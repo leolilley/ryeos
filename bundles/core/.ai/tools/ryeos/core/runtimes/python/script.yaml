@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-04T06:02:08Z:0baf32e5e1c0afad58546755d9fbcef997f1edfcee3f878c10e7f6ffccae951f:Bb0uOlTrv86AzJBficXBLIZdyiBQlBLjKFiAGBJJIHjbUV2UKU3y8Qwm3M/el1VSbYbTFSqmhJTh95IYFjjVBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-06-05T04:12:06Z:0baf32e5e1c0afad58546755d9fbcef997f1edfcee3f878c10e7f6ffccae951f:uhKSaynhVjYZDDHYHqI+V3FIzQYMS/gwKRGdbHVVpVKH4BIwRiFXHXekYJgxO8kwRznN7hIZSYYjbgILfBYABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"

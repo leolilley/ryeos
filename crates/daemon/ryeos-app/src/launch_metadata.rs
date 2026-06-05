@@ -115,7 +115,7 @@ impl Default for RuntimeLaunchMetadata {
 /// over the live LocalPath when reconstructing the resume request, so
 /// resume runs against the project version that was current at the
 /// time the checkpoint was written, NOT the current head of the
-/// working directory. See `docs/future/RESUME-ADVANCED-PATH.md`.
+/// working directory. See `docs/future/native-resume-snapshot-pinning.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeContext {

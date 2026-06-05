@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-04T04:39:02Z:89de426de068e73736090e5c7a28c0a5f5918128cc4a54de9b89cffeb73dc255:U+H1AMMfumuI65XNohskne/1L9eLIXDOCamiPedO4UZuNihZ0sAOY0kDQDmsW1fS7bPfobtPZ3bHBEf6LTZFCA==:28d6678e11fbd630868f120a80b939ff93b3bb15de8339d6939adb90441c0619
+# ryeos:signed:2026-06-05T03:08:21Z:dcb9bf15e54f7e435ece04f6f1030eaf04c26f3b500eb977b03c95ab754a0c47:WhJxhmgyxo+Cokdg50LdBlR94ngcO3flR7kiLEKhap/qSFQKX6jTEWIx2BYLvSenhQTylJj5mEXnv5Gxif4+DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: scheduler-register
@@ -6,6 +6,17 @@ tokens:
 - scheduler
 - register
 description: Create or update a schedule spec
+arguments:
+- name: params
+  kind: json
+  positional: 1
+  required: false
+  description: JSON object passed to the scheduled item
+parameter_binding:
+  mode: tail_object
+  input_flag: input
+  single_json_object_arg: true
+  flag_key_normalization: hyphen_to_underscore
 dispatch:
   kind: execute_ref
   execute: service:scheduler/register

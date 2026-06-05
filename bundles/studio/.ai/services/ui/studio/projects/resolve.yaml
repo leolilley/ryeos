@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-03T06:08:29Z:7dd2f6ca4cdcb78962749071ddcb0a480eeaa89f7384b3ead0577adc5e21a0cd:JYa3JEilQcC+7aMwUlaOT/VRkMMjzPvoYQRrB9Q4iS4hKmzbZpDAoEAoHsBgM+a5OjpFpZY+rYTpfcDplJzpDw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-06-05T04:12:12Z:7dd2f6ca4cdcb78962749071ddcb0a480eeaa89f7384b3ead0577adc5e21a0cd:0Wl7nniXjEinADDnmE+IatnSSAyyThLCbCV8GvujwPRBSQ/N8FObnLmFCnJu02rLr8BF+sEMeIOPFQw5F7wDCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: studio/projects/resolve
 version: "1.0.0"

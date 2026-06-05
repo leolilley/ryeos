@@ -1,24 +1,24 @@
-//! Rebuildable SQLite projection helpers for bundle/domain events.
+//! Rebuildable SQLite projection helpers for bundle events.
 
 use std::path::Path;
 
 use anyhow::Context;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-use crate::domain_events::DomainEventRecord;
-use crate::objects::validate_domain_identifier;
+use crate::bundle_events::BundleEventRecord;
+use crate::objects::validate_bundle_identifier;
 
 const META_SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
-CREATE TABLE IF NOT EXISTS domain_projection_meta (
+CREATE TABLE IF NOT EXISTS bundle_projection_meta (
     projection_name TEXT PRIMARY KEY,
     schema_version INTEGER NOT NULL CHECK (schema_version > 0),
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS domain_projection_cursors (
+CREATE TABLE IF NOT EXISTS bundle_projection_cursors (
     projection_name TEXT NOT NULL,
     bundle_id TEXT NOT NULL,
     event_kind TEXT NOT NULL,
@@ -29,12 +29,12 @@ CREATE TABLE IF NOT EXISTS domain_projection_cursors (
     PRIMARY KEY (projection_name, bundle_id, event_kind, chain_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_domain_projection_cursors_projection
-    ON domain_projection_cursors(projection_name);
+CREATE INDEX IF NOT EXISTS idx_bundle_projection_cursors_projection
+    ON bundle_projection_cursors(projection_name);
 "#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DomainProjectionCursor {
+pub struct BundleProjectionCursor {
     pub projection_name: String,
     pub bundle_id: String,
     pub event_kind: String,
@@ -45,7 +45,7 @@ pub struct DomainProjectionCursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DomainProjectionSyncReport {
+pub struct BundleProjectionSyncReport {
     pub projection_name: String,
     pub schema_version: u32,
     pub scanned: usize,
@@ -53,20 +53,20 @@ pub struct DomainProjectionSyncReport {
     pub skipped: usize,
 }
 
-pub struct DomainProjectionDb {
+pub struct BundleProjectionDb {
     conn: Connection,
 }
 
-impl DomainProjectionDb {
+impl BundleProjectionDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create projection dir {}", parent.display()))?;
         }
         let conn = Connection::open(path)
-            .with_context(|| format!("open domain projection db {}", path.display()))?;
+            .with_context(|| format!("open bundle projection db {}", path.display()))?;
         conn.execute_batch(META_SCHEMA_SQL)
-            .context("create domain projection metadata schema")?;
+            .context("create bundle projection metadata schema")?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
         Ok(Self { conn })
     }
@@ -82,7 +82,7 @@ impl DomainProjectionDb {
     pub fn apply_schema(&self, schema_sql: &str) -> anyhow::Result<()> {
         self.conn
             .execute_batch(schema_sql)
-            .context("apply domain projection schema")
+            .context("apply bundle projection schema")
     }
 
     pub fn reset_projection(
@@ -96,11 +96,11 @@ impl DomainProjectionDb {
         }
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "DELETE FROM domain_projection_cursors WHERE projection_name = ?",
+            "DELETE FROM bundle_projection_cursors WHERE projection_name = ?",
             params![projection_name],
         )?;
         tx.execute(
-            "INSERT INTO domain_projection_meta (projection_name, schema_version, updated_at)
+            "INSERT INTO bundle_projection_meta (projection_name, schema_version, updated_at)
              VALUES (?, ?, ?)
              ON CONFLICT(projection_name) DO UPDATE SET
                 schema_version = excluded.schema_version,
@@ -117,20 +117,20 @@ impl DomainProjectionDb {
         bundle_id: &str,
         event_kind: &str,
         chain_id: &str,
-    ) -> anyhow::Result<Option<DomainProjectionCursor>> {
+    ) -> anyhow::Result<Option<BundleProjectionCursor>> {
         validate_projection_name(projection_name)?;
-        validate_domain_identifier("bundle_id", bundle_id)?;
-        validate_domain_identifier("event_kind", event_kind)?;
-        validate_domain_identifier("chain_id", chain_id)?;
+        validate_bundle_identifier("bundle_id", bundle_id)?;
+        validate_bundle_identifier("event_kind", event_kind)?;
+        validate_bundle_identifier("chain_id", chain_id)?;
         self.conn
             .query_row(
                 "SELECT projection_name, bundle_id, event_kind, chain_id,
                         last_chain_seq, last_event_hash, updated_at
-                 FROM domain_projection_cursors
+                 FROM bundle_projection_cursors
                  WHERE projection_name = ? AND bundle_id = ? AND event_kind = ? AND chain_id = ?",
                 params![projection_name, bundle_id, event_kind, chain_id],
                 |row| {
-                    Ok(DomainProjectionCursor {
+                    Ok(BundleProjectionCursor {
                         projection_name: row.get(0)?,
                         bundle_id: row.get(1)?,
                         event_kind: row.get(2)?,
@@ -142,18 +142,18 @@ impl DomainProjectionDb {
                 },
             )
             .optional()
-            .context("read domain projection cursor")
+            .context("read bundle projection cursor")
     }
 
     pub fn sync_records<F>(
         &mut self,
         projection_name: &str,
         schema_version: u32,
-        records: &[DomainEventRecord],
+        records: &[BundleEventRecord],
         mut handler: F,
-    ) -> anyhow::Result<DomainProjectionSyncReport>
+    ) -> anyhow::Result<BundleProjectionSyncReport>
     where
-        F: FnMut(&Connection, &DomainEventRecord) -> anyhow::Result<()>,
+        F: FnMut(&Connection, &BundleEventRecord) -> anyhow::Result<()>,
     {
         validate_projection_name(projection_name)?;
         if schema_version == 0 {
@@ -185,7 +185,7 @@ impl DomainProjectionDb {
                 if record.event.chain_seq == cursor.last_chain_seq {
                     if cursor.last_event_hash.as_deref() != Some(record.event_hash.as_str()) {
                         anyhow::bail!(
-                            "domain projection cursor hash mismatch for {}/{}/{} at seq {}",
+                            "bundle projection cursor hash mismatch for {}/{}/{} at seq {}",
                             record.event.bundle_id,
                             record.event.event_kind,
                             record.event.chain_id,
@@ -197,7 +197,7 @@ impl DomainProjectionDb {
                 }
                 if record.event.chain_seq != cursor.last_chain_seq + 1 {
                     anyhow::bail!(
-                        "domain projection cursor gap for {}/{}/{}: cursor={}, event={}",
+                        "bundle projection cursor gap for {}/{}/{}: cursor={}, event={}",
                         record.event.bundle_id,
                         record.event.event_kind,
                         record.event.chain_id,
@@ -209,7 +209,7 @@ impl DomainProjectionDb {
                     != cursor.last_event_hash.as_deref()
                 {
                     anyhow::bail!(
-                        "domain projection cursor link mismatch for {}/{}/{}: cursor_hash={:?}, event_prev={:?}",
+                        "bundle projection cursor link mismatch for {}/{}/{}: cursor_hash={:?}, event_prev={:?}",
                         record.event.bundle_id,
                         record.event.event_kind,
                         record.event.chain_id,
@@ -219,7 +219,7 @@ impl DomainProjectionDb {
                 }
             } else if record.event.chain_seq != 1 {
                 anyhow::bail!(
-                    "domain projection missing chain start for {}/{}/{} at seq {}",
+                    "bundle projection missing chain start for {}/{}/{} at seq {}",
                     record.event.bundle_id,
                     record.event.event_kind,
                     record.event.chain_id,
@@ -227,7 +227,7 @@ impl DomainProjectionDb {
                 );
             } else if record.event.prev_chain_event_hash.is_some() {
                 anyhow::bail!(
-                    "domain projection chain start for {}/{}/{} has prev hash {:?}",
+                    "bundle projection chain start for {}/{}/{} has prev hash {:?}",
                     record.event.bundle_id,
                     record.event.event_kind,
                     record.event.chain_id,
@@ -240,7 +240,7 @@ impl DomainProjectionDb {
         }
 
         tx.commit()?;
-        Ok(DomainProjectionSyncReport {
+        Ok(BundleProjectionSyncReport {
             projection_name: projection_name.to_string(),
             schema_version,
             scanned,
@@ -257,14 +257,14 @@ fn ensure_projection_meta(
 ) -> anyhow::Result<()> {
     let existing: Option<u32> = conn
         .query_row(
-            "SELECT schema_version FROM domain_projection_meta WHERE projection_name = ?",
+            "SELECT schema_version FROM bundle_projection_meta WHERE projection_name = ?",
             params![projection_name],
             |row| row.get::<_, i64>(0).map(|v| v as u32),
         )
         .optional()?;
     match existing {
         Some(existing) if existing != schema_version => anyhow::bail!(
-            "domain projection schema_version drift for {}: existing={}, requested={}",
+            "bundle projection schema_version drift for {}: existing={}, requested={}",
             projection_name,
             existing,
             schema_version
@@ -272,7 +272,7 @@ fn ensure_projection_meta(
         Some(_) => Ok(()),
         None => {
             conn.execute(
-                "INSERT INTO domain_projection_meta (projection_name, schema_version, updated_at)
+                "INSERT INTO bundle_projection_meta (projection_name, schema_version, updated_at)
                  VALUES (?, ?, ?)",
                 params![projection_name, schema_version, lillux::time::iso8601_now()],
             )?;
@@ -287,15 +287,15 @@ fn cursor_in_tx(
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
-) -> anyhow::Result<Option<DomainProjectionCursor>> {
+) -> anyhow::Result<Option<BundleProjectionCursor>> {
     conn.query_row(
         "SELECT projection_name, bundle_id, event_kind, chain_id,
                 last_chain_seq, last_event_hash, updated_at
-         FROM domain_projection_cursors
+         FROM bundle_projection_cursors
          WHERE projection_name = ? AND bundle_id = ? AND event_kind = ? AND chain_id = ?",
         params![projection_name, bundle_id, event_kind, chain_id],
         |row| {
-            Ok(DomainProjectionCursor {
+            Ok(BundleProjectionCursor {
                 projection_name: row.get(0)?,
                 bundle_id: row.get(1)?,
                 event_kind: row.get(2)?,
@@ -307,16 +307,16 @@ fn cursor_in_tx(
         },
     )
     .optional()
-    .context("read domain projection cursor")
+    .context("read bundle projection cursor")
 }
 
 fn upsert_cursor_in_tx(
     conn: &Connection,
     projection_name: &str,
-    record: &DomainEventRecord,
+    record: &BundleEventRecord,
 ) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO domain_projection_cursors (
+        "INSERT INTO bundle_projection_cursors (
             projection_name, bundle_id, event_kind, chain_id,
             last_chain_seq, last_event_hash, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -338,17 +338,17 @@ fn upsert_cursor_in_tx(
 }
 
 fn validate_projection_name(value: &str) -> anyhow::Result<()> {
-    validate_domain_identifier("projection_name", value)
+    validate_bundle_identifier("projection_name", value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain_events::{append_domain_event, DomainEventAppendRequest};
+    use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
     use crate::signer::TestSigner;
 
-    fn append_request(chain_id: &str, event_type: &str) -> DomainEventAppendRequest {
-        DomainEventAppendRequest {
+    fn append_request(chain_id: &str, event_type: &str) -> BundleEventAppendRequest {
+        BundleEventAppendRequest {
             effective_bundle_id: "ryeos-email".to_string(),
             bundle_id: Some("ryeos-email".to_string()),
             event_kind: "email_event".to_string(),
@@ -373,7 +373,7 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
 
-        let first = append_domain_event(
+        let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -382,16 +382,16 @@ mod tests {
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_domain_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
 
-        let records = crate::domain_events::scan_domain_events(
+        let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
         )
         .unwrap();
-        let mut projection = DomainProjectionDb::open(&tmp.path().join("email.db")).unwrap();
+        let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
         projection
             .apply_schema(
                 "CREATE TABLE email_events (
@@ -438,8 +438,8 @@ mod tests {
     #[test]
     fn projection_rejects_schema_version_drift() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut projection = DomainProjectionDb::open(&tmp.path().join("email.db")).unwrap();
-        let records = Vec::<DomainEventRecord>::new();
+        let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
+        let records = Vec::<BundleEventRecord>::new();
         projection
             .sync_records("ryeos-email", 1, &records, |_conn, _record| Ok(()))
             .unwrap();
@@ -457,7 +457,7 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended = append_domain_event(
+        let appended = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -465,11 +465,11 @@ mod tests {
         )
         .unwrap();
 
-        let record = DomainEventRecord {
+        let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),
         };
-        let mut projection = DomainProjectionDb::open(&tmp.path().join("email.db")).unwrap();
+        let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
         projection
             .sync_records(
                 "ryeos-email",
@@ -496,7 +496,7 @@ mod tests {
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
 
-        let first = append_domain_event(
+        let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -505,8 +505,8 @@ mod tests {
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_domain_event(&cas_root, &refs_root, second_req, &signer).unwrap();
-        let records = crate::domain_events::scan_domain_events(
+        append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
@@ -514,7 +514,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut projection = DomainProjectionDb::open(&tmp.path().join("email.db")).unwrap();
+        let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
         projection
             .sync_records("ryeos-email", 1, &records[..1], |_conn, _record| Ok(()))
             .unwrap();

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:ed6e6f4881f22a07181cf4d1719d9b668134aed7137ad970969fa613897dd602:k3V+s6TpRljuKsCJtX3RwZobuvfgT/Ld4f2TJwsN7+ff4RLHY0jwDKp+afrp0E43XM9+VRAFiqIIwtqdBarnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-05T04:12:08Z:0f7b7c98bf40c2a8f11734131af9d9aa2fec4190c1f5fc0d71556f7759fc2596:NRFVwGjBex+GHyJFZH0lC4f6DRbs3hF6R39qtci6YQ+YEA0cGSk6leYcMAhaLmtI8NiDY+LyRTKf4tnSYvSfBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]

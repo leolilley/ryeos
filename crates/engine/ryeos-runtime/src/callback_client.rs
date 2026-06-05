@@ -262,41 +262,41 @@ impl CallbackClient {
         }
     }
 
-    pub async fn domain_events_append(&self, request: Value) -> Result<Value> {
+    pub async fn bundle_events_append(&self, request: Value) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "callback domain_events_append called without an inner UDS client \
-                 (socket missing); cannot append durable domain event"
+                "callback bundle_events_append called without an inner UDS client \
+                 (socket missing); cannot append durable bundle event"
             )
         })?;
         client
-            .domain_events_append(&self.thread_id, request)
+            .bundle_events_append(&self.thread_id, request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    pub async fn domain_events_read_chain(&self, request: Value) -> Result<Value> {
+    pub async fn bundle_events_read_chain(&self, request: Value) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "callback domain_events_read_chain called without an inner UDS client \
-                 (socket missing); cannot read durable domain events"
+                "callback bundle_events_read_chain called without an inner UDS client \
+                 (socket missing); cannot read durable bundle events"
             )
         })?;
         client
-            .domain_events_read_chain(&self.thread_id, request)
+            .bundle_events_read_chain(&self.thread_id, request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    pub async fn domain_events_scan(&self, request: Value) -> Result<Value> {
+    pub async fn bundle_events_scan(&self, request: Value) -> Result<Value> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
-                "callback domain_events_scan called without an inner UDS client \
-                 (socket missing); cannot scan durable domain events"
+                "callback bundle_events_scan called without an inner UDS client \
+                 (socket missing); cannot scan durable bundle events"
             )
         })?;
         client
-            .domain_events_scan(&self.thread_id, request)
+            .bundle_events_scan(&self.thread_id, request)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
@@ -618,21 +618,21 @@ mod tests {
         async fn replay_events(&self, _thread_id: &str) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
-        async fn domain_events_append(
+        async fn bundle_events_append(
             &self,
             _thread_id: &str,
             request: Value,
         ) -> Result<Value, CallbackError> {
             Ok(request)
         }
-        async fn domain_events_read_chain(
+        async fn bundle_events_read_chain(
             &self,
             _thread_id: &str,
             _request: Value,
         ) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
-        async fn domain_events_scan(
+        async fn bundle_events_scan(
             &self,
             _thread_id: &str,
             _request: Value,

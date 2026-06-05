@@ -1,15 +1,15 @@
-//! DomainEventObject — immutable bundle/domain fact stored in CAS.
+//! BundleEventObject — immutable bundle fact stored in CAS.
 
 use serde::{Deserialize, Serialize};
 
 use super::{validate_object_kind, SCHEMA_VERSION};
 
-pub const DOMAIN_EVENT_KIND: &str = "domain_event";
+pub const BUNDLE_EVENT_KIND: &str = "bundle_event";
 
-/// Attribution captured for a domain event append.
+/// Attribution captured for a bundle event append.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct DomainEventAttribution {
+pub struct BundleEventAttribution {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -20,13 +20,13 @@ pub struct DomainEventAttribution {
     pub site: Option<String>,
 }
 
-/// Immutable bundle/domain event object.
+/// Immutable bundle event object.
 ///
 /// The CAS hash of the canonical JSON representation is the event hash. The
 /// hash itself is intentionally not embedded in the object body.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DomainEventObject {
+pub struct BundleEventObject {
     pub schema: u32,
     pub kind: String,
     pub bundle_id: String,
@@ -38,8 +38,8 @@ pub struct DomainEventObject {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev_chain_event_hash: Option<String>,
     pub created_at: String,
-    #[serde(default, skip_serializing_if = "DomainEventAttribution::is_empty")]
-    pub attribution: DomainEventAttribution,
+    #[serde(default, skip_serializing_if = "BundleEventAttribution::is_empty")]
+    pub attribution: BundleEventAttribution,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -51,7 +51,7 @@ pub struct DomainEventObject {
     pub payload: serde_json::Value,
 }
 
-impl DomainEventAttribution {
+impl BundleEventAttribution {
     fn is_empty(&self) -> bool {
         self.actor.is_none()
             && self.tool.is_none()
@@ -60,16 +60,16 @@ impl DomainEventAttribution {
     }
 }
 
-impl DomainEventObject {
+impl BundleEventObject {
     pub fn validate(&self) -> anyhow::Result<()> {
-        validate_object_kind(&self.kind, DOMAIN_EVENT_KIND)?;
+        validate_object_kind(&self.kind, BUNDLE_EVENT_KIND)?;
         if self.schema != SCHEMA_VERSION {
             anyhow::bail!("unexpected schema version: {}", self.schema);
         }
-        validate_domain_identifier("bundle_id", &self.bundle_id)?;
-        validate_domain_identifier("event_kind", &self.event_kind)?;
-        validate_domain_identifier("event_type", &self.event_type)?;
-        validate_domain_identifier("chain_id", &self.chain_id)?;
+        validate_bundle_identifier("bundle_id", &self.bundle_id)?;
+        validate_bundle_identifier("event_kind", &self.event_kind)?;
+        validate_bundle_identifier("event_type", &self.event_type)?;
+        validate_bundle_identifier("chain_id", &self.chain_id)?;
         if self.schema_version == 0 {
             anyhow::bail!("schema_version must be greater than zero");
         }
@@ -92,16 +92,16 @@ impl DomainEventObject {
     }
 
     pub fn to_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).expect("DomainEventObject serialization cannot fail")
+        serde_json::to_value(self).expect("BundleEventObject serialization cannot fail")
     }
 }
 
-pub fn hash_domain_event(event: &DomainEventObject) -> String {
+pub fn hash_bundle_event(event: &BundleEventObject) -> String {
     let canonical = lillux::canonical_json(&event.to_value());
     lillux::sha256_hex(canonical.as_bytes())
 }
 
-pub fn validate_domain_identifier(label: &str, value: &str) -> anyhow::Result<()> {
+pub fn validate_bundle_identifier(label: &str, value: &str) -> anyhow::Result<()> {
     if value.is_empty() {
         anyhow::bail!("{label} must not be empty");
     }
@@ -142,10 +142,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hash_is_not_embedded_in_domain_event_body() {
-        let event = DomainEventObject {
+    fn hash_is_not_embedded_in_bundle_event_body() {
+        let event = BundleEventObject {
             schema: SCHEMA_VERSION,
-            kind: DOMAIN_EVENT_KIND.to_string(),
+            kind: BUNDLE_EVENT_KIND.to_string(),
             bundle_id: "ryeos-email".to_string(),
             event_kind: "email_event".to_string(),
             event_type: "email_planned".to_string(),
@@ -154,7 +154,7 @@ mod tests {
             chain_seq: 1,
             prev_chain_event_hash: None,
             created_at: "2026-06-04T00:00:00Z".to_string(),
-            attribution: DomainEventAttribution::default(),
+            attribution: BundleEventAttribution::default(),
             idempotency_key: None,
             request_fingerprint: None,
             correlation_id: None,
@@ -165,17 +165,17 @@ mod tests {
         event.validate().unwrap();
         let value = event.to_value();
         assert!(value.get("event_hash").is_none());
-        assert_eq!(hash_domain_event(&event).len(), 64);
+        assert_eq!(hash_bundle_event(&event).len(), 64);
     }
 
     #[test]
     fn rejects_path_unsafe_identifier() {
-        assert!(validate_domain_identifier("chain_id", "../bad").is_err());
-        assert!(validate_domain_identifier("chain_id", "email/1").is_err());
-        assert!(validate_domain_identifier("bundle_id", ".").is_err());
-        assert!(validate_domain_identifier("event_kind", "..").is_err());
-        assert!(validate_domain_identifier("event_type", "..").is_err());
-        assert!(validate_domain_identifier("chain_id", ".").is_err());
-        assert!(validate_domain_identifier("chain_id", "email_1").is_ok());
+        assert!(validate_bundle_identifier("chain_id", "../bad").is_err());
+        assert!(validate_bundle_identifier("chain_id", "email/1").is_err());
+        assert!(validate_bundle_identifier("bundle_id", ".").is_err());
+        assert!(validate_bundle_identifier("event_kind", "..").is_err());
+        assert!(validate_bundle_identifier("event_type", "..").is_err());
+        assert!(validate_bundle_identifier("chain_id", ".").is_err());
+        assert!(validate_bundle_identifier("chain_id", "email_1").is_ok());
     }
 }

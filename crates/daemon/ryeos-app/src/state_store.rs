@@ -1265,33 +1265,33 @@ impl StateStore {
             .collect::<Result<Vec<_>>>()
     }
 
-    pub fn append_domain_event(
+    pub fn append_bundle_event(
         &self,
-        request: ryeos_state::DomainEventAppendRequest,
-    ) -> Result<ryeos_state::DomainEventAppendResult> {
+        request: ryeos_state::BundleEventAppendRequest,
+    ) -> Result<ryeos_state::BundleEventAppendResult> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        g.state_db.append_domain_event(request, g.signer.as_ref())
+        g.state_db.append_bundle_event(request, g.signer.as_ref())
     }
 
-    pub fn read_domain_event_chain(
+    pub fn read_bundle_event_chain(
         &self,
         bundle_id: &str,
         event_kind: &str,
         chain_id: &str,
-    ) -> Result<Vec<ryeos_state::DomainEventRecord>> {
+    ) -> Result<Vec<ryeos_state::BundleEventRecord>> {
         let g = self.lock()?;
         g.state_db
-            .read_domain_event_chain(bundle_id, event_kind, chain_id)
+            .read_bundle_event_chain(bundle_id, event_kind, chain_id)
     }
 
-    pub fn scan_domain_events(
+    pub fn scan_bundle_events(
         &self,
         bundle_id: &str,
         event_kind: &str,
-    ) -> Result<Vec<ryeos_state::DomainEventRecord>> {
+    ) -> Result<Vec<ryeos_state::BundleEventRecord>> {
         let g = self.lock()?;
-        g.state_db.scan_domain_events(bundle_id, event_kind)
+        g.state_db.scan_bundle_events(bundle_id, event_kind)
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {

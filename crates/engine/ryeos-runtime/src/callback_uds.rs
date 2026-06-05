@@ -182,7 +182,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn domain_events_append(
+    async fn bundle_events_append(
         &self,
         thread_id: &str,
         mut request: Value,
@@ -190,12 +190,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         request["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut request);
         self.rpc
-            .request("runtime.domain_events_append", request)
+            .request("runtime.bundle_events_append", request)
             .await
             .map_err(Self::map_rpc_error)
     }
 
-    async fn domain_events_read_chain(
+    async fn bundle_events_read_chain(
         &self,
         thread_id: &str,
         mut request: Value,
@@ -203,12 +203,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         request["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut request);
         self.rpc
-            .request("runtime.domain_events_read_chain", request)
+            .request("runtime.bundle_events_read_chain", request)
             .await
             .map_err(Self::map_rpc_error)
     }
 
-    async fn domain_events_scan(
+    async fn bundle_events_scan(
         &self,
         thread_id: &str,
         mut request: Value,
@@ -216,7 +216,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         request["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut request);
         self.rpc
-            .request("runtime.domain_events_scan", request)
+            .request("runtime.bundle_events_scan", request)
             .await
             .map_err(Self::map_rpc_error)
     }

@@ -8,10 +8,10 @@
 //! item resolution (engine), or low-level CAS primitives (lillux).
 
 pub mod admission;
+pub mod bundle_events;
+pub mod bundle_outbox;
+pub mod bundle_projection;
 pub mod chain;
-pub mod domain_events;
-pub mod domain_outbox;
-pub mod domain_projection;
 pub mod gc;
 pub mod head_cache;
 pub mod ignore;
@@ -33,21 +33,21 @@ pub mod user_sync;
 pub mod verify;
 
 pub use admission::{admit_root, AdmissionRequest, AdmissionResult};
+pub use bundle_events::{BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord};
+pub use bundle_outbox::{
+    claim_bundle_outbox_messages, enqueue_bundle_outbox_message, ensure_bundle_outbox_schema,
+    get_bundle_outbox_message, mark_bundle_outbox_delivered, mark_bundle_outbox_failed,
+    BundleOutboxMessage,
+};
+pub use bundle_projection::{
+    BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
+};
 pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
-pub use domain_events::{DomainEventAppendRequest, DomainEventAppendResult, DomainEventRecord};
-pub use domain_outbox::{
-    claim_domain_outbox_messages, enqueue_domain_outbox_message, ensure_domain_outbox_schema,
-    get_domain_outbox_message, mark_domain_outbox_delivered, mark_domain_outbox_failed,
-    DomainOutboxMessage,
-};
-pub use domain_projection::{
-    DomainProjectionCursor, DomainProjectionDb, DomainProjectionSyncReport,
-};
 pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
 pub use objects::{
     thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
-    Attestation, ChainState, DomainEventAttribution, DomainEventObject,
+    Attestation, BundleEventAttribution, BundleEventObject, ChainState,
 };
 pub use projection::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,

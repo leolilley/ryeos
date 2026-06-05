@@ -30,7 +30,7 @@ pub struct CallbackCapability {
     /// there is no deploy-window fallback or daemon-engine fallback.
     pub provenance: ExecutionProvenance,
     /// Bundle identity derived by the launcher from the verified root item.
-    /// Runtime domain-event APIs use this instead of trusting caller-supplied
+    /// Runtime bundle-event APIs use this instead of trusting caller-supplied
     /// bundle IDs.
     pub effective_bundle_id: Option<String>,
     /// Root item ref that minted this callback token, used for attribution.

@@ -8,16 +8,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum BundleDomainEventOperation {
+pub enum BundleEventOperation {
     Append,
     Scan,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BundleDomainEventDecl {
+pub struct BundleEventDecl {
     pub event_kind: String,
-    pub operations: Vec<BundleDomainEventOperation>,
+    pub operations: Vec<BundleEventOperation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct BundleManifestSource {
     #[serde(default)]
     pub uses_kinds: Vec<String>,
     #[serde(default)]
-    pub domain_events: Vec<BundleDomainEventDecl>,
+    pub bundle_events: Vec<BundleEventDecl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,7 +48,7 @@ pub struct BundleManifest {
     #[serde(default)]
     pub uses_kinds: Vec<String>,
     #[serde(default)]
-    pub domain_events: Vec<BundleDomainEventDecl>,
+    pub bundle_events: Vec<BundleEventDecl>,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -98,7 +98,7 @@ pub fn materialize_manifest(
         provides_kinds,
         requires_kinds: source.requires_kinds,
         uses_kinds: source.uses_kinds,
-        domain_events: source.domain_events,
+        bundle_events: source.bundle_events,
     })
 }
 
@@ -749,7 +749,7 @@ typo_field: oops
             description: "test".to_string(),
             requires_kinds: vec![],
             uses_kinds: vec![],
-            domain_events: vec![],
+            bundle_events: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

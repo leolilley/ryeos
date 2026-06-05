@@ -79,19 +79,19 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
     async fn replay_events(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
-    async fn domain_events_append(
+    async fn bundle_events_append(
         &self,
         thread_id: &str,
         request: Value,
     ) -> Result<Value, CallbackError>;
 
-    async fn domain_events_read_chain(
+    async fn bundle_events_read_chain(
         &self,
         thread_id: &str,
         request: Value,
     ) -> Result<Value, CallbackError>;
 
-    async fn domain_events_scan(
+    async fn bundle_events_scan(
         &self,
         thread_id: &str,
         request: Value,

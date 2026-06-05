@@ -7,7 +7,7 @@
 //! ## Design
 //!
 //! - `id`: optional event ID for `Last-Event-ID` / replay.
-//! - `event_type`: domain event category (e.g., `thread.upsert`).
+//! - `event_type`: bundle event category (e.g., `thread.upsert`).
 //! - `payload`: arbitrary JSON — the actual event data.
 //!
 //! The envelope is the contract boundary between producers and transports.
@@ -22,7 +22,7 @@ pub struct RouteStreamEnvelope {
     /// Optional event ID for replay / deduplication.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Domain event type (e.g. `thread.upsert`, `session.heartbeat`).
+    /// Bundle event type (e.g. `thread.upsert`, `session.heartbeat`).
     pub event_type: String,
     /// Event payload — arbitrary JSON.
     pub payload: Value,

@@ -441,7 +441,7 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
 /// the version that was current when the checkpoint was written —
 /// silently breaking the documented "Phase 6 pins resume to the
 /// original project snapshot" promise. See
-/// `docs/future/RESUME-ADVANCED-PATH.md`.
+/// `docs/future/native-resume-snapshot-pinning.md`.
 ///
 /// Returns the allocated snapshot hash on success, `None` if no
 /// pinning was needed (no `native_resume`, or already pinned via a
@@ -1360,7 +1360,7 @@ fn defer_tat_token_revocation(
 /// resolver runs against the pinned snapshot (via
 /// `ProjectContext::SnapshotHash`), so the resumed plan matches the
 /// project version captured at the original spawn — not the current
-/// working-dir head. See `docs/future/RESUME-ADVANCED-PATH.md`.
+/// working-dir head. See `docs/future/native-resume-snapshot-pinning.md`.
 #[tracing::instrument(
     name = "thread:resume_params",
     skip(state, resume),
@@ -1481,7 +1481,7 @@ pub fn execution_params_from_resume_context(
 /// subprocess writes a checkpoint but before the next checkpoint
 /// flushes, work between the last checkpoint and crash will replay.
 /// Resume promises *bounded* duplicates after crash, NOT exactly-once
-/// semantics. See `docs/future/RESUME-ADVANCED-PATH.md`
+/// semantics. See `docs/future/native-resume-snapshot-pinning.md`
 /// (Evolution 2 — supervisor side-car) for the trade-off discussion.
 #[tracing::instrument(
     name = "thread:resume",

@@ -85,7 +85,7 @@ pub fn bind_argv_with_command(
     };
 
     let mut value = bind_argv(argv);
-    decode_structured_command_fields(&mut value)?;
+    decode_structured_command_fields(&mut value, command)?;
 
     let forms = command.forms.clone();
     if forms.is_empty() {
@@ -156,22 +156,42 @@ fn reject_undeclared_positionals(
     ))
 }
 
-fn decode_structured_command_fields(value: &mut serde_json::Value) -> Result<(), String> {
+fn decode_structured_command_fields(
+    value: &mut serde_json::Value,
+    command: &CommandDef,
+) -> Result<(), String> {
     let Some(obj) = value.as_object_mut() else {
         return Ok(());
     };
-    let Some(raw) = obj.get("parameters").cloned() else {
-        return Ok(());
-    };
-    let Some(raw_str) = raw.as_str() else {
-        return Ok(());
-    };
-    let decoded: serde_json::Value = serde_json::from_str(raw_str)
-        .map_err(|e| format!("--parameters must be valid JSON object: {e}"))?;
-    if !decoded.is_object() {
-        return Err("--parameters must decode to a JSON object".into());
+
+    for argument in &command.arguments {
+        if argument.kind != CommandArgumentKind::Json {
+            continue;
+        }
+        let key = normalise_key(&argument.name);
+        let Some(raw) = obj.get(&key).cloned() else {
+            continue;
+        };
+        let Some(raw_str) = raw.as_str() else {
+            continue;
+        };
+        let decoded: serde_json::Value = serde_json::from_str(raw_str)
+            .map_err(|e| format!("--{} must be valid JSON: {e}", argument.name))?;
+        obj.insert(key, decoded);
     }
-    obj.insert("parameters".to_string(), decoded);
+
+    if let Some(raw) = obj.get("parameters").cloned() {
+        let Some(raw_str) = raw.as_str() else {
+            return Ok(());
+        };
+        let decoded: serde_json::Value = serde_json::from_str(raw_str)
+            .map_err(|e| format!("--parameters must be valid JSON object: {e}"))?;
+        if !decoded.is_object() {
+            return Err("--parameters must decode to a JSON object".into());
+        }
+        obj.insert("parameters".to_string(), decoded);
+    }
+
     Ok(())
 }
 
@@ -421,6 +441,52 @@ mod tests {
         );
 
         assert!(result.unwrap_err().contains("JSON object"));
+    }
+
+    #[test]
+    fn command_decodes_declared_json_argument() {
+        let mut command = test_command(vec!["scheduler".into(), "register".into()], Vec::new());
+        command.arguments.push(crate::CommandArgumentDef {
+            name: "params".into(),
+            kind: crate::CommandArgumentKind::Json,
+            positional: 0,
+            required: false,
+            arity: crate::CommandArgumentArity::One,
+            description: None,
+        });
+
+        let result = bind_argv_with_command(
+            &[
+                "--schedule-id".into(),
+                "daily".into(),
+                "--params".into(),
+                r#"{"skip_shows":true,"limit":5000}"#.into(),
+            ],
+            Some(&command),
+        )
+        .unwrap();
+
+        assert_eq!(result["schedule_id"], "daily");
+        assert_eq!(result["params"]["skip_shows"], true);
+        assert_eq!(result["params"]["limit"], 5000);
+    }
+
+    #[test]
+    fn command_rejects_invalid_declared_json_argument() {
+        let mut command = test_command(vec!["scheduler".into(), "register".into()], Vec::new());
+        command.arguments.push(crate::CommandArgumentDef {
+            name: "params".into(),
+            kind: crate::CommandArgumentKind::Json,
+            positional: 0,
+            required: false,
+            arity: crate::CommandArgumentArity::One,
+            description: None,
+        });
+
+        let result =
+            bind_argv_with_command(&["--params".into(), "{not-json}".into()], Some(&command));
+
+        assert!(result.unwrap_err().contains("--params must be valid JSON"));
     }
 
     fn test_command(
