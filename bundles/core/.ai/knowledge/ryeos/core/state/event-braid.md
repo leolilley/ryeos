@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:1459cc1ef66698c2f80c223223a73404b17e1ac6c2ca0575950bac09c96d04aa:XL8m9UkPBZ5/Um61PkrSwcZqHdbTE5kBS6ywRGiqa3P5oTnOCSWDcm2RZcuFo8t2PIWup1tej0+bMudR/b45AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-05T04:12:08Z:a208043d63c1532c8ed85b07707ab60d2153d37ebe01374a9559ad249eafb055:kNe+He6XGgxkNsi+SxMbO+VOkFcmkDzKAhtxzeEvTLmleZr88/i0qrsw0gSemSi4H55Fe3nAhenG0js03nexCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-26T06:36:57Z:5c2b44f222beee257760034bd1be413a46adeb1fa94a9390970cb8139501b891:DDivbfvoOJUrruSi0rPKiQQkbBe5VsaEiiTZ/b3T8gX5Zo0nWeHGURwn/3Bh/xalhPjQAgpHrv5i8Hx+27wrBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-05T04:12:11Z:102c2026b04224ba404011aec985b300b398a0df62eeef13032f160c52e86d7d:WRiLlmKa9xuu+FSvY0mlSCLGXYd9gb3CNGIfLzzU27E9hO69AJs+Lb/FF5/O/crMTRoa0DDm2S73gcYFAvUdBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: web
 version: 0.5.0
 description: Optional web access tools for agents
@@ -6,3 +6,4 @@ provides_kinds: []
 requires_kinds:
 - tool
 uses_kinds: []
+bundle_events: []

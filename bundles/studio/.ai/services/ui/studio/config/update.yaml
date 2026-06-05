@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-03T06:08:22Z:a99e3492cc95bc35a8c398ab57c1fa079f64f97ffea684b1681671967c23db42:MRiC83r7Ko+F64+TYqqRRdCWpygZRxs+in7QyVTPF2ZL5BkCiXwnbY3IwPaaMINfYZnUtdLgWdiNa62ZJzXwBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-06-05T04:12:12Z:a99e3492cc95bc35a8c398ab57c1fa079f64f97ffea684b1681671967c23db42:ESWesYu2oZEs5xCywMgazAKro39vGto98TrtjxcBWj0koMrvTE4ZcwDMAh7cl+ImIBouafNd/d657mJnteT/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: studio/config/update
 version: "1.0.0"
