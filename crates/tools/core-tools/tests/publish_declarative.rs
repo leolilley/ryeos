@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use lillux::crypto::{DecodePrivateKey, SigningKey};
+use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
 fn host_triple() -> String {
     let output = std::process::Command::new("rustc")
@@ -109,15 +110,34 @@ fn run_publish_once(
     registry_root: &Path,
     key: &SigningKey,
 ) -> ryeos_tools::actions::publish::PublishReport {
+    run_publish_once_with_trust(bundle_dir, registry_root, key, None)
+}
+
+fn run_publish_once_with_trust(
+    bundle_dir: &Path,
+    registry_root: &Path,
+    key: &SigningKey,
+    base_trust_store: Option<TrustStore>,
+) -> ryeos_tools::actions::publish::PublishReport {
     let opts = ryeos_tools::actions::publish::PublishOptions {
         bundle_source: bundle_dir.to_path_buf(),
         registry_roots: vec![registry_root.to_path_buf()],
         signing_key: key.clone(),
+        base_trust_store,
         owner: "test".to_string(),
         emit_trust_doc: false,
     };
     ryeos_tools::actions::publish::run_publish(&opts)
         .unwrap_or_else(|e| panic!("publish failed: {e:#}"))
+}
+
+fn trust_store_for_key(key: &SigningKey, label: &str) -> TrustStore {
+    let verifying_key = key.verifying_key();
+    TrustStore::from_signers(vec![TrustedSigner {
+        fingerprint: compute_fingerprint(&verifying_key),
+        verifying_key,
+        label: Some(label.to_string()),
+    }])
 }
 
 #[test]
@@ -154,6 +174,54 @@ fn declarative_publish_skips_binary_rebuild_and_signs_manifest() {
     assert!(
         !bundle.join(ryeos_engine::AI_DIR).join("refs").exists(),
         "publish should not create binary CAS refs for a declarative bundle"
+    );
+}
+
+#[test]
+fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
+    if !core_bundle().join(ryeos_engine::AI_DIR).is_dir() {
+        eprintln!("skipping: bundles/core not found");
+        return;
+    }
+    let registry_key = load_dev_signing_key();
+    let author_key = SigningKey::from_bytes(&[99u8; 32]);
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = create_declarative_bundle(tmp.path());
+    let registry = prepare_core_registry(tmp.path(), &registry_key);
+
+    let err = ryeos_tools::actions::publish::run_publish(
+        &ryeos_tools::actions::publish::PublishOptions {
+            bundle_source: bundle.to_path_buf(),
+            registry_roots: vec![registry.to_path_buf()],
+            signing_key: author_key.clone(),
+            base_trust_store: None,
+            owner: "test".to_string(),
+            emit_trust_doc: false,
+        },
+    )
+    .expect_err("publish should reject untrusted dependency registry signer");
+    let err = format!("{err:#}");
+    assert!(err.contains("untrusted signer"), "unexpected error: {err}");
+
+    let report = run_publish_once_with_trust(
+        &bundle,
+        &registry,
+        &author_key,
+        Some(trust_store_for_key(&registry_key, "registry")),
+    );
+
+    assert!(report.sign_report.failed.is_empty());
+    assert_eq!(
+        report.author_fingerprint,
+        compute_fingerprint(&author_key.verifying_key()),
+        "bundle source should be signed by the author key, not the registry key"
+    );
+    assert!(
+        bundle
+            .join(ryeos_engine::AI_DIR)
+            .join("manifest.yaml")
+            .is_file(),
+        "manifest.yaml should be generated when dependency registry trust is supplied"
     );
 }
 
