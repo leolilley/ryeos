@@ -406,7 +406,7 @@ mod tests {
         let kind_dir = Path::new("/bundle/.ai/tools");
 
         assert!(is_tools_python_lib_path(
-            Path::new("/bundle/.ai/tools/ryeos/core/runtimes/python/lib/ryeos_runtime/events.py"),
+            Path::new("/bundle/.ai/tools/ryeos/core/runtimes/python/lib/support.py"),
             kind_dir,
         ));
         assert!(!is_tools_python_lib_path(

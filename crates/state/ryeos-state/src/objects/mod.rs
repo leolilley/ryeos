@@ -14,8 +14,8 @@
 //! - [`Attestation`] — signed claim about a CAS object
 
 pub mod attestation;
+pub mod bundle_event;
 pub mod chain_state;
-pub mod domain_event;
 pub mod item_source;
 pub mod project_snapshot;
 pub mod source_manifest;
@@ -23,11 +23,11 @@ pub mod thread_event;
 pub mod thread_snapshot;
 
 pub use attestation::Attestation;
-pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
-pub use domain_event::{
-    hash_domain_event, validate_domain_identifier, DomainEventAttribution, DomainEventObject,
-    DOMAIN_EVENT_KIND,
+pub use bundle_event::{
+    hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
+    BUNDLE_EVENT_KIND,
 };
+pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use item_source::ItemSource;
 pub use project_snapshot::ProjectSnapshot;
 pub use source_manifest::SourceManifest;

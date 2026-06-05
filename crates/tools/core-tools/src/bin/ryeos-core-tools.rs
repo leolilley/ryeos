@@ -128,10 +128,10 @@ enum Cmd {
         cmd: SnapshotCmd,
     },
 
-    /// Append/read/scan project-local bundle domain events.
-    DomainEvents {
+    /// Append/read/scan project-local bundle events.
+    BundleEvents {
         #[command(subcommand)]
-        cmd: DomainEventsCmd,
+        cmd: BundleEventsCmd,
     },
 
     /// Return the node's public identity document.
@@ -323,7 +323,7 @@ enum SnapshotCmd {
 }
 
 #[derive(Subcommand, Debug)]
-enum DomainEventsCmd {
+enum BundleEventsCmd {
     /// Low-level/dev-only append to a bundle/event-kind chain.
     ///
     /// This CLI is not an authorization boundary: `effective_bundle_id` is
@@ -372,7 +372,7 @@ enum DomainEventsCmd {
         causation_id: Option<String>,
     },
 
-    /// Read one domain event chain.
+    /// Read one bundle event chain.
     ReadChain {
         #[arg(long)]
         project_path: Option<PathBuf>,
@@ -384,7 +384,7 @@ enum DomainEventsCmd {
         chain_id: Option<String>,
     },
 
-    /// Scan domain events for a bundle/event kind.
+    /// Scan bundle events for a bundle/event kind.
     Scan {
         #[arg(long)]
         project_path: Option<PathBuf>,
@@ -486,7 +486,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Snapshot { cmd } => run_snapshot(cmd, cli.stdin_json),
-        Cmd::DomainEvents { cmd } => run_domain_events(cmd, cli.stdin_json),
+        Cmd::BundleEvents { cmd } => run_bundle_events(cmd, cli.stdin_json),
         Cmd::Identity { system_space_dir } => {
             let params = if cli.stdin_json {
                 read_stdin_json()?
@@ -968,7 +968,7 @@ impl ryeos_state::Signer for CoreToolsStateSigner {
 }
 
 #[derive(serde::Deserialize)]
-struct DomainEventAppendParams {
+struct BundleEventAppendParams {
     project_path: Option<PathBuf>,
     effective_bundle_id: String,
     #[serde(default)]
@@ -991,7 +991,7 @@ struct DomainEventAppendParams {
 }
 
 #[derive(serde::Deserialize)]
-struct DomainEventReadChainParams {
+struct BundleEventReadChainParams {
     project_path: Option<PathBuf>,
     bundle_id: String,
     event_kind: String,
@@ -999,7 +999,7 @@ struct DomainEventReadChainParams {
 }
 
 #[derive(serde::Deserialize)]
-struct DomainEventScanParams {
+struct BundleEventScanParams {
     project_path: Option<PathBuf>,
     bundle_id: String,
     event_kind: String,
@@ -1009,9 +1009,9 @@ fn default_schema_version() -> u32 {
     1
 }
 
-fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<()> {
+fn run_bundle_events(cmd: BundleEventsCmd, stdin_json: bool) -> anyhow::Result<()> {
     match cmd {
-        DomainEventsCmd::Append {
+        BundleEventsCmd::Append {
             project_path,
             effective_bundle_id,
             bundle_id,
@@ -1026,9 +1026,9 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
             causation_id,
         } => {
             let params = if stdin_json {
-                serde_json::from_value::<DomainEventAppendParams>(read_stdin_json()?)?
+                serde_json::from_value::<BundleEventAppendParams>(read_stdin_json()?)?
             } else {
-                DomainEventAppendParams {
+                BundleEventAppendParams {
                     project_path,
                     effective_bundle_id: effective_bundle_id
                         .ok_or_else(|| anyhow::anyhow!("--effective-bundle-id required"))?,
@@ -1051,12 +1051,12 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
                     causation_id,
                 }
             };
-            let db = open_domain_event_state(params.project_path.as_deref())?;
+            let db = open_bundle_event_state(params.project_path.as_deref())?;
             let user_root = ryeos_engine::roots::user_root()
                 .map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
             let signer = CoreToolsStateSigner::new(load_user_signing_key(&user_root)?);
-            let result = db.append_domain_event(
-                ryeos_state::DomainEventAppendRequest {
+            let result = db.append_bundle_event(
+                ryeos_state::BundleEventAppendRequest {
                     effective_bundle_id: params.effective_bundle_id,
                     bundle_id: params.bundle_id,
                     event_kind: params.event_kind,
@@ -1068,7 +1068,7 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
                     idempotency_key: params.idempotency_key,
                     correlation_id: params.correlation_id,
                     causation_id: params.causation_id,
-                    attribution: ryeos_state::DomainEventAttribution::default(),
+                    attribution: ryeos_state::BundleEventAttribution::default(),
                 },
                 &signer,
             )?;
@@ -1083,16 +1083,16 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
             );
             Ok(())
         }
-        DomainEventsCmd::ReadChain {
+        BundleEventsCmd::ReadChain {
             project_path,
             bundle_id,
             event_kind,
             chain_id,
         } => {
             let params = if stdin_json {
-                serde_json::from_value::<DomainEventReadChainParams>(read_stdin_json()?)?
+                serde_json::from_value::<BundleEventReadChainParams>(read_stdin_json()?)?
             } else {
-                DomainEventReadChainParams {
+                BundleEventReadChainParams {
                     project_path,
                     bundle_id: bundle_id.ok_or_else(|| anyhow::anyhow!("--bundle-id required"))?,
                     event_kind: event_kind
@@ -1100,8 +1100,8 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
                     chain_id: chain_id.ok_or_else(|| anyhow::anyhow!("--chain-id required"))?,
                 }
             };
-            let db = open_domain_event_state(params.project_path.as_deref())?;
-            let records = db.read_domain_event_chain(
+            let db = open_bundle_event_state(params.project_path.as_deref())?;
+            let records = db.read_bundle_event_chain(
                 &params.bundle_id,
                 &params.event_kind,
                 &params.chain_id,
@@ -1112,23 +1112,23 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
             );
             Ok(())
         }
-        DomainEventsCmd::Scan {
+        BundleEventsCmd::Scan {
             project_path,
             bundle_id,
             event_kind,
         } => {
             let params = if stdin_json {
-                serde_json::from_value::<DomainEventScanParams>(read_stdin_json()?)?
+                serde_json::from_value::<BundleEventScanParams>(read_stdin_json()?)?
             } else {
-                DomainEventScanParams {
+                BundleEventScanParams {
                     project_path,
                     bundle_id: bundle_id.ok_or_else(|| anyhow::anyhow!("--bundle-id required"))?,
                     event_kind: event_kind
                         .ok_or_else(|| anyhow::anyhow!("--event-kind required"))?,
                 }
             };
-            let db = open_domain_event_state(params.project_path.as_deref())?;
-            let records = db.scan_domain_events(&params.bundle_id, &params.event_kind)?;
+            let db = open_bundle_event_state(params.project_path.as_deref())?;
+            let records = db.scan_bundle_events(&params.bundle_id, &params.event_kind)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&records_to_json(records))?
@@ -1138,7 +1138,7 @@ fn run_domain_events(cmd: DomainEventsCmd, stdin_json: bool) -> anyhow::Result<(
     }
 }
 
-fn open_domain_event_state(project_path: Option<&Path>) -> anyhow::Result<ryeos_state::StateDb> {
+fn open_bundle_event_state(project_path: Option<&Path>) -> anyhow::Result<ryeos_state::StateDb> {
     let project_path = match project_path {
         Some(path) => path.to_path_buf(),
         None => std::env::current_dir().context("resolve current directory")?,
@@ -1146,7 +1146,7 @@ fn open_domain_event_state(project_path: Option<&Path>) -> anyhow::Result<ryeos_
     ryeos_state::StateDb::open(&project_path.join(ryeos_engine::AI_DIR).join("state"))
 }
 
-fn records_to_json(records: Vec<ryeos_state::DomainEventRecord>) -> serde_json::Value {
+fn records_to_json(records: Vec<ryeos_state::BundleEventRecord>) -> serde_json::Value {
     serde_json::Value::Array(
         records
             .into_iter()
@@ -1573,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn domain_events_append_and_read_chain_via_handler() {
+    fn bundle_events_append_and_read_chain_via_handler() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let previous_user_space = std::env::var_os("USER_SPACE");
         let tmp = tempfile::tempdir().unwrap();
@@ -1594,7 +1594,7 @@ mod tests {
         .unwrap();
         std::env::set_var("USER_SPACE", &user);
 
-        let append = DomainEventsCmd::Append {
+        let append = BundleEventsCmd::Append {
             project_path: Some(project.clone()),
             effective_bundle_id: Some("ryeos-email".to_string()),
             bundle_id: Some("ryeos-email".to_string()),
@@ -1608,12 +1608,12 @@ mod tests {
             correlation_id: None,
             causation_id: None,
         };
-        run_domain_events(append, false).unwrap();
+        run_bundle_events(append, false).unwrap();
 
         let db =
             ryeos_state::StateDb::open(&project.join(ryeos_engine::AI_DIR).join("state")).unwrap();
         let chain = db
-            .read_domain_event_chain("ryeos-email", "email_event", "email_1")
+            .read_bundle_event_chain("ryeos-email", "email_event", "email_1")
             .unwrap();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].event.event_type, "email_planned");

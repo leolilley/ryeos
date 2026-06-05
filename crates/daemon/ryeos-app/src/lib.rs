@@ -3,10 +3,10 @@
 // Phase B: extraction in progress. Modules are added as files are moved
 // out of ryeosd. Each move keeps the workspace compiling.
 
+pub mod bundle_event_service;
 pub mod callback_token;
 pub mod command_service;
 pub mod config;
-pub mod domain_event_service;
 pub mod engine_cache;
 pub mod engine_init;
 pub mod env_contract;

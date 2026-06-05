@@ -1,10 +1,10 @@
-//! Daemon-enforced runtime API for bundle/domain events.
+//! Daemon-enforced runtime API for bundle events.
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
-use ryeos_state::{DomainEventAppendRequest, DomainEventAppendResult, DomainEventRecord};
+use ryeos_state::{BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -13,7 +13,7 @@ use crate::state_store::StateStore;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DomainEventAppendParams {
+pub struct BundleEventAppendParams {
     pub thread_id: String,
     pub event_kind: String,
     pub chain_id: String,
@@ -34,7 +34,7 @@ pub struct DomainEventAppendParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DomainEventReadChainParams {
+pub struct BundleEventReadChainParams {
     pub thread_id: String,
     pub event_kind: String,
     pub chain_id: String,
@@ -42,43 +42,43 @@ pub struct DomainEventReadChainParams {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DomainEventScanParams {
+pub struct BundleEventScanParams {
     pub thread_id: String,
     pub event_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DomainEventAppendResponse {
+pub struct BundleEventAppendResponse {
     pub event_hash: String,
     pub chain_head_hash: String,
-    pub event: ryeos_state::DomainEventObject,
+    pub event: ryeos_state::BundleEventObject,
     pub idempotent: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DomainEventRecordsResponse {
-    pub events: Vec<DomainEventRecord>,
+pub struct BundleEventRecordsResponse {
+    pub events: Vec<BundleEventRecord>,
 }
 
-pub struct DomainEventService;
+pub struct BundleEventService;
 
-impl DomainEventService {
+impl BundleEventService {
     pub fn append(
         state_store: &Arc<StateStore>,
         authorizer: &Authorizer,
         cap: &CallbackCapability,
-        params: DomainEventAppendParams,
-    ) -> anyhow::Result<DomainEventAppendResponse> {
+        params: BundleEventAppendParams,
+    ) -> anyhow::Result<BundleEventAppendResponse> {
         let effective_bundle_id = effective_bundle_id(cap)?;
-        validate_domain_identifiers(&effective_bundle_id, &params.event_kind)?;
-        authorize_domain_event(
+        validate_bundle_identifiers(&effective_bundle_id, &params.event_kind)?;
+        authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
             "append",
             &effective_bundle_id,
             &params.event_kind,
         )?;
-        let result = state_store.append_domain_event(DomainEventAppendRequest {
+        let result = state_store.append_bundle_event(BundleEventAppendRequest {
             effective_bundle_id,
             bundle_id: None,
             event_kind: params.event_kind,
@@ -99,19 +99,19 @@ impl DomainEventService {
         state_store: &Arc<StateStore>,
         authorizer: &Authorizer,
         cap: &CallbackCapability,
-        params: DomainEventReadChainParams,
-    ) -> anyhow::Result<DomainEventRecordsResponse> {
+        params: BundleEventReadChainParams,
+    ) -> anyhow::Result<BundleEventRecordsResponse> {
         let effective_bundle_id = effective_bundle_id(cap)?;
-        validate_domain_identifiers(&effective_bundle_id, &params.event_kind)?;
-        authorize_domain_event(
+        validate_bundle_identifiers(&effective_bundle_id, &params.event_kind)?;
+        authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
             "scan",
             &effective_bundle_id,
             &params.event_kind,
         )?;
-        Ok(DomainEventRecordsResponse {
-            events: state_store.read_domain_event_chain(
+        Ok(BundleEventRecordsResponse {
+            events: state_store.read_bundle_event_chain(
                 &effective_bundle_id,
                 &params.event_kind,
                 &params.chain_id,
@@ -123,25 +123,25 @@ impl DomainEventService {
         state_store: &Arc<StateStore>,
         authorizer: &Authorizer,
         cap: &CallbackCapability,
-        params: DomainEventScanParams,
-    ) -> anyhow::Result<DomainEventRecordsResponse> {
+        params: BundleEventScanParams,
+    ) -> anyhow::Result<BundleEventRecordsResponse> {
         let effective_bundle_id = effective_bundle_id(cap)?;
-        validate_domain_identifiers(&effective_bundle_id, &params.event_kind)?;
-        authorize_domain_event(
+        validate_bundle_identifiers(&effective_bundle_id, &params.event_kind)?;
+        authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
             "scan",
             &effective_bundle_id,
             &params.event_kind,
         )?;
-        Ok(DomainEventRecordsResponse {
-            events: state_store.scan_domain_events(&effective_bundle_id, &params.event_kind)?,
+        Ok(BundleEventRecordsResponse {
+            events: state_store.scan_bundle_events(&effective_bundle_id, &params.event_kind)?,
         })
     }
 }
 
-impl From<DomainEventAppendResult> for DomainEventAppendResponse {
-    fn from(result: DomainEventAppendResult) -> Self {
+impl From<BundleEventAppendResult> for BundleEventAppendResponse {
+    fn from(result: BundleEventAppendResult) -> Self {
         Self {
             event_hash: result.event_hash,
             chain_head_hash: result.chain_head_hash,
@@ -161,27 +161,27 @@ fn effective_bundle_id(cap: &CallbackCapability) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("callback token has no effective_bundle_id"))
 }
 
-fn validate_domain_identifiers(bundle_id: &str, event_kind: &str) -> anyhow::Result<()> {
-    ryeos_state::objects::validate_domain_identifier("bundle_id", bundle_id)?;
-    ryeos_state::objects::validate_domain_identifier("event_kind", event_kind)?;
+fn validate_bundle_identifiers(bundle_id: &str, event_kind: &str) -> anyhow::Result<()> {
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", bundle_id)?;
+    ryeos_state::objects::validate_bundle_identifier("event_kind", event_kind)?;
     Ok(())
 }
 
-fn authorize_domain_event(
+fn authorize_bundle_event(
     authorizer: &Authorizer,
     effective_caps: &[String],
     verb: &str,
     bundle_id: &str,
     event_kind: &str,
 ) -> anyhow::Result<()> {
-    let required = format!("ryeos.{verb}.domain_events.{bundle_id}/{event_kind}");
+    let required = format!("ryeos.{verb}.bundle_events.{bundle_id}/{event_kind}");
     authorizer
         .authorize(effective_caps, &AuthorizationPolicy::require(&required))
         .with_context(|| format!("missing required capability: {required}"))
 }
 
-fn attribution_for_callback(cap: &CallbackCapability) -> ryeos_state::DomainEventAttribution {
-    ryeos_state::DomainEventAttribution {
+fn attribution_for_callback(cap: &CallbackCapability) -> ryeos_state::BundleEventAttribution {
+    ryeos_state::BundleEventAttribution {
         actor: None,
         tool: cap.item_ref.clone(),
         executor: None,
@@ -221,13 +221,13 @@ mod tests {
     }
 
     #[test]
-    fn authorizes_domain_event_capability() {
+    fn authorizes_bundle_event_capability() {
         let authorizer = Authorizer::new();
         let cap = cap(
-            vec!["ryeos.append.domain_events.ryeos-email/email_event".into()],
+            vec!["ryeos.append.bundle_events.ryeos-email/email_event".into()],
             Some("ryeos-email"),
         );
-        authorize_domain_event(
+        authorize_bundle_event(
             &authorizer,
             &cap.effective_caps,
             "append",
@@ -240,11 +240,11 @@ mod tests {
     #[test]
     fn validates_identifiers_before_capability_check() {
         let cap = cap(
-            vec!["ryeos.scan.domain_events.*".into()],
+            vec!["ryeos.scan.bundle_events.*".into()],
             Some("ryeos-email"),
         );
         let bundle_id = effective_bundle_id(&cap).unwrap();
-        let err = validate_domain_identifiers(&bundle_id, "../bad").unwrap_err();
+        let err = validate_bundle_identifiers(&bundle_id, "../bad").unwrap_err();
         assert!(format!("{err:#}").contains("unsafe character"));
     }
 }

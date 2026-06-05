@@ -1,4 +1,4 @@
-//! Bundle/domain event chains backed by CAS objects and signed refs.
+//! Bundle event chains backed by CAS objects and signed refs.
 
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
@@ -9,17 +9,17 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::objects::{
-    hash_domain_event, validate_domain_identifier, DomainEventAttribution, DomainEventObject,
-    DOMAIN_EVENT_KIND, SCHEMA_VERSION,
+    hash_bundle_event, validate_bundle_identifier, BundleEventAttribution, BundleEventObject,
+    BUNDLE_EVENT_KIND, SCHEMA_VERSION,
 };
 use crate::refs;
 use crate::signer::Signer;
 
-const DOMAIN_EVENTS_NAMESPACE: &str = "domain_events";
-const MAX_DOMAIN_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+const BUNDLE_EVENTS_NAMESPACE: &str = "bundle_events";
+const MAX_BUNDLE_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
-pub struct DomainEventAppendRequest {
+pub struct BundleEventAppendRequest {
     pub effective_bundle_id: String,
     pub bundle_id: Option<String>,
     pub event_kind: String,
@@ -31,28 +31,28 @@ pub struct DomainEventAppendRequest {
     pub idempotency_key: Option<String>,
     pub correlation_id: Option<String>,
     pub causation_id: Option<String>,
-    pub attribution: DomainEventAttribution,
+    pub attribution: BundleEventAttribution,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainEventAppendResult {
+pub struct BundleEventAppendResult {
     pub event_hash: String,
     pub chain_head_hash: String,
-    pub event: DomainEventObject,
+    pub event: BundleEventObject,
     pub idempotent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainEventRecord {
+pub struct BundleEventRecord {
     pub event_hash: String,
-    pub event: DomainEventObject,
+    pub event: BundleEventObject,
 }
 
-struct DomainEventChainLock {
+struct BundleEventChainLock {
     _lock_file: File,
 }
 
-impl DomainEventChainLock {
+impl BundleEventChainLock {
     fn acquire(
         refs_root: &Path,
         bundle_id: &str,
@@ -61,14 +61,14 @@ impl DomainEventChainLock {
     ) -> anyhow::Result<Self> {
         let lock_path = refs_root
             .join("generic")
-            .join(DOMAIN_EVENTS_NAMESPACE)
+            .join(BUNDLE_EVENTS_NAMESPACE)
             .join(bundle_id)
             .join(event_kind)
             .join("chains")
             .join(chain_id)
             .join("lock");
         if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent).context("failed to create domain event lock dir")?;
+            std::fs::create_dir_all(parent).context("failed to create bundle event lock dir")?;
         }
         let lock_file = OpenOptions::new()
             .create(true)
@@ -77,7 +77,7 @@ impl DomainEventChainLock {
             .write(true)
             .open(&lock_path)
             .with_context(|| {
-                format!("failed to open domain event lock: {}", lock_path.display())
+                format!("failed to open bundle event lock: {}", lock_path.display())
             })?;
 
         #[cfg(unix)]
@@ -85,7 +85,7 @@ impl DomainEventChainLock {
             let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) };
             if ret != 0 {
                 anyhow::bail!(
-                    "domain event flock failed at {}: {}",
+                    "bundle event flock failed at {}: {}",
                     lock_path.display(),
                     std::io::Error::last_os_error()
                 );
@@ -98,7 +98,7 @@ impl DomainEventChainLock {
     }
 }
 
-impl Drop for DomainEventChainLock {
+impl Drop for BundleEventChainLock {
     fn drop(&mut self) {
         #[cfg(unix)]
         unsafe {
@@ -108,7 +108,7 @@ impl Drop for DomainEventChainLock {
 }
 
 #[tracing::instrument(
-    name = "state:domain_event_append",
+    name = "state:bundle_event_append",
     skip(cas_root, refs_root, request, signer),
     fields(
         effective_bundle_id = %request.effective_bundle_id,
@@ -117,12 +117,12 @@ impl Drop for DomainEventChainLock {
         event_type = %request.event_type,
     )
 )]
-pub fn append_domain_event(
+pub fn append_bundle_event(
     cas_root: &Path,
     refs_root: &Path,
-    request: DomainEventAppendRequest,
+    request: BundleEventAppendRequest,
     signer: &dyn Signer,
-) -> anyhow::Result<DomainEventAppendResult> {
+) -> anyhow::Result<BundleEventAppendResult> {
     let bundle_id = request
         .bundle_id
         .as_deref()
@@ -130,14 +130,14 @@ pub fn append_domain_event(
         .to_string();
     if bundle_id != request.effective_bundle_id {
         anyhow::bail!(
-            "domain event bundle_id mismatch: requested {}, effective {}",
+            "bundle event bundle_id mismatch: requested {}, effective {}",
             bundle_id,
             request.effective_bundle_id
         );
     }
 
     validate_append_request(&bundle_id, &request)?;
-    let _lock = DomainEventChainLock::acquire(
+    let _lock = BundleEventChainLock::acquire(
         refs_root,
         &bundle_id,
         &request.event_kind,
@@ -158,7 +158,7 @@ pub fn append_domain_event(
 
     let current_head = refs::read_generic_head_ref(
         refs_root,
-        DOMAIN_EVENTS_NAMESPACE,
+        BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(&bundle_id, &request.event_kind, &request.chain_id),
     )?;
     let current_head_hash = current_head.as_ref().map(|head| head.target_hash.as_str());
@@ -174,15 +174,15 @@ pub fn append_domain_event(
     }
 
     let (chain_seq, prev_chain_event_hash) = if let Some(head_hash) = current_head_hash {
-        let previous = read_domain_event_by_hash(cas_root, head_hash)?;
+        let previous = read_bundle_event_by_hash(cas_root, head_hash)?;
         (previous.event.chain_seq + 1, Some(head_hash.to_string()))
     } else {
         (1, None)
     };
 
-    let event = DomainEventObject {
+    let event = BundleEventObject {
         schema: SCHEMA_VERSION,
-        kind: DOMAIN_EVENT_KIND.to_string(),
+        kind: BUNDLE_EVENT_KIND.to_string(),
         bundle_id: bundle_id.clone(),
         event_kind: request.event_kind.clone(),
         event_type: request.event_type.clone(),
@@ -203,21 +203,21 @@ pub fn append_domain_event(
     let event_hash = lillux::sha256_hex(event_json.as_bytes());
     let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
     lillux::atomic_write(&event_path, event_json.as_bytes())
-        .context("failed to store domain event in CAS")?;
+        .context("failed to store bundle event in CAS")?;
 
     refs::write_generic_head_ref(
         refs_root,
-        DOMAIN_EVENTS_NAMESPACE,
+        BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(&bundle_id, &event.event_kind, &event.chain_id),
         &event_hash,
         signer,
     )
-    .context("failed to write domain event chain head")?;
+    .context("failed to write bundle event chain head")?;
 
     if let Some(idempotency_key) = &event.idempotency_key {
         refs::write_generic_head_ref(
             refs_root,
-            DOMAIN_EVENTS_NAMESPACE,
+            BUNDLE_EVENTS_NAMESPACE,
             &idempotency_ref_name(
                 &bundle_id,
                 &event.event_kind,
@@ -227,10 +227,10 @@ pub fn append_domain_event(
             &event_hash,
             signer,
         )
-        .context("failed to write domain event idempotency head")?;
+        .context("failed to write bundle event idempotency head")?;
     }
 
-    Ok(DomainEventAppendResult {
+    Ok(BundleEventAppendResult {
         event_hash: event_hash.clone(),
         chain_head_hash: event_hash,
         event,
@@ -238,19 +238,19 @@ pub fn append_domain_event(
     })
 }
 
-pub fn read_domain_event_chain(
+pub fn read_bundle_event_chain(
     cas_root: &Path,
     refs_root: &Path,
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
-) -> anyhow::Result<Vec<DomainEventRecord>> {
-    validate_domain_identifier("bundle_id", bundle_id)?;
-    validate_domain_identifier("event_kind", event_kind)?;
-    validate_domain_identifier("chain_id", chain_id)?;
+) -> anyhow::Result<Vec<BundleEventRecord>> {
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", event_kind)?;
+    validate_bundle_identifier("chain_id", chain_id)?;
     let Some(head) = refs::read_generic_head_ref(
         refs_root,
-        DOMAIN_EVENTS_NAMESPACE,
+        BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(bundle_id, event_kind, chain_id),
     )?
     else {
@@ -260,32 +260,32 @@ pub fn read_domain_event_chain(
     let mut records = Vec::new();
     let mut next_hash = Some(head.target_hash);
     while let Some(hash) = next_hash {
-        let record = read_domain_event_by_hash(cas_root, &hash)?;
+        let record = read_bundle_event_by_hash(cas_root, &hash)?;
         if record.event.bundle_id != bundle_id
             || record.event.event_kind != event_kind
             || record.event.chain_id != chain_id
         {
-            anyhow::bail!("domain event chain contains mismatched event metadata");
+            anyhow::bail!("bundle event chain contains mismatched event metadata");
         }
         next_hash = record.event.prev_chain_event_hash.clone();
         records.push(record);
     }
     records.reverse();
-    validate_domain_event_chain_links(bundle_id, event_kind, chain_id, &records)?;
+    validate_bundle_event_chain_links(bundle_id, event_kind, chain_id, &records)?;
     Ok(records)
 }
 
-pub fn scan_domain_events(
+pub fn scan_bundle_events(
     cas_root: &Path,
     refs_root: &Path,
     bundle_id: &str,
     event_kind: &str,
-) -> anyhow::Result<Vec<DomainEventRecord>> {
-    validate_domain_identifier("bundle_id", bundle_id)?;
-    validate_domain_identifier("event_kind", event_kind)?;
+) -> anyhow::Result<Vec<BundleEventRecord>> {
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", event_kind)?;
     let prefix = format!(
         "{}/{}/{}/chains",
-        DOMAIN_EVENTS_NAMESPACE, bundle_id, event_kind
+        BUNDLE_EVENTS_NAMESPACE, bundle_id, event_kind
     );
     let heads = refs::list_generic_head_refs(refs_root, &prefix)?;
     let mut records = Vec::new();
@@ -298,7 +298,7 @@ pub fn scan_domain_events(
         {
             continue;
         }
-        records.extend(read_domain_event_chain(
+        records.extend(read_bundle_event_chain(
             cas_root, refs_root, bundle_id, event_kind, parts[3],
         )?);
     }
@@ -321,17 +321,17 @@ pub fn scan_domain_events(
     Ok(records)
 }
 
-fn validate_domain_event_chain_links(
+fn validate_bundle_event_chain_links(
     bundle_id: &str,
     event_kind: &str,
     chain_id: &str,
-    records: &[DomainEventRecord],
+    records: &[BundleEventRecord],
 ) -> anyhow::Result<()> {
     for (idx, record) in records.iter().enumerate() {
         let expected_seq = (idx + 1) as u64;
         if record.event.chain_seq != expected_seq {
             anyhow::bail!(
-                "domain event chain {}/{}/{} has sequence gap: expected {}, got {}",
+                "bundle event chain {}/{}/{} has sequence gap: expected {}, got {}",
                 bundle_id,
                 event_kind,
                 chain_id,
@@ -345,7 +345,7 @@ fn validate_domain_event_chain_links(
             .map(|prev_idx| records[prev_idx].event_hash.as_str());
         if record.event.prev_chain_event_hash.as_deref() != expected_prev {
             anyhow::bail!(
-                "domain event chain {}/{}/{} has link mismatch at seq {}: expected prev {:?}, got {:?}",
+                "bundle event chain {}/{}/{} has link mismatch at seq {}: expected prev {:?}, got {:?}",
                 bundle_id,
                 event_kind,
                 chain_id,
@@ -358,26 +358,26 @@ fn validate_domain_event_chain_links(
     Ok(())
 }
 
-pub fn read_domain_event_by_hash(
+pub fn read_bundle_event_by_hash(
     cas_root: &Path,
     event_hash: &str,
-) -> anyhow::Result<DomainEventRecord> {
+) -> anyhow::Result<BundleEventRecord> {
     validate_canonical_hash("event_hash", event_hash)?;
     let path = lillux::shard_path(cas_root, "objects", event_hash, ".json");
     let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read domain event object {}", path.display()))?;
-    let event: DomainEventObject = serde_json::from_str(&content)
-        .with_context(|| format!("failed to parse domain event {}", event_hash))?;
+        .with_context(|| format!("failed to read bundle event object {}", path.display()))?;
+    let event: BundleEventObject = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse bundle event {}", event_hash))?;
     event.validate()?;
-    let actual_hash = hash_domain_event(&event);
+    let actual_hash = hash_bundle_event(&event);
     if actual_hash != event_hash {
         anyhow::bail!(
-            "domain event hash mismatch: expected {}, got {}",
+            "bundle event hash mismatch: expected {}, got {}",
             event_hash,
             actual_hash
         );
     }
-    Ok(DomainEventRecord {
+    Ok(BundleEventRecord {
         event_hash: event_hash.to_string(),
         event,
     })
@@ -387,16 +387,16 @@ fn maybe_return_idempotent(
     cas_root: &Path,
     refs_root: &Path,
     bundle_id: &str,
-    request: &DomainEventAppendRequest,
+    request: &BundleEventAppendRequest,
     request_fingerprint: &str,
     signer: &dyn Signer,
-) -> anyhow::Result<Option<DomainEventAppendResult>> {
+) -> anyhow::Result<Option<BundleEventAppendResult>> {
     let Some(idempotency_key) = &request.idempotency_key else {
         return Ok(None);
     };
     if let Some(existing_ref) = refs::read_generic_head_ref(
         refs_root,
-        DOMAIN_EVENTS_NAMESPACE,
+        BUNDLE_EVENTS_NAMESPACE,
         &idempotency_ref_name(
             bundle_id,
             &request.event_kind,
@@ -404,7 +404,7 @@ fn maybe_return_idempotent(
             idempotency_key,
         ),
     )? {
-        let existing = read_domain_event_by_hash(cas_root, &existing_ref.target_hash)?;
+        let existing = read_bundle_event_by_hash(cas_root, &existing_ref.target_hash)?;
         return idempotent_result_or_conflict(
             refs_root,
             bundle_id,
@@ -443,8 +443,8 @@ fn find_idempotent_event_in_chain(
     event_kind: &str,
     chain_id: &str,
     idempotency_key: &str,
-) -> anyhow::Result<Option<DomainEventRecord>> {
-    for record in read_domain_event_chain(cas_root, refs_root, bundle_id, event_kind, chain_id)? {
+) -> anyhow::Result<Option<BundleEventRecord>> {
+    for record in read_bundle_event_chain(cas_root, refs_root, bundle_id, event_kind, chain_id)? {
         if record.event.idempotency_key.as_deref() == Some(idempotency_key) {
             return Ok(Some(record));
         }
@@ -455,11 +455,11 @@ fn find_idempotent_event_in_chain(
 fn idempotent_result_or_conflict(
     refs_root: &Path,
     bundle_id: &str,
-    request: &DomainEventAppendRequest,
+    request: &BundleEventAppendRequest,
     request_fingerprint: &str,
-    existing: DomainEventRecord,
+    existing: BundleEventRecord,
     repair_signer: Option<&dyn Signer>,
-) -> anyhow::Result<Option<DomainEventAppendResult>> {
+) -> anyhow::Result<Option<BundleEventAppendResult>> {
     if existing.event.request_fingerprint.as_deref() != Some(request_fingerprint) {
         anyhow::bail!(
             "IdempotencyConflict for bundle/event_kind/chain {}/{}/{}",
@@ -472,7 +472,7 @@ fn idempotent_result_or_conflict(
         if let Some(idempotency_key) = &existing.event.idempotency_key {
             refs::write_generic_head_ref(
                 refs_root,
-                DOMAIN_EVENTS_NAMESPACE,
+                BUNDLE_EVENTS_NAMESPACE,
                 &idempotency_ref_name(
                     bundle_id,
                     &existing.event.event_kind,
@@ -482,13 +482,13 @@ fn idempotent_result_or_conflict(
                 &existing.event_hash,
                 signer,
             )
-            .context("failed to repair domain event idempotency head")?;
+            .context("failed to repair bundle event idempotency head")?;
         }
     }
     let chain_head_hash =
         current_chain_head_hash(refs_root, bundle_id, &request.event_kind, &request.chain_id)?
             .unwrap_or_else(|| existing.event_hash.clone());
-    Ok(Some(DomainEventAppendResult {
+    Ok(Some(BundleEventAppendResult {
         event_hash: existing.event_hash,
         chain_head_hash,
         event: existing.event,
@@ -504,7 +504,7 @@ fn current_chain_head_hash(
 ) -> anyhow::Result<Option<String>> {
     Ok(refs::read_generic_head_ref(
         refs_root,
-        DOMAIN_EVENTS_NAMESPACE,
+        BUNDLE_EVENTS_NAMESPACE,
         &chain_ref_name(bundle_id, event_kind, chain_id),
     )?
     .map(|head| head.target_hash))
@@ -512,12 +512,12 @@ fn current_chain_head_hash(
 
 fn validate_append_request(
     bundle_id: &str,
-    request: &DomainEventAppendRequest,
+    request: &BundleEventAppendRequest,
 ) -> anyhow::Result<()> {
-    validate_domain_identifier("bundle_id", bundle_id)?;
-    validate_domain_identifier("event_kind", &request.event_kind)?;
-    validate_domain_identifier("event_type", &request.event_type)?;
-    validate_domain_identifier("chain_id", &request.chain_id)?;
+    validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_bundle_identifier("event_kind", &request.event_kind)?;
+    validate_bundle_identifier("event_type", &request.event_type)?;
+    validate_bundle_identifier("chain_id", &request.chain_id)?;
     if request.schema_version == 0 {
         anyhow::bail!("schema_version must be greater than zero");
     }
@@ -526,7 +526,7 @@ fn validate_append_request(
         validate_canonical_hash("expected_chain_head_hash", hash)?;
     }
     if let Some(key) = &request.idempotency_key {
-        crate::objects::domain_event::validate_idempotency_key(key)?;
+        crate::objects::bundle_event::validate_idempotency_key(key)?;
     }
     Ok(())
 }
@@ -551,7 +551,7 @@ fn idempotency_ref_name(
     format!("{}/{}/idempotency/{}", bundle_id, event_kind, key_hash)
 }
 
-fn compute_request_fingerprint(bundle_id: &str, request: &DomainEventAppendRequest) -> String {
+fn compute_request_fingerprint(bundle_id: &str, request: &BundleEventAppendRequest) -> String {
     let value = serde_json::json!({
         "bundle_id": bundle_id,
         "event_kind": request.event_kind,
@@ -568,11 +568,11 @@ fn compute_request_fingerprint(bundle_id: &str, request: &DomainEventAppendReque
 
 fn validate_payload_size(payload: &serde_json::Value) -> anyhow::Result<()> {
     let bytes = lillux::canonical_json(payload).len();
-    if bytes > MAX_DOMAIN_EVENT_PAYLOAD_BYTES {
+    if bytes > MAX_BUNDLE_EVENT_PAYLOAD_BYTES {
         anyhow::bail!(
-            "domain event payload too large: {} > {}",
+            "bundle event payload too large: {} > {}",
             bytes,
-            MAX_DOMAIN_EVENT_PAYLOAD_BYTES
+            MAX_BUNDLE_EVENT_PAYLOAD_BYTES
         );
     }
     Ok(())
@@ -599,8 +599,8 @@ mod tests {
         (tmp, cas_root, refs_root)
     }
 
-    fn append_request(chain_id: &str, event_type: &str) -> DomainEventAppendRequest {
-        DomainEventAppendRequest {
+    fn append_request(chain_id: &str, event_type: &str) -> BundleEventAppendRequest {
+        BundleEventAppendRequest {
             effective_bundle_id: "ryeos-email".to_string(),
             bundle_id: Some("ryeos-email".to_string()),
             event_kind: "email_event".to_string(),
@@ -612,16 +612,16 @@ mod tests {
             idempotency_key: None,
             correlation_id: None,
             causation_id: None,
-            attribution: DomainEventAttribution::default(),
+            attribution: BundleEventAttribution::default(),
         }
     }
 
     #[test]
-    fn appends_and_reads_domain_event_chain() {
+    fn appends_and_reads_bundle_event_chain() {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        let first = append_domain_event(
+        let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -630,9 +630,9 @@ mod tests {
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        let second = append_domain_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        let second = append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
 
-        let chain = read_domain_event_chain(
+        let chain = read_bundle_event_chain(
             &cas_root,
             &refs_root,
             "ryeos-email",
@@ -655,14 +655,14 @@ mod tests {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        append_domain_event(
+        append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
         )
         .unwrap();
-        let err = append_domain_event(
+        let err = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_approved"),
@@ -679,14 +679,14 @@ mod tests {
 
         let mut req = append_request("email_1", "email_send_requested");
         req.idempotency_key = Some("request-send:email_1".to_string());
-        let first = append_domain_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
+        let first = append_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
 
-        let retry = append_domain_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
+        let retry = append_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
         assert!(retry.idempotent);
         assert_eq!(retry.event_hash, first.event_hash);
 
         req.payload = serde_json::json!({"email_id":"email_1","changed":true});
-        let err = append_domain_event(&cas_root, &refs_root, req, &signer).unwrap_err();
+        let err = append_bundle_event(&cas_root, &refs_root, req, &signer).unwrap_err();
         assert!(format!("{err:#}").contains("IdempotencyConflict"));
     }
 
@@ -697,10 +697,10 @@ mod tests {
 
         let mut req = append_request("email_1", "email_send_requested");
         req.idempotency_key = Some("request-send:email_1".to_string());
-        let first = append_domain_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
+        let first = append_bundle_event(&cas_root, &refs_root, req.clone(), &signer).unwrap();
         let idem_path = refs_root
             .join("generic")
-            .join(DOMAIN_EVENTS_NAMESPACE)
+            .join(BUNDLE_EVENTS_NAMESPACE)
             .join(idempotency_ref_name(
                 "ryeos-email",
                 "email_event",
@@ -711,7 +711,7 @@ mod tests {
         assert!(idem_path.is_file());
         std::fs::remove_file(&idem_path).unwrap();
 
-        let retry = append_domain_event(&cas_root, &refs_root, req, &signer).unwrap();
+        let retry = append_bundle_event(&cas_root, &refs_root, req, &signer).unwrap();
         assert!(retry.idempotent);
         assert_eq!(retry.event_hash, first.event_hash);
         assert!(
@@ -727,13 +727,13 @@ mod tests {
 
         let mut first_req = append_request("email_1", "email_send_requested");
         first_req.idempotency_key = Some("request-send:email_1".to_string());
-        let first = append_domain_event(&cas_root, &refs_root, first_req.clone(), &signer).unwrap();
+        let first = append_bundle_event(&cas_root, &refs_root, first_req.clone(), &signer).unwrap();
 
         let mut second_req = append_request("email_1", "email_send_claimed");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        let second = append_domain_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        let second = append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
 
-        let retry = append_domain_event(&cas_root, &refs_root, first_req, &signer).unwrap();
+        let retry = append_bundle_event(&cas_root, &refs_root, first_req, &signer).unwrap();
         assert!(retry.idempotent);
         assert_eq!(retry.event_hash, first.event_hash);
         assert_eq!(retry.chain_head_hash, second.event_hash);
@@ -744,14 +744,14 @@ mod tests {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        append_domain_event(
+        append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_b", "email_planned"),
             &signer,
         )
         .unwrap();
-        append_domain_event(
+        append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_a", "email_planned"),
@@ -760,7 +760,7 @@ mod tests {
         .unwrap();
 
         let scanned =
-            scan_domain_events(&cas_root, &refs_root, "ryeos-email", "email_event").unwrap();
+            scan_bundle_events(&cas_root, &refs_root, "ryeos-email", "email_event").unwrap();
         assert_eq!(scanned.len(), 2);
         assert_eq!(scanned[0].event.chain_id, "email_a");
         assert_eq!(scanned[1].event.chain_id, "email_b");
@@ -771,7 +771,7 @@ mod tests {
         let (_tmp, cas_root, refs_root) = roots();
         let signer = TestSigner::default();
 
-        let first = append_domain_event(
+        let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
@@ -789,14 +789,14 @@ mod tests {
         lillux::atomic_write(&malformed_path, malformed_json.as_bytes()).unwrap();
         refs::write_generic_head_ref(
             &refs_root,
-            DOMAIN_EVENTS_NAMESPACE,
+            BUNDLE_EVENTS_NAMESPACE,
             &chain_ref_name("ryeos-email", "email_event", "email_1"),
             &malformed_hash,
             &signer,
         )
         .unwrap();
 
-        let err = read_domain_event_chain(
+        let err = read_bundle_event_chain(
             &cas_root,
             &refs_root,
             "ryeos-email",
@@ -813,7 +813,7 @@ mod tests {
         let signer = TestSigner::default();
         let mut req = append_request("email_1", "email_planned");
         req.bundle_id = Some("other-bundle".to_string());
-        let err = append_domain_event(&cas_root, &refs_root, req, &signer).unwrap_err();
+        let err = append_bundle_event(&cas_root, &refs_root, req, &signer).unwrap_err();
         assert!(format!("{err:#}").contains("bundle_id mismatch"));
     }
 }

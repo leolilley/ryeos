@@ -1,7 +1,7 @@
 //! Per-session event bus for browser clients.
 //!
 //! `SessionBus` is a `tokio::broadcast` channel per session ID. The daemon
-//! publishes domain events (thread changes, capability updates, health) and
+//! publishes bundle events (thread changes, capability updates, health) and
 //! the `/ui/events/session/{session_id}` SSE endpoint subscribes and frames
 //! them as `RouteStreamEnvelope` items.
 //!

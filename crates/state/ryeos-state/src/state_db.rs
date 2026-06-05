@@ -10,13 +10,13 @@ use std::sync::Mutex;
 
 use anyhow::Context;
 
-use crate::chain::{self, AppendResult, CreateResult, SnapshotUpdate};
-use crate::domain_events::{
-    self, DomainEventAppendRequest, DomainEventAppendResult, DomainEventRecord,
+use crate::bundle_events::{
+    self, BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord,
 };
-use crate::domain_projection::DomainProjectionDb;
+use crate::bundle_projection::BundleProjectionDb;
+use crate::chain::{self, AppendResult, CreateResult, SnapshotUpdate};
 use crate::head_cache::HeadCache;
-use crate::objects::domain_event::validate_domain_identifier;
+use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
 use crate::projection::{
@@ -293,23 +293,23 @@ impl StateDb {
         crate::refs::list_generic_head_refs(&self.refs_root, prefix)
     }
 
-    // ── Bundle/domain event chains ────────────────────────────────
+    // ── Bundle event chains ────────────────────────────────
 
-    pub fn append_domain_event(
+    pub fn append_bundle_event(
         &self,
-        request: DomainEventAppendRequest,
+        request: BundleEventAppendRequest,
         signer: &dyn Signer,
-    ) -> anyhow::Result<DomainEventAppendResult> {
-        domain_events::append_domain_event(&self.cas_root, &self.refs_root, request, signer)
+    ) -> anyhow::Result<BundleEventAppendResult> {
+        bundle_events::append_bundle_event(&self.cas_root, &self.refs_root, request, signer)
     }
 
-    pub fn read_domain_event_chain(
+    pub fn read_bundle_event_chain(
         &self,
         bundle_id: &str,
         event_kind: &str,
         chain_id: &str,
-    ) -> anyhow::Result<Vec<DomainEventRecord>> {
-        domain_events::read_domain_event_chain(
+    ) -> anyhow::Result<Vec<BundleEventRecord>> {
+        bundle_events::read_bundle_event_chain(
             &self.cas_root,
             &self.refs_root,
             bundle_id,
@@ -318,25 +318,25 @@ impl StateDb {
         )
     }
 
-    pub fn scan_domain_events(
+    pub fn scan_bundle_events(
         &self,
         bundle_id: &str,
         event_kind: &str,
-    ) -> anyhow::Result<Vec<DomainEventRecord>> {
-        domain_events::scan_domain_events(&self.cas_root, &self.refs_root, bundle_id, event_kind)
+    ) -> anyhow::Result<Vec<BundleEventRecord>> {
+        bundle_events::scan_bundle_events(&self.cas_root, &self.refs_root, bundle_id, event_kind)
     }
 
-    pub fn open_domain_projection(
+    pub fn open_bundle_projection(
         &self,
         projection_name: &str,
-    ) -> anyhow::Result<DomainProjectionDb> {
-        validate_domain_identifier("projection_name", projection_name)?;
+    ) -> anyhow::Result<BundleProjectionDb> {
+        validate_bundle_identifier("projection_name", projection_name)?;
         let state_root = self.cas_root.parent().ok_or_else(|| {
             anyhow::anyhow!("CAS root has no parent: {}", self.cas_root.display())
         })?;
-        let projection_root = state_root.join("domain-projections");
-        fs::create_dir_all(&projection_root).context("creating domain projection root")?;
-        DomainProjectionDb::open(&projection_root.join(format!("{projection_name}.sqlite3")))
+        let projection_root = state_root.join("bundle-projections");
+        fs::create_dir_all(&projection_root).context("creating bundle projection root")?;
+        BundleProjectionDb::open(&projection_root.join(format!("{projection_name}.sqlite3")))
     }
 
     // ── Query helpers ──────────────────────────────────────────────

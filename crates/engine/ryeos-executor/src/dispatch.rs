@@ -1654,7 +1654,7 @@ async fn dispatch_tool_subprocess(
     }
 
     let item_ref_for_error = resolved.item_ref.clone();
-    let effective_caps = derive_direct_tool_domain_event_caps(&resolved, ctx)?;
+    let effective_caps = derive_direct_tool_bundle_event_caps(&resolved, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
@@ -1712,7 +1712,7 @@ async fn dispatch_tool_subprocess(
     }
 }
 
-fn derive_direct_tool_domain_event_caps(
+fn derive_direct_tool_bundle_event_caps(
     resolved: &ResolvedExecutionRequest,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
@@ -1723,10 +1723,10 @@ fn derive_direct_tool_domain_event_caps(
     .ok_or_else(|| {
         DispatchError::InvalidRef(
             item_ref.clone(),
-            "direct tool domain-event authority requires a bundle-qualified tool ref".into(),
+            "direct tool bundle-event authority requires a bundle-qualified tool ref".into(),
         )
     })?;
-    ryeos_state::objects::validate_domain_identifier("bundle_id", &effective_bundle_id)
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
         .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
 
     let Some(ai_dir) = resolved_item_ai_dir(&resolved.resolved_item) else {
@@ -1738,43 +1738,43 @@ fn derive_direct_tool_domain_event_caps(
     let Some(manifest) = manifest else {
         return Ok(Vec::new());
     };
-    if manifest.domain_events.is_empty() {
+    if manifest.bundle_events.is_empty() {
         return Ok(Vec::new());
     }
     if manifest.name != effective_bundle_id {
         return Err(DispatchError::InvalidRef(
             item_ref,
             format!(
-                "domain-event manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
+                "bundle-event manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
                 manifest.name, effective_bundle_id
             ),
         ));
     }
 
     let mut caps = BTreeSet::new();
-    for decl in manifest.domain_events {
-        ryeos_state::objects::validate_domain_identifier("event_kind", &decl.event_kind)
+    for decl in manifest.bundle_events {
+        ryeos_state::objects::validate_bundle_identifier("event_kind", &decl.event_kind)
             .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
         if decl.operations.is_empty() {
             return Err(DispatchError::InvalidRef(
                 resolved.item_ref.clone(),
                 format!(
-                    "domain_events declaration for '{}' must list at least one operation",
+                    "bundle_events declaration for '{}' must list at least one operation",
                     decl.event_kind
                 ),
             ));
         }
         for op in decl.operations {
             match op {
-                ryeos_bundle::manifest::BundleDomainEventOperation::Append => {
+                ryeos_bundle::manifest::BundleEventOperation::Append => {
                     caps.insert(format!(
-                        "ryeos.append.domain_events.{effective_bundle_id}/{}",
+                        "ryeos.append.bundle_events.{effective_bundle_id}/{}",
                         decl.event_kind
                     ));
                 }
-                ryeos_bundle::manifest::BundleDomainEventOperation::Scan => {
+                ryeos_bundle::manifest::BundleEventOperation::Scan => {
                     caps.insert(format!(
-                        "ryeos.scan.domain_events.{effective_bundle_id}/{}",
+                        "ryeos.scan.bundle_events.{effective_bundle_id}/{}",
                         decl.event_kind
                     ));
                 }
@@ -2211,7 +2211,7 @@ metadata:
     }
 
     #[test]
-    fn direct_tool_domain_event_caps_derive_exact_self_bundle_caps() {
+    fn direct_tool_bundle_event_caps_derive_exact_self_bundle_caps() {
         let bundle = tempdir().join("ryeos-email");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(
@@ -2222,7 +2222,7 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-domain_events:
+bundle_events:
   - event_kind: email_event
     operations: [append, scan]
 "#,
@@ -2230,22 +2230,22 @@ domain_events:
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
 
-        let caps = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap();
+        let caps = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap();
         assert_eq!(
             caps,
             vec![
-                "ryeos.append.domain_events.ryeos-email/email_event".to_string(),
-                "ryeos.scan.domain_events.ryeos-email/email_event".to_string(),
+                "ryeos.append.bundle_events.ryeos-email/email_event".to_string(),
+                "ryeos.scan.bundle_events.ryeos-email/email_event".to_string(),
             ]
         );
     }
 
     #[test]
-    fn direct_tool_domain_event_caps_empty_without_signed_declarations() {
+    fn direct_tool_bundle_event_caps_empty_without_signed_declarations() {
         let bundle = tempdir().join("ryeos-email");
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
-        assert!(derive_direct_tool_domain_event_caps(&resolved, &ctx)
+        assert!(derive_direct_tool_bundle_event_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
 
@@ -2257,16 +2257,16 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-domain_events: []
+bundle_events: []
 "#,
         );
-        assert!(derive_direct_tool_domain_event_caps(&resolved, &ctx)
+        assert!(derive_direct_tool_bundle_event_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
     }
 
     #[test]
-    fn direct_tool_domain_event_caps_reject_manifest_namespace_mismatch_when_declared() {
+    fn direct_tool_bundle_event_caps_reject_manifest_namespace_mismatch_when_declared() {
         let bundle = tempdir().join("ryeos-email");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(
@@ -2277,19 +2277,19 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-domain_events:
+bundle_events:
   - event_kind: email_event
     operations: [append]
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
-        let err = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("namespace mismatch"), "got: {err}");
     }
 
     #[test]
-    fn direct_tool_domain_event_caps_reject_invalid_manifest_declarations() {
+    fn direct_tool_bundle_event_caps_reject_invalid_manifest_declarations() {
         let bundle = tempdir().join("ryeos-email");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         let ctx = test_execution_context(bundle.clone());
@@ -2303,12 +2303,12 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-domain_events:
+bundle_events:
   - event_kind: ../bad
     operations: [append]
 "#,
         );
-        let err = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
 
         write_signed_manifest(
@@ -2319,12 +2319,12 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-domain_events:
+bundle_events:
   - event_kind: email_event
     operations: []
 "#,
         );
-        let err = derive_direct_tool_domain_event_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap_err();
         assert!(
             err.to_string().contains("must list at least one operation"),
             "got: {err}"
@@ -2344,7 +2344,7 @@ domain_events:
             )]),
         );
 
-        assert!(derive_direct_tool_domain_event_caps(&resolved, &ctx)
+        assert!(derive_direct_tool_bundle_event_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
     }
