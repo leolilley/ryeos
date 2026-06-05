@@ -151,7 +151,15 @@ pub fn build_inventory_for_kind(
                     source: Box::new(e),
                 }
             })?;
-        if is_terminal_descriptor(&descriptor) {
+        // Tool inventory is a direct-invocation surface: runtimes hand
+        // these descriptors back to dispatch as tools an agent may ask
+        // to run as the requested/root item. A tool with no extracted
+        // executor_id cannot be used that way. In core, terminal chain
+        // nodes such as `ryeos/core/subprocess/execute` are represented
+        // with `executor_id: null`: they are valid endpoints of another
+        // tool's executor chain, but they are not ordinary launchable
+        // tools and should not be offered in inventory.
+        if is_not_directly_invokable_tool_descriptor(inventoried_kind, &descriptor) {
             continue;
         }
         if let Some(prev_id) = seen_names.get(&descriptor.name) {
@@ -215,9 +223,6 @@ fn build_descriptor_for_ref(
     // surface separately (description, name) so a runtime reading
     // `extra` doesn't see duplicates of `descriptor.description`.
     let mut extra: HashMap<String, Value> = metadata.extra.clone();
-    if let Some(v) = parsed.get("tool_type") {
-        extra.insert("tool_type".to_owned(), v.clone());
-    }
     if let Some(ref v) = metadata.executor_id {
         extra.insert("executor_id".to_owned(), Value::String(v.clone()));
     }
@@ -253,8 +258,11 @@ fn build_descriptor_for_ref(
     })
 }
 
-fn is_terminal_descriptor(descriptor: &ItemDescriptor) -> bool {
-    descriptor.extra.get("tool_type").and_then(Value::as_str) == Some("terminal")
+fn is_not_directly_invokable_tool_descriptor(
+    inventoried_kind: &str,
+    descriptor: &ItemDescriptor,
+) -> bool {
+    inventoried_kind == "tool" && !descriptor.extra.contains_key("executor_id")
 }
 
 /// Read the parsed body and return the first non-null value at any
@@ -333,16 +341,24 @@ mod tests {
     }
 
     #[test]
-    fn terminal_tool_descriptors_are_hidden_from_inventory() {
+    fn tool_descriptors_without_executor_id_are_not_directly_invokable() {
         let mut descriptor = ItemDescriptor::default();
-        descriptor
-            .extra
-            .insert("tool_type".to_owned(), Value::String("terminal".to_owned()));
-        assert!(is_terminal_descriptor(&descriptor));
+        assert!(is_not_directly_invokable_tool_descriptor(
+            "tool",
+            &descriptor
+        ));
+        assert!(!is_not_directly_invokable_tool_descriptor(
+            "knowledge",
+            &descriptor
+        ));
 
-        descriptor
-            .extra
-            .insert("tool_type".to_owned(), Value::String("regular".to_owned()));
-        assert!(!is_terminal_descriptor(&descriptor));
+        descriptor.extra.insert(
+            "executor_id".to_owned(),
+            Value::String("@subprocess".to_owned()),
+        );
+        assert!(!is_not_directly_invokable_tool_descriptor(
+            "tool",
+            &descriptor
+        ));
     }
 }
