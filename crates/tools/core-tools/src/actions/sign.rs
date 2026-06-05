@@ -177,15 +177,23 @@ pub fn run_sign(
             .unwrap_or_else(|| file_path.display().to_string());
         let display_ref = format!("{}:{}", target.kind, bare_id);
 
-        match sign_one(&file_path, kind_schema, &ai_root, &parsers) {
-            Ok(SignOutcome::Signed(sig)) => report.signed.push(ItemOutcome {
+        match sign_one(&file_path, &target.kind, kind_schema, &ai_root, &parsers) {
+            Ok(SignOneResult {
+                outcome: SignOutcome::Signed(sig),
+                warnings,
+            }) => report.signed.push(ItemOutcome {
                 item_ref: display_ref,
                 signature: Some(sig),
                 error: None,
+                warnings,
             }),
-            Ok(SignOutcome::Unchanged {
-                file,
-                signer_fingerprint,
+            Ok(SignOneResult {
+                outcome:
+                    SignOutcome::Unchanged {
+                        file,
+                        signer_fingerprint,
+                    },
+                warnings,
             }) => report.validated.push(ItemOutcome {
                 item_ref: display_ref,
                 signature: Some(SignatureReport {
@@ -195,11 +203,13 @@ pub fn run_sign(
                     updated_at: String::new(),
                 }),
                 error: None,
+                warnings,
             }),
             Err(e) => report.failed.push(ItemOutcome {
                 item_ref: display_ref,
                 signature: None,
                 error: Some(format!("{e:#}")),
+                warnings: Vec::new(),
             }),
         }
     }
@@ -211,10 +221,11 @@ pub fn run_sign(
 /// Returns `SignOutcome::Unchanged` if the file was already validly signed.
 fn sign_one(
     file_path: &Path,
+    kind_name: &str,
     kind_schema: &KindSchema,
     ai_root: &Path,
     parsers: &ParserDispatcher,
-) -> Result<SignOutcome> {
+) -> Result<SignOneResult> {
     let content =
         fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
     let matched_ext = file_path
@@ -255,7 +266,23 @@ fn sign_one(
         )
     })?;
 
-    sign_in_place(file_path, &content, &source_format.signature)
+    let warnings = sign_warnings(kind_name, &parsed);
+    let outcome = sign_in_place(file_path, &content, &source_format.signature)?;
+    Ok(SignOneResult { outcome, warnings })
+}
+
+fn sign_warnings(kind_name: &str, parsed: &serde_json::Value) -> Vec<String> {
+    if kind_name == "tool"
+        && parsed
+            .get("executor_id")
+            .is_some_and(serde_json::Value::is_null)
+    {
+        return vec![
+            "tool declares `executor_id: null`; this is valid for terminal executor-chain endpoints, but the tool is not directly invokable as a requested item"
+                .to_string(),
+        ];
+    }
+    Vec::new()
 }
 
 #[derive(Debug)]
@@ -456,6 +483,8 @@ pub struct ItemOutcome {
     pub signature: Option<SignatureReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
@@ -605,6 +634,11 @@ fn is_already_validly_signed_operator(
 }
 
 /// Outcome of signing a single item via `sign_in_place`.
+struct SignOneResult {
+    outcome: SignOutcome,
+    warnings: Vec<String>,
+}
+
 enum SignOutcome {
     /// Already valid, left untouched.
     Unchanged {
@@ -763,5 +797,18 @@ mod tests {
         } else {
             std::env::remove_var("RYE_SIGNING_KEY");
         }
+    }
+
+    #[test]
+    fn sign_warnings_flags_tool_with_null_executor_id() {
+        let parsed = serde_json::json!({"executor_id": null});
+        let warnings = sign_warnings("tool", &parsed);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("executor_id: null"));
+
+        assert!(
+            sign_warnings("tool", &serde_json::json!({"executor_id": "@subprocess"})).is_empty()
+        );
+        assert!(sign_warnings("knowledge", &parsed).is_empty());
     }
 }
