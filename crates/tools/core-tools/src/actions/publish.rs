@@ -28,6 +28,7 @@ use serde::Serialize;
 use crate::actions::build_bundle::{self, RebuildReport};
 use crate::actions::sign_bundle::{self, SignBundleReport};
 use ryeos_bundle::manifest::{materialize_manifest, BundleManifestSource};
+use ryeos_engine::trust::TrustStore;
 
 #[derive(Debug)]
 pub struct PublishOptions {
@@ -43,6 +44,9 @@ pub struct PublishOptions {
     pub registry_roots: Vec<PathBuf>,
     /// Author signing key used for every signing operation in this run.
     pub signing_key: SigningKey,
+    /// Operator trust store used to verify dependency bundle schemas,
+    /// parsers, and handlers during the sign-items phase.
+    pub base_trust_store: Option<TrustStore>,
     /// Owner label written into PUBLISHER_TRUST.toml (e.g. "ryeos-official",
     /// "ryeos-dev"). Required when `emit_trust_doc` is true.
     pub owner: String,
@@ -125,10 +129,11 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     };
 
     // ── Phase 3: sign every other signable item ──
-    let sign_report = sign_bundle::sign_bundle_items(
+    let sign_report = sign_bundle::sign_bundle_items_with_trust(
         &opts.bundle_source,
         &opts.registry_roots,
         &opts.signing_key,
+        opts.base_trust_store.as_ref(),
     )
     .context("sign-items phase failed")?;
     if !sign_report.is_total_success() {

@@ -15,8 +15,27 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use lillux::crypto::{DecodePrivateKey, SigningKey};
+
+static HANDLER_BINS_BUILD: OnceLock<()> = OnceLock::new();
+
+fn host_triple() -> String {
+    let output = std::process::Command::new("rustc")
+        .args(["-vV"])
+        .output()
+        .expect("rustc -vV");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .find(|line| line.starts_with("host:"))
+        .expect("host triple in rustc -vV")
+        .strip_prefix("host:")
+        .unwrap()
+        .trim()
+        .to_string()
+}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -97,6 +116,90 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
+fn target_debug_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        PathBuf::from(dir).join("debug")
+    } else {
+        workspace_root().join("target").join("debug")
+    }
+}
+
+fn ensure_handler_bins_built() -> PathBuf {
+    let debug_dir = target_debug_dir();
+    let required = [
+        "rye-parser-yaml-document",
+        "rye-parser-yaml-header-document",
+        "rye-parser-regex-kv",
+        "rye-composer-identity",
+    ];
+
+    if required.iter().all(|name| debug_dir.join(name).is_file()) {
+        return debug_dir;
+    }
+
+    HANDLER_BINS_BUILD.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = std::process::Command::new(cargo)
+            .args(["build", "-p", "ryeos-handler-bins", "--bins"])
+            .current_dir(workspace_root())
+            .status()
+            .expect("spawn cargo build for ryeos-handler-bins");
+        assert!(
+            status.success(),
+            "cargo build -p ryeos-handler-bins --bins failed"
+        );
+    });
+
+    debug_dir
+}
+
+fn copy_executable(src: &Path, dst: &Path) {
+    std::fs::copy(src, dst).unwrap_or_else(|e| {
+        panic!(
+            "copy executable {} -> {} failed: {e}",
+            src.display(),
+            dst.display()
+        )
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dst).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dst, perms).unwrap();
+    }
+}
+
+fn stage_real_core_binaries(bundle: &Path) {
+    let triple = host_triple();
+    if triple != "x86_64-unknown-linux-gnu" {
+        eprintln!(
+            "skipping binary staging: core descriptors target x86_64-unknown-linux-gnu, host is {triple}"
+        );
+        return;
+    }
+
+    let bin_root = bundle.join(ryeos_engine::AI_DIR).join("bin");
+    let bin_dir = bin_root.join(&triple);
+    let _ = std::fs::remove_dir_all(&bin_root);
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    let debug_dir = ensure_handler_bins_built();
+    for name in [
+        "rye-parser-yaml-document",
+        "rye-parser-yaml-header-document",
+        "rye-parser-regex-kv",
+        "rye-composer-identity",
+    ] {
+        copy_executable(&debug_dir.join(name), &bin_dir.join(name));
+    }
+
+    copy_executable(
+        &PathBuf::from(env!("CARGO_BIN_EXE_ryeos-core-tools")),
+        &bin_dir.join("ryeos-core-tools"),
+    );
+}
+
 fn run_publish_once(
     bundle_dir: &Path,
     key: &SigningKey,
@@ -105,6 +208,7 @@ fn run_publish_once(
         bundle_source: bundle_dir.to_path_buf(),
         registry_roots: vec![bundle_dir.to_path_buf()], // core is its own registry
         signing_key: key.clone(),
+        base_trust_store: None,
         owner: "test".to_string(),
         emit_trust_doc: false,
     };
@@ -125,6 +229,7 @@ fn publish_twice_produces_zero_diff() {
     let tmp = tempfile::tempdir().unwrap();
     let bundle = tmp.path().join("core");
     copy_dir_recursive(&source, &bundle);
+    stage_real_core_binaries(&bundle);
 
     // Run 1: initial publish
     let _report1 = run_publish_once(&bundle, &key);

@@ -632,7 +632,7 @@ fn run_build(
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let (bundle_source, mut registry_roots, owner, no_trust_doc) = if stdin_json {
+    let (bundle_source, registry_roots, owner, no_trust_doc) = if stdin_json {
         if bundle_source.is_some() {
             anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
         }
@@ -668,14 +668,29 @@ fn run_build(
     let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
         .with_context(|| format!("load signing key from {}", key_path.display()))?;
 
-    if registry_roots.is_empty() {
-        registry_roots.push(bundle_source.clone());
-    }
+    let source_path = canonical_bundle_source(&bundle_source)?;
+    let system_space_dir = std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .map(|d| d.join("ryeos"))
+                .expect("could not determine XDG data directory")
+        });
+    let registry_roots = bundle_publish_dependency_roots(
+        &source_path,
+        registry_roots,
+        &system_space_dir,
+        Some(&user_root),
+    )?;
+    let base_trust_store =
+        ryeos_engine::trust::TrustStore::load_three_tier(None, Some(&user_root), &registry_roots)
+            .context("load trust store for registry roots")?;
 
     let report = run_publish(&PublishOptions {
-        bundle_source,
+        bundle_source: source_path,
         registry_roots,
         signing_key,
+        base_trust_store: Some(base_trust_store),
         owner,
         emit_trust_doc: !no_trust_doc,
     })?;
@@ -705,6 +720,43 @@ impl BundlePublishParams {
             self.registry_roots.clone()
         }
     }
+}
+
+fn bundle_publish_dependency_roots(
+    source_path: &Path,
+    registry_roots: Vec<PathBuf>,
+    system_space_dir: &Path,
+    user_root: Option<&Path>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    if !registry_roots.is_empty() {
+        return bundle_verify_dependency_roots(
+            source_path,
+            registry_roots,
+            system_space_dir,
+            user_root,
+        );
+    }
+
+    if source_bundle_name(source_path)?.as_deref() == Some("core") {
+        return Ok(vec![source_path.to_path_buf()]);
+    }
+
+    bundle_verify_dependency_roots(source_path, registry_roots, system_space_dir, user_root)
+}
+
+fn source_bundle_name(source_path: &Path) -> anyhow::Result<Option<String>> {
+    let source_manifest = source_path
+        .join(ryeos_engine::AI_DIR)
+        .join("manifest.source.yaml");
+    if !source_manifest.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&source_manifest)
+        .with_context(|| format!("read manifest source {}", source_manifest.display()))?;
+    let source: ryeos_bundle::manifest::BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_manifest.display()))?;
+    Ok(Some(source.name))
 }
 
 fn run_bundle_verify(
