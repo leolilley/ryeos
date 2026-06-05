@@ -1,0 +1,178 @@
+//! Scheduler-facing classification of completed thread result payloads.
+//!
+//! Thread status is a lifecycle signal: a runtime can exit cleanly and mark a
+//! thread `completed` while the tool's structured result reports that the
+//! application work failed. Scheduler fire history uses this classifier to keep
+//! `status` lifecycle-oriented while making `outcome` reflect the tool result.
+
+use serde_json::Value;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadResultOutcome {
+    Success,
+    ResultFailed { reason: Option<String> },
+}
+
+pub fn classify_result_payload(value: &Value) -> ThreadResultOutcome {
+    if has_success_false(value) {
+        return ThreadResultOutcome::ResultFailed {
+            reason: extract_failure_reason(value),
+        };
+    }
+
+    if let Some(inner) = value.get("result") {
+        if has_success_false(inner) {
+            return ThreadResultOutcome::ResultFailed {
+                reason: extract_failure_reason(inner),
+            };
+        }
+    }
+
+    ThreadResultOutcome::Success
+}
+
+pub fn completed_fire_outcome(result: Option<&ThreadResultOutcome>) -> &'static str {
+    match result {
+        Some(ThreadResultOutcome::ResultFailed { .. }) => "result_failed",
+        _ => "success",
+    }
+}
+
+pub fn fire_status_for_thread_status(thread_status: &str) -> &'static str {
+    match thread_status {
+        "completed" => "completed",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    }
+}
+
+pub fn fire_outcome_for_terminal(
+    thread_status: &str,
+    result: Option<&ThreadResultOutcome>,
+    fallback_outcome_code: Option<&str>,
+) -> String {
+    match thread_status {
+        "completed" => completed_fire_outcome(result).to_string(),
+        "cancelled" => "thread_cancelled".to_string(),
+        _ => fallback_outcome_code.unwrap_or("thread_failed").to_string(),
+    }
+}
+
+fn has_success_false(value: &Value) -> bool {
+    value.as_object().and_then(|obj| obj.get("success")) == Some(&Value::Bool(false))
+}
+
+fn extract_failure_reason(value: &Value) -> Option<String> {
+    for key in ["error", "message"] {
+        if let Some(reason) = value.get(key).and_then(|v| v.as_str()) {
+            return Some(reason.to_string());
+        }
+    }
+
+    let steps = value.get("steps")?.as_object()?;
+    for step in steps.values() {
+        let failed = step
+            .get("success")
+            .is_some_and(|v| v == &Value::Bool(false))
+            || step
+                .get("status")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| matches!(s, "error" | "failed"));
+        if failed {
+            for key in ["error", "message"] {
+                if let Some(reason) = step.get(key).and_then(|v| v.as_str()) {
+                    return Some(reason.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn classifies_success_true_as_success() {
+        assert_eq!(
+            classify_result_payload(&json!({ "success": true })),
+            ThreadResultOutcome::Success
+        );
+    }
+
+    #[test]
+    fn classifies_top_level_success_false_as_result_failed() {
+        assert_eq!(
+            classify_result_payload(&json!({ "success": false, "error": "boom" })),
+            ThreadResultOutcome::ResultFailed {
+                reason: Some("boom".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn classifies_nested_success_false_as_result_failed() {
+        assert_eq!(
+            classify_result_payload(&json!({ "result": { "success": false, "error": "boom" } })),
+            ThreadResultOutcome::ResultFailed {
+                reason: Some("boom".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn extracts_reason_from_failed_step() {
+        assert_eq!(
+            classify_result_payload(&json!({
+                "result": {
+                    "success": false,
+                    "steps": {
+                        "hydrate_profiles": {
+                            "status": "error",
+                            "error": "insert failed"
+                        }
+                    }
+                }
+            })),
+            ThreadResultOutcome::ResultFailed {
+                reason: Some("insert failed".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn unrelated_payload_is_success() {
+        assert_eq!(
+            classify_result_payload(&json!("ok")),
+            ThreadResultOutcome::Success
+        );
+        assert_eq!(
+            classify_result_payload(&json!({ "status": "ok" })),
+            ThreadResultOutcome::Success
+        );
+    }
+
+    #[test]
+    fn completed_fire_outcome_uses_result_failure() {
+        assert_eq!(
+            completed_fire_outcome(Some(&ThreadResultOutcome::ResultFailed { reason: None })),
+            "result_failed"
+        );
+        assert_eq!(completed_fire_outcome(None), "success");
+    }
+
+    #[test]
+    fn completed_terminal_outcome_prefers_result_failure_over_success_outcome_code() {
+        assert_eq!(
+            fire_outcome_for_terminal(
+                "completed",
+                Some(&ThreadResultOutcome::ResultFailed { reason: None }),
+                Some("success"),
+            ),
+            "result_failed"
+        );
+    }
+}

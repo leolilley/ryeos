@@ -99,8 +99,24 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                             "cancelled" => "cancelled",
                             _ => "failed",
                         };
+                        let result_outcome = if fire_status == "completed" {
+                            match ctx.get_thread_result_outcome(thread_id) {
+                                Ok(outcome) => outcome,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        fire_id = %fire.fire_id,
+                                        thread_id = %thread_id,
+                                        error = %e,
+                                        "scheduler: repair sweep failed to inspect completed thread result"
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         let outcome = match fire_status {
-                            "completed" => "success",
+                            "completed" => super::completed_fire_outcome(result_outcome.as_ref()),
                             "cancelled" => "thread_cancelled",
                             _ => "thread_failed",
                         };
@@ -684,5 +700,128 @@ async fn record_skip<Ctx: SchedulerContext>(
         }).await.unwrap_or_else(|e| {
             tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (skip persist)");
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ThreadResultOutcome;
+    use ryeos_engine::trust::TrustStore;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    struct MockContext {
+        system_space: TempDir,
+        db: Arc<crate::db::SchedulerDb>,
+        gate: Arc<RwLock<()>>,
+        trust: TrustStore,
+        statuses: Mutex<HashMap<String, String>>,
+        outcomes: Mutex<HashMap<String, ThreadResultOutcome>>,
+    }
+
+    impl MockContext {
+        fn new() -> Self {
+            Self {
+                system_space: tempfile::tempdir().unwrap(),
+                db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
+                gate: Arc::new(RwLock::new(())),
+                trust: TrustStore::empty(),
+                statuses: Mutex::new(HashMap::new()),
+                outcomes: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl SchedulerContext for MockContext {
+        fn system_space_dir(&self) -> &std::path::Path {
+            self.system_space.path()
+        }
+
+        fn scheduler_db(&self) -> Arc<crate::db::SchedulerDb> {
+            self.db.clone()
+        }
+
+        fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>> {
+            self.gate.clone()
+        }
+
+        fn trust_store(&self) -> &TrustStore {
+            &self.trust
+        }
+
+        fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.statuses.lock().unwrap().get(thread_id).cloned())
+        }
+
+        fn get_thread_result_outcome(
+            &self,
+            thread_id: &str,
+        ) -> anyhow::Result<Option<ThreadResultOutcome>> {
+            Ok(self.outcomes.lock().unwrap().get(thread_id).cloned())
+        }
+
+        fn submit_cancel(&self, _thread_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dispatch_scheduled_item(
+            &self,
+            _spec: &ScheduleSpecRecord,
+            _fire_id: &str,
+            _thread_id: &str,
+            _scheduled_at: i64,
+            _trigger_reason: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_stale_completed_fire_uses_result_failed_outcome() {
+        let ctx = MockContext::new();
+        let fire = FireRecord {
+            fire_id: "sched@1000".to_string(),
+            schedule_id: "sched".to_string(),
+            scheduled_at: 1000,
+            fired_at: Some(lillux::time::timestamp_millis() - 60_000),
+            completed_at: None,
+            thread_id: Some("T-test".to_string()),
+            status: "dispatched".to_string(),
+            trigger_reason: "normal".to_string(),
+            outcome: None,
+            signer_fingerprint: Some("fp".to_string()),
+        };
+        ctx.db.upsert_fire(&fire).unwrap();
+        ctx.statuses
+            .lock()
+            .unwrap()
+            .insert("T-test".to_string(), "completed".to_string());
+        ctx.outcomes.lock().unwrap().insert(
+            "T-test".to_string(),
+            ThreadResultOutcome::ResultFailed {
+                reason: Some("boom".to_string()),
+            },
+        );
+
+        repair_stale_fires(&ctx).await;
+
+        let updated = ctx.db.get_fire("sched@1000").unwrap().unwrap();
+        assert_eq!(updated.status, "completed");
+        assert_eq!(updated.outcome.as_deref(), Some("result_failed"));
+
+        let jsonl = std::fs::read_to_string(
+            ctx.system_space
+                .path()
+                .join(ryeos_engine::AI_DIR)
+                .join("state")
+                .join("schedules")
+                .join("sched")
+                .join("fires.jsonl"),
+        )
+        .unwrap();
+        assert!(jsonl.contains(r#""outcome":"result_failed""#));
     }
 }

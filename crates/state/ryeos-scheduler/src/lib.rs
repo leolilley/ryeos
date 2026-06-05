@@ -16,10 +16,15 @@ pub mod overlap;
 pub mod planning;
 pub mod projection;
 pub mod reconcile;
+pub mod result_outcome;
 pub mod timer;
 pub mod types;
 
 // Re-export primary types
+pub use result_outcome::{
+    classify_result_payload, completed_fire_outcome, fire_outcome_for_terminal,
+    fire_status_for_thread_status, ThreadResultOutcome,
+};
 pub use types::{FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 
 use std::path::Path;
@@ -49,6 +54,16 @@ pub trait SchedulerContext: Send + Sync + 'static {
 
     /// Check a thread's status. Returns `None` if thread doesn't exist.
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>>;
+
+    /// Classify a terminal thread's captured result payload, if available.
+    ///
+    /// Scheduler repair/reconcile uses this to avoid reporting a completed
+    /// runtime as a successful fire when the tool result follows the
+    /// `{ "success": false }` convention. Implementations should return
+    /// `Ok(None)` when no result row exists.
+    fn get_thread_result_outcome(&self, _thread_id: &str) -> Result<Option<ThreadResultOutcome>> {
+        Ok(None)
+    }
 
     /// Submit a cancel command for a thread.
     fn submit_cancel(&self, thread_id: &str) -> Result<()>;
@@ -90,6 +105,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
         (**self).get_thread_status(thread_id)
+    }
+
+    fn get_thread_result_outcome(&self, thread_id: &str) -> Result<Option<ThreadResultOutcome>> {
+        (**self).get_thread_result_outcome(thread_id)
     }
 
     fn submit_cancel(&self, thread_id: &str) -> Result<()> {

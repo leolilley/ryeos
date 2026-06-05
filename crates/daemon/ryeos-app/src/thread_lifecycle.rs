@@ -356,7 +356,7 @@ impl ThreadLifecycleService {
             thread_id,
             &FinalizeThreadRecord {
                 status: terminal_status.to_string(),
-                outcome_code,
+                outcome_code: outcome_code.clone(),
                 result_json: completion.result.clone(),
                 error_json: completion.error.clone(),
                 artifacts: completion
@@ -367,6 +367,13 @@ impl ThreadLifecycleService {
                 final_cost: completion.final_cost.clone(),
             },
         )?;
+
+        self.update_scheduler_fire_on_thread_terminal(
+            thread_id,
+            terminal_status,
+            outcome_code.as_deref(),
+            completion.result.as_ref(),
+        );
 
         let finalized = self
             .get_thread(thread_id)?
@@ -422,36 +429,56 @@ impl ThreadLifecycleService {
             },
         )?;
 
-        // Update scheduler fire record if this thread was scheduler-dispatched.
+        let terminal_status = normalize_terminal_status(&params.status)?;
+        self.update_scheduler_fire_on_thread_terminal(
+            &params.thread_id,
+            terminal_status,
+            params.outcome_code.as_deref(),
+            params.result.as_ref(),
+        );
+
+        self.get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
+    }
+
+    fn update_scheduler_fire_on_thread_terminal(
+        &self,
+        thread_id: &str,
+        terminal_status: &str,
+        outcome_code: Option<&str>,
+        result: Option<&Value>,
+    ) {
         if let Ok(guard) = self.scheduler_db.read() {
             if let Some(ref db) = *guard {
-                if let Ok(Some(fire)) = db.find_fire_by_thread(&params.thread_id) {
-                    let terminal_status = normalize_terminal_status(&params.status)?;
-                    let fire_status = match terminal_status {
-                        "completed" => "completed",
-                        "cancelled" => "cancelled",
-                        _ => "failed",
-                    };
-                    let outcome_str = params.outcome_code.as_deref().unwrap_or(fire_status);
+                if let Ok(Some(fire)) = db.find_fire_by_thread(thread_id) {
+                    let fire_status =
+                        ryeos_scheduler::fire_status_for_thread_status(terminal_status);
+                    let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
+                    let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
+                        terminal_status,
+                        result_outcome.as_ref(),
+                        outcome_code,
+                    );
                     let now = lillux::time::timestamp_millis();
+                    let completed_fired_at = fire.fired_at.unwrap_or(now);
 
                     // Clone fields needed for JSONL before the move
                     let jsonl_fire_id = fire.fire_id.clone();
                     let jsonl_schedule_id = fire.schedule_id.clone();
                     let jsonl_scheduled_at = fire.scheduled_at;
-                    let jsonl_fired_at = fire.fired_at;
+                    let jsonl_trigger_reason = fire.trigger_reason.clone();
                     let jsonl_signer_fp = fire.signer_fingerprint.clone();
 
                     let updated = ryeos_scheduler::types::FireRecord {
                         status: fire_status.to_string(),
                         outcome: Some(outcome_str.to_string()),
-                        fired_at: Some(now),
+                        fired_at: Some(completed_fired_at),
                         completed_at: Some(now),
                         ..fire
                     };
                     if let Err(e) = db.upsert_fire(&updated) {
                         tracing::warn!(
-                            thread_id = %params.thread_id,
+                            thread_id = %thread_id,
                             error = %e,
                             "scheduler: failed to update fire status on thread completion"
                         );
@@ -466,9 +493,10 @@ impl ThreadLifecycleService {
                                 "fire_id": jsonl_fire_id,
                                 "schedule_id": jsonl_schedule_id,
                                 "scheduled_at": jsonl_scheduled_at,
-                                "fired_at": jsonl_fired_at,
-                                "thread_id": params.thread_id,
+                                "fired_at": completed_fired_at,
+                                "thread_id": thread_id,
                                 "completed_at": now,
+                                "trigger_reason": jsonl_trigger_reason,
                                 "outcome": outcome_str,
                                 "signer_fingerprint": jsonl_signer_fp,
                             });
@@ -482,7 +510,7 @@ impl ThreadLifecycleService {
                                 ryeos_scheduler::projection::append_jsonl_entry(&fires_path, &entry)
                             {
                                 tracing::warn!(
-                                    thread_id = %params.thread_id,
+                                    thread_id = %thread_id,
                                     error = %e,
                                     "scheduler: failed to append completion to JSONL"
                                 );
@@ -492,9 +520,6 @@ impl ThreadLifecycleService {
                 }
             }
         }
-
-        self.get_thread(&params.thread_id)?
-            .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
     }
 
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
