@@ -1586,12 +1586,20 @@ async fn dispatch_streaming_subprocess(
 async fn dispatch_tool_subprocess(
     current_ref: &CanonicalRef,
     thread_profile: &str,
-    _verified: Option<&VerifiedItem>,
+    verified: Option<&VerifiedItem>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
+
+    if verified.is_some_and(|item| item.resolved.metadata.executor_id.is_none()) {
+        return Err(DispatchError::RootExecutorMissing {
+            item_ref,
+            detail: "items with no executor_id, including terminal executors such as `tool:ryeos/core/subprocess/execute`, cannot be launched as root tools. Create a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper."
+                .into(),
+        });
+    }
 
     let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {

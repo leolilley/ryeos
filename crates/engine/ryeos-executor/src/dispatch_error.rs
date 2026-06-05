@@ -119,6 +119,11 @@ pub enum DispatchError {
     /// does not correspond to a known executor.
     #[error("subprocess executor missing for '{item_ref}': {detail}")]
     SubprocessExecutorMissing { item_ref: String, detail: String },
+    /// Root item has no executor_id. Terminal executors use
+    /// `executor_id: null` to end a chain and are not launchable as
+    /// root tools.
+    #[error("root executor missing for '{item_ref}': {detail}")]
+    RootExecutorMissing { item_ref: String, detail: String },
     /// Subprocess run failed — the inline or detached run encountered
     /// an error after resolution succeeded.
     #[error("subprocess run failed for '{item_ref}': {detail}")]
@@ -263,7 +268,8 @@ impl DispatchError {
             | Self::AliasCycle { .. }
             | Self::AliasChainTooLong { .. }
             | Self::CapabilityRejected { .. }
-            | Self::SchemaMisconfigured { .. } => StatusCode::BAD_REQUEST,
+            | Self::SchemaMisconfigured { .. }
+            | Self::RootExecutorMissing { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
             | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
@@ -320,6 +326,7 @@ impl DispatchError {
             Self::ServiceCapDenied { .. } => "service_cap_denied",
             Self::ServiceUnavailable { .. } => "service_unavailable",
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
+            Self::RootExecutorMissing { .. } => "root_executor_missing",
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
             Self::RequiredSecretMissing { .. } => "required_secret_missing",

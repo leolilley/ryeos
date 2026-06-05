@@ -151,6 +151,9 @@ pub fn build_inventory_for_kind(
                     source: Box::new(e),
                 }
             })?;
+        if is_terminal_descriptor(&descriptor) {
+            continue;
+        }
         if let Some(prev_id) = seen_names.get(&descriptor.name) {
             return Err(EngineError::DuplicateInventoryName {
                 kind: inventoried_kind.to_owned(),
@@ -212,6 +215,9 @@ fn build_descriptor_for_ref(
     // surface separately (description, name) so a runtime reading
     // `extra` doesn't see duplicates of `descriptor.description`.
     let mut extra: HashMap<String, Value> = metadata.extra.clone();
+    if let Some(v) = parsed.get("tool_type") {
+        extra.insert("tool_type".to_owned(), v.clone());
+    }
     if let Some(ref v) = metadata.executor_id {
         extra.insert("executor_id".to_owned(), Value::String(v.clone()));
     }
@@ -245,6 +251,10 @@ fn build_descriptor_for_ref(
         schema,
         extra,
     })
+}
+
+fn is_terminal_descriptor(descriptor: &ItemDescriptor) -> bool {
+    descriptor.extra.get("tool_type").and_then(Value::as_str) == Some("terminal")
 }
 
 /// Read the parsed body and return the first non-null value at any
@@ -320,5 +330,19 @@ mod tests {
     fn pick_schema_returns_none_when_no_keys() {
         let parsed = serde_json::json!({"x": 1});
         assert!(pick_schema(&parsed, &[]).is_none());
+    }
+
+    #[test]
+    fn terminal_tool_descriptors_are_hidden_from_inventory() {
+        let mut descriptor = ItemDescriptor::default();
+        descriptor
+            .extra
+            .insert("tool_type".to_owned(), Value::String("terminal".to_owned()));
+        assert!(is_terminal_descriptor(&descriptor));
+
+        descriptor
+            .extra
+            .insert("tool_type".to_owned(), Value::String("regular".to_owned()));
+        assert!(!is_terminal_descriptor(&descriptor));
     }
 }

@@ -260,6 +260,11 @@ pub enum EngineError {
     #[error("item `{item_ref}` does not declare an executor_id")]
     MissingExecutorId { item_ref: String },
 
+    #[error(
+        "root item `{item_ref}` is not directly executable because it has no root executor_id or declares `executor_id: null`; terminal executors end an executor chain. Define a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper."
+    )]
+    RootExecutorMissingOrTerminal { item_ref: String },
+
     #[error("kind `{kind}` is not executable (no execution block in kind schema)")]
     KindNotExecutable { kind: String },
 

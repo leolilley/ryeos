@@ -134,3 +134,27 @@ async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
         "invalid item response must not include thread_id: {body}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_subprocess_terminal_execution_is_bad_request() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+
+    let (status, body) = h
+        .post_execute(
+            "tool:ryeos/core/subprocess/execute",
+            ".",
+            json!({ "command": "/bin/true" }),
+        )
+        .await
+        .expect("post direct subprocess terminal");
+
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some("root_executor_missing"),
+        "unexpected direct terminal rejection body: {body}"
+    );
+    let error = body.get("error").and_then(Value::as_str).unwrap_or("");
+    assert!(error.contains("@subprocess"), "missing remediation: {body}");
+    assert!(error.contains("config"), "missing config guidance: {body}");
+}

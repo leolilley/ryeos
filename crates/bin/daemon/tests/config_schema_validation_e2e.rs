@@ -35,8 +35,8 @@ fn workspace_root() -> PathBuf {
 
 /// Synthesize a YAML tool whose top-level body declares
 /// `config_schema` requiring `count: integer >= 0`. Targets
-/// `@subprocess` directly so the chain is one hop deep — enough to
-/// exercise the plan_builder ValidateInput pre-pass.
+/// `@subprocess` so the test exercises a real wrapper tool, not the
+/// internal terminal subprocess primitive as a root executable.
 fn synth_project_with_schema_tool() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -51,7 +51,7 @@ fn synth_project_with_schema_tool() -> PathBuf {
     fs::create_dir_all(&tools_dir).unwrap();
 
     let body = r#"version: "1.0.0"
-executor_id: "tool:ryeos/core/subprocess/execute"
+executor_id: "@subprocess"
 category: ""
 description: "schema-checked demo"
 
@@ -136,39 +136,23 @@ fn build_plan_rejects_params_violating_config_schema() {
 
 #[test]
 fn build_plan_accepts_params_conforming_to_config_schema() {
-    // We can't easily synthesize a YAML tool with a runnable chain
-    // here without bringing the full bundle's runtime config into
-    // the test. Instead, prove the conforming-params path by
-    // resolving a real bundle tool that ships with config_schema
-    // (`tool:ryeos/core/subprocess/execute` requires `command`) and
-    // confirming that the validator does NOT block valid params.
-    //
     // The rejection test above already proves the negative path
     // (handler is wired into plan_builder); this test proves the
-    // positive path (valid params don't trigger a false positive).
+    // positive path on a proper wrapper tool (valid params don't
+    // trigger a false positive).
     let engine = build_engine_against_bundle();
     let project_dir = synth_project_with_schema_tool();
     let ctx = plan_ctx(&project_dir);
 
-    let item = CanonicalRef::parse("tool:ryeos/core/subprocess/execute").expect("ref parses");
-    let resolved = engine.resolve(&ctx, &item).expect("resolve bundle tool");
+    let item = CanonicalRef::parse("tool:schema_demo").expect("ref parses");
+    let resolved = engine.resolve(&ctx, &item).expect("resolve");
     let verified = engine.verify(&ctx, resolved).expect("verify");
 
-    let good_params = serde_json::json!({ "command": "/bin/true" });
+    let good_params = serde_json::json!({ "count": 1 });
 
     let result = engine.build_plan(&ctx, &verified, &good_params, &ctx.execution_hints);
 
     let _ = fs::remove_dir_all(&project_dir);
 
-    // We don't require build_plan to succeed (other downstream
-    // checks may complain about the test environment). What we
-    // require is that the failure mode is NOT
-    // ParameterValidationFailed when params satisfy the schema.
-    if let Err(err) = result {
-        let msg = format!("{err:?}");
-        assert!(
-            !msg.contains("ParameterValidationFailed"),
-            "valid params triggered a false-positive schema rejection: {msg}"
-        );
-    }
+    result.expect("valid params should build a wrapper-tool subprocess plan");
 }
