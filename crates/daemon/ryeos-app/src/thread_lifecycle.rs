@@ -1076,7 +1076,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     // prefers a `ProjectContext::SnapshotHash { hash }` form when
     // `original_snapshot_hash` is `Some`, so resume runs against the
     // exact project version captured at spawn time, not the current
-    // working-dir head. See `docs/future/RESUME-ADVANCED-PATH.md`.
+    // working-dir head. See `docs/future/native-resume-snapshot-pinning.md`.
     if launch_metadata.native_resume.is_some() {
         launch_metadata =
             launch_metadata.with_resume_context(crate::launch_metadata::ResumeContext {

@@ -1,9 +1,10 @@
-# Advanced native resume path
+# Native resume snapshot pinning
 
 ## Status
 
-Deferred. Current native resume support pins LocalPath execution to a snapshot
-captured at spawn time and resumes from persisted launch metadata/checkpoints.
+Deferred follow-up notes for native resume. Current native resume support pins
+LocalPath execution to a snapshot captured at spawn time and resumes from
+persisted launch metadata/checkpoints.
 
 ## Already implemented baseline
 
@@ -11,7 +12,7 @@ captured at spawn time and resumes from persisted launch metadata/checkpoints.
 - LocalPath resume is pinned to the original project snapshot when needed.
 - Reconciliation can re-spawn resumable work under the same thread identity.
 
-## Deferred work
+## Deferred follow-up work
 
 Advanced resume work may include:
 
