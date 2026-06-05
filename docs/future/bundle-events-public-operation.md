@@ -77,8 +77,6 @@ Future scan should add pagination/cursors before high-volume use.
 
 ## Non-goals
 
-- Do not add compatibility aliases, fallback readers, migrations, or legacy
-  refs for the previous pre-public `domain_events` naming.
 - Do not expose raw CAS read/write as the bundle-author API.
 - Do not wrap `ryeos-core-tools bundle-events` for normal runtime execution;
   that command accepts caller-supplied bundle identity, opens state directly,
