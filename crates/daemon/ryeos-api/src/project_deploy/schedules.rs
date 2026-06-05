@@ -438,12 +438,13 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let body = read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
-                anyhow!(
-                    "schedule_id '{}' lost node YAML during project deploy; refusing update",
-                    schedule_id
-                )
-            })?;
+            let body =
+                read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
+                    anyhow!(
+                        "schedule_id '{}' lost node YAML during project deploy; refusing update",
+                        schedule_id
+                    )
+                })?;
             let yaml_hash = read_existing_schedule_content_hash(schedules_dir, schedule_id)?
                 .ok_or_else(|| {
                     anyhow!(
