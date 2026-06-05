@@ -344,12 +344,12 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         )?
     };
 
-    // Step 1a: Root items MUST declare an executor_id — no default,
-    // no fallback. `executor_id: null` is valid only for terminal
-    // executor-chain hops such as `tool:ryeos/core/subprocess/execute`;
-    // it is not a root-executable tool shape. Reject before validating
-    // root config_schema so terminal primitives don't look like public
-    // parameterized command runners.
+    // Step 1a: Requested/root items MUST declare a non-null executor_id —
+    // no default, no fallback. `executor_id: null` is valid only for
+    // terminal executor-chain hops such as `tool:ryeos/core/subprocess/execute`;
+    // it is not directly invokable as the requested item. Reject before
+    // validating root config_schema so terminal primitives don't look like
+    // public parameterized command runners.
     let executor_id = resolved
         .metadata
         .executor_id
