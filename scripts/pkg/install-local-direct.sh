@@ -58,7 +58,7 @@ run_timeout() {
 }
 
 ryeos_status_quick() {
-    run_timeout 10 ryeos status 2>/dev/null || true
+    run_timeout 10 ryeos node status 2>/dev/null || true
 }
 
 pid_from_status() {
@@ -382,7 +382,11 @@ fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "[install-local-direct] restarting daemon"
-    run_timeout 30 ryeos start >/dev/null || die "daemon did not restart cleanly"
+    # An incompatible projection schema epoch bump can make the first restart
+    # rebuild projection.sqlite3 from CAS/refs before readiness. Give that
+    # healthy one-time rebuild enough time to finish. Keep this slightly above
+    # ryeos start's internal wait so the CLI can print its own diagnostic.
+    run_timeout 930 ryeos start >/dev/null || die "daemon did not restart cleanly"
     ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 

@@ -94,7 +94,7 @@ pub async fn handle(
     let existing_spec = state.scheduler_db.get_spec(&req.schedule_id)?;
 
     // Ownership check on update: the caller must be the existing
-    // requester (or admin). On create, no ownership check needed —
+    // requester. On create, no ownership check needed —
     // the caller becomes the owner.
     if let Some(ref existing) = existing_spec {
         ctx.require_owner(Some(&existing.requester_fingerprint))
@@ -199,7 +199,7 @@ pub async fn handle(
     };
 
     // On UPDATE, preserve the existing requester_fingerprint — only the
-    // original owner (or admin) can update, but the owner identity and
+    // original owner can update, but the owner identity and
     // granted capabilities stay the same. On CREATE, the caller becomes
     // the owner and current caller scopes become the schedule grant.
     let requester_fingerprint = if let Some(ref existing) = existing_spec {

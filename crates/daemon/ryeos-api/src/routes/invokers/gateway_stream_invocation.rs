@@ -53,6 +53,8 @@ pub(crate) struct LaunchRequest {
     /// Optional op-specific inputs.
     #[serde(default)]
     pub(crate) inputs: Option<Value>,
+    #[serde(default)]
+    pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
 }
 
 fn default_launch_mode() -> String {
@@ -143,6 +145,31 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                     ))
                 })?;
         }
+
+        let usage_subject = req.usage_subject.clone();
+        let usage_subject_asserted_by = if let Some(subject) = &usage_subject {
+            subject
+                .validate()
+                .map_err(|e| RouteDispatchError::BadRequest(e.to_string()))?;
+            let principal = ctx
+                .principal
+                .as_ref()
+                .ok_or(RouteDispatchError::Unauthorized)?;
+            let required_cap = format!("ryeos.execute.on_behalf_of.{}", subject.namespace);
+            let policy = AuthorizationPolicy::require(&required_cap);
+            ctx.state
+                .authorizer
+                .authorize(&principal.scopes, &policy)
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability: {}",
+                        required_cap
+                    ))
+                })?;
+            Some(principal.id.clone())
+        } else {
+            None
+        };
 
         let project_path =
             crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)
@@ -309,6 +336,8 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             launch_mode: req.launch_mode,
             target_site_id: req.target_site_id,
             validate_only: req.validate_only,
+            usage_subject,
+            usage_subject_asserted_by,
             operation: req.operation,
             inputs: req.inputs,
         };

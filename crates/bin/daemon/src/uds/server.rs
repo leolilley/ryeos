@@ -572,6 +572,8 @@ mod tests {
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some("user:test".to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
         }
     }
 

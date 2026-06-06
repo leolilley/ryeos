@@ -156,6 +156,8 @@ pub async fn run(
             origin_site_id: plan_ctx.origin_site_id.clone(),
             upstream_thread_id: Some(parent_thread_id.to_string()),
             requested_by: Some(principal_fingerprint.to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
         })
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
 

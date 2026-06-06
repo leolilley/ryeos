@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-05T12:52:27Z:2812c8ca77f5b404461119de2d8c9cc2e97805f723da3ef4141b7b00db29e403:dAyaSK2LO5dEiJVXHavmfDbeJNGgXXhpHds3zEep71roQh+4q2I4q6KPG4BzcpEoaUBrhMheQGfffYTPbe/YBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: threads.usage.summary
+required_caps: ["ryeos.execute.service.threads.usage.summary"]
+schema:
+  namespace: string?
+  subject: string?
+  settled_at_gte: string?
+  settled_at_lt: string?
+description: "Summarize continuation-aware token and spend usage by attributed usage subject"

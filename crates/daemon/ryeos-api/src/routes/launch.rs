@@ -65,6 +65,8 @@ pub(crate) struct DispatchLaunchOptions {
     pub target_site_id: Option<String>,
     /// Whether to validate composition only, without execution.
     pub validate_only: bool,
+    pub usage_subject: Option<ryeos_state::UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
     /// Optional operation name for multi-op items.
     pub operation: Option<String>,
     /// Optional op-specific inputs.
@@ -77,6 +79,8 @@ impl Default for DispatchLaunchOptions {
             launch_mode: "inline".to_string(),
             target_site_id: None,
             validate_only: false,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
             operation: None,
             inputs: None,
         }
@@ -125,6 +129,8 @@ pub(crate) fn spawn_dispatch_launch(
     // async move boundary.
     let launch_mode = options.launch_mode;
     let validate_only = options.validate_only;
+    let usage_subject = options.usage_subject;
+    let usage_subject_asserted_by = options.usage_subject_asserted_by;
     let operation = options.operation;
     let inputs = options.inputs;
 
@@ -171,6 +177,8 @@ pub(crate) fn spawn_dispatch_launch(
             provenance,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
+            usage_subject,
+            usage_subject_asserted_by,
             operation,
             inputs,
         };

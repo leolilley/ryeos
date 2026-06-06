@@ -111,7 +111,20 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
                 match ctx.get_thread_status(thread_id) {
                     Ok(Some(status)) => match status.as_str() {
                         "completed" => {
-                            update_fire_completed(ctx, fire, thread_id, "completed", "success")
+                            let result_outcome = match ctx.get_thread_result_outcome(thread_id) {
+                                Ok(outcome) => outcome,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        fire_id = %fire.fire_id,
+                                        thread_id = %thread_id,
+                                        error = %e,
+                                        "recovered: failed to inspect completed thread result"
+                                    );
+                                    None
+                                }
+                            };
+                            let outcome = super::completed_fire_outcome(result_outcome.as_ref());
+                            update_fire_completed(ctx, fire, thread_id, "completed", outcome)
                                 .await?;
                             tracing::info!(
                                 fire_id = %fire.fire_id,
@@ -263,6 +276,7 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
         "fired_at": fire.fired_at.unwrap_or(now),
         "thread_id": thread_id,
         "completed_at": now,
+        "trigger_reason": fire.trigger_reason,
         "outcome": outcome,
         "signer_fingerprint": fire.signer_fingerprint,
     });
@@ -284,4 +298,116 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
     .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {}", e))??;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ThreadResultOutcome;
+    use ryeos_engine::trust::TrustStore;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    struct MockContext {
+        system_space: TempDir,
+        db: Arc<crate::db::SchedulerDb>,
+        gate: Arc<RwLock<()>>,
+        trust: TrustStore,
+        statuses: Mutex<HashMap<String, String>>,
+        outcomes: Mutex<HashMap<String, ThreadResultOutcome>>,
+    }
+
+    impl MockContext {
+        fn new() -> Self {
+            Self {
+                system_space: tempfile::tempdir().unwrap(),
+                db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
+                gate: Arc::new(RwLock::new(())),
+                trust: TrustStore::empty(),
+                statuses: Mutex::new(HashMap::new()),
+                outcomes: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl SchedulerContext for MockContext {
+        fn system_space_dir(&self) -> &std::path::Path {
+            self.system_space.path()
+        }
+
+        fn scheduler_db(&self) -> Arc<crate::db::SchedulerDb> {
+            self.db.clone()
+        }
+
+        fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>> {
+            self.gate.clone()
+        }
+
+        fn trust_store(&self) -> &TrustStore {
+            &self.trust
+        }
+
+        fn get_thread_status(&self, thread_id: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.statuses.lock().unwrap().get(thread_id).cloned())
+        }
+
+        fn get_thread_result_outcome(
+            &self,
+            thread_id: &str,
+        ) -> anyhow::Result<Option<ThreadResultOutcome>> {
+            Ok(self.outcomes.lock().unwrap().get(thread_id).cloned())
+        }
+
+        fn submit_cancel(&self, _thread_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn dispatch_scheduled_item(
+            &self,
+            _spec: &ScheduleSpecRecord,
+            _fire_id: &str,
+            _thread_id: &str,
+            _scheduled_at: i64,
+            _trigger_reason: &str,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_completed_fire_uses_result_failed_outcome() {
+        let ctx = MockContext::new();
+        let fire = FireRecord {
+            fire_id: "sched@1000".to_string(),
+            schedule_id: "sched".to_string(),
+            scheduled_at: 1000,
+            fired_at: Some(1001),
+            completed_at: None,
+            thread_id: Some("T-test".to_string()),
+            status: "dispatched".to_string(),
+            trigger_reason: "normal".to_string(),
+            outcome: None,
+            signer_fingerprint: Some("fp".to_string()),
+        };
+        ctx.db.upsert_fire(&fire).unwrap();
+        ctx.statuses
+            .lock()
+            .unwrap()
+            .insert("T-test".to_string(), "completed".to_string());
+        ctx.outcomes.lock().unwrap().insert(
+            "T-test".to_string(),
+            ThreadResultOutcome::ResultFailed {
+                reason: Some("boom".to_string()),
+            },
+        );
+
+        let intents = recover_inflight_fires(&ctx).await.unwrap();
+
+        assert!(intents.is_empty());
+        let updated = ctx.db.get_fire("sched@1000").unwrap().unwrap();
+        assert_eq!(updated.status, "completed");
+        assert_eq!(updated.outcome.as_deref(), Some("result_failed"));
+    }
 }

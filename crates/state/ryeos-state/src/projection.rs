@@ -4,7 +4,12 @@
 //! It provides fast read access and is the authoritative source for thread
 //! queries during normal operation.
 
-use anyhow::Context;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, Context};
 use rusqlite::{Connection, OptionalExtension};
 
 // ============= Schema =============
@@ -131,6 +136,52 @@ CREATE TABLE IF NOT EXISTS thread_facets (
 
 CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 
+-- Latest cumulative usage per thread. Raw thread_usage events are cumulative,
+-- so summary queries must read this latest-per-thread projection instead of
+-- summing the events table directly.
+CREATE TABLE IF NOT EXISTS thread_usage_latest (
+    thread_id TEXT PRIMARY KEY,
+    chain_root_id TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL,
+    thread_seq INTEGER NOT NULL,
+
+    completed_turns INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    spend_usd REAL NOT NULL,
+    spawns_used INTEGER NOT NULL,
+
+    started_at TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    last_settled_turn_seq INTEGER NOT NULL,
+    elapsed_ms INTEGER NOT NULL,
+
+    provider_id TEXT,
+    model TEXT,
+    profile TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_chain
+    ON thread_usage_latest(chain_root_id);
+CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_settled_at
+    ON thread_usage_latest(settled_at);
+CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_model
+    ON thread_usage_latest(provider_id, model);
+
+-- App-level usage attribution asserted by an authorized RyeOS principal at
+-- root launch time. Keyed by chain root so child/continuation usage can join
+-- back to the root app subject.
+CREATE TABLE IF NOT EXISTS thread_usage_subjects (
+    chain_root_id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    asserted_by TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_usage_subjects_subject
+    ON thread_usage_subjects(namespace, subject);
+
 -- CAS entry attribution: why a CAS object/blob is present locally.
 CREATE TABLE IF NOT EXISTS cas_entries (
     hash TEXT NOT NULL,
@@ -219,6 +270,11 @@ use crate::sqlite_schema;
 /// Application ID stamp for projection.db.
 /// RYPJ = 0x5259504a ("RY" + "PJ" for "projection").
 const PROJECTION_APP_ID: i32 = 0x5259_504a;
+
+/// Current projection schema epoch. This is stored in SQLite's
+/// `PRAGMA user_version` slot, but RyeOS treats it as the projection
+/// schema epoch. Bump this for incompatible projection schema changes.
+const PROJECTION_SCHEMA_EPOCH: i32 = 2;
 
 /// Schema spec for projection.db — the single source of truth for
 /// what tables/columns/indexes this database must contain.
@@ -603,6 +659,142 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "thread_usage_latest",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "completed_turns",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "input_tokens",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "output_tokens",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spend_usd",
+                        col_type: "REAL",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "spawns_used",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "started_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "settled_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_settled_turn_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "elapsed_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "provider_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "model",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "profile",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_usage_subjects",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_root_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "namespace",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "subject",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "asserted_by",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "cas_entries",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -979,6 +1171,30 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_latest_chain",
+                table: "thread_usage_latest",
+                columns: &["chain_root_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_latest_settled_at",
+                table: "thread_usage_latest",
+                columns: &["settled_at"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_latest_model",
+                table: "thread_usage_latest",
+                columns: &["provider_id", "model"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_usage_subjects_subject",
+                table: "thread_usage_subjects",
+                columns: &["namespace", "subject"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_cas_entries_state",
                 table: "cas_entries",
                 columns: &["state"],
@@ -1077,10 +1293,140 @@ pub struct ProjectionDb {
     conn: Connection,
 }
 
+/// Result of opening the projection database.
+pub struct ProjectionOpenResult {
+    pub db: ProjectionDb,
+    pub reset: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionOwnershipState {
+    Empty,
+    Owned,
+    Foreign { app_id: i32, user_tables: i64 },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CasEntryKind {
     Object,
     Blob,
+}
+
+fn classify_projection_db(
+    conn: &Connection,
+    expected_app_id: i32,
+) -> anyhow::Result<ProjectionOwnershipState> {
+    let app_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("failed to read PRAGMA application_id")?;
+    let user_tables = user_table_count(conn)?;
+
+    if app_id == expected_app_id {
+        return Ok(ProjectionOwnershipState::Owned);
+    }
+    if app_id == 0 && user_tables == 0 {
+        return Ok(ProjectionOwnershipState::Empty);
+    }
+    Ok(ProjectionOwnershipState::Foreign {
+        app_id,
+        user_tables,
+    })
+}
+
+fn user_table_count(conn: &Connection) -> anyhow::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )
+    .context("failed to check for existing projection tables")
+}
+
+fn stored_projection_schema_epoch(conn: &Connection) -> anyhow::Result<i32> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("failed to read stored projection schema epoch")
+}
+
+fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(&format!("PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};"))
+        .context("failed to stamp projection schema epoch")?;
+    let stored = stored_projection_schema_epoch(conn)?;
+    if stored != PROJECTION_SCHEMA_EPOCH {
+        bail!(
+            "failed to verify projection schema epoch stamp: stored={stored}, expected={}",
+            PROJECTION_SCHEMA_EPOCH
+        );
+    }
+    Ok(())
+}
+
+fn init_current_projection_schema(
+    conn: &Connection,
+    spec: &sqlite_schema::SchemaSpec,
+    path: &Path,
+) -> anyhow::Result<()> {
+    sqlite_schema::init_owned(conn, spec, SCHEMA_SQL, path)?;
+    stamp_projection_schema_epoch(conn)?;
+    sqlite_schema::assert_owned(conn, spec, path)?;
+    Ok(())
+}
+
+fn close_connection(conn: Connection) -> anyhow::Result<()> {
+    conn.close()
+        .map_err(|(_, err)| err)
+        .context("failed to close projection database before reset")
+}
+
+fn reset_projection_files(
+    path: &Path,
+    stored_epoch: i32,
+    current_epoch: i32,
+) -> anyhow::Result<()> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before UNIX_EPOCH")?
+        .as_secs();
+    let suffix = format!(
+        "reset.{stored_epoch}-to-{current_epoch}.{timestamp}.{}",
+        process::id()
+    );
+
+    for candidate in projection_reset_candidates(path) {
+        if !candidate.exists() {
+            continue;
+        }
+        let backup = backup_path(&candidate, &suffix);
+        fs::rename(&candidate, &backup).with_context(|| {
+            format!(
+                "failed to rename stale projection file {} to {}",
+                candidate.display(),
+                backup.display()
+            )
+        })?;
+        tracing::warn!(
+            path = %candidate.display(),
+            backup = %backup.display(),
+            stored_epoch,
+            current_epoch,
+            "renamed stale projection file"
+        );
+    }
+
+    Ok(())
+}
+
+fn projection_reset_candidates(path: &Path) -> Vec<PathBuf> {
+    let base = path.to_string_lossy();
+    vec![
+        path.to_path_buf(),
+        PathBuf::from(format!("{base}-wal")),
+        PathBuf::from(format!("{base}-shm")),
+        PathBuf::from(format!("{base}-journal")),
+    ]
+}
+
+fn backup_path(path: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.to_string_lossy(), suffix))
 }
 
 impl CasEntryKind {
@@ -1372,22 +1718,70 @@ impl ProjectionDb {
     /// Open or create a projection database.
     ///
     /// If the file exists, verifies it matches the schema spec exactly
-    /// (tables, columns, indexes, application_id). If the file is empty
-    /// or missing, initialises it from the DDL and stamps the
-    /// application_id.
-    pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
-        let conn =
-            rusqlite::Connection::open(path).context("failed to open projection database")?;
+    /// (tables, columns, indexes, application_id, projection schema epoch).
+    /// If the file is empty or missing, initialises it from the current DDL.
+    /// If an owned file has a stale projection schema epoch, it is renamed
+    /// aside and recreated from the current DDL.
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self::open_with_status(path)?.db)
+    }
+
+    /// Open or create a projection database and report whether it was reset
+    /// because its stored projection schema epoch did not match the current
+    /// epoch. Callers with CAS/refs access should rebuild the projection when
+    /// `reset` is true.
+    pub fn open_with_status(path: &Path) -> anyhow::Result<ProjectionOpenResult> {
+        let conn = Connection::open(path).context("failed to open projection database")?;
 
         let spec = projection_schema_spec();
 
-        if sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-            sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, path)?;
-        } else {
-            sqlite_schema::assert_owned(&conn, &spec, path)?;
+        match classify_projection_db(&conn, spec.application_id)? {
+            ProjectionOwnershipState::Empty => {
+                init_current_projection_schema(&conn, &spec, path)?;
+                return Ok(ProjectionOpenResult {
+                    db: Self { conn },
+                    reset: false,
+                });
+            }
+            ProjectionOwnershipState::Foreign {
+                app_id,
+                user_tables,
+            } => {
+                bail!(
+                    "projection database application_id is {app_id}, expected {}; \
+                     user_tables={user_tables}; this file ({}) was not created by RyeOS. \
+                     Recovery: mv <file> <file>.foreign.$(date +%s); then restart.",
+                    spec.application_id,
+                    path.display(),
+                );
+            }
+            ProjectionOwnershipState::Owned => {}
         }
 
-        Ok(Self { conn })
+        let stored_epoch = stored_projection_schema_epoch(&conn)?;
+        if stored_epoch != PROJECTION_SCHEMA_EPOCH {
+            tracing::warn!(
+                path = %path.display(),
+                stored_epoch,
+                current_epoch = PROJECTION_SCHEMA_EPOCH,
+                "owned projection schema epoch mismatch; resetting projection database"
+            );
+            close_connection(conn)?;
+            reset_projection_files(path, stored_epoch, PROJECTION_SCHEMA_EPOCH)?;
+
+            let conn = Connection::open(path).context("failed to reopen projection database")?;
+            init_current_projection_schema(&conn, &spec, path)?;
+            return Ok(ProjectionOpenResult {
+                db: Self { conn },
+                reset: true,
+            });
+        }
+
+        sqlite_schema::assert_owned(&conn, &spec, path)?;
+        Ok(ProjectionOpenResult {
+            db: Self { conn },
+            reset: false,
+        })
     }
 
     /// Get the underlying connection for queries.
@@ -2482,7 +2876,157 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         }
     }
 
+    if event.event_type == "thread_usage" {
+        project_thread_usage_latest(db, event)?;
+    }
+
+    if event.event_type == "thread_created" {
+        project_thread_usage_subject(db, event)?;
+    }
+
     Ok(())
+}
+
+fn project_thread_usage_subject(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    let Some(subject_value) = event.payload.get("usage_subject") else {
+        return Ok(());
+    };
+
+    let usage_subject: crate::UsageSubject = serde_json::from_value(subject_value.clone())
+        .context("failed to deserialize thread_created usage_subject")?;
+    usage_subject.validate()?;
+    let asserted_by = event
+        .payload
+        .get("usage_subject_asserted_by")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    db.connection()
+        .execute(
+            "INSERT INTO thread_usage_subjects (
+                chain_root_id, namespace, subject, asserted_by, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chain_root_id) DO UPDATE SET
+                namespace = excluded.namespace,
+                subject = excluded.subject,
+                asserted_by = excluded.asserted_by,
+                created_at = excluded.created_at",
+            rusqlite::params![
+                &event.chain_root_id,
+                &usage_subject.namespace,
+                &usage_subject.subject,
+                asserted_by,
+                &event.ts,
+            ],
+        )
+        .context("failed to project thread_usage_subjects")?;
+
+    Ok(())
+}
+
+fn project_thread_usage_latest(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    let completed_turns = payload_u64_to_i64(&event.payload, "completed_turns")?;
+    let input_tokens = payload_u64_to_i64(&event.payload, "input_tokens")?;
+    let output_tokens = payload_u64_to_i64(&event.payload, "output_tokens")?;
+    let spawns_used = payload_u64_to_i64(&event.payload, "spawns_used")?;
+    let last_settled_turn_seq = payload_u64_to_i64(&event.payload, "last_settled_turn_seq")?;
+    let elapsed_ms = payload_u64_to_i64(&event.payload, "elapsed_ms")?;
+    let started_at = payload_str(&event.payload, "started_at")?;
+    let settled_at = payload_str(&event.payload, "settled_at")?;
+    let spend_usd = event
+        .payload
+        .get("spend_usd")
+        .and_then(|value| value.as_f64())
+        .context("thread_usage payload missing numeric spend_usd")?;
+    let provider_id = event
+        .payload
+        .get("provider_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let model = event
+        .payload
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let profile = event
+        .payload
+        .get("profile")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    db.connection()
+        .execute(
+            "INSERT INTO thread_usage_latest (
+                thread_id, chain_root_id, chain_seq, thread_seq,
+                completed_turns, input_tokens, output_tokens, spend_usd, spawns_used,
+                started_at, settled_at, last_settled_turn_seq, elapsed_ms,
+                provider_id, model, profile
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                chain_root_id = excluded.chain_root_id,
+                chain_seq = excluded.chain_seq,
+                thread_seq = excluded.thread_seq,
+                completed_turns = excluded.completed_turns,
+                input_tokens = excluded.input_tokens,
+                output_tokens = excluded.output_tokens,
+                spend_usd = excluded.spend_usd,
+                spawns_used = excluded.spawns_used,
+                started_at = excluded.started_at,
+                settled_at = excluded.settled_at,
+                last_settled_turn_seq = excluded.last_settled_turn_seq,
+                elapsed_ms = excluded.elapsed_ms,
+                provider_id = excluded.provider_id,
+                model = excluded.model,
+                profile = excluded.profile
+            WHERE excluded.chain_seq > thread_usage_latest.chain_seq",
+            rusqlite::params![
+                &event.thread_id,
+                &event.chain_root_id,
+                u64_to_i64(event.chain_seq, "chain_seq")?,
+                u64_to_i64(event.thread_seq, "thread_seq")?,
+                completed_turns,
+                input_tokens,
+                output_tokens,
+                spend_usd,
+                spawns_used,
+                started_at,
+                settled_at,
+                last_settled_turn_seq,
+                elapsed_ms,
+                provider_id,
+                model,
+                profile,
+            ],
+        )
+        .context("failed to project thread_usage_latest")?;
+
+    Ok(())
+}
+
+fn payload_u64_to_i64(payload: &serde_json::Value, field: &str) -> anyhow::Result<i64> {
+    let value = payload
+        .get(field)
+        .and_then(|value| value.as_u64())
+        .with_context(|| format!("thread_usage payload missing integer {field}"))?;
+    u64_to_i64(value, field)
+}
+
+fn payload_str(payload: &serde_json::Value, field: &str) -> anyhow::Result<String> {
+    payload
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .with_context(|| format!("thread_usage payload missing string {field}"))
+}
+
+fn u64_to_i64(value: u64, field: &str) -> anyhow::Result<i64> {
+    i64::try_from(value).with_context(|| format!("thread_usage {field} exceeds i64"))
 }
 
 /// Project a thread edge (parent-child relationship).
@@ -2550,6 +3094,182 @@ mod tests {
 
         assert!(tables.contains(&"projection_meta".to_string()));
         assert!(tables.contains(&"threads".to_string()));
+        assert!(tables.contains(&"thread_usage_latest".to_string()));
+
+        assert_eq!(
+            stored_projection_schema_epoch(db.connection()).unwrap(),
+            PROJECTION_SCHEMA_EPOCH
+        );
+    }
+
+    #[test]
+    fn open_with_status_reports_no_reset_for_current_schema() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        ProjectionDb::open(&path).unwrap();
+
+        let opened = ProjectionDb::open_with_status(&path).unwrap();
+        assert!(!opened.reset);
+        assert_eq!(
+            stored_projection_schema_epoch(opened.db.connection()).unwrap(),
+            PROJECTION_SCHEMA_EPOCH
+        );
+        assert!(reset_backups(&path).is_empty());
+    }
+
+    #[test]
+    fn open_with_status_resets_owned_stale_epoch_before_validation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {PROJECTION_APP_ID};
+             PRAGMA user_version = 0;
+             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
+        ))
+        .unwrap();
+        drop(conn);
+
+        let opened = ProjectionDb::open_with_status(&path).unwrap();
+        assert!(opened.reset);
+        assert_eq!(
+            stored_projection_schema_epoch(opened.db.connection()).unwrap(),
+            PROJECTION_SCHEMA_EPOCH
+        );
+        assert!(table_exists(
+            opened.db.connection(),
+            "thread_usage_subjects"
+        ));
+        assert!(!table_exists(opened.db.connection(), "sentinel"));
+        assert_eq!(reset_backups(&path).len(), 1);
+    }
+
+    #[test]
+    fn reset_projection_files_renames_projection_sidecars() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        let shm = PathBuf::from(format!("{}-shm", path.to_string_lossy()));
+        let journal = PathBuf::from(format!("{}-journal", path.to_string_lossy()));
+        std::fs::write(&path, b"db").unwrap();
+        std::fs::write(&wal, b"wal").unwrap();
+        std::fs::write(&shm, b"shm").unwrap();
+        std::fs::write(&journal, b"journal").unwrap();
+
+        reset_projection_files(&path, 0, PROJECTION_SCHEMA_EPOCH).unwrap();
+
+        let backups = reset_backups(&path);
+        assert_eq!(backups.len(), 4);
+        assert!(backups
+            .iter()
+            .any(|backup| backup_has_stem(backup, "projection.db-wal")));
+        assert!(backups
+            .iter()
+            .any(|backup| backup_has_stem(backup, "projection.db-shm")));
+        assert!(backups
+            .iter()
+            .any(|backup| backup_has_stem(backup, "projection.db-journal")));
+    }
+
+    #[test]
+    fn open_with_status_current_epoch_bad_schema_fails_without_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {PROJECTION_APP_ID};
+             PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};
+             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
+        ))
+        .unwrap();
+        drop(conn);
+
+        let err = ProjectionDb::open_with_status(&path)
+            .err()
+            .expect("current epoch bad schema should fail");
+        assert!(err.to_string().contains("missing expected table"));
+        assert!(reset_backups(&path).is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(table_exists(&conn, "sentinel"));
+    }
+
+    #[test]
+    fn open_with_status_foreign_db_fails_without_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sentinel (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+
+        let err = ProjectionDb::open_with_status(&path)
+            .err()
+            .expect("foreign projection database should fail");
+        assert!(err.to_string().contains("was not created by RyeOS"));
+        assert!(reset_backups(&path).is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(table_exists(&conn, "sentinel"));
+    }
+
+    #[test]
+    fn open_with_status_wrong_nonzero_app_id_fails_without_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA application_id = 1234;
+             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = ProjectionDb::open_with_status(&path)
+            .err()
+            .expect("wrong nonzero application_id should fail");
+        assert!(err.to_string().contains("application_id is 1234"));
+        assert!(reset_backups(&path).is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(table_exists(&conn, "sentinel"));
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    fn reset_backups(path: &Path) -> Vec<PathBuf> {
+        let dir = path.parent().unwrap();
+        let prefix = path.file_name().unwrap().to_string_lossy().to_string();
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .map(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with(&prefix) && name.contains(".reset.")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn backup_has_stem(path: &Path, expected_stem: &str) -> bool {
+        path.file_name()
+            .map(|name| {
+                name.to_string_lossy()
+                    .starts_with(&format!("{expected_stem}.reset."))
+            })
+            .unwrap_or(false)
     }
 
     #[test]

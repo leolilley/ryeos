@@ -180,6 +180,8 @@ async fn handle_execute(
         provenance: child_provenance,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
+        usage_subject: None,
+        usage_subject_asserted_by: None,
         operation: None,
         inputs: None,
     };

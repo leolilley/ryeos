@@ -1,6 +1,6 @@
 //! `scheduler.pause` — disable a schedule without removing it.
 //!
-//! Ownership check: non-admin callers can only pause their own schedules.
+//! Ownership check: callers can only pause their own schedules.
 
 use std::sync::Arc;
 

@@ -22,7 +22,8 @@ use crate::objects::ThreadSnapshot;
 use crate::projection::{
     self, AdmissionAttestationRecord, CasEntriesByStateSummary, CasEntryAttribution, CasEntryState,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, NewSyncJob, NewSyncJobAttempt,
-    ProjectionDb, SyncJobAttemptRecord, SyncJobRecord, SyncJobState, SyncJobUpdate,
+    ProjectionDb, ProjectionOpenResult, SyncJobAttemptRecord, SyncJobRecord, SyncJobState,
+    SyncJobUpdate,
 };
 use crate::queries;
 use crate::refs::{GenericHeadRef, SignedRef};
@@ -55,8 +56,22 @@ impl StateDb {
         std::fs::create_dir_all(&refs_root).context("creating refs root")?;
         std::fs::create_dir_all(&locators_root).context("creating locators root")?;
 
-        let projection =
-            ProjectionDb::open(&projection_path).context("opening projection database")?;
+        let ProjectionOpenResult {
+            db: projection,
+            reset,
+        } = ProjectionDb::open_with_status(&projection_path)
+            .context("opening projection database")?;
+        if reset {
+            let report = crate::rebuild::rebuild_projection(&projection, &cas_root, &refs_root)
+                .context("rebuilding projection after schema epoch reset")?;
+            tracing::info!(
+                path = %projection_path.display(),
+                chains_rebuilt = report.chains_rebuilt,
+                threads_restored = report.threads_restored,
+                events_projected = report.events_projected,
+                "projection rebuilt after schema epoch reset"
+            );
+        }
 
         Ok(Self {
             cas_root,
@@ -515,6 +530,124 @@ mod tests {
         assert_eq!(row.chain_root_id, "T-root");
         assert_eq!(row.kind, "directive");
         assert_eq!(row.status, "created");
+    }
+
+    #[test]
+    fn open_rebuilds_projection_after_schema_epoch_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let signer = TestSigner::default();
+
+        {
+            let db = StateDb::open(&root).unwrap();
+            let snapshot = ThreadSnapshotBuilder::new(
+                "T-root",
+                "T-root",
+                "directive",
+                "system/test",
+                "directive-runtime",
+            )
+            .build();
+            db.create_chain("T-root", snapshot, &signer).unwrap();
+        }
+
+        let projection_path = root.join("projection.sqlite3");
+        let conn = rusqlite::Connection::open(&projection_path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+        drop(conn);
+
+        let db = StateDb::open(&root).unwrap();
+        let row = db
+            .get_thread("T-root")
+            .unwrap()
+            .expect("thread should be rebuilt from CAS/refs");
+        assert_eq!(row.thread_id, "T-root");
+        assert_eq!(row.chain_root_id, "T-root");
+        assert_eq!(row.kind, "directive");
+    }
+
+    #[test]
+    fn open_rebuilds_usage_projection_after_schema_epoch_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("state");
+        let signer = TestSigner::default();
+
+        {
+            let db = StateDb::open(&root).unwrap();
+            let snapshot = ThreadSnapshotBuilder::new(
+                "T-root",
+                "T-root",
+                "directive",
+                "directive:apps/tv-tracker/ai_chat",
+                "directive-runtime",
+            )
+            .build();
+            db.create_chain("T-root", snapshot, &signer).unwrap();
+
+            let created =
+                crate::objects::thread_event::NewEvent::new("T-root", "T-root", "thread_created")
+                    .payload(serde_json::json!({
+                        "item_ref": "directive:apps/tv-tracker/ai_chat",
+                        "executor_ref": "runtime:directive-runtime",
+                        "launch_mode": "inline",
+                        "usage_subject": {
+                            "namespace": "tv-tracker",
+                            "subject": "csm01"
+                        },
+                        "usage_subject_asserted_by": "fp:backend"
+                    }))
+                    .build();
+            let usage =
+                crate::objects::thread_event::NewEvent::new("T-root", "T-root", "thread_usage")
+                    .payload(serde_json::json!({
+                        "completed_turns": 3,
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "spend_usd": 0.15,
+                        "spawns_used": 1,
+                        "started_at": "2026-06-01T00:00:00Z",
+                        "settled_at": "2026-06-01T00:01:00Z",
+                        "last_settled_turn_seq": 3,
+                        "elapsed_ms": 1000,
+                        "provider_id": "anthropic",
+                        "model": "claude-test",
+                        "profile": "general"
+                    }))
+                    .build();
+            db.append_events("T-root", "T-root", vec![created, usage], vec![], &signer)
+                .unwrap();
+        }
+
+        let projection_path = root.join("projection.sqlite3");
+        let conn = rusqlite::Connection::open(&projection_path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 0;").unwrap();
+        drop(conn);
+
+        let db = StateDb::open(&root).unwrap();
+        let usage_rows: i64 = db
+            .projection()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_usage_latest WHERE thread_id = 'T-root' \
+                 AND input_tokens = 100 AND output_tokens = 50",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(usage_rows, 1);
+
+        let subject_rows: i64 = db
+            .projection()
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM thread_usage_subjects WHERE chain_root_id = 'T-root' \
+                 AND namespace = 'tv-tracker' AND subject = 'csm01' \
+                 AND asserted_by = 'fp:backend'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(subject_rows, 1);
     }
 
     #[test]

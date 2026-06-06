@@ -5,7 +5,7 @@
 //! silently switch between thread-scoped and chain-scoped replay based
 //! on which optional field was set.
 //!
-//! Ownership check: non-admin callers can only replay events for
+//! Ownership check: callers can only replay events for
 //! threads they own.
 
 use std::sync::Arc;

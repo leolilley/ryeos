@@ -110,7 +110,7 @@ pub async fn handle(
 
     // 7. Subset check: every requested scope must be permitted by at
     //    least one caller scope. Callers with ["*"] can grant anything
-    //    (but wildcard was already rejected above, so admin callers
+    //    (but wildcard was already rejected above, so wildcard callers
     //    must still explicitly list scopes).
     for scope in &normalized {
         let permitted = state

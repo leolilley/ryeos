@@ -113,6 +113,8 @@ pub struct DispatchRequest<'a> {
     /// event. `None` (the default) preserves the old
     /// "mint inside `create_root_thread`" path.
     pub pre_minted_thread_id: Option<String>,
+    pub usage_subject: Option<ryeos_state::UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
     /// **Op dispatch**: the operation name from the `/execute` request.
     /// When `None`, the op resolver uses `default_operation` from the
     /// schema. When `Some` but the kind has no `operations`, the field
@@ -773,6 +775,8 @@ pub(crate) async fn dispatch_op(
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(request.acting_principal.to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
         })
         .map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
 
@@ -1367,6 +1371,8 @@ async fn dispatch_managed_subprocess(
         origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
         target_site_id: None,
         requested_by: Some(acting_principal.to_string()),
+        usage_subject: request.usage_subject.clone(),
+        usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         parameters: params.clone(),
         resolved_item,
         plan_context: ctx.plan_ctx.clone(),
@@ -1610,6 +1616,8 @@ async fn dispatch_tool_subprocess(
             launch_mode: request.launch_mode,
             parameters: request.params.clone(),
             requested_by: Some(request.acting_principal.to_string()),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             caller_scopes: ctx.caller_scopes.clone(),
             validate_only: request.validate_only,
         },
@@ -2194,6 +2202,8 @@ metadata:
             origin_site_id: "site:test".into(),
             target_site_id: None,
             requested_by: Some("fp:test".into()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
             parameters: serde_json::Value::Null,
             resolved_item,
             plan_context: test_plan_context(bundle_root.to_path_buf()),

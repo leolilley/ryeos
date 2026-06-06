@@ -1,12 +1,11 @@
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::status::{is_running, LifecycleStatus};
@@ -57,6 +56,7 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
     };
 
     let ryeosd = resolve_ryeosd();
+    let (stderr_log_path, stderr_log_start, stderr_log) = open_startup_stderr_log(env)?;
     let mut child = Command::new(&ryeosd)
         .arg("--system-space-dir")
         .arg(&config.system_space_dir)
@@ -66,11 +66,10 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
         .arg(&config.uds_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(stderr_log))
         .spawn()
         .with_context(|| format!("spawn {}", ryeosd.display()))?;
 
-    let mut child_stderr = child.stderr.take();
     loop {
         let status = crate::status::status(env).await?;
         if is_running(&status) {
@@ -94,11 +93,17 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
             // Child is gone and no live daemon is visible. Surface the
             // failure immediately rather than wedging concurrent
             // starters behind the start lock until the deadline.
-            let stderr = read_child_stderr(&mut child_stderr).await;
+            let stderr = read_startup_stderr_since(&stderr_log_path, stderr_log_start);
             if stderr.trim().is_empty() {
-                bail!("ryeosd exited before lifecycle readiness: {exit}");
+                bail!(
+                    "ryeosd exited before lifecycle readiness: {exit}\nstartup stderr log: {}",
+                    stderr_log_path.display()
+                );
             }
-            bail!("ryeosd exited before lifecycle readiness: {exit}\nstderr:\n{stderr}");
+            bail!(
+                "ryeosd exited before lifecycle readiness: {exit}\nstartup stderr log: {}\nstderr tail:\n{stderr}",
+                stderr_log_path.display()
+            );
         }
 
         if Instant::now() >= deadline {
@@ -116,13 +121,46 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
     }
 }
 
-async fn read_child_stderr(stderr: &mut Option<tokio::process::ChildStderr>) -> String {
-    let Some(mut stderr) = stderr.take() else {
-        return String::new();
+fn startup_stderr_log_path(env: &LocalLifecycleEnv) -> PathBuf {
+    env.config()
+        .system_space_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("ryeosd-start.stderr.log")
+}
+
+fn open_startup_stderr_log(env: &LocalLifecycleEnv) -> Result<(PathBuf, u64, File)> {
+    let path = startup_stderr_log_path(env);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let start_len = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open startup stderr log {}", path.display()))?;
+    Ok((path, start_len, file))
+}
+
+fn read_startup_stderr_since(path: &Path, offset: u64) -> String {
+    const MAX_TAIL_BYTES: usize = 8192;
+
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => return format!("<failed to open startup stderr log: {err}>"),
     };
-    let mut buf = String::new();
-    let _ = tokio::time::timeout(Duration::from_millis(500), stderr.read_to_string(&mut buf)).await;
-    buf
+    if let Err(err) = file.seek(SeekFrom::Start(offset)) {
+        return format!("<failed to seek startup stderr log: {err}>");
+    }
+    let mut bytes = Vec::new();
+    if let Err(err) = file.read_to_end(&mut bytes) {
+        return format!("<failed to read startup stderr log: {err}>");
+    }
+    if bytes.len() > MAX_TAIL_BYTES {
+        bytes = bytes[bytes.len() - MAX_TAIL_BYTES..].to_vec();
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// RAII guard for the lifecycle start lock.

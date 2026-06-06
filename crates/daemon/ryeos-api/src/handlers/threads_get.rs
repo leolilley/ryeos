@@ -1,6 +1,6 @@
 //! `threads.get` — fetch one thread row plus result, artifacts, and facets.
 //!
-//! Ownership check: non-admin callers can only access their own threads.
+//! Ownership check: callers can only access their own threads.
 //! Returns 404 (not 403) to avoid leaking existence.
 
 use std::sync::Arc;

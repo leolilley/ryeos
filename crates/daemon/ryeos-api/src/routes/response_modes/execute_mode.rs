@@ -59,6 +59,8 @@ pub struct ExecuteRequest {
     pub operation: Option<String>,
     #[serde(default)]
     pub inputs: Option<Value>,
+    #[serde(default)]
+    pub usage_subject: Option<ryeos_state::UsageSubject>,
 }
 
 fn default_launch_mode() -> String {
@@ -201,6 +203,27 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     ))
                 })?;
         }
+
+        let usage_subject = request.usage_subject.clone();
+        let usage_subject_asserted_by = if let Some(subject) = &usage_subject {
+            subject
+                .validate()
+                .map_err(|e| RouteDispatchError::BadRequest(e.to_string()))?;
+            let required_cap = format!("ryeos.execute.on_behalf_of.{}", subject.namespace);
+            let policy = AuthorizationPolicy::require(&required_cap);
+            state
+                .authorizer
+                .authorize(&caller_scopes, &policy)
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability: {}",
+                        required_cap
+                    ))
+                })?;
+            Some(caller_principal_id.clone())
+        } else {
+            None
+        };
 
         let site_id = state.threads.site_id();
         let project_source = request.project_source.clone().unwrap_or_default();
@@ -471,6 +494,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     launch_mode: "inline",
                     parameters: request.parameters.clone(),
                     requested_by: Some(caller_principal_id.clone()),
+                    usage_subject: usage_subject.clone(),
+                    usage_subject_asserted_by: usage_subject_asserted_by.clone(),
                     caller_scopes: caller_scopes.clone(),
                     validate_only: false,
                 },
@@ -550,6 +575,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     launch_mode: "inline".to_string(),
                     target_site_id: None,
                     validate_only: false,
+                    usage_subject: usage_subject.clone(),
+                    usage_subject_asserted_by: usage_subject_asserted_by.clone(),
                     operation: request.operation.clone(),
                     inputs: request.inputs.clone(),
                 },
@@ -625,6 +652,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let dispatch_target_site_id = match target_site_plan {
             TargetSitePlan::Local => None,
             TargetSitePlan::Remote(plan) => {
+                if usage_subject.is_some() {
+                    return Ok(dispatch_error_response(target_site_unsupported(
+                        &plan.target_site_id,
+                        "usage_subject attribution is not supported for target-site forwarding v1",
+                    )));
+                }
                 let client = crate::remote::client::RemoteClient::new(
                     &plan.remote.remote.url,
                     &plan.remote.remote.principal_id,
@@ -681,6 +714,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             provenance,
             original_root_kind: root_canonical.kind.as_str(),
             pre_minted_thread_id: None,
+            usage_subject,
+            usage_subject_asserted_by,
             operation: request.operation.clone(),
             inputs: request.inputs.clone(),
         };

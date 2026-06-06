@@ -229,6 +229,8 @@ pub async fn execute_service_verified(
         origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
         upstream_thread_id: None,
         requested_by: Some(ctx.principal_fingerprint.clone()),
+        usage_subject: None,
+        usage_subject_asserted_by: None,
     };
 
     let audit_ok = state.threads.create_thread(&create_params).is_ok();

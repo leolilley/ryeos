@@ -47,7 +47,8 @@ pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
 pub use objects::{
     thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
-    Attestation, BundleEventAttribution, BundleEventObject, ChainState,
+    thread_snapshot::UsageSubject, Attestation, BundleEventAttribution, BundleEventObject,
+    ChainState,
 };
 pub use projection::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,

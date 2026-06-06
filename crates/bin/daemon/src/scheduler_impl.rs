@@ -16,7 +16,7 @@ use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_scheduler::db::SchedulerDb;
 use ryeos_scheduler::types::ScheduleSpecRecord;
-use ryeos_scheduler::SchedulerContext;
+use ryeos_scheduler::{SchedulerContext, ThreadResultOutcome};
 
 /// Newtype wrapper around `AppState` so we can implement
 /// `SchedulerContext` from `ryeos_scheduler` for state defined in
@@ -48,6 +48,16 @@ impl SchedulerContext for AppSchedulerContext {
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    fn get_thread_result_outcome(&self, thread_id: &str) -> Result<Option<ThreadResultOutcome>> {
+        let Some(record) = self.0.threads.get_thread_result(thread_id)? else {
+            return Ok(None);
+        };
+        let Some(result) = record.result.as_ref() else {
+            return Ok(Some(ThreadResultOutcome::Success));
+        };
+        Ok(Some(ryeos_scheduler::classify_result_payload(result)))
     }
 
     fn submit_cancel(&self, thread_id: &str) -> Result<()> {
@@ -96,6 +106,8 @@ impl SchedulerContext for AppSchedulerContext {
             provenance,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
             operation: None,
             inputs: None,
         };

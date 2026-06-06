@@ -1,7 +1,7 @@
 //! `scheduler.list` — list registered schedules.
 //!
-//! Supports owner filtering: admins see all schedules, verified non-admins
-//! see only their schedules, and anonymous/unverified callers see none.
+//! Supports owner filtering: verified callers see only their schedules, and
+//! anonymous/unverified callers see none.
 
 use std::sync::Arc;
 
@@ -28,20 +28,14 @@ pub async fn handle(
     ctx: crate::handler_context::HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let filter_requester = if ctx.is_present() {
-        if ctx.is_admin() {
-            None
-        } else {
-            Some(ctx.fingerprint.as_str())
-        }
-    } else {
+    let Some(filter_requester) = ctx.is_present().then_some(ctx.fingerprint.as_str()) else {
         return Ok(serde_json::json!({ "schedules": [] }));
     };
 
     let specs = state.scheduler_db.list_specs_filtered(
         req.enabled_only,
         req.schedule_type.as_deref(),
-        filter_requester,
+        Some(filter_requester),
     )?;
 
     // Batch-load last fires to avoid N+1 queries

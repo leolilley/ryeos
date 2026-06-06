@@ -22,6 +22,7 @@ use ryeos_engine::contracts::{
     ThreadTerminalStatus, TrustClass,
 };
 use ryeos_engine::engine::Engine;
+use ryeos_state::UsageSubject;
 
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
@@ -63,6 +64,10 @@ pub struct ThreadCreateParams {
     pub upstream_thread_id: Option<String>,
     #[serde(default)]
     pub requested_by: Option<String>,
+    #[serde(default)]
+    pub usage_subject: Option<UsageSubject>,
+    #[serde(default)]
+    pub usage_subject_asserted_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +162,8 @@ pub struct ResolvedExecutionRequest {
     pub origin_site_id: String,
     pub target_site_id: Option<String>,
     pub requested_by: Option<String>,
+    pub usage_subject: Option<UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
     pub parameters: Value,
     /// The engine's resolved item — carried through for verify/build_plan/execute.
     pub resolved_item: ResolvedItem,
@@ -247,6 +254,8 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         };
 
         let _persisted = self.state_store.create_thread(&thread_record)?;
@@ -281,6 +290,8 @@ impl ThreadLifecycleService {
             origin_site_id: params.origin_site_id.clone(),
             upstream_thread_id: params.upstream_thread_id.clone(),
             requested_by: params.requested_by.clone(),
+            usage_subject: params.usage_subject.clone(),
+            usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
         };
 
         let _persisted = self.state_store.create_thread(&thread_record)?;
@@ -356,7 +367,7 @@ impl ThreadLifecycleService {
             thread_id,
             &FinalizeThreadRecord {
                 status: terminal_status.to_string(),
-                outcome_code,
+                outcome_code: outcome_code.clone(),
                 result_json: completion.result.clone(),
                 error_json: completion.error.clone(),
                 artifacts: completion
@@ -367,6 +378,13 @@ impl ThreadLifecycleService {
                 final_cost: completion.final_cost.clone(),
             },
         )?;
+
+        self.update_scheduler_fire_on_thread_terminal(
+            thread_id,
+            terminal_status,
+            outcome_code.as_deref(),
+            completion.result.as_ref(),
+        );
 
         let finalized = self
             .get_thread(thread_id)?
@@ -422,36 +440,56 @@ impl ThreadLifecycleService {
             },
         )?;
 
-        // Update scheduler fire record if this thread was scheduler-dispatched.
+        let terminal_status = normalize_terminal_status(&params.status)?;
+        self.update_scheduler_fire_on_thread_terminal(
+            &params.thread_id,
+            terminal_status,
+            params.outcome_code.as_deref(),
+            params.result.as_ref(),
+        );
+
+        self.get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
+    }
+
+    fn update_scheduler_fire_on_thread_terminal(
+        &self,
+        thread_id: &str,
+        terminal_status: &str,
+        outcome_code: Option<&str>,
+        result: Option<&Value>,
+    ) {
         if let Ok(guard) = self.scheduler_db.read() {
             if let Some(ref db) = *guard {
-                if let Ok(Some(fire)) = db.find_fire_by_thread(&params.thread_id) {
-                    let terminal_status = normalize_terminal_status(&params.status)?;
-                    let fire_status = match terminal_status {
-                        "completed" => "completed",
-                        "cancelled" => "cancelled",
-                        _ => "failed",
-                    };
-                    let outcome_str = params.outcome_code.as_deref().unwrap_or(fire_status);
+                if let Ok(Some(fire)) = db.find_fire_by_thread(thread_id) {
+                    let fire_status =
+                        ryeos_scheduler::fire_status_for_thread_status(terminal_status);
+                    let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
+                    let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
+                        terminal_status,
+                        result_outcome.as_ref(),
+                        outcome_code,
+                    );
                     let now = lillux::time::timestamp_millis();
+                    let completed_fired_at = fire.fired_at.unwrap_or(now);
 
                     // Clone fields needed for JSONL before the move
                     let jsonl_fire_id = fire.fire_id.clone();
                     let jsonl_schedule_id = fire.schedule_id.clone();
                     let jsonl_scheduled_at = fire.scheduled_at;
-                    let jsonl_fired_at = fire.fired_at;
+                    let jsonl_trigger_reason = fire.trigger_reason.clone();
                     let jsonl_signer_fp = fire.signer_fingerprint.clone();
 
                     let updated = ryeos_scheduler::types::FireRecord {
                         status: fire_status.to_string(),
                         outcome: Some(outcome_str.to_string()),
-                        fired_at: Some(now),
+                        fired_at: Some(completed_fired_at),
                         completed_at: Some(now),
                         ..fire
                     };
                     if let Err(e) = db.upsert_fire(&updated) {
                         tracing::warn!(
-                            thread_id = %params.thread_id,
+                            thread_id = %thread_id,
                             error = %e,
                             "scheduler: failed to update fire status on thread completion"
                         );
@@ -466,9 +504,10 @@ impl ThreadLifecycleService {
                                 "fire_id": jsonl_fire_id,
                                 "schedule_id": jsonl_schedule_id,
                                 "scheduled_at": jsonl_scheduled_at,
-                                "fired_at": jsonl_fired_at,
-                                "thread_id": params.thread_id,
+                                "fired_at": completed_fired_at,
+                                "thread_id": thread_id,
                                 "completed_at": now,
+                                "trigger_reason": jsonl_trigger_reason,
                                 "outcome": outcome_str,
                                 "signer_fingerprint": jsonl_signer_fp,
                             });
@@ -482,7 +521,7 @@ impl ThreadLifecycleService {
                                 ryeos_scheduler::projection::append_jsonl_entry(&fires_path, &entry)
                             {
                                 tracing::warn!(
-                                    thread_id = %params.thread_id,
+                                    thread_id = %thread_id,
                                     error = %e,
                                     "scheduler: failed to append completion to JSONL"
                                 );
@@ -492,9 +531,6 @@ impl ThreadLifecycleService {
                 }
             }
         }
-
-        self.get_thread(&params.thread_id)?
-            .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
     }
 
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
@@ -559,6 +595,8 @@ impl ThreadLifecycleService {
             origin_site_id: source.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: source.requested_by.clone(),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
         };
 
         // Create successor, write continued edge, finalize source — all in one transaction
@@ -614,7 +652,7 @@ impl ThreadLifecycleService {
     ///
     /// When `filter_principal` is `Some(fp)`, only threads with
     /// `requested_by = fp` are returned. `None` returns all threads
-    /// (admin callers).
+    /// (internal callers that intentionally request an unfiltered view).
     pub fn list_threads_filtered(
         &self,
         limit: usize,
@@ -729,6 +767,8 @@ pub struct ResolveRootExecutionParams<'a> {
     pub launch_mode: &'a str,
     pub parameters: Value,
     pub requested_by: Option<String>,
+    pub usage_subject: Option<UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
     pub caller_scopes: Vec<String>,
     pub validate_only: bool,
 }
@@ -744,6 +784,8 @@ pub fn resolve_root_execution(
         launch_mode,
         parameters,
         requested_by,
+        usage_subject,
+        usage_subject_asserted_by,
         caller_scopes,
         validate_only,
     } = params;
@@ -792,6 +834,8 @@ pub fn resolve_root_execution(
         origin_site_id: site_id.to_string(),
         target_site_id: None,
         requested_by,
+        usage_subject,
+        usage_subject_asserted_by,
         parameters,
         resolved_item: resolved,
         plan_context: plan_ctx,

@@ -1,6 +1,6 @@
 //! `scheduler.resume` — re-enable a paused schedule.
 //!
-//! Ownership check: non-admin callers can only resume their own schedules.
+//! Ownership check: callers can only resume their own schedules.
 
 use std::sync::Arc;
 

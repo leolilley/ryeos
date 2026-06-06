@@ -4,7 +4,7 @@
 //! `cancelled`, and broadcasts the `thread_cancelled` event to any
 //! live subscribers via `ThreadEventHub`.
 //!
-//! Ownership check: non-admin callers can only cancel their own threads.
+//! Ownership check: callers can only cancel their own threads.
 
 use std::sync::Arc;
 
@@ -36,7 +36,7 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    // Ownership check: non-admin callers can only cancel their own threads.
+    // Ownership check: callers can only cancel their own threads.
     ctx.require_owner(thread.requested_by.as_deref())?;
 
     // Check if already terminal — bail early with a clear message.
