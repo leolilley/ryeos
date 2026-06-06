@@ -215,7 +215,11 @@ impl LifecycleController {
     }
 
     pub async fn start(&self) -> Result<StartReport> {
-        start::start(&self.env, Duration::from_secs(15)).await
+        // First startup after an incompatible projection schema epoch bump may
+        // rebuild projection.sqlite3 from CAS/refs before the daemon opens its
+        // lifecycle socket. Keep this longer than ordinary process startup so
+        // a healthy one-time rebuild is not reported as a failed `ryeos start`.
+        start::start(&self.env, Duration::from_secs(900)).await
     }
 
     pub async fn stop(&self, opts: StopOptions) -> Result<StopReport> {

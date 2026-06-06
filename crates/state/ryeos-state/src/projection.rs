@@ -4,7 +4,12 @@
 //! It provides fast read access and is the authoritative source for thread
 //! queries during normal operation.
 
-use anyhow::Context;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, Context};
 use rusqlite::{Connection, OptionalExtension};
 
 // ============= Schema =============
@@ -265,6 +270,11 @@ use crate::sqlite_schema;
 /// Application ID stamp for projection.db.
 /// RYPJ = 0x5259504a ("RY" + "PJ" for "projection").
 const PROJECTION_APP_ID: i32 = 0x5259_504a;
+
+/// Current projection schema epoch. This is stored in SQLite's
+/// `PRAGMA user_version` slot, but RyeOS treats it as the projection
+/// schema epoch. Bump this for incompatible projection schema changes.
+const PROJECTION_SCHEMA_EPOCH: i32 = 2;
 
 /// Schema spec for projection.db — the single source of truth for
 /// what tables/columns/indexes this database must contain.
@@ -1283,10 +1293,140 @@ pub struct ProjectionDb {
     conn: Connection,
 }
 
+/// Result of opening the projection database.
+pub struct ProjectionOpenResult {
+    pub db: ProjectionDb,
+    pub reset: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionOwnershipState {
+    Empty,
+    Owned,
+    Foreign { app_id: i32, user_tables: i64 },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CasEntryKind {
     Object,
     Blob,
+}
+
+fn classify_projection_db(
+    conn: &Connection,
+    expected_app_id: i32,
+) -> anyhow::Result<ProjectionOwnershipState> {
+    let app_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("failed to read PRAGMA application_id")?;
+    let user_tables = user_table_count(conn)?;
+
+    if app_id == expected_app_id {
+        return Ok(ProjectionOwnershipState::Owned);
+    }
+    if app_id == 0 && user_tables == 0 {
+        return Ok(ProjectionOwnershipState::Empty);
+    }
+    Ok(ProjectionOwnershipState::Foreign {
+        app_id,
+        user_tables,
+    })
+}
+
+fn user_table_count(conn: &Connection) -> anyhow::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )
+    .context("failed to check for existing projection tables")
+}
+
+fn stored_projection_schema_epoch(conn: &Connection) -> anyhow::Result<i32> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .context("failed to read stored projection schema epoch")
+}
+
+fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(&format!("PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};"))
+        .context("failed to stamp projection schema epoch")?;
+    let stored = stored_projection_schema_epoch(conn)?;
+    if stored != PROJECTION_SCHEMA_EPOCH {
+        bail!(
+            "failed to verify projection schema epoch stamp: stored={stored}, expected={}",
+            PROJECTION_SCHEMA_EPOCH
+        );
+    }
+    Ok(())
+}
+
+fn init_current_projection_schema(
+    conn: &Connection,
+    spec: &sqlite_schema::SchemaSpec,
+    path: &Path,
+) -> anyhow::Result<()> {
+    sqlite_schema::init_owned(conn, spec, SCHEMA_SQL, path)?;
+    stamp_projection_schema_epoch(conn)?;
+    sqlite_schema::assert_owned(conn, spec, path)?;
+    Ok(())
+}
+
+fn close_connection(conn: Connection) -> anyhow::Result<()> {
+    conn.close()
+        .map_err(|(_, err)| err)
+        .context("failed to close projection database before reset")
+}
+
+fn reset_projection_files(
+    path: &Path,
+    stored_epoch: i32,
+    current_epoch: i32,
+) -> anyhow::Result<()> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before UNIX_EPOCH")?
+        .as_secs();
+    let suffix = format!(
+        "reset.{stored_epoch}-to-{current_epoch}.{timestamp}.{}",
+        process::id()
+    );
+
+    for candidate in projection_reset_candidates(path) {
+        if !candidate.exists() {
+            continue;
+        }
+        let backup = backup_path(&candidate, &suffix);
+        fs::rename(&candidate, &backup).with_context(|| {
+            format!(
+                "failed to rename stale projection file {} to {}",
+                candidate.display(),
+                backup.display()
+            )
+        })?;
+        tracing::warn!(
+            path = %candidate.display(),
+            backup = %backup.display(),
+            stored_epoch,
+            current_epoch,
+            "renamed stale projection file"
+        );
+    }
+
+    Ok(())
+}
+
+fn projection_reset_candidates(path: &Path) -> Vec<PathBuf> {
+    let base = path.to_string_lossy();
+    vec![
+        path.to_path_buf(),
+        PathBuf::from(format!("{base}-wal")),
+        PathBuf::from(format!("{base}-shm")),
+        PathBuf::from(format!("{base}-journal")),
+    ]
+}
+
+fn backup_path(path: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}.{}", path.to_string_lossy(), suffix))
 }
 
 impl CasEntryKind {
@@ -1578,22 +1718,70 @@ impl ProjectionDb {
     /// Open or create a projection database.
     ///
     /// If the file exists, verifies it matches the schema spec exactly
-    /// (tables, columns, indexes, application_id). If the file is empty
-    /// or missing, initialises it from the DDL and stamps the
-    /// application_id.
-    pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
-        let conn =
-            rusqlite::Connection::open(path).context("failed to open projection database")?;
+    /// (tables, columns, indexes, application_id, projection schema epoch).
+    /// If the file is empty or missing, initialises it from the current DDL.
+    /// If an owned file has a stale projection schema epoch, it is renamed
+    /// aside and recreated from the current DDL.
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self::open_with_status(path)?.db)
+    }
+
+    /// Open or create a projection database and report whether it was reset
+    /// because its stored projection schema epoch did not match the current
+    /// epoch. Callers with CAS/refs access should rebuild the projection when
+    /// `reset` is true.
+    pub fn open_with_status(path: &Path) -> anyhow::Result<ProjectionOpenResult> {
+        let conn = Connection::open(path).context("failed to open projection database")?;
 
         let spec = projection_schema_spec();
 
-        if sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-            sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, path)?;
-        } else {
-            sqlite_schema::assert_owned(&conn, &spec, path)?;
+        match classify_projection_db(&conn, spec.application_id)? {
+            ProjectionOwnershipState::Empty => {
+                init_current_projection_schema(&conn, &spec, path)?;
+                return Ok(ProjectionOpenResult {
+                    db: Self { conn },
+                    reset: false,
+                });
+            }
+            ProjectionOwnershipState::Foreign {
+                app_id,
+                user_tables,
+            } => {
+                bail!(
+                    "projection database application_id is {app_id}, expected {}; \
+                     user_tables={user_tables}; this file ({}) was not created by RyeOS. \
+                     Recovery: mv <file> <file>.foreign.$(date +%s); then restart.",
+                    spec.application_id,
+                    path.display(),
+                );
+            }
+            ProjectionOwnershipState::Owned => {}
         }
 
-        Ok(Self { conn })
+        let stored_epoch = stored_projection_schema_epoch(&conn)?;
+        if stored_epoch != PROJECTION_SCHEMA_EPOCH {
+            tracing::warn!(
+                path = %path.display(),
+                stored_epoch,
+                current_epoch = PROJECTION_SCHEMA_EPOCH,
+                "owned projection schema epoch mismatch; resetting projection database"
+            );
+            close_connection(conn)?;
+            reset_projection_files(path, stored_epoch, PROJECTION_SCHEMA_EPOCH)?;
+
+            let conn = Connection::open(path).context("failed to reopen projection database")?;
+            init_current_projection_schema(&conn, &spec, path)?;
+            return Ok(ProjectionOpenResult {
+                db: Self { conn },
+                reset: true,
+            });
+        }
+
+        sqlite_schema::assert_owned(&conn, &spec, path)?;
+        Ok(ProjectionOpenResult {
+            db: Self { conn },
+            reset: false,
+        })
     }
 
     /// Get the underlying connection for queries.
@@ -2907,6 +3095,181 @@ mod tests {
         assert!(tables.contains(&"projection_meta".to_string()));
         assert!(tables.contains(&"threads".to_string()));
         assert!(tables.contains(&"thread_usage_latest".to_string()));
+
+        assert_eq!(
+            stored_projection_schema_epoch(db.connection()).unwrap(),
+            PROJECTION_SCHEMA_EPOCH
+        );
+    }
+
+    #[test]
+    fn open_with_status_reports_no_reset_for_current_schema() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        ProjectionDb::open(&path).unwrap();
+
+        let opened = ProjectionDb::open_with_status(&path).unwrap();
+        assert!(!opened.reset);
+        assert_eq!(
+            stored_projection_schema_epoch(opened.db.connection()).unwrap(),
+            PROJECTION_SCHEMA_EPOCH
+        );
+        assert!(reset_backups(&path).is_empty());
+    }
+
+    #[test]
+    fn open_with_status_resets_owned_stale_epoch_before_validation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {PROJECTION_APP_ID};
+             PRAGMA user_version = 0;
+             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
+        ))
+        .unwrap();
+        drop(conn);
+
+        let opened = ProjectionDb::open_with_status(&path).unwrap();
+        assert!(opened.reset);
+        assert_eq!(
+            stored_projection_schema_epoch(opened.db.connection()).unwrap(),
+            PROJECTION_SCHEMA_EPOCH
+        );
+        assert!(table_exists(
+            opened.db.connection(),
+            "thread_usage_subjects"
+        ));
+        assert!(!table_exists(opened.db.connection(), "sentinel"));
+        assert_eq!(reset_backups(&path).len(), 1);
+    }
+
+    #[test]
+    fn reset_projection_files_renames_projection_sidecars() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let wal = PathBuf::from(format!("{}-wal", path.to_string_lossy()));
+        let shm = PathBuf::from(format!("{}-shm", path.to_string_lossy()));
+        let journal = PathBuf::from(format!("{}-journal", path.to_string_lossy()));
+        std::fs::write(&path, b"db").unwrap();
+        std::fs::write(&wal, b"wal").unwrap();
+        std::fs::write(&shm, b"shm").unwrap();
+        std::fs::write(&journal, b"journal").unwrap();
+
+        reset_projection_files(&path, 0, PROJECTION_SCHEMA_EPOCH).unwrap();
+
+        let backups = reset_backups(&path);
+        assert_eq!(backups.len(), 4);
+        assert!(backups
+            .iter()
+            .any(|backup| backup_has_stem(backup, "projection.db-wal")));
+        assert!(backups
+            .iter()
+            .any(|backup| backup_has_stem(backup, "projection.db-shm")));
+        assert!(backups
+            .iter()
+            .any(|backup| backup_has_stem(backup, "projection.db-journal")));
+    }
+
+    #[test]
+    fn open_with_status_current_epoch_bad_schema_fails_without_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "PRAGMA application_id = {PROJECTION_APP_ID};
+             PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};
+             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
+        ))
+        .unwrap();
+        drop(conn);
+
+        let err = ProjectionDb::open_with_status(&path)
+            .err()
+            .expect("current epoch bad schema should fail");
+        assert!(err.to_string().contains("missing expected table"));
+        assert!(reset_backups(&path).is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(table_exists(&conn, "sentinel"));
+    }
+
+    #[test]
+    fn open_with_status_foreign_db_fails_without_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE sentinel (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+
+        let err = ProjectionDb::open_with_status(&path)
+            .err()
+            .expect("foreign projection database should fail");
+        assert!(err.to_string().contains("was not created by RyeOS"));
+        assert!(reset_backups(&path).is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(table_exists(&conn, "sentinel"));
+    }
+
+    #[test]
+    fn open_with_status_wrong_nonzero_app_id_fails_without_reset() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA application_id = 1234;
+             CREATE TABLE sentinel (id INTEGER PRIMARY KEY);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let err = ProjectionDb::open_with_status(&path)
+            .err()
+            .expect("wrong nonzero application_id should fail");
+        assert!(err.to_string().contains("application_id is 1234"));
+        assert!(reset_backups(&path).is_empty());
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(table_exists(&conn, "sentinel"));
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+            [table],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    fn reset_backups(path: &Path) -> Vec<PathBuf> {
+        let dir = path.parent().unwrap();
+        let prefix = path.file_name().unwrap().to_string_lossy().to_string();
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|candidate| {
+                candidate
+                    .file_name()
+                    .map(|name| {
+                        let name = name.to_string_lossy();
+                        name.starts_with(&prefix) && name.contains(".reset.")
+                    })
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn backup_has_stem(path: &Path, expected_stem: &str) -> bool {
+        path.file_name()
+            .map(|name| {
+                name.to_string_lossy()
+                    .starts_with(&format!("{expected_stem}.reset."))
+            })
+            .unwrap_or(false)
     }
 
     #[test]
