@@ -423,7 +423,7 @@ impl std::fmt::Debug for RuntimeHandlerRegistry {
 ///
 /// `ignored_keys` is the set of metadata keys the engine deliberately
 /// does NOT route through the handler registry (e.g. `version`,
-/// `__executor_id__`). Any other key that is not registered is a hard
+/// `executor_id`). Any other key that is not registered is a hard
 /// `EngineError::UnknownRuntimeBlock`.
 #[allow(clippy::too_many_arguments)]
 pub fn compile_with_handlers(

@@ -53,14 +53,15 @@ fn synth_project_with_hello() -> PathBuf {
     // accepted by the engine for items the chain doesn't gate on), so
     // the shebang is the very first line.
     //
-    // The dunders below match the kind schema's `metadata.rules`:
-    //   __executor_id__ → routes to the python script runtime, which
-    //                     itself targets `@subprocess` (alias).
+    // The ryeos-tool header below matches the kind schema's `metadata.rules`:
+    //   executor_id → routes to the python script runtime, which itself
+    //                 targets `@subprocess` (alias).
     let body = r#"#!/usr/bin/env python3
-__version__ = "1.0.0"
-__executor_id__ = "tool:ryeos/core/runtimes/python/script"
-__category__ = "hello"
-__description__ = "Hello world demo"
+# ryeos-tool:
+#   category: hello
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   description: "Hello world demo"
 
 import sys
 print("hello world")
@@ -123,11 +124,11 @@ fn daemon_executes_python_hello_world_end_to_end() {
         .resolve(&plan_ctx, &item)
         .expect("resolve hello.py from project space");
 
-    // Sanity: the kind schema must have extracted the executor_id dunder.
+    // Sanity: the kind schema must have extracted executor_id from header metadata.
     assert_eq!(
         resolved.metadata.executor_id.as_deref(),
         Some("tool:ryeos/core/runtimes/python/script"),
-        "extraction rules failed to pull __executor_id__ from hello.py"
+        "extraction rules failed to pull executor_id from hello.py"
     );
 
     let verified = engine

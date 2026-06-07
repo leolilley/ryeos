@@ -1,8 +1,8 @@
-# ryeos:signed:2026-04-09T00:59:52Z:f4ee01da580f35d5a1fdba657907d1af9cc76e389ede0318c9982c5549baadf1:moR6iynsSJgn4cF3vRMNs-6_pY230lIZsBAi51Xl-yydX70RbP2BImKKB9Q1x3uR_XbcxtPa3dSBWUV8QkjcBA:4b987fd4e40303ac
+# ryeos:signed:2026-06-07T05:42:18Z:fa2e54f13702de276dbfd904e3b3b4386b975d56cc3c5a7bc4c7d04a0c3c3e39:mvRw244iOR3MLVZbj1QaRZgwmxI4CnMd1w4w3Ttoy8smGW+HQU1AEE4Nr7jlV/M2CIGaZpux8OKJuZMK4cQ5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos-tool:
+#   category: test/anchor_demo
+#   version: "1.0.0"
+#   tool_type: python
+#   executor_id: ryeos/core/runtimes/python/function
+#   tool_description: "Anchor demo package init"
 """Anchor demo package."""
-
-__version__ = "1.0.0"
-__tool_type__ = "python"
-__executor_id__ = "ryeos/core/runtimes/python/function"
-__category__ = "test/anchor_demo"
-__tool_description__ = "Anchor demo package init"

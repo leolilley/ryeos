@@ -1,15 +1,15 @@
-# ryeos:signed:2026-04-09T00:59:52Z:186450e22c28b23086a4cfdc235607cf130b3f77fe7164f8a2d35df4e53cbfb5:uI35E-cq-gM1_x1tDU12bMPmd95IEUiCXe03lFzqXuyO_T4d7o1V7lGL7Zdx_VoOSKP1Fpm82opa50RXR292AQ:4b987fd4e40303ac
+# ryeos:signed:2026-06-07T05:42:18Z:d5fd48d63dcac5bc4ff7cdb7feffb673cd7b5285ff9d102148238df2f367ab9d:Kew/7lOykavT7KyqdBBVupqKeJR4VR5056S9aNO53Ggy127153vZy+9UvnT5YrHRAz+1MpTn4Yg+hMT2vUZXDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos-tool:
+#   category: test/anchor_demo
+#   version: "1.0.0"
+#   tool_type: python
+#   executor_id: ryeos/core/runtimes/python/function
+#   tool_description: "Demo tool testing anchor system with sibling imports"
 """Anchor demo tool - tests the anchor system with multi-file imports.
 
 Imports a sibling helper module via PYTHONPATH injection from the
 anchor system. If anchor doesn't work, `from helpers import ...` fails.
 """
-
-__version__ = "1.0.0"
-__tool_type__ = "python"
-__executor_id__ = "ryeos/core/runtimes/python/function"
-__category__ = "test/anchor_demo"
-__tool_description__ = "Demo tool testing anchor system with sibling imports"
 
 import json
 from pathlib import Path

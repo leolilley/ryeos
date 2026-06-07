@@ -2790,7 +2790,7 @@ pub struct ResolvedSourceFormat {
     /// The matched file extension, e.g. `".py"`, `".md"`
     pub extension: String,
     /// Canonical parser tool ref, e.g.
-    /// `"parser:ryeos/core/python/ast"`. The `ParserDispatcher`
+    /// `"parser:ryeos/core/python/tool-header"`. The `ParserDispatcher`
     /// resolves this through `ParserRegistry`.
     pub parser: String,
     /// Signature embedding envelope for this file type
@@ -2861,9 +2861,9 @@ pub struct SignatureHeader {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemMetadata {
-    /// Executor ID from `__executor_id__` or frontmatter
+    /// Executor ID extracted from item metadata
     pub executor_id: Option<String>,
-    /// Item version from `__version__`
+    /// Item version extracted from item metadata
     pub version: Option<String>,
     /// Item description
     pub description: Option<String>,

@@ -1,10 +1,9 @@
-# ryeos:signed:2026-06-07T05:18:56Z:70d1c35340f73c948265baa0aeee7418f9c4e09592101c705fa532e436d52101:lAfL0cd48LpXdsdI48Pk96+cJnfZXi9TLHpTgUoYEYk2qPZRnRCxLQtpCCKPDuRDiCQjykH2EntnPIeh/8lkCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos-tool:
+#   category: ryeos/core/verbs
+#   version: "1.0.0"
+#   tool_type: python
+#   description: "List all known verbs and their aliases from installed bundles"
 """Verb list tool — reads verb and alias YAMLs from installed bundles."""
-
-__version__ = "1.0.0"
-__tool_type__ = "python"
-__category__ = "ryeos/core/verbs"
-__description__ = "List all known verbs and their aliases from installed bundles"
 
 import json
 import os
@@ -44,13 +43,7 @@ def _read_yamls(directory: str) -> list[dict]:
         try:
             with open(path) as f:
                 content = f.read()
-            lines = content.split("\n")
-            body_lines = []
-            for line in lines:
-                    continue
-                body_lines.append(line)
-            body = "\n".join(body_lines)
-            data = yaml.safe_load(body)
+            data = yaml.safe_load(content)
             if data and isinstance(data, dict):
                 data["_source_file"] = path
                 results.append(data)

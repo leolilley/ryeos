@@ -1,4 +1,3 @@
-# ryeos:signed:2026-06-07T05:18:54Z:2f269d5f7142b46126083ee72c82695ed1c945fb2fdecc7c917f58fc44bc80ec:Oi55hLOoztQnyv82fryg8TIrYYxzGTtAMqCXWihoo+pxuBfADpM23bIziQDXrUq0Lvonb8a1g+lZA7HragXzDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -19,7 +18,7 @@ execution:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
 formats:
   - extensions: [".py"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: "#"
       after_shebang: true
@@ -84,10 +83,8 @@ runtime:
     - native_resume
 metadata:
   # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
-  # Python files use Python's dunder convention (`__category__`,
-  # `__version__`, ...); the `parser:ryeos/core/python/ast` regex_kv
-  # config strips the `__` framing so the parsed dict has the same
-  # plain keys as the YAML case. Downstream rules — and the path
+  # Python files use a comment-YAML `# ryeos-tool:` header that parses
+  # to the same plain-key shape. Downstream rules — and the path
   # validator — therefore see ONE shape regardless of source format.
   rules:
     name:

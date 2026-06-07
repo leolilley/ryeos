@@ -1,3 +1,4 @@
+# ryeos:signed:2026-06-07T05:37:38Z:31e05eb8a0b55e27535e2b575aa77476d56a869b845c84099f2a0860240b9706:VmlT8saN+g88+R/8uZ6XmTZQfy4wIMYDxc/dCyKaUq33gXWAflwolNeYdd2wzlDcjnKjpKROvkDE7gQEeglwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 <!-- ryeos:signed:2026-06-05T04:12:08Z:0f7b7c98bf40c2a8f11734131af9d9aa2fec4190c1f5fc0d71556f7759fc2596:NRFVwGjBex+GHyJFZH0lC4f6DRbs3hF6R39qtci6YQ+YEA0cGSk6leYcMAhaLmtI8NiDY+LyRTKf4tnSYvSfBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
@@ -36,7 +37,7 @@ machine, not the LLM workflow layer:
 │   │                                     # objects, vault, remote status, push-head
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
 ├── parsers/ryeos/core/                  # javascript, markdown/frontmatter,
-│                                         # python/ast, yaml/yaml
+│                                         # python/tool-header, yaml/yaml
 ├── protocols/ryeos/core/                # opaque, runtime_v1, tool_streaming_v1
 ├── services/                            # bundle, fetch, verify, objects,
 │                                         # remote, vault, system, health, etc.

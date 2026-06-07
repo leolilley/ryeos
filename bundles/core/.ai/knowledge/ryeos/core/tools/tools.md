@@ -1,3 +1,4 @@
+# ryeos:signed:2026-06-07T05:37:38Z:88cc30a76a0843c8ac374a4852f0765162468c5fac7ed40f3adec782c9bc1006:nIUMON9IQccg1zVXYUWUSrazOVAiuL/xzlRkuHs9xGoXtGN6Cgy2cjxRDzFNXNyOvAEScITKerSBQ/7j2kXeCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 <!-- ryeos:signed:2026-05-31T08:15:56Z:2e9d58561c9dc08ccf1a50bf94c08ded9d949e093b036f30e86ea9bc0c4a7a28:NwTPFxOUNAgCnEeqHLP8h/SU1Hp6cYT4HDoi0ImI52NHw/M6/yegteT89lyznY480PbrUKAgRkTD+XqWuRa5DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
@@ -20,13 +21,13 @@ Tools can be authored in multiple formats:
 
 | Format   | Extension   | Parser                      |
 |----------|-------------|-----------------------------|
-| Python   | `.py`       | `parser:ryeos/core/python/ast` |
+| Python   | `.py`       | `parser:ryeos/core/python/tool-header` |
 | YAML     | `.yaml`     | `parser:ryeos/core/yaml/yaml` |
 | JS/TS    | `.js`, `.ts` | `parser:ryeos/core/javascript/javascript` |
 
-Python tools extract metadata from dunder constants (`__version__`,
-`__category__`, etc.) via AST parsing. YAML tools have metadata
-inline. All formats produce the same normalized metadata shape.
+Python tools extract metadata from a `# ryeos-tool:` comment-YAML header.
+YAML tools have metadata inline. All formats produce the same normalized
+metadata shape.
 
 ## Tool Metadata
 
@@ -62,10 +63,14 @@ The subprocess executor:
 ## Python Tool Anatomy
 
 ```python
+#!/usr/bin/env python3
+# ryeos-tool:
+#   category: my/project
+#   version: "1.0.0"
+#   tool_type: python
+#   executor_id: "tool:ryeos/core/runtimes/python/function"
+#   description: "Tool description."
 """Tool description."""
-__version__ = "1.0.0"
-__category__ = "my/project"
-__tool_type__ = "python"
 
 def execute(params, project_path):
     """Execute the tool. params is a dict from the caller."""

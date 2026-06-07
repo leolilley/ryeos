@@ -9,7 +9,7 @@
 //! drive `runtime:*` refs through the protocol-derived
 //! `ProtocolCapabilities` resolved from the verified protocol descriptor
 //! (introduced by 0b), instead of the deleted V5.2-shape `tool:native_pin`
-//! synth (whose `tool_type: tool` + `__executor_id__: native:*` shape is
+//! synth (whose `tool_type: tool` + `executor_id: native:*` shape is
 //! no longer a real V5.3 dispatch path now that every runtime is
 //! `kind: runtime`). The wording of every rejection is preserved
 //! byte-identically — that is the point of these pin tests, and
@@ -23,8 +23,8 @@ mod common;
 use std::path::Path;
 
 use base64::Engine;
-use common::fast_fixture::register_standard_bundle;
 use common::DaemonHarness;
+use common::fast_fixture::register_standard_bundle;
 use lillux::crypto::Signer as _;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ async fn post_execute_with_extras(
     (status, value)
 }
 
-/// Synthesize a `.py` tool whose `__executor_id__` chains to the bundled
+/// Synthesize a `.py` tool whose `executor_id` chains to the bundled
 /// python script runtime (which itself aliases `@subprocess`). Mirrors the
 /// in-process `hello_world_python.rs` setup but goes over HTTP. Used by
 /// `pin_tool_over_tcp_succeeds` — gives a working terminal subprocess
@@ -197,10 +197,11 @@ async fn synth_tool_request(
     let tools_dir = project.path().join(".ai").join("tools");
     std::fs::create_dir_all(&tools_dir).expect("mkdir tools");
     let body = r#"#!/usr/bin/env python3
-__version__ = "1.0.0"
-__executor_id__ = "tool:ryeos/core/runtimes/python/script"
-__category__ = "hello_pin"
-__description__ = "V5.3 dispatch_pin tool"
+# ryeos-tool:
+#   category: hello_pin
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   description: "V5.3 dispatch_pin tool"
 
 import sys
 print("pin")

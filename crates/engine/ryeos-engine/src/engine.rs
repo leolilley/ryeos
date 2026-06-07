@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::AI_DIR;
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::{
@@ -16,7 +17,6 @@ use crate::parsers::ParserDispatcher;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 /// Request for an effective, composed item value.
 #[derive(Debug, Clone)]
@@ -684,7 +684,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -833,7 +833,7 @@ formats:
         assert_eq!(resolved.source_format.extension, ".py");
         assert_eq!(
             resolved.source_format.parser,
-            "parser:ryeos/core/python/ast"
+            "parser:ryeos/core/python/tool-header"
         );
         assert!(resolved.signature_header.is_some());
         let sig = resolved.signature_header.unwrap();
@@ -1070,7 +1070,7 @@ formats:
         assert_eq!(resolved.source_format.extension, ".py");
         assert_eq!(
             resolved.source_format.parser,
-            "parser:ryeos/core/python/ast"
+            "parser:ryeos/core/python/tool-header"
         );
     }
 

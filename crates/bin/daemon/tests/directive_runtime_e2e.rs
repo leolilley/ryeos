@@ -16,9 +16,9 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
-use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
 /// Plant the `model-providers/mock` config under
@@ -146,10 +146,11 @@ fn plant_python_echo_tool(user_space: &Path, rel: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{rel}.py"));
     let body = r#"#!/usr/bin/env python3
-__version__ = "1.0.0"
-__executor_id__ = "tool:ryeos/core/runtimes/python/script"
-__category__ = "{dir_relative}"
-__description__ = "P3b echo tool — prints its single arg back"
+# ryeos-tool:
+#   category: "{dir_relative}"
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   description: "P3b echo tool — prints its single arg back"
 
 import json
 import sys
@@ -161,7 +162,8 @@ import sys
 # into the LLM context.
 print(json.dumps({"echoed": "ok"}))
 sys.exit(0)
-"#;
+"#
+    .replace("{dir_relative}", dir_relative);
     std::fs::write(&path, body)?;
     Ok(())
 }
@@ -248,7 +250,9 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
         Some(r) => r,
         None => {
             let stderr = h.drain_stderr_nonblocking().await;
-            panic!("response missing `result` envelope\nbody={body:#}\n--- daemon stderr ---\n{stderr}");
+            panic!(
+                "response missing `result` envelope\nbody={body:#}\n--- daemon stderr ---\n{stderr}"
+            );
         }
     };
     if result.get("success").and_then(|v| v.as_bool()) != Some(true) {
@@ -565,18 +569,19 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "X"}),
     );
-    let (status, body) =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
-            Err(_) => {
-                let stderr = h.drain_stderr_nonblocking().await;
-                panic!(
+    let (status, body) = match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut)
+        .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("post /execute failed: {e}"),
+        Err(_) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
                 "POST /execute timed out after 30s — denial path hung instead of failing cleanly.\n\
                  --- daemon stderr ---\n{stderr}"
             );
-            }
-        };
+        }
+    };
 
     assert_eq!(
         status,

@@ -429,7 +429,7 @@ mod tests {
     fn resolve_finds_project_space_when_only_source() {
         let project_root = tempdir();
         let system_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
@@ -447,7 +447,7 @@ mod tests {
     fn resolve_system_wins_over_project() {
         let project_root = tempdir();
         let system_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn resolve_finds_user_space() {
         let user_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
         write_item(&user_root, "tools", "my_tool", ".py", "# user");
 
@@ -494,7 +494,10 @@ mod tests {
     fn resolve_extension_priority() {
         let project_root = tempdir();
         // .py is listed first, so it should win even though .yaml also exists
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast"), (".yaml", "yaml/yaml")]);
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml/yaml")],
+        );
 
         write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
@@ -510,7 +513,7 @@ mod tests {
     #[test]
     fn resolve_not_found() {
         let project_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
         let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![]);
         let ref_ = CanonicalRef::parse("tool:nonexistent").unwrap();
@@ -533,7 +536,7 @@ mod tests {
         let project_root = tempdir();
         let user_root = tempdir();
         let system_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
         write_item(&user_root, "tools", "my_tool", ".py", "# user");
@@ -604,8 +607,7 @@ mod tests {
 
     #[test]
     fn parse_signature_header_after_shebang() {
-        let content =
-            "#!/usr/bin/env python3\n# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
+        let content = "#!/usr/bin/env python3\n# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
         let envelope = SignatureEnvelope {
             prefix: "#".to_owned(),
             suffix: None,
@@ -625,7 +627,7 @@ mod tests {
     fn resolve_item_full_emits_span() {
         let project_root = tempdir();
         let system_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/ast")]);
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
         write_item(&project_root, "tools", "trace_tool", ".py", "# content");
 
         let roots = ResolutionRoots::from_flat(Some(project_root.clone()), None, vec![system_root]);
