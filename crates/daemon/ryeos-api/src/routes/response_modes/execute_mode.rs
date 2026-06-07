@@ -1069,6 +1069,7 @@ mod tests {
             project_source: None,
             operation: None,
             inputs: None,
+            usage_subject: None,
         }
     }
 

@@ -1,6 +1,7 @@
 pub mod browser_launch_mode;
 pub mod event_stream_mode;
 pub mod execute_mode;
+pub mod handler_mode;
 pub mod json_mode;
 pub mod launch_mode;
 pub mod static_mode;
@@ -60,6 +61,7 @@ impl ResponseModeRegistry {
     ) -> Self {
         let mut r = Self::new();
         r.register(Arc::new(launch_mode::LaunchMode::default()));
+        r.register(Arc::new(handler_mode::HandlerMode));
         r.register(Arc::new(json_mode::JsonMode {
             service_descriptors,
         }));
@@ -108,6 +110,10 @@ mod tests {
         assert!(
             r.get("browser_launch").is_some(),
             "browser_launch mode must be registered"
+        );
+        assert!(
+            r.get("handler").is_some(),
+            "handler mode must be registered"
         );
         assert!(r.get("json").is_some(), "json mode must be registered");
         assert!(
