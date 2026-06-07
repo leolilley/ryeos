@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T04:05:13Z:cbfb4e8cc3a513f0e638b6305c9ad029202a3a7e55a8954daf52dc9f4b1ead11:L4Jq1277tkxfHa3xno13SJ4M0tmM13iyHawRhNnhfjTd1CDGoQGro4e8kmKNwjwSCQqPCsx77G9JVsDCxEHCBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T04:30:04Z:26462901ad653d6aeb61d5d79eeeae9ef7b8c66b61f6b95344f77de7a4b668ad:xlpRF5uC8RMjFnJNvmwIcJGpsgkdMSQWBcmO2ml/UgGdfgp3aGDzQ1cuKpXF4dxJg86PmwXUlLxEXGJbtCCuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
@@ -207,6 +207,57 @@ The daemon adds `thread_id` and callback authentication on the UDS
 request. Tool authors should use the runtime callback client available to
 their runtime rather than shelling out to operator commands such as
 `ryeos-core-tools bundle-events ...`.
+
+### Bundle events are durable state, not secret storage
+
+Bundle event payloads are persisted to CAS and indexed/replayed by Rye OS
+state machinery. They are appropriate for domain history, projections,
+idempotency records, state-machine transitions, and audit trails. They
+are not a secret boundary for provider refresh tokens, webhook signing
+secrets, OAuth client secrets, or other plaintext credentials.
+
+For secret-bearing bundle state, store only one of these in bundle
+events:
+
+- a vault reference or sealed secret identifier;
+- an envelope-encrypted blob whose plaintext key is not recorded in the
+  event chain;
+- non-sensitive metadata needed to reconstruct projections.
+
+The event chain may record that a token was created, rotated, revoked, or
+failed verification; it should not record the raw token unless the bundle
+has explicitly encrypted it outside the event payload.
+
+### Runtime recipes
+
+One-time state consumption, such as OAuth `state`, should be represented
+as a single chain per state nonce or setup session. Append `state_issued`
+with an expiry and owner principal, then consume with an append guarded by
+`expected_chain_head_hash`. If the guarded append fails, reread the chain:
+an existing `state_consumed` means replay/reuse and should be rejected;
+an expired state should append or return an expiry outcome without
+exchanging the provider code.
+
+Token rotation should use one chain per external account or credential
+binding. Record non-secret metadata such as provider account id,
+principal id, scopes, expiry, vault/sealed-secret ref, and rotation
+reason. Use idempotency keys derived from provider delivery IDs or the
+rotation attempt id so retries converge on one durable outcome.
+
+Idempotent side effects should use stable `idempotency_key` values based
+on the external event or local command being applied, for example
+`gmail-webhook:<history_id>` or `send:<message_id>`. On ambiguous tool
+results, reread the relevant chain before retrying. If the side effect may
+have happened outside Rye OS, append a reconciliation-needed event and let
+a scheduled reconciler observe the provider/system of record before
+issuing another side effect.
+
+Projection rebuilds should treat bundle events as the source of truth for
+bundle-owned materialized views. Rebuilders scan event kinds, replay
+chains in order, ignore duplicate idempotency keys, and tolerate terminal
+failure events. A projection that cannot decide whether an external side
+effect occurred should materialize an explicit ambiguous/reconcile state
+rather than silently assuming success or failure.
 
 ## Reachability
 

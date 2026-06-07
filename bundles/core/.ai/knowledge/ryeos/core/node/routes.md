@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T04:05:13Z:8a3fdcdc5fbba280e82cf1eeb4ccf5f5aba213993da6015b1ce9ca5ecbc53c66:HnFYNFw+31aw+K2Lc+3Y+HNJ1LSFid+vM40GFWsshGdyAPgECT8T72JUdFXIHitO35UkrS4wsnys5DO/IQGACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T04:30:03Z:29b0e4f8b04dc1ccb0cd40da0fd6d2321fc1e1d8eeea7f44f9847df73c804838:nFrXIUHXe8Dm7Xg4b7/eoIs3QVAE8OimgqcrMogD79gyaC+jlZH50g2KGXSEMdfgosu88GV4aCRiPL01JhDECA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -185,6 +185,19 @@ The request envelope passed as tool parameters has this shape:
 }
 ```
 
+`principal.id` is the stable application allowlist key. For
+`auth: ryeos_signed`, the verifier sets it to the request signing
+fingerprint in `fp:<fingerprint>` form; use that exact string for
+bundle/project allowlists and durable ownership records. The
+`principal.verifier` field identifies which verifier produced the
+principal (`none`, `ryeos_signed`, `hmac`, and future verifier names) and
+should be treated as mechanism metadata, not the allowlist key.
+
+Handler tools should derive tenant, owner, and account authority from
+the verified principal or from server-side state that was created under a
+verified principal. Query-string values are request data, not authority,
+even on callback routes.
+
 `source_config.request` is deliberately opt-in:
 
 | Field | Effect |
@@ -220,6 +233,21 @@ response:
       envelope_field: response
       response_bytes_max: 1048576
 ```
+
+OAuth integrations should use a two-route pattern:
+
+1. a protected setup/connect route (`auth: ryeos_signed`) that creates a
+   one-time state record bound to `principal.id`, selected provider,
+   redirect URI, and any local account context;
+2. a public provider callback route (`auth: none`) that consumes that
+   state exactly once, exchanges the provider code, stores resulting
+   tokens through the bundle's chosen secret/state mechanism, and returns
+   the final redirect or HTML response.
+
+Do not trust `owner`, `account`, `bundle`, or redirect destination from
+callback query parameters. The callback should derive those from the
+consumed state record and reject missing, expired, reused, or mismatched
+state before exchanging the provider code.
 
 Webhook JSON body example:
 
@@ -356,6 +384,22 @@ global auth middleware.
 This means a webhook endpoint from Stripe can use HMAC while the
 `/execute` endpoint uses Ed25519 signatures — no conflict, no middleware
 ordering concerns.
+
+### Choosing central auth vs route auth
+
+Use central Rye OS auth (`auth: ryeos_signed`) when the caller is a Rye OS
+operator, project, agent, or trusted service that can sign requests and
+you want grants/scopes to flow through the daemon's normal authorization
+model. This is the right default for setup/admin routes, remote-control
+operations, and any route that chooses durable ownership.
+
+Use route-specific auth when the caller is an external provider with its
+own verification scheme: `auth: none` only for callbacks whose authority
+comes from one-time state, `auth: hmac` for providers that sign webhook
+deliveries, and future provider verifiers for protocols such as SNS-style
+certificate verification. Keep provider identity at the route boundary;
+after verification, write bundle events or state under the derived
+principal/state, not under query parameters supplied by the provider.
 
 ## Per-Route Semaphores
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T04:05:13Z:6a664f22b9d422fda197b77fbade269d18cd0af7d3e5a24c6baa44c49583b272:U69MsxBdbX7QupYvHGFgHN8yxqT8Q4ZO3W8IAxMVlqOguU4uaNTzz0M3Ysh7yjkgkw82HWvyVJqhSvOjjD84Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T04:30:05Z:d64c918868f6385e9a7b70b1b1e369f61c4cd6a5c234858df5a36e9daab9effd:PbFjoQDGo2EtgkODgwqJg3gKJqAin67U8+gdeKhQFGZvk4MFk9NzH+4vOUK72iH0Tj2scjkedfvqfrkwPbzsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -210,6 +210,20 @@ Use scheduler services for imperative operator control (`register`,
 `pause`, `resume`, `deregister`, `show_fires`). Use project deploy
 schedule declarations for repeatable bundle/project-owned runtime jobs.
 
+Hosted deployments should treat schedule declarations as part of bundle
+activation. The operator flow is: install/verify the bundle, authorize the
+execution principal that will own the scheduled work, reconcile declared
+schedules into node schedule records, then inspect `scheduler/list` or
+`scheduler/show_fires` before enabling traffic. Disable or pause schedules
+before removing a bundle or revoking the execution principal.
+
+Long-running bundle duties should be modeled as small scheduled tools
+rather than HTTP callbacks: process send queues, run due campaign work,
+poll IMAP or provider deltas, retry ambiguous side effects, and
+rebuild/materialize projections. Each scheduled tool should be idempotent
+against bundle events or the provider's delivery IDs so missed, retried,
+or overlapping fires do not duplicate external side effects.
+
 ## Service vs Tool
 
 | Aspect | Service | Tool |
@@ -230,6 +244,33 @@ HTTP route under `.ai/node/routes/`. Examples:
 - `service:system/push-head` via `/push-head`
 - `service:objects/get` via `/objects/get`
 - `service:threads/list` via `/threads`
+
+Bundle handler routes follow the same node route table, but their source
+is a fixed same-bundle `tool:` ref. A hosted public route is live only
+after the bundle is installed into the node, its route items verify, the
+daemon route table is built/reloaded, required runtime config/secrets are
+available, and the public ingress forwards the desired path to the Rye OS
+daemon over TLS.
+
+Operator checklist for public bundle routes:
+
+1. install or update the signed bundle and verify it against configured
+   registry roots;
+2. provision declared `required_secrets` and non-secret runtime config
+   such as public base URL, OAuth redirect URI, provider region, and
+   webhook verification settings;
+3. authorize the setup/admin caller fingerprints for protected routes;
+4. configure ingress to expose only intended public paths and preserve
+   headers required by the route descriptor;
+5. reload or restart the daemon if the deployment model does not hot-load
+   route table changes;
+6. probe health/setup/callback/webhook paths with expected auth and body
+   shapes before handing the URL to the provider.
+
+Use route auth for inbound provider verification and scheduler services
+for background runtime duties. Do not make providers call generic
+`/execute`, and do not use public handler routes for recurring internal
+maintenance that can be represented as a signed schedule.
 
 ### Verb-backed services
 
