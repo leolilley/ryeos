@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:8084f3f8411744af1a4566095806bab11efc76a92b86f0e3419667bc7043e66e:eVOI16K8YsutQ6xQMB8gLnVKHGwBZBrOvmRMRl3PwWSA3J1YjVqatqsu15xd4fqbNGv3rxo9OLHpnatjx3TbAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T02:02:55Z:8306376255754667d969392d40bb8debec6b96aedad8930bc65693d2ae21b5c6:gygBzwtWe4JOpuWPKGnmMtlAwIaB+UvhYBsIqsX37IQPjHAH7wYFviVPAyM2L6XPfsfUm3mzYKjQxpmfH2dNAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core/node
@@ -72,7 +72,7 @@ The dispatcher does:
 
 ### Step 4: Response modes bridge HTTP to business logic
 
-Five built-in modes, each a trait implementation:
+Built-in modes, each a trait implementation:
 
 | Mode | What it does | Source |
 |---|---|---|
@@ -81,14 +81,84 @@ Five built-in modes, each a trait implementation:
 | `execute` | Full dispatch pipeline (token → engine) | Implicit (from body) |
 | `event_stream` | SSE stream (gateway or subscription) | `dispatch_launch` or `thread_events` |
 | `launch` | Fire-and-forget dispatch, returns 202 | `response.source_config` |
+| `handler` | Calls a fixed route handler with a request envelope; the handler returns an HTTP response envelope | `tool:<bundle>/<path>` |
+| `browser_launch` | UI-specific session-cookie + redirect adapter | `service:ui/launch` |
 
-The `accepted` key is an alias for `launch`.
+The `accepted` key is a legacy alias for `launch`; new route descriptors
+should use `launch`.
 
 Each mode is strict about what it accepts. The `execute` mode rejects a
 route that declares `response.source` or static fields — it's a
 dedicated pipeline. The `json` mode requires `response.source` and
 rejects `execute` fields. You can't accidentally wire the wrong handler
 type to the wrong mode.
+
+### Handler mode
+
+`handler` is for fixed-target HTTP endpoints such as public webhooks,
+tracking pixels, redirects, and small HTML/text responses. Unlike
+`execute`, the request cannot choose an `item_ref` or `project_path`.
+Unlike `json`, the route target owns the HTTP response envelope.
+
+```yaml
+id: ryeos-email.track_click
+path: /track/click
+methods: [GET]
+auth: none
+request:
+  body: none
+response:
+  mode: handler
+  source: tool:ryeos-email/webhook/track_click
+  source_config:
+    request:
+      query: true
+      path_params: true
+      headers:
+        - user-agent
+        - x-forwarded-for
+    result:
+      envelope_field: response
+      response_bytes_max: 1048576
+```
+
+The daemon builds a request envelope and passes it as tool parameters.
+The handler tool returns a response envelope such as:
+
+```json
+{
+  "response": {
+    "status": 302,
+    "headers": {
+      "Location": "https://example.com/target"
+    }
+  }
+}
+```
+
+or:
+
+```json
+{
+  "response": {
+    "status": 200,
+    "content_type": "image/gif",
+    "body_base64": "..."
+  }
+}
+```
+
+`handler` mode rejects execution-identity fields such as `project_path`,
+`item_ref`, and `parameters` in `source_config`; those belong to the
+generic execution surfaces, not bundle-declared HTTP handlers.
+
+Handler response envelopes support `status`, `headers`, `json`, `body`,
+`body_base64`, and `content_type`. JSON responses always use
+`application/json`; text and base64 bodies may set `content_type`. Dynamic
+response headers are sanitized: hop-by-hop headers, `Content-Type`, and
+`Set-Cookie` must not be supplied through `headers`. Use `content_type`
+for content type instead. `response_bytes_max` bounds encoded JSON, text,
+or decoded base64 response body bytes.
 
 ## Invokers
 
