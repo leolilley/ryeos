@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:11Z:871fd8d08da4ae94419beba206bc5d9d0707516ca82ce48c613f770da72a1730:fNkZsK+uJ3sy6EZ64uCzmJ3kqxXTo480R1zIBIr/lPm70XgiU7A/ocSEQjrZzVBh766mlAHnRLcRbpFj5wvECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T05:19:02Z:871fd8d08da4ae94419beba206bc5d9d0707516ca82ce48c613f770da72a1730:fNkZsK+uJ3sy6EZ64uCzmJ3kqxXTo480R1zIBIr/lPm70XgiU7A/ocSEQjrZzVBh766mlAHnRLcRbpFj5wvECg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: launch-mint
 version: "1.0.0"

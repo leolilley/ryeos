@@ -137,6 +137,7 @@ pub enum ViewKindSpec {
     Projects,
     SpaceBrowser,
     Trust,
+    Atlas,
     Graph,
     EventInspector,
 }
@@ -157,6 +158,7 @@ impl ViewKindSpec {
             ViewKindSpec::Projects => ViewSpec::Projects,
             ViewKindSpec::SpaceBrowser => ViewSpec::SpaceBrowser { project: None },
             ViewKindSpec::Trust => ViewSpec::Trust,
+            ViewKindSpec::Atlas => ViewSpec::Atlas,
             ViewKindSpec::Graph => ViewSpec::Graph { graph_id: None },
             ViewKindSpec::EventInspector => ViewSpec::EventInspector,
         }
@@ -203,6 +205,59 @@ pub struct AmbientSpec {
     pub show_background: Option<bool>,
     #[serde(default)]
     pub opacity: Option<f32>,
+    #[serde(default)]
+    pub mode: AmbientModeSpec,
+    #[serde(default)]
+    pub atlas: Option<AmbientAtlasSpec>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbientModeSpec {
+    #[default]
+    Ambient,
+    NamespaceAtlas,
+    #[serde(rename = "atlas_2d")]
+    Atlas2d,
+    #[serde(rename = "atlas_paper_3d")]
+    AtlasPaper3d,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AmbientAtlasSpec {
+    #[serde(default)]
+    pub style: AmbientAtlasStyleSpec,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmbientAtlasStyleSpec {
+    #[default]
+    #[serde(rename = "flat_2d")]
+    Flat2d,
+    #[serde(rename = "paper_3d")]
+    Paper3d,
+}
+
+impl AmbientSpec {
+    pub fn namespace_atlas_style(&self) -> Option<AmbientAtlasStyleSpec> {
+        match self.mode {
+            AmbientModeSpec::Ambient => None,
+            AmbientModeSpec::NamespaceAtlas => Some(
+                self.atlas
+                    .as_ref()
+                    .map(|atlas| atlas.style)
+                    .unwrap_or_default(),
+            ),
+            AmbientModeSpec::Atlas2d => Some(AmbientAtlasStyleSpec::Flat2d),
+            AmbientModeSpec::AtlasPaper3d => Some(AmbientAtlasStyleSpec::Paper3d),
+        }
+    }
+
+    pub fn uses_namespace_atlas(&self) -> bool {
+        self.show_background.unwrap_or(true) && self.namespace_atlas_style().is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1175,6 +1230,29 @@ view = "thread_list"
             .unwrap_or_else(|e| panic!("failed to parse bundled graph surface: {}", e));
         assert_eq!(spec.name, "graph-operator");
         assert_eq!(spec.extends.as_deref(), Some("surface:ryeos/studio/base"));
+    }
+
+    #[test]
+    fn bundled_atlas_surface_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("bundles/studio/.ai/surfaces/ryeos/studio/atlas.yaml");
+        assert!(path.exists(), "bundled atlas surface missing at {path:?}");
+        let content = std::fs::read_to_string(path).unwrap();
+        let spec: SurfaceSpec = serde_yaml::from_str(&content)
+            .unwrap_or_else(|e| panic!("failed to parse bundled atlas surface: {}", e));
+        assert_eq!(spec.name, "studio-atlas");
+        assert_eq!(
+            spec.ambient.as_ref().map(|ambient| ambient.mode),
+            Some(AmbientModeSpec::NamespaceAtlas)
+        );
+        assert_eq!(
+            spec.ambient
+                .as_ref()
+                .and_then(|ambient| ambient.namespace_atlas_style()),
+            Some(AmbientAtlasStyleSpec::Flat2d)
+        );
+        assert!(validate_surface(&spec).is_empty());
     }
 
     #[test]

@@ -5,10 +5,11 @@
 //! alias/verb command model. A command descriptor does not grant authority;
 //! execution authorization remains based on the final item ref.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,6 +27,8 @@ pub struct CommandDef {
     pub arguments: Vec<CommandArgumentDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forms: Vec<CommandArgumentForm>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub defaults: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_binding: Option<CommandParameterBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -521,6 +524,7 @@ mod tests {
             help: None,
             arguments: Vec::new(),
             forms: Vec::new(),
+            defaults: Default::default(),
             parameter_binding: None,
             project: None,
             dispatch: CommandDispatch::ExecuteRef {

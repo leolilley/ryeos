@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-07T03:11:46Z:af1d5eb07e172577be02ce0e4f2c53e5d718112f98ff50333b59ca1c552d6d06:u37q7uINRAYejaOrnOkwKp7CsnNuLr1wlr1giuikjVkwv7scMbXjgUi69Rln4MMk97BeTYJ+Q2wJ8lJ4t3W4CQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+name: central-auth
+version: 0.1.0
+description: 'Central web-app auth primitives: principals, sessions, invites, roles and capabilities'
+provides_kinds: []
+requires_kinds:
+- tool
+- config
+uses_kinds: []
+bundle_events: []

@@ -216,6 +216,8 @@ impl Walker {
         GraphResult {
             success: result.errors.is_empty(),
             graph_id: self.graph.graph_id.clone(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
             graph_run_id: String::new(),
             status: if result.errors.is_empty() {
                 "valid".into()
@@ -273,6 +275,8 @@ impl Walker {
             let result = GraphResult {
                 success: false,
                 graph_id: self.graph.graph_id.clone(),
+                definition_ref: self.graph.definition_ref.clone(),
+                definition_hash: self.graph.definition_hash.clone(),
                 graph_run_id,
                 status: "invalid".into(),
                 steps: 0,
@@ -347,7 +351,9 @@ impl Walker {
                 .append_runtime_event(
                     RuntimeEventType::GraphStarted,
                     json!({
-                        "graph_id": self.graph.graph_id,
+                        "graph_id": &self.graph.graph_id,
+                        "definition_ref": &self.graph.definition_ref,
+                        "definition_hash": &self.graph.definition_hash,
                         "graph_run_id": &graph_run_id,
                     }),
                 )
@@ -880,7 +886,10 @@ impl Walker {
                             RuntimeEventType::GraphForeachIteration,
                             json!({
                                 "graph_run_id": graph_run_id,
+                                "definition_ref": &self.graph.definition_ref,
+                                "definition_hash": &self.graph.definition_hash,
                                 "node": current,
+                                "node_ref": node_ref(&self.graph.definition_ref, current),
                                 "step": step,
                                 "iteration": i,
                                 "total": results.len(),
@@ -979,7 +988,9 @@ impl Walker {
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
                     step,
-                    result_hash: None,
+                    definition_ref: self.graph.definition_ref.clone(),
+                    definition_hash: self.graph.definition_hash.clone(),
+                    result_hash: Some(hash_json_value(result)),
                     cache_hit,
                     elapsed_ms,
                     error: None,
@@ -1043,6 +1054,8 @@ impl Walker {
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
                     step,
+                    definition_ref: self.graph.definition_ref.clone(),
+                    definition_hash: self.graph.definition_hash.clone(),
                     result_hash: None,
                     cache_hit: false,
                     elapsed_ms,
@@ -1143,6 +1156,8 @@ impl Walker {
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
                     step,
+                    definition_ref: self.graph.definition_ref.clone(),
+                    definition_hash: self.graph.definition_hash.clone(),
                     result_hash: None,
                     cache_hit: false,
                     elapsed_ms,
@@ -1289,6 +1304,8 @@ impl Walker {
         let graph_result = GraphResult {
             success,
             graph_id: self.graph.graph_id.clone(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
             graph_run_id: graph_run_id.to_string(),
             status: status.clone(),
             steps,
@@ -1314,6 +1331,9 @@ impl Walker {
                 .append_runtime_event(
                     RuntimeEventType::GraphCompleted,
                     json!({
+                        "graph_id": &self.graph.graph_id,
+                        "definition_ref": &self.graph.definition_ref,
+                        "definition_hash": &self.graph.definition_hash,
                         "graph_run_id": graph_run_id,
                         "status": &status,
                         "steps": steps,
@@ -1371,6 +1391,8 @@ impl Walker {
             let graph_result = GraphResult {
                 success: false,
                 graph_id: self.graph.graph_id.clone(),
+                definition_ref: self.graph.definition_ref.clone(),
+                definition_hash: self.graph.definition_hash.clone(),
                 graph_run_id: graph_run_id.to_string(),
                 status: "error".into(),
                 steps: next_step,
@@ -1386,6 +1408,9 @@ impl Walker {
                 .append_runtime_event(
                     RuntimeEventType::GraphCompleted,
                     json!({
+                        "graph_id": &self.graph.graph_id,
+                        "definition_ref": &self.graph.definition_ref,
+                        "definition_hash": &self.graph.definition_hash,
                         "graph_run_id": graph_run_id,
                         "status": "error",
                         "steps": next_step,
@@ -1416,7 +1441,10 @@ impl Walker {
                 RuntimeEventType::GraphStepStarted,
                 json!({
                     "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "definition_hash": &self.graph.definition_hash,
                     "node": current,
+                    "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
                 }),
             )
@@ -1437,7 +1465,10 @@ impl Walker {
                 RuntimeEventType::ToolCallStart,
                 json!({
                     "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "definition_hash": &self.graph.definition_hash,
                     "node": current,
+                    "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
                     "item_id": item_id,
                 }),
@@ -1460,7 +1491,10 @@ impl Walker {
                 RuntimeEventType::ToolCallResult,
                 json!({
                     "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "definition_hash": &self.graph.definition_hash,
                     "node": current,
+                    "node_ref": node_ref(&self.graph.definition_ref, current),
                     "step": step,
                     "item_id": item_id,
                     "status": status,
@@ -1480,7 +1514,10 @@ impl Walker {
     ) {
         let mut payload = json!({
             "graph_run_id": graph_run_id,
+            "definition_ref": &self.graph.definition_ref,
+            "definition_hash": &self.graph.definition_hash,
             "node": current,
+            "node_ref": node_ref(&self.graph.definition_ref, current),
             "step": step,
             "status": status,
         });
@@ -1508,9 +1545,13 @@ impl Walker {
                     RuntimeEventType::GraphBranchTaken,
                     json!({
                         "graph_run_id": graph_run_id,
+                        "definition_ref": &self.graph.definition_ref,
+                        "definition_hash": &self.graph.definition_hash,
                         "node": current,
+                        "node_ref": node_ref(&self.graph.definition_ref, current),
                         "step": step,
                         "target": t,
+                        "target_node_ref": node_ref(&self.graph.definition_ref, t),
                     }),
                 )
                 .await;
@@ -1574,6 +1615,14 @@ fn strip_none_values(val: &Value) -> Value {
         Value::Array(arr) => Value::Array(arr.iter().map(strip_none_values).collect()),
         other => other.clone(),
     }
+}
+
+fn node_ref(definition_ref: &str, node: &str) -> String {
+    format!("{definition_ref}#node:{node}")
+}
+
+fn hash_json_value(value: &Value) -> String {
+    lillux::cas::sha256_hex(serde_json::to_string(value).unwrap_or_default().as_bytes())
 }
 
 fn compute_cache_key(graph_id: &str, node_name: &str, action: &Value) -> String {

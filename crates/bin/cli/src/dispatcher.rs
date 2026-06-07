@@ -605,6 +605,7 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
+            defaults: Default::default(),
             parameter_binding: None,
             project: Some(ryeos_runtime::CommandProjectPolicy {
                 resolution: project_resolution,
@@ -638,6 +639,7 @@ mod tests {
                     matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
                 }],
             }],
+            defaults: Default::default(),
             parameter_binding: Some(ryeos_runtime::CommandParameterBinding {
                 mode: ryeos_runtime::CommandParameterBindingMode::TailObject,
                 input_flag: Some("input".into()),

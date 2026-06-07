@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::layout::{layout_paths, LayoutNode};
 use super::model::{
-    AtlasBoundsVm, AtlasItemKind, AtlasLinkVm, AtlasNodeVm, AtlasRegionVm, AtlasScope,
-    AtlasStackItemVm, AtlasUiStateVm, AtlasVisualStateVm, NamespaceAtlasVm,
+    AtlasBoundsVm, AtlasInteractionVm, AtlasItemKind, AtlasLinkVm, AtlasNodeVm, AtlasProjectionVm,
+    AtlasRegionVm, AtlasScope, AtlasStackItemVm, AtlasUiStateVm, AtlasVisualStateVm,
+    NamespaceAtlasVm,
 };
+use crate::radial_tree::{layout_paths, RadialTreeNode};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AtlasInput {
@@ -26,6 +27,24 @@ pub struct AtlasItemInput {
     pub source_path: String,
     pub scope: String,
     pub executable: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AtlasFileSpaceInput {
+    pub generation: u64,
+    pub root_label: String,
+    pub root: String,
+    pub entries: Vec<AtlasFileInput>,
+    pub selected_ref: Option<String>,
+    pub ui: AtlasUiStateVm,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AtlasFileInput {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
 }
 
 pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
@@ -51,6 +70,9 @@ pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
             .or_default()
             .push(AtlasStackItemVm {
                 id: format!("item:{canonical_ref}"),
+                interaction: Some(AtlasInteractionVm::InspectItem {
+                    canonical_ref: canonical_ref.clone(),
+                }),
                 canonical_ref,
                 kind,
                 scope: AtlasScope::from_str(&item.scope),
@@ -109,15 +131,23 @@ pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
                 .is_some_and(|selected_namespace| selected_namespace == namespace_key);
         let dimmed = selected_namespace.is_some() && !highlighted && !stack.is_empty();
 
+        let visible_stack = stack
+            .into_iter()
+            .filter(|item| input.ui.item_visible(item.kind))
+            .collect();
         nodes.push(node_from_layout(
             layout,
-            stack,
+            visible_stack,
             &input.root_label,
             AtlasVisualStateVm {
                 selected,
                 highlighted,
                 dimmed,
             },
+            Some(AtlasInteractionVm::FocusFolder {
+                root: None,
+                path: namespace_key,
+            }),
         ));
     }
 
@@ -127,12 +157,103 @@ pub fn build_namespace_atlas(input: AtlasInput) -> NamespaceAtlasVm {
     NamespaceAtlasVm {
         schema_version: "ryeos.namespace_atlas.v1".to_string(),
         generation: input.generation,
+        projection: AtlasProjectionVm::AiSpace,
         coordinate_system: "ryeos.radial_namespace.v1".to_string(),
         root_label: non_empty(input.root_label).unwrap_or_else(|| ".ai".to_string()),
         bounds,
         nodes,
         links,
         regions,
+        selected_ref,
+        ui: input.ui,
+    }
+}
+
+pub fn build_file_space_atlas(input: AtlasFileSpaceInput) -> NamespaceAtlasVm {
+    let mut stack_items: BTreeMap<String, Vec<AtlasStackItemVm>> = BTreeMap::new();
+    let mut paths = BTreeSet::new();
+    paths.insert(Vec::new());
+
+    for entry in input.entries {
+        let path = split_path(&entry.path);
+        if entry.is_dir {
+            paths.insert(path);
+            continue;
+        }
+        let folder = path
+            .get(..path.len().saturating_sub(1))
+            .map(|parts| parts.to_vec())
+            .unwrap_or_default();
+        let folder_key = folder.join("/");
+        paths.insert(folder);
+        let file_ref = format!("file:{}:{}", input.root, entry.path);
+        stack_items
+            .entry(folder_key)
+            .or_default()
+            .push(AtlasStackItemVm {
+                id: format!("item:{file_ref}"),
+                interaction: Some(AtlasInteractionVm::ReadFile {
+                    root: input.root.clone(),
+                    path: entry.path.clone(),
+                }),
+                canonical_ref: file_ref,
+                kind: AtlasItemKind::File,
+                scope: AtlasScope::from_str(&input.root),
+                label: non_empty(entry.name).unwrap_or_else(|| label_from_key(&entry.path)),
+                source_path: entry.path,
+                executable: false,
+                y_offset: AtlasItemKind::File.layer_offset(),
+            });
+    }
+
+    let layout_nodes = layout_paths(paths.into_iter().collect());
+    let mut bounds = AtlasBoundsVm::default();
+    let selected_ref = input.selected_ref.clone();
+    let mut nodes = Vec::new();
+
+    for layout in &layout_nodes {
+        bounds.radius_max = bounds.radius_max.max(layout.radius);
+        bounds.x_min = bounds.x_min.min(layout.position[0]);
+        bounds.x_max = bounds.x_max.max(layout.position[0]);
+        bounds.z_min = bounds.z_min.min(layout.position[2]);
+        bounds.z_max = bounds.z_max.max(layout.position[2]);
+
+        let namespace_key = layout.path.join("/");
+        let mut stack = stack_items.remove(&namespace_key).unwrap_or_default();
+        stack.sort_by(|a, b| a.source_path.cmp(&b.source_path));
+        let selected = selected_ref
+            .as_deref()
+            .is_some_and(|selected| stack.iter().any(|item| item.canonical_ref == selected));
+        let visible_stack = stack
+            .into_iter()
+            .filter(|item| input.ui.item_visible(item.kind))
+            .collect();
+        nodes.push(node_from_layout(
+            layout,
+            visible_stack,
+            &input.root_label,
+            AtlasVisualStateVm {
+                selected,
+                highlighted: selected,
+                dimmed: false,
+            },
+            Some(AtlasInteractionVm::FocusFolder {
+                root: Some(input.root.clone()),
+                path: namespace_key,
+            }),
+        ));
+    }
+
+    NamespaceAtlasVm {
+        schema_version: "ryeos.namespace_atlas.v1".to_string(),
+        generation: input.generation,
+        projection: AtlasProjectionVm::FileSpace,
+        coordinate_system: "ryeos.radial_tree.v1".to_string(),
+        root_label: non_empty(input.root_label).unwrap_or_else(|| "File Space".to_string()),
+        bounds,
+        nodes,
+        links: Vec::new(),
+        regions: Vec::new(),
         selected_ref,
         ui: input.ui,
     }
@@ -174,10 +295,11 @@ fn build_context_links(
 }
 
 fn node_from_layout(
-    layout: &LayoutNode,
+    layout: &RadialTreeNode,
     stack: Vec<AtlasStackItemVm>,
     root_label: &str,
     state: AtlasVisualStateVm,
+    interaction: Option<AtlasInteractionVm>,
 ) -> AtlasNodeVm {
     let namespace_key = layout.path.join("/");
     AtlasNodeVm {
@@ -201,6 +323,7 @@ fn node_from_layout(
         position: layout.position,
         stack,
         state,
+        interaction,
     }
 }
 
@@ -367,6 +490,7 @@ fn fallback_canonical_ref(kind: AtlasItemKind, namespace_key: &str) -> String {
         AtlasItemKind::Tool => "tool",
         AtlasItemKind::Knowledge => "knowledge",
         AtlasItemKind::Config => "config",
+        AtlasItemKind::File => "file",
         AtlasItemKind::Other => "item",
     };
     format!("{prefix}:{namespace_key}")

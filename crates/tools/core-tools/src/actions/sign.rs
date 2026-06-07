@@ -756,8 +756,7 @@ mod tests {
 
     #[test]
     fn parse_sign_target_rejects_suffixes() {
-        let err = parse_sign_target("knowledge:smoke/entry@t:2026-06-07T00:00:00Z")
-            .unwrap_err();
+        let err = parse_sign_target("knowledge:smoke/entry@t:2026-06-07T00:00:00Z").unwrap_err();
         assert!(err.to_string().contains("do not support suffixes"));
 
         let err = parse_sign_target("knowledge:smoke/*@t:2026-06-07T00:00:00Z").unwrap_err();

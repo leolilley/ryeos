@@ -175,12 +175,12 @@ pub async fn execute_service_verified(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     match (mode, avail) {
         (ExecutionMode::Standalone, ServiceAvailability::DaemonOnly) => {
-            bail!("service:{service_ref} is DaemonOnly; start the daemon and call /execute");
+            bail!("{service_ref} is DaemonOnly; start the daemon and call /execute");
         }
         (ExecutionMode::Live, ServiceAvailability::OfflineOnly) => {
             bail!(
-                "service:{service_ref} is OfflineOnly; engine reload not implemented; \
-                 run `ryeosd run-service service:{service_ref}` while daemon is stopped"
+                "{service_ref} is OfflineOnly; engine reload not implemented; \
+                 run `ryeosd run-service {service_ref}` while daemon is stopped"
             );
         }
         _ => {}

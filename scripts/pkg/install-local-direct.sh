@@ -23,7 +23,8 @@ Fast-install the current checkout using the packaged RyeOS layout:
   ~/.local/share/ryeos/.ai/bundles/{core,standard,studio,web,hosted-node}  (after init)
 
 Options:
-  --skip-populate       Do not run scripts/populate-bundles.sh first
+  --populate            Run scripts/populate-bundles.sh first (expensive; rebuilds
+                        bundle-owned release binaries and republishes bundles)
   --no-init             Install files but do not run ryeos init
   --no-daemon-restart   Do not stop/restart an already-running daemon
   --keep-shadows        Do not move /usr/local/bin or ~/.local/bin RyeOS shadows
@@ -35,10 +36,11 @@ Options:
                         (default: full)
   -h, --help            Show this help
 
-Default behavior is safe and complete: populate bundles, install files,
-stop any already-running daemon, move stale PATH shadows aside, run
-ryeos init with the installed PUBLISHER_TRUST.toml files, then restart
-the daemon if it was running before the install.
+Default behavior is incremental: install already-built binaries and bundle
+sources, stop any already-running daemon, move stale PATH shadows aside, run
+ryeos init with the installed PUBLISHER_TRUST.toml files, then restart the
+daemon if it was running before the install. Pass --populate only when bundle
+artifacts actually need to be regenerated.
 EOF
 }
 
@@ -100,7 +102,7 @@ stop_daemon_for_install() {
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 
-run_populate=1
+run_populate=0
 run_init=1
 restart_daemon=1
 cleanup_shadows=1
@@ -110,8 +112,8 @@ bundle_set="full"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --skip-populate)
-            run_populate=0
+        --populate)
+            run_populate=1
             shift
             ;;
         --no-init)

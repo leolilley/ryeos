@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use crate::atlas::{build_namespace_atlas, AtlasInput, AtlasItemInput, NamespaceAtlasVm};
+use crate::atlas::{
+    build_file_space_atlas, build_namespace_atlas, AtlasFileInput, AtlasFileSpaceInput, AtlasInput,
+    AtlasItemInput, AtlasProjectionVm, NamespaceAtlasVm,
+};
 
 use super::event::StudioAction;
 use super::model::StudioInspectorState;
@@ -308,25 +311,58 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         capabilities.sort();
         capabilities.dedup();
 
-        scene.atlas = Some(build_namespace_atlas(AtlasInput {
+        if core.ui.atlas.active_projection == AtlasProjectionVm::AiSpace {
+            scene.atlas = Some(build_namespace_atlas(AtlasInput {
+                generation: core.generation,
+                root_label: ".ai".to_string(),
+                items: items
+                    .items
+                    .iter()
+                    .map(|item| AtlasItemInput {
+                        canonical_ref: item.canonical_ref.clone(),
+                        kind: item.item_kind.clone(),
+                        label: item.label.clone(),
+                        namespace: item.namespace.clone(),
+                        source_path: item.source_path.clone(),
+                        scope: item.space.clone(),
+                        executable: item.executable,
+                    })
+                    .collect(),
+                capabilities,
+                selected_ref,
+                context_refs: atlas_context_refs(core),
+                ui: core.ui.atlas.clone(),
+            }));
+        }
+    }
+
+    if core.ui.atlas.active_projection == AtlasProjectionVm::FileSpace {
+        let file_space = core.data.file_space.as_ref();
+        let selected_ref = match &core.ui.inspector {
+            StudioInspectorState::File { root, path } => Some(format!("file:{root}:{path}")),
+            _ => None,
+        };
+        scene.atlas = Some(build_file_space_atlas(AtlasFileSpaceInput {
             generation: core.generation,
-            root_label: ".ai".to_string(),
-            items: items
-                .items
-                .iter()
-                .map(|item| AtlasItemInput {
-                    canonical_ref: item.canonical_ref.clone(),
-                    kind: item.item_kind.clone(),
-                    label: item.label.clone(),
-                    namespace: item.namespace.clone(),
-                    source_path: item.source_path.clone(),
-                    scope: item.space.clone(),
-                    executable: item.executable,
+            root_label: "File Space".to_string(),
+            root: file_space
+                .map(|file_space| file_space.root.clone())
+                .unwrap_or_else(|| "project".to_string()),
+            entries: file_space
+                .map(|file_space| {
+                    file_space
+                        .entries
+                        .iter()
+                        .map(|entry| AtlasFileInput {
+                            path: entry.path.clone(),
+                            name: entry.name.clone(),
+                            is_dir: entry.is_dir,
+                            size: entry.size,
+                        })
+                        .collect()
                 })
-                .collect(),
-            capabilities,
+                .unwrap_or_default(),
             selected_ref,
-            context_refs: atlas_context_refs(core),
             ui: core.ui.atlas.clone(),
         }));
     }

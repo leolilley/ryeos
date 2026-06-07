@@ -7,6 +7,13 @@ let homeShell = null;
 let homeField = null;
 let homeLanding = null;
 let homeLandingSignature = "";
+let atlasInspector = null;
+let atlasInspectorSignature = "";
+let atlasFocus = null;
+let latestAmbient = {};
+let atlasPanelVisible = false;
+let atlasHoverCard = null;
+let latestShell = null;
 let typerTimer = null;
 let typerLineIndex = 0;
 let typerTarget = null;
@@ -34,15 +41,23 @@ const FALLBACK_TYPER_LINES = [
 export function studioHome(vm, scene, shell) {
   const isHome = vm.workspace?.is_home !== false;
   const home = homeShell || el("section", "studio-home");
+  const ambient = vm.session?.ambient || {};
+  const namespaceAtlas = isNamespaceAtlasAmbient(ambient);
+  latestShell = shell;
+  latestAmbient = ambient;
   homeShell = home;
   if (!home.dataset.initialized) {
     home.setAttribute("aria-label", "RyeOS home space");
     homeField = el("div", "studio-home-field");
-    home.append(ambientBackground(scene), homeField);
+    home.append(ambientBackground(scene, ambient), homeField);
     home.dataset.initialized = "true";
   } else {
-    ambientBackground(scene);
+    ambientBackground(scene, ambient);
   }
+  home.classList.toggle("ambient-hidden", ambient.show_background === false);
+  home.classList.toggle("ambient-atlas-2d", namespaceAtlas && atlasStyle(ambient) === "flat_2d");
+  home.classList.toggle("atlas-panel-visible", atlasPanelVisible);
+  home.style.setProperty("--ambient-opacity", String(ambient.opacity ?? 1));
   home.style.setProperty("--scene-object-count", String(scene?.objects?.length || 0));
   if (!isHome) {
     home.classList.add("backdrop-only");
@@ -54,19 +69,28 @@ export function studioHome(vm, scene, shell) {
     const landing = homeLandingView(vm, shell);
     landing.hidden = false;
     if (!landing.parentNode) home.append(landing);
+    if (namespaceAtlas && atlasFocus?.pinned) {
+      const inspector = atlasInspectorView(scene);
+      inspector.hidden = false;
+      if (!inspector.parentNode) home.append(inspector);
+    } else if (atlasInspector) {
+      atlasInspector.hidden = true;
+      setAtlasFocus(null, scene, ambient);
+    }
   }
-  updateObjectField(scene);
+  updateObjectField(scene, ambient);
   return home;
 }
 
-function ambientBackground(scene) {
-  return ambientLayer(scene);
+function ambientBackground(scene, ambient) {
+  return ambientLayer(scene, ambient);
 }
 
-function updateObjectField(scene) {
+function updateObjectField(scene, ambient = {}) {
   const field = homeField;
   if (!field) return;
   field.replaceChildren();
+  if (isNamespaceAtlasAmbient(ambient)) return;
   for (const object of scene?.objects || []) {
     const marker = el("span", `studio-home-node ${object.kind || "object"} ${object.tone || "neutral"}`);
     marker.style.left = `${50 + (object.position?.[0] || 0) * 12}%`;
@@ -193,16 +217,225 @@ function ryeosVersion(shell) {
   return (shell?.dimension?.local_node?.status?.version || "0.1.0").replace(/^ryeosd-/, "");
 }
 
-function ambientLayer(scene) {
+function ambientLayer(scene, ambient = {}) {
+  const mode = ambientSceneFamily(ambient);
+  const style = atlasStyle(ambient);
+  const key = `${mode}:${style}`;
+  const options = { mode, atlasStyle: style, atlasFocus };
   if (!ambientCanvas) {
     ambientCanvas = document.createElement("canvas");
     ambientCanvas.className = "studio-ambient-canvas";
     ambientCanvas.setAttribute("aria-hidden", "true");
-    ambientScene = mountStudioAmbientScene(ambientCanvas, scene);
+    ambientCanvas.dataset.ambientKey = key;
+    bindAtlasCanvasEvents(ambientCanvas);
+    ambientScene = mountStudioAmbientScene(ambientCanvas, scene, options);
   } else {
-    ambientScene?.update(scene);
+    if (ambientCanvas.dataset.ambientKey !== key) {
+      ambientScene?.dispose?.();
+      ambientCanvas.dataset.ambientKey = key;
+      bindAtlasCanvasEvents(ambientCanvas);
+      ambientScene = mountStudioAmbientScene(ambientCanvas, scene, options);
+    } else {
+      ambientScene?.update(scene, options);
+    }
   }
   return ambientCanvas;
+}
+
+function bindAtlasCanvasEvents(canvas) {
+  if (canvas.dataset.atlasEventsBound === "true") return;
+  canvas.addEventListener("studio-atlas-hover", onAtlasCanvasHover);
+  canvas.addEventListener("studio-atlas-navigate", onAtlasNavigate);
+  canvas.addEventListener("studio-atlas-select", onAtlasSelect);
+  canvas.dataset.atlasEventsBound = "true";
+}
+
+function atlasInspectorView(scene = {}) {
+  const atlas = scene?.atlas || {};
+  const nodes = atlas.nodes || [];
+  const items = nodes.flatMap((node) => (node.stack || []).map((item) => ({ ...item, folder: node.namespace_key || node.label || "root" })));
+  const roots = nodes.filter((node) => (node.path?.length || 0) === 1);
+  const kinds = [...new Set(items.map((item) => item.kind || "other"))].sort();
+  const signature = JSON.stringify({
+    generation: atlas.generation,
+    selected: atlas.selected_ref,
+    roots: roots.map((node) => [node.id, node.namespace_key, node.stack?.length || 0]),
+    kinds,
+    items: items.slice(0, 24).map((item) => item.canonical_ref || item.label),
+  });
+  if (atlasInspector && atlasInspectorSignature === signature) return atlasInspector;
+  atlasInspectorSignature = signature;
+
+  const panel = el("aside", "studio-atlas-inspector");
+  panel.append(
+    textEl("div", "ATLAS", "studio-atlas-kicker"),
+    textEl("h2", "inspect namespace"),
+    textEl("p", "Hover or select folders, kinds, and items to highlight the related atlas shapes.", "studio-atlas-help"),
+  );
+  const clear = textEl("button", "CLEAR", "studio-atlas-chip clear");
+  clear.type = "button";
+  clear.addEventListener("click", () => setAtlasFocus(null, scene));
+  panel.append(clear);
+  panel.append(atlasGroup("root folders", roots.slice(0, 10).map((node) => ({
+    label: node.label || node.namespace_key || "root",
+    meta: `${node.stack?.length || 0} items`,
+    focus: { type: "folder", id: node.id, path: node.namespace_key || "" },
+  })), scene));
+  panel.append(atlasGroup("kinds", kinds.map((kind) => ({
+    label: kind,
+    meta: String(items.filter((item) => (item.kind || "other") === kind).length),
+    focus: { type: "kind", kind },
+  })), scene));
+  panel.append(atlasGroup("items", items.slice(0, 14).map((item) => ({
+    label: item.label || item.canonical_ref || "item",
+    meta: item.folder,
+    focus: { type: "item", ref: atlasItemRef(item), kind: item.kind || "other" },
+  })), scene));
+
+  if (atlasInspector?.parentNode) atlasInspector.replaceWith(panel);
+  atlasInspector = panel;
+  return panel;
+}
+
+function atlasItemRef(item = {}) {
+  return item.canonical_ref || item.id || item.label || "";
+}
+
+function atlasGroup(title, entries, scene) {
+  const group = el("section", "studio-atlas-group");
+  group.append(textEl("h3", title));
+  if (!entries.length) {
+    group.append(textEl("span", "none", "studio-atlas-empty"));
+    return group;
+  }
+  for (const entry of entries) {
+    const row = el("button", "studio-atlas-row");
+    row.type = "button";
+    row.classList.toggle("active", atlasFocusMatches(entry.focus));
+    row.append(textEl("span", entry.label), textEl("small", entry.meta || ""));
+    row.addEventListener("mouseenter", () => setAtlasFocus(atlasInspectorFocus(entry.focus), scene));
+    row.addEventListener("focus", () => setAtlasFocus(atlasInspectorFocus(entry.focus), scene));
+    row.addEventListener("click", () => setAtlasFocus({ ...entry.focus, pinned: true }, scene));
+    group.append(row);
+  }
+  group.addEventListener("mouseleave", () => {
+    if (!atlasFocus?.pinned) setAtlasFocus(null, scene);
+  });
+  return group;
+}
+
+function atlasInspectorFocus(focus) {
+  return atlasFocus?.pinned ? { ...focus, pinned: true } : focus;
+}
+
+function setAtlasFocus(focus, scene, ambient = {}) {
+  atlasFocus = focus;
+  const currentAmbient = Object.keys(ambient).length ? ambient : latestAmbient;
+  ambientScene?.update?.(scene, { mode: ambientSceneFamily(currentAmbient), atlasStyle: atlasStyle(currentAmbient), atlasFocus });
+  atlasInspectorSignature = "";
+  if (homeShell) {
+    homeShell.classList.toggle("atlas-inspector-visible", Boolean(atlasFocus?.pinned));
+    if (atlasFocus?.pinned) {
+      const inspector = atlasInspector?.parentNode ? atlasInspector : atlasInspectorView(scene);
+      inspector.hidden = false;
+      if (!inspector.parentNode) homeShell.append(inspector);
+    } else if (atlasInspector) {
+      atlasInspector.hidden = true;
+    }
+  }
+}
+
+function atlasFocusMatches(focus) {
+  if (!atlasFocus || !focus) return !atlasFocus && !focus;
+  const { pinned: _focusPinned, ...current } = atlasFocus;
+  const { pinned: _entryPinned, ...entry } = focus;
+  return JSON.stringify(current) === JSON.stringify(entry);
+}
+
+function onAtlasCanvasHover(event) {
+  const detail = event.detail || null;
+  updateAtlasHoverCard(detail);
+}
+
+function onAtlasNavigate() {
+  atlasPanelVisible = true;
+  homeShell?.classList.add("atlas-panel-visible");
+}
+
+function onAtlasSelect(event) {
+  const detail = event.detail || null;
+  if (!detail?.id) return;
+  if (dispatchAtlasInteraction(detail.interaction)) return;
+  setAtlasFocus({
+    type: detail.kind?.startsWith("atlas_") ? "folder" : "item",
+    id: detail.id,
+    ref: detail.id,
+    kind: detail.kind,
+    path: detail.path || "",
+    pinned: true,
+  }, event.detail?.sceneModel || {});
+}
+
+function dispatchAtlasInteraction(interaction) {
+  if (!interaction || !latestShell?.dispatchUi) return false;
+  switch (interaction.type) {
+    case "inspect_item":
+      latestShell.dispatchUi({
+        type: "activate",
+        action: { type: "inspect_item", canonical_ref: interaction.canonical_ref },
+      });
+      return true;
+    case "read_file":
+      latestShell.dispatchUi({
+        type: "activate",
+        action: { type: "read_file", root: interaction.root, path: interaction.path },
+      });
+      return true;
+    case "focus_folder":
+      if (interaction.root) {
+        latestShell.dispatchUi({
+          type: "set_atlas_file_space_path",
+          root: interaction.root,
+          path: interaction.path || "",
+        });
+        return true;
+      }
+      return false;
+    default:
+      return false;
+  }
+}
+
+function updateAtlasHoverCard(detail) {
+  if (!homeShell) return;
+  if (!detail?.id) {
+    atlasHoverCard?.remove();
+    atlasHoverCard = null;
+    return;
+  }
+  if (!atlasHoverCard) {
+    atlasHoverCard = el("div", "studio-atlas-hover-card");
+    homeShell.append(atlasHoverCard);
+  }
+  atlasHoverCard.replaceChildren(
+    textEl("strong", detail.label || detail.id),
+    textEl("span", detail.kind || "atlas item"),
+  );
+}
+
+function ambientSceneFamily(ambient = {}) {
+  return isNamespaceAtlasAmbient(ambient) ? "namespace_atlas" : "ambient";
+}
+
+function isNamespaceAtlasAmbient(ambient = {}) {
+  return ambient.mode === "namespace_atlas" || ambient.mode === "atlas_2d" || ambient.mode === "atlas_paper_3d";
+}
+
+function atlasStyle(ambient = {}) {
+  if (ambient.atlas?.style) return ambient.atlas.style;
+  if (ambient.mode === "atlas_paper_3d") return "paper_3d";
+  if (ambient.mode === "namespace_atlas" || ambient.mode === "atlas_2d") return "flat_2d";
+  return "flat_2d";
 }
 
 function typerLine(lines = FALLBACK_TYPER_LINES) {

@@ -192,6 +192,7 @@ fn stack_glyphs(kinds: impl Iterator<Item = AtlasItemKind>) -> String {
         AtlasItemKind::Tool,
         AtlasItemKind::Knowledge,
         AtlasItemKind::Config,
+        AtlasItemKind::File,
         AtlasItemKind::Other,
     ] {
         if kinds.iter().any(|candidate| *candidate == kind) {
@@ -210,6 +211,7 @@ fn atlas_layer_label(atlas: &NamespaceAtlasVm) -> String {
         (AtlasItemKind::Tool, "T"),
         (AtlasItemKind::Knowledge, "K"),
         (AtlasItemKind::Config, "C"),
+        (AtlasItemKind::File, "F"),
     ]
     .into_iter()
     .map(|(kind, label)| {

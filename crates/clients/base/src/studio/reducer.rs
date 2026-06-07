@@ -1,7 +1,7 @@
 use super::dto::{
-    StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
-    StudioItemInspectionDto, StudioItemsDto, StudioOpenProjectDto, StudioSchedulesDto,
-    StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
+    StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFileSpaceDto, StudioFilesDto,
+    StudioGcStatusDto, StudioItemInspectionDto, StudioItemsDto, StudioOpenProjectDto,
+    StudioSchedulesDto, StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::event::{
@@ -80,6 +80,56 @@ impl StudioCore {
                 self.ui.atlas.set_lens(lens);
                 self.bump_generation();
                 Vec::new()
+            }
+            StudioUiEvent::SetAtlasProjection { projection, root } => {
+                self.ui.atlas.active_projection = projection;
+                if projection.is_file_space() {
+                    if let Some(root) = root {
+                        self.ui.atlas.file_space_root = root;
+                    }
+                    self.ui.atlas.file_space_path.clear();
+                    self.ui.atlas.set_lens(crate::atlas::AtlasLensVm::None);
+                }
+                self.bump_generation();
+                match projection {
+                    crate::atlas::AtlasProjectionVm::AiSpace => {
+                        vec![self.emit(StudioEffectKind::FetchItems {
+                            tile_id: None,
+                            query: None,
+                            kind: None,
+                            limit: 1000,
+                        })]
+                    }
+                    crate::atlas::AtlasProjectionVm::FileSpace => {
+                        if self.has_project_bound() {
+                            vec![self.emit(StudioEffectKind::FetchFileSpace {
+                                root: self.ui.atlas.file_space_root.clone(),
+                                path: self.ui.atlas.file_space_path.clone(),
+                                max_depth: 8,
+                                max_entries: 3000,
+                            })]
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                }
+            }
+            StudioUiEvent::SetAtlasFileSpacePath { root, path } => {
+                self.ui.atlas.active_projection = crate::atlas::AtlasProjectionVm::FileSpace;
+                self.ui.atlas.file_space_root = root;
+                self.ui.atlas.file_space_path = path;
+                self.ui.atlas.set_lens(crate::atlas::AtlasLensVm::None);
+                self.bump_generation();
+                if self.has_project_bound() {
+                    vec![self.emit(StudioEffectKind::FetchFileSpace {
+                        root: self.ui.atlas.file_space_root.clone(),
+                        path: self.ui.atlas.file_space_path.clone(),
+                        max_depth: 8,
+                        max_entries: 3000,
+                    })]
+                } else {
+                    Vec::new()
+                }
             }
             StudioUiEvent::FocusChanged { target } => {
                 let Some(tile_id) = target
@@ -936,6 +986,7 @@ impl StudioCore {
                 self.data.dimension = None;
                 self.data.topology = None;
                 self.data.items = None;
+                self.data.file_space = None;
                 self.data.tile_items.clear();
                 self.data.files = None;
                 self.data.tile_files.clear();
@@ -991,6 +1042,13 @@ impl StudioCore {
                             core.data.tile_files.insert(tile_id.clone(), files.clone());
                         }
                         core.data.files = Some(files);
+                    }
+                });
+            }
+            StudioEffectResultKind::FileSpace => {
+                self.apply_parsed::<StudioFileSpaceDto>(data, "file_space", |core, file_space| {
+                    if effect_matches_current_file_space(Some(&expected), core, &file_space) {
+                        core.data.file_space = Some(file_space);
                     }
                 });
             }
@@ -1238,6 +1296,9 @@ fn effect_result_kind_matches(
             StudioEffectKind::ListFiles { .. },
             StudioEffectResultKind::FilesList
         ) | (
+            StudioEffectKind::FetchFileSpace { .. },
+            StudioEffectResultKind::FileSpace
+        ) | (
             StudioEffectKind::ReadFile { .. },
             StudioEffectResultKind::FileRead
         ) | (
@@ -1271,6 +1332,7 @@ fn effect_depends_on_project_binding(kind: &StudioEffectKind) -> bool {
         StudioEffectKind::FetchDimension
             | StudioEffectKind::FetchTopology
             | StudioEffectKind::FetchItems { .. }
+            | StudioEffectKind::FetchFileSpace { .. }
             | StudioEffectKind::ListFiles { .. }
             | StudioEffectKind::ReadFile { .. }
             | StudioEffectKind::InspectItem { .. }
@@ -1381,6 +1443,21 @@ fn effect_matches_current_files(
     root == &current_root && path == &current_path && root == &files.root && path == &files.path
 }
 
+fn effect_matches_current_file_space(
+    expected: Option<&StudioEffectKind>,
+    core: &StudioCore,
+    file_space: &StudioFileSpaceDto,
+) -> bool {
+    let Some(StudioEffectKind::FetchFileSpace { root, path, .. }) = expected else {
+        return true;
+    };
+    core.ui.atlas.active_projection.is_file_space()
+        && root == &core.ui.atlas.file_space_root
+        && path == &core.ui.atlas.file_space_path
+        && root == &file_space.root
+        && path == &file_space.path
+}
+
 fn effect_matches_current_file_read(
     expected: Option<&StudioEffectKind>,
     core: &StudioCore,
@@ -1466,6 +1543,30 @@ mod tests {
         }
     }
 
+    fn atlas_session() -> BrowserSession {
+        BrowserSession {
+            surface_ref: "surface:ryeos/studio/atlas".to_string(),
+            effective_surface: Some(serde_json::json!({
+                "name": "studio-atlas",
+                "version": "1.0.0",
+                "layout": {
+                    "root": "main",
+                    "nodes": {
+                        "main": { "type": "pane", "view": "graph" }
+                    }
+                },
+                "ambient": {
+                    "show_background": true,
+                    "opacity": 1.0,
+                    "mode": "namespace_atlas",
+                    "atlas": { "style": "flat_2d" }
+                }
+            })),
+            project_path: None,
+            ..session()
+        }
+    }
+
     fn item_tile_id(core: &StudioCore) -> TileId {
         core.workspace
             .tiles
@@ -1547,6 +1648,59 @@ mod tests {
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology)));
+    }
+
+    #[test]
+    fn atlas_surface_fetches_items_and_builds_scene_atlas() {
+        let mut core = StudioCore::new(atlas_session(), BrowserViewport::default(), 0);
+        let effects = core.initial_effects();
+        let items_id = effects
+            .iter()
+            .find(|effect| {
+                matches!(
+                    effect.kind,
+                    StudioEffectKind::FetchItems {
+                        tile_id: None,
+                        query: None,
+                        kind: None,
+                        ..
+                    }
+                )
+            })
+            .map(|effect| effect.id)
+            .expect("atlas surface should fetch atlas items");
+
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: items_id,
+                ok: true,
+                kind: StudioEffectResultKind::Items,
+                data: Some(serde_json::json!({
+                    "schema_version": "studio.items.v1",
+                    "counts": { "by_kind": {}, "by_space": {} },
+                    "items": [{
+                        "canonical_ref": "tool:demo/run",
+                        "item_kind": "tool",
+                        "bare_id": "demo/run",
+                        "label": "run",
+                        "namespace": "demo",
+                        "source_path": "/tmp/.ai/tools/demo/run.yaml",
+                        "space": "project",
+                        "executable": true
+                    }]
+                })),
+                error: None,
+            },
+        });
+
+        let scene = crate::studio::scene_model::build_scene_model(&core);
+        let atlas = scene.atlas.expect("atlas surface should build scene atlas");
+        assert_eq!(atlas.root_label, ".ai");
+        assert!(atlas
+            .nodes
+            .iter()
+            .flat_map(|node| &node.stack)
+            .any(|item| item.canonical_ref == "tool:demo/run"));
     }
 
     #[test]

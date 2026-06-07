@@ -34,6 +34,12 @@ pub enum StudioEffectKind {
         root: String,
         path: String,
     },
+    FetchFileSpace {
+        root: String,
+        path: String,
+        max_depth: usize,
+        max_entries: usize,
+    },
     ReadFile {
         root: String,
         path: String,
@@ -89,6 +95,7 @@ pub enum StudioEffectResultKind {
     Schedules,
     GcStatus,
     FilesList,
+    FileSpace,
     FileRead,
     ItemInspection,
     ThreadInspection,

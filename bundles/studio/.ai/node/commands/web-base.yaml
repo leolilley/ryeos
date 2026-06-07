@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-07T05:19:01Z:1dc2c004aafc84641100c002b5819b3bfcddd730531bdcd9451a8fe98afb4b30:RSadd6V7YgBWi8eaZKyKJ6QtWbHaU2GdMSnzyq4XkEZ8mOBK9WWJNTw6B7y+8uWs6PN80VxK1EwgUWW0nb+7Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: commands
+section: commands
+name: web-base
+tokens:
+- web
+- base
+description: Open the browser RyeOS Studio base surface.
+defaults:
+  surface: surface:ryeos/studio/base
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-31T08:15:52Z:f9ea57a19b961c58bff42ca00818e3101050113e7c195bd7b1b04e5f5def70f1:Zmwv0RdxA+RDjVAsIOOCfxzWjQDu6rr0l6VKCmeeIGBKB2XGelwvLgo3J0dGYRVxSe+3/+r5jWj/4xo5XX2qAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T05:18:55Z:f9ea57a19b961c58bff42ca00818e3101050113e7c195bd7b1b04e5f5def70f1:Zmwv0RdxA+RDjVAsIOOCfxzWjQDu6rr0l6VKCmeeIGBKB2XGelwvLgo3J0dGYRVxSe+3/+r5jWj/4xo5XX2qAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.claim
 required_caps: []

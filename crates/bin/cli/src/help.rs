@@ -359,7 +359,16 @@ fn usage_tail(command: &LoadedCommandDescriptor, item: Option<&ItemHelpMetadata>
             let shape = form
                 .slots
                 .iter()
-                .map(|slot| format!("<{}>", slot.field.replace('_', "-")))
+                .map(|slot| {
+                    let field = slot.field.replace('_', "-");
+                    let required = !command.command.defaults.contains_key(&slot.field)
+                        && !command.command.defaults.contains_key(&field);
+                    if required {
+                        format!("<{field}>")
+                    } else {
+                        format!("[<{field}>]")
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             if !shape.is_empty() {
@@ -534,7 +543,10 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             )?;
         }
         Some("sign") => {
-            writeln!(out, "ryeos sign — Sign RyeOS items by canonical ref or glob")?;
+            writeln!(
+                out,
+                "ryeos sign — Sign RyeOS items by canonical ref or glob"
+            )?;
             writeln!(out)?;
             writeln!(out, "USAGE: ryeos sign <item_ref_or_glob> [OPTIONS]")?;
             writeln!(out)?;
@@ -601,6 +613,7 @@ mod tests {
                         matcher: ryeos_runtime::CommandArgumentKind::String,
                     }],
                 }],
+                defaults: Default::default(),
                 parameter_binding: None,
                 project: Some(ryeos_runtime::CommandProjectPolicy {
                     resolution: ryeos_runtime::CommandProjectResolution::Optional,
@@ -660,6 +673,7 @@ mod tests {
                         matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
                     }],
                 }],
+                defaults: Default::default(),
                 parameter_binding: None,
                 project: None,
                 dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
@@ -676,6 +690,49 @@ mod tests {
         assert_eq!(
             installed_usage_line(&command, None),
             "ryeos execute [--async] <item-ref>"
+        );
+    }
+
+    #[test]
+    fn installed_help_renders_defaulted_form_slots_as_optional() {
+        let mut defaults = std::collections::BTreeMap::new();
+        defaults.insert(
+            "surface".to_string(),
+            serde_json::Value::String("surface:ryeos/studio/atlas".to_string()),
+        );
+        let command = LoadedCommandDescriptor {
+            command: ryeos_runtime::CommandDef {
+                category: "commands".into(),
+                section: "commands".into(),
+                name: "web".into(),
+                tokens: vec!["web".into()],
+                description: "Open Studio".into(),
+                aliases: vec![],
+                help: None,
+                arguments: vec![],
+                forms: vec![ryeos_runtime::CommandArgumentForm {
+                    slots: vec![ryeos_runtime::CommandArgumentSlot {
+                        field: "surface".into(),
+                        matcher: ryeos_runtime::CommandArgumentKind::String,
+                    }],
+                }],
+                defaults,
+                parameter_binding: None,
+                project: None,
+                dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
+                    execute: "client:ryeos/web".into(),
+                    availability: ryeos_runtime::CommandAvailability::Auto,
+                },
+                source_file: PathBuf::from("/tmp/web.yaml"),
+                provenance: ryeos_runtime::CommandProvenance::default(),
+            },
+            tokens: vec!["web".into()],
+            description: "Open Studio".into(),
+        };
+
+        assert_eq!(
+            installed_usage_line(&command, None),
+            "ryeos web [<surface>]"
         );
     }
 }

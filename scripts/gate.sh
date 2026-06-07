@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Workspace gate: builds + installs bundle binaries + rebuilds CAS manifests
-# (via populate-bundles.sh), then runs the full nextest workspace gate.
+# Workspace test gate.
 #
-# Bundle bin/ contents and CAS manifests are .gitignored derivable artifacts.
-# This script regenerates them on every run so tests have a fresh, consistent
-# bundle tree to read.
+# This intentionally does NOT rebuild/repopulate bundles by default. Bundle
+# refresh is expensive and should be an explicit authoring/release action.
 #
 # Usage:
-#     ./scripts/gate.sh                 # full workspace
-#     ./scripts/gate.sh -p ryeosd       # forwarded to nextest
-#     ./scripts/gate.sh --no-tests      # only populate bundles, skip tests
+#     ./scripts/gate.sh                         # full workspace tests
+#     ./scripts/gate.sh -p ryeosd               # forwarded to nextest
+#     ./scripts/gate.sh --refresh-bundles       # explicit full bundle refresh, then tests
+#     ./scripts/gate.sh --refresh-bundles --no-tests
+#     ./scripts/gate.sh --bundle-set hosted-node --refresh-bundles
 #
-# This is the canonical gate; CI and humans should both invoke it.
+# CI/release jobs that need regenerated bundle binaries/manifests must pass
+# --refresh-bundles explicitly. Local UI/dev loops should not.
 
 set -euo pipefail
 
@@ -24,22 +25,44 @@ KEY="${KEY:-$ROOT/.dev-keys/PUBLISHER_DEV.pem}"
 OWNER="${OWNER:-ryeos-dev}"
 
 skip_tests=0
+refresh_bundles=0
+bundle_set="full"
 nextest_args=()
-for arg in "$@"; do
-    case "$arg" in
-        --no-tests) skip_tests=1 ;;
-        *) nextest_args+=("$arg") ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-tests)
+            skip_tests=1
+            shift
+            ;;
+        --refresh-bundles)
+            refresh_bundles=1
+            shift
+            ;;
+        --bundle-set)
+            [[ $# -ge 2 ]] || { echo "gate: --bundle-set requires a value" >&2; exit 2; }
+            bundle_set="$2"
+            shift 2
+            ;;
+        *)
+            nextest_args+=("$1")
+            shift
+            ;;
     esac
 done
 
-if [[ ! -s "$KEY" ]]; then
-    echo "gate: signing key not found at $KEY" >&2
-    echo "gate: set KEY=/path/to/PUBLISHER.pem (or create $KEY)" >&2
+if [[ "$refresh_bundles" == "1" ]]; then
+    if [[ ! -s "$KEY" ]]; then
+        echo "gate: signing key not found at $KEY" >&2
+        echo "gate: set KEY=/path/to/PUBLISHER.pem (or create $KEY)" >&2
+        exit 2
+    fi
+    echo "gate: explicitly refreshing bundles (bundle-set: $bundle_set)"
+    "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set"
+elif [[ "$skip_tests" == "1" ]]; then
+    echo "gate: --no-tests without --refresh-bundles has nothing to do" >&2
+    echo "gate: pass --refresh-bundles --no-tests for the old populate-only behavior" >&2
     exit 2
 fi
-
-echo "gate: populating bundles (build + install + rebuild-manifest)"
-"$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER"
 
 if [[ "$skip_tests" == "1" ]]; then
     exit 0

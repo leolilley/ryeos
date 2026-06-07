@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-07T05:19:01Z:3f9773a82219c24b0aa4fea4f890a07bfa3d7db38c972505f1a3b529ce4862b2:i+I4Rdh+sd+j2FUxuE8TWGRk5ypj2tPgHQlG3NVZeZ4Vad47+ThPOo5MYFVzDBdOGIIyveZ9GQkBUZ7JV0WyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: commands
+section: commands
+name: web-atlas
+tokens:
+- web
+- atlas
+description: Open the browser RyeOS Studio Atlas surface.
+defaults:
+  surface: surface:ryeos/studio/atlas
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

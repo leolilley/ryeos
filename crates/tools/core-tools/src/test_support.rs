@@ -12,8 +12,8 @@
 //! rebuilt at unpredictable points mid-run; tests that resolve
 //! `bin:ryeos-core-tools` (the `service_data_e2e` `tool_fetch_*` /
 //! `tool_verify_*` / `tool_identity_*` set) then fail with
-//! `BinHashMismatch`. Each test passes individually after
-//! `./scripts/gate.sh --no-tests` re-syncs the manifest.
+//! `BinHashMismatch`. Each test passes individually after an explicit
+//! bundle refresh re-syncs the manifest.
 //!
 //! `isolated_core_bundle(test_name)` resolves the issue structurally:
 //! it copies the core bundle into `target/test-bundles/<test_name>/`
@@ -41,8 +41,8 @@
 //!
 //! ## Signing key
 //!
-//! Re-signing requires the dev publisher signing key — the same key
-//! `./scripts/gate.sh` uses for its automatic re-sync. The key path is
+//! Re-signing requires the dev publisher signing key — the same key used
+//! by explicit bundle refresh workflows. The key path is
 //! taken from the `RYEOS_SIGNING_KEY` environment variable, falling back
 //! to the workspace's checked-in `.dev-keys/PUBLISHER_DEV.pem`, then to
 //! operator key locations for older local setups. This keeps tests from

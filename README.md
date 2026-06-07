@@ -162,12 +162,14 @@ uses `/data/user` and `/data/core` for persistent operator and system state.
 git clone https://github.com/leolilley/ryeos.git
 cd ryeos
 cargo build
-./scripts/dev-up.sh
+./scripts/pkg/install-local-direct.sh
 ```
 
-`scripts/dev-up.sh` populates and signs bundles with the development publisher
-key, initializes a repo-local `.local/ryeos` system space, and starts a daemon
-against that isolated state.
+`scripts/pkg/install-local-direct.sh` installs the current built artifacts into
+the local packaged layout and initializes the user system space. It does not
+refresh bundle artifacts by default. Use
+`scripts/pkg/install-local-direct.sh --populate` only when bundle-owned binaries,
+CAS manifests, or signed bundle outputs actually need to be regenerated.
 
 ## Using RyeOS from an AI client
 
@@ -265,10 +267,10 @@ That makes the event graph the source of truth, not an incidental database file.
 Use the repository scripts rather than hand-editing derived bundle state.
 
 ```bash
-./scripts/gate.sh                 # populate/sign bundles, then run nextest
-./scripts/gate.sh --no-tests      # refresh bundle bin/CAS/signatures only
-./scripts/dev-up.sh               # fresh repo-local daemon in .local/ryeos
-./scripts/pkg/install-local-direct.sh
+./scripts/gate.sh                         # run workspace tests without refreshing bundles
+./scripts/gate.sh --refresh-bundles       # explicit expensive bundle refresh, then tests
+./scripts/pkg/install-local-direct.sh      # install current built artifacts into packaged layout
+./scripts/pkg/install-local-direct.sh --populate  # expensive: refresh bundles first
 ```
 
 Common loops:
@@ -276,10 +278,11 @@ Common loops:
 | Change type                                | Recommended loop                                         |
 | ------------------------------------------ | -------------------------------------------------------- |
 | Rust-only compile feedback                 | `cargo build` or targeted `cargo test -p <crate>`        |
-| Rust affecting bundled binaries            | `./scripts/gate.sh --no-tests`, then targeted tests.     |
-| Bundle YAML, schemas, tools, or runtimes   | `./scripts/gate.sh` unless intentionally skipping tests. |
-| Daemon/CLI behavior with installed bundles | `./scripts/dev-up.sh`.                                   |
-| Packaged layout repair                     | `./scripts/pkg/install-local-direct.sh`.                 |
+| Rust affecting bundled binaries            | Targeted `cargo build --release -p <owner>`, then explicit bundle refresh only if needed. |
+| Bundle YAML, schemas, tools, or runtimes   | Targeted signing/publish flow; use `./scripts/gate.sh --refresh-bundles` only for release validation. |
+| Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh. |
+| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh` after building touched user-facing binaries. |
+| Packaged layout repair                     | `./scripts/pkg/install-local-direct.sh --populate` only when artifacts must be regenerated. |
 
 Hard rules for contributors and agents:
 

@@ -25,6 +25,13 @@ export async function runEffect(effect) {
       return result(effect, "gc_status", await getJson("/ui/api/studio/gc/status"));
     case "list_files":
       return result(effect, "files_list", await fileJson("/ui/api/studio/files/list", kind));
+    case "fetch_file_space":
+      return result(effect, "file_space", await postJson("/ui/api/studio/files/tree", {
+        root: kind.root || "project",
+        path: kind.path || "",
+        max_depth: kind.max_depth,
+        max_entries: kind.max_entries,
+      }));
     case "read_file":
       return result(effect, "file_read", await fileJson("/ui/api/studio/files/read", kind));
     case "inspect_item":
@@ -120,6 +127,7 @@ function resultKindFor(effect) {
   if (type === "fetch_schedules") return "schedules";
   if (type === "fetch_gc_status") return "gc_status";
   if (type === "list_files") return "files_list";
+  if (type === "fetch_file_space") return "file_space";
   if (type === "read_file") return "file_read";
   if (type === "inspect_item") return "item_inspection";
   if (type === "inspect_thread") return "thread_inspection";

@@ -89,6 +89,7 @@ pub fn bind_argv_with_command(
 
     let forms = command.forms.clone();
     if forms.is_empty() {
+        apply_command_defaults(&mut value, command);
         reject_undeclared_positionals(&value, command)?;
         return Ok(value);
     }
@@ -105,6 +106,7 @@ pub fn bind_argv_with_command(
         .collect();
 
     if positionals.is_empty() {
+        apply_command_defaults(&mut value, command);
         return Ok(value);
     }
 
@@ -128,6 +130,7 @@ pub fn bind_argv_with_command(
                     serde_json::Value::String(arg.clone()),
                 );
             }
+            apply_command_defaults(&mut value, command);
             return Ok(value);
         }
     }
@@ -136,6 +139,19 @@ pub fn bind_argv_with_command(
         "positional arguments {:?} do not match any positional form for alias {:?}",
         positionals, command.tokens
     ))
+}
+
+fn apply_command_defaults(value: &mut serde_json::Value, command: &CommandDef) {
+    if command.defaults.is_empty() {
+        return;
+    }
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    for (key, default) in &command.defaults {
+        obj.entry(normalise_key(key))
+            .or_insert_with(|| default.clone());
+    }
 }
 
 fn reject_undeclared_positionals(
@@ -432,6 +448,42 @@ mod tests {
     }
 
     #[test]
+    fn command_defaults_fill_missing_fields() {
+        let mut command = test_command(vec!["web".into(), "base".into()], Vec::new());
+        command.defaults.insert(
+            "surface".into(),
+            serde_json::Value::String("surface:ryeos/studio/base".into()),
+        );
+
+        let result = bind_argv_with_command(&[], Some(&command)).unwrap();
+
+        assert_eq!(result["surface"], "surface:ryeos/studio/base");
+    }
+
+    #[test]
+    fn command_positionals_override_defaults() {
+        let mut command = test_command(
+            vec!["web".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "surface".into(),
+                    matcher: crate::CommandArgumentKind::String,
+                }],
+            }],
+        );
+        command.defaults.insert(
+            "surface".into(),
+            serde_json::Value::String("surface:ryeos/studio/atlas".into()),
+        );
+
+        let result =
+            bind_argv_with_command(&["surface:custom/studio/debug".into()], Some(&command))
+                .unwrap();
+
+        assert_eq!(result["surface"], "surface:custom/studio/debug");
+    }
+
+    #[test]
     fn command_rejects_parameters_json_array() {
         let command = test_command(vec!["remote".into(), "run".into()], Vec::new());
 
@@ -483,8 +535,7 @@ mod tests {
             }],
         );
 
-        let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command))
-            .unwrap();
+        let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command)).unwrap();
         assert_eq!(result["item_ref"], "tool:agent-kiwi/*");
     }
 
@@ -501,7 +552,9 @@ mod tests {
         );
 
         let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command));
-        assert!(result.unwrap_err().contains("do not match any positional form"));
+        assert!(result
+            .unwrap_err()
+            .contains("do not match any positional form"));
     }
 
     #[test]
@@ -610,6 +663,7 @@ mod tests {
             help: None,
             arguments: Vec::new(),
             forms,
+            defaults: Default::default(),
             parameter_binding: None,
             project: None,
             dispatch: crate::CommandDispatch::Group,
