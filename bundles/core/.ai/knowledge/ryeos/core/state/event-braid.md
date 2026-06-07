@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-05T04:12:08Z:a208043d63c1532c8ed85b07707ab60d2153d37ebe01374a9559ad249eafb055:kNe+He6XGgxkNsi+SxMbO+VOkFcmkDzKAhtxzeEvTLmleZr88/i0qrsw0gSemSi4H55Fe3nAhenG0js03nexCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T03:08:13Z:cbfb4e8cc3a513f0e638b6305c9ad029202a3a7e55a8954daf52dc9f4b1ead11:nHFP+ZGrTDEJ5Y6Ciom42yBLCJQZL80+f+DMoYXZ8R+/5f5gUUMIv8UgrYel7GS9T1oPvAQ6A6sEnf+k2+abAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core/state
@@ -124,6 +124,89 @@ replay that produces an identical projection to the original.
 Real-time event streaming uses per-thread `tokio::sync::broadcast`
 channels. Events are published **after** CAS persistence. Lagged SSE
 subscribers catch up by replaying from `after_chain_seq = last_seen_seq`.
+
+## Bundle Events
+
+Bundle events are durable, bundle-scoped application events owned by Rye
+OS state/CAS. They are distinct from thread lifecycle events: a bundle
+uses them for its own domain history, while the daemon still owns
+identity, authorization, storage, and attribution.
+
+Bundle manifests declare event kinds and allowed operations:
+
+```yaml
+name: ryeos-email
+bundle_events:
+  - event_kind: email_event
+    operations: [append, scan]
+```
+
+When a verified bundle-qualified tool executes, Rye OS derives callback
+capabilities from the signed manifest and the tool ref. For the manifest
+above, a direct `tool:ryeos-email/...` execution receives callback caps
+such as:
+
+```text
+ryeos.append.bundle_events.ryeos-email/email_event
+ryeos.scan.bundle_events.ryeos-email/email_event
+```
+
+Bundle code must not pass `bundle_id`. The daemon mints callback tokens
+with `effective_bundle_id` derived from the verified root item ref and
+rejects caller-supplied bundle identity. The runtime callback APIs take
+only event-kind and chain data; daemon-side UDS handlers enforce the
+callback token and required capability before touching state.
+
+Runtime callback operations:
+
+| Operation | Capability checked | Purpose |
+|---|---|---|
+| `bundle_events_append` | `ryeos.append.bundle_events.<bundle>/<event_kind>` | Append one event to a bundle chain. |
+| `bundle_events_read_chain` | `ryeos.scan.bundle_events.<bundle>/<event_kind>` | Read one chain for an event kind. |
+| `bundle_events_scan` | `ryeos.scan.bundle_events.<bundle>/<event_kind>` | Scan all records for an event kind. |
+
+`read_chain` is covered by the `scan` manifest operation in the current
+schema. If a future manifest adds an explicit `read` or `read_chain`
+operation, this table and the capability derivation must be updated
+together.
+
+Append request shape:
+
+```json
+{
+  "event_kind": "email_event",
+  "chain_id": "email_123",
+  "event_type": "email_planned",
+  "schema_version": 1,
+  "payload": {"campaign_id": "campaign_abc"},
+  "idempotency_key": "email_plan:email_123",
+  "expected_chain_head_hash": null,
+  "correlation_id": null,
+  "causation_id": null
+}
+```
+
+Read-chain request shape:
+
+```json
+{
+  "event_kind": "email_event",
+  "chain_id": "email_123"
+}
+```
+
+Scan request shape:
+
+```json
+{
+  "event_kind": "email_event"
+}
+```
+
+The daemon adds `thread_id` and callback authentication on the UDS
+request. Tool authors should use the runtime callback client available to
+their runtime rather than shelling out to operator commands such as
+`ryeos-core-tools bundle-events ...`.
 
 ## Reachability
 

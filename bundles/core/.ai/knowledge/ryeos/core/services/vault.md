@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:185e11b0d37d9b516fecfca520ec56d100daa3b6bd76cd4d11c50e5b88a1bc3a:zgmLaKnRBj3jbwc9reEB67dO8Al23b6C1m4lXlSz2CTyL/iz88p3ljRdjQ9swOmKSRLg5TDKOPYLhArzlGzNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T03:08:13Z:e1d5c5a1bb5cf3b5c4f9c2d6d927ccc728c1a03f4ca4dd3c66694fca29ddfcb4:rvTQypS8GMa36sJCHw/x9zDC9lu4N8AtVn9C8Xv1LlTEOrL/8cZle7PfqUZBpGpc1cYsvE0hBT/jWPgqbk/TAg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core/services
 tags: [service, vault, secrets, remote]
@@ -23,6 +23,38 @@ operator-level access to the target node vault.
 These services are separate from runtime vault bindings: launch preflight
 resolves required secrets before spawning a subprocess, then injects only
 the declared bindings into the runtime environment.
+
+## Runtime secret bindings
+
+Tools expose their secret needs through `required_secrets` metadata. The
+dispatcher reads exactly those names before launch and refuses execution
+if any declared secret is missing. Sources are checked in this order:
+
+1. sealed node vault;
+2. daemon host environment;
+3. user/project `.env` overlay.
+
+Only declared names are injected into the subprocess environment. The
+daemon never pours the whole vault into a tool process.
+
+```yaml
+category: agent-kiwi/oauth/connect
+executor_id: "@subprocess"
+required_secrets:
+  - GOOGLE_CLIENT_ID
+  - GOOGLE_CLIENT_SECRET
+  - AGENT_KIWI_OAUTH_STATE_SECRET
+```
+
+Use vault services or CLI/remote-vault commands to provision encrypted
+operator secrets. Hosted deployments may instead provide declared names
+as service environment variables; local development may use project or
+user `.env` files.
+
+Non-secret runtime config such as public base URLs, allowed redirect
+domains, or provider regions should be passed through ordinary tool
+configuration, parameters, or project config. Reserve `required_secrets`
+for values that must be treated as secrets.
 
 Security notes:
 
