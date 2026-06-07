@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:24Z:dbea9030a18b798ad8824213a280f77d94d26d56a2a72ede72f855da14eb8324:7X2hYerk40RBCWUVfNRhaRlqStMKgAcKWDbNzZiJPgYk78OgT8rjKbOAlFfMxn0CcSmwhDmYhh6vaIfgsaERAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T03:56:54Z:8af7ace9b251baa57d37546fd3383f299ffdf6b5df8bcd71d41916f48f443971:EcbRiErVHJbj9IrMaBudgR2ne5jBheZasPJRhqSbU300Sr+XN+ZR3h6BHxJpf2S6mlUYknaj3SWKAKubjwjECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "verify"
 executor_id: "@subprocess"
@@ -22,4 +22,7 @@ config_schema:
     registry_root:
       type: string
       description: "Optional registry/dependency root to include during validation."
+    registry_roots:
+      type: array
+      description: "Optional registry/dependency roots to include during validation."
   required: [source]

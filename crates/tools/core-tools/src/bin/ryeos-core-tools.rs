@@ -1238,8 +1238,8 @@ fn run_sign(
     let batch = run_sign(&item_ref, project.as_deref(), source)?;
     println!("{}", serde_json::to_string_pretty(&batch)?);
     if !batch.is_total_success() {
-        eprintln!(
-            "✗ {}/{} items failed validation or signing",
+        anyhow::bail!(
+            "{}/{} items failed validation or signing",
             batch.failed.len(),
             batch.total()
         );

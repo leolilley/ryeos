@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:04Z:3b111c03b71c01ff47d8086bf1b5527cd3ded0d47da214f335c6f2441b7395dd:aXFfxv5nCXHmK8bJRVscWqfdVE69N+jd4TVXa+M68KjPYu7XL5Pom/45eMKU1TQ7bfTlKnitxTcDQO0WeMuYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T03:56:51Z:46f2197f7e46b5d8005080526c1d288e6fcc9c08aa89163e68b25fabf3ae73e5:KrnOx1Vx8zgnYaEDxhccT97zWI9XNUxxC9f3YJqnq/S1/SJAOcWHmMAwpz15p9bj4xKlh6qt1GJJhQP/NUrKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: bundle-remove
@@ -6,6 +6,9 @@ tokens:
 - bundle
 - remove
 description: Remove an installed bundle
+forms:
+- slots:
+  - field: name
 dispatch:
   kind: execute_ref
   execute: service:bundle/remove

@@ -534,9 +534,14 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             )?;
         }
         Some("sign") => {
-            writeln!(out, "ryeos sign — Sign a RyeOS item by canonical ref")?;
+            writeln!(out, "ryeos sign — Sign RyeOS items by canonical ref or glob")?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos sign <item_ref> [OPTIONS]")?;
+            writeln!(out, "USAGE: ryeos sign <item_ref_or_glob> [OPTIONS]")?;
+            writeln!(out)?;
+            writeln!(out, "EXAMPLES:")?;
+            writeln!(out, "  ryeos sign knowledge:my/entry")?;
+            writeln!(out, "  ryeos sign 'tool:agent-kiwi/*'")?;
+            writeln!(out, "  ryeos sign 'node:routes/*'")?;
             writeln!(out)?;
             writeln!(out, "OPTIONS:")?;
             writeln!(

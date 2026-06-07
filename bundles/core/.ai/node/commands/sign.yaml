@@ -1,17 +1,17 @@
-# ryeos:signed:2026-06-05T04:12:04Z:30ace17107ddfccb2c44a912cb85e72e36e432e6e12e4ced126b0953e6f1a554:tK2jv+0u6si3r7FwKbZDQyPS+o2D8PiulcX5KRCN0ADmTavSPge0rN6ysLZ0zVNiu7a7O3BSpQHZtwyEyZVCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T03:33:11Z:9b24997c7f8ef69da508b9a1a75b2ae62a26a9471510d948a9bb905e5074aee0:ZD3YJynty0V5ZAi0DUUGW4nOoGyulaxRyufuxkh0UxgbI77P36XZerlk4MIC+6kazlgjatAQlP+dR/SWJbTVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: sign
 tokens:
 - s
-description: Cryptographically sign an item by canonical ref
+description: Cryptographically sign an item or item glob by canonical ref
 aliases:
 - tokens:
   - sign
 forms:
 - slots:
   - field: item_ref
-    matcher: canonical_ref
+    matcher: string
 dispatch:
   kind: execute_ref
   execute: tool:ryeos/core/sign
