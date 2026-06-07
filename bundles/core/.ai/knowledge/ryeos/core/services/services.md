@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-05T04:12:08Z:dcc9c2578254e609e7c50114b79f9d176c5261a8b9f2f3e0e8add36889ef6c3f:jb3W1f2eBy4LY2thbActDaH5n68PHE48mvY/FCI3xnJZAE23oUCyZyVrYiueQ0sfZJoVOBcgZCIBvjfrrO1sAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T04:30:05Z:d64c918868f6385e9a7b70b1b1e369f61c4cd6a5c234858df5a36e9daab9effd:PbFjoQDGo2EtgkODgwqJg3gKJqAin67U8+gdeKhQFGZvk4MFk9NzH+4vOUK72iH0Tj2scjkedfvqfrkwPbzsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -159,6 +159,71 @@ These are contributed by the standard bundle.
 | `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler.resume` |
 | `scheduler/show_fires` | `scheduler.show_fires` | `ryeos.execute.service.scheduler/show_fires` |
 
+Scheduler support is a node/runtime surface, not part of HTTP route
+handling. Schedules are represented as signed node config records under
+`.ai/node/schedules/<schedule_id>.yaml` and project deploy can reconcile
+project-authored schedule declarations into that node-owned section.
+
+Schedule records include the target `item_ref`, schedule type,
+expression, params, project root, execution authority, and optional
+`managed_by` metadata. This lets a verified bundle or project declare
+periodic work such as send-queue processing, due campaign work, IMAP
+polling, or projection rebuilds without inventing a separate cron shim.
+
+Node schedule spec shape:
+
+```yaml
+spec_version: 1
+section: schedules
+schedule_id: ryeos-email.process-send-queue
+item_ref: tool:ryeos-email/system/process_send_queue
+schedule_type: interval
+expression: "30"
+params: {}
+timezone: UTC
+enabled: true
+project_root: /path/to/project-or-bundle
+execution:
+  requester_fingerprint: fp:...
+  capabilities: []
+```
+
+Project-managed declarations use the deploy/reconcile path rather than
+hand-editing node-owned schedule files. A declaration file lists desired
+schedules; deploy writes the signed node schedule records and preserves
+or validates existing execution authority.
+
+```yaml
+category: schedules/ryeos-email
+version: "1.0.0"
+schema_version: "1"
+schedules:
+  - schedule_id: ryeos-email.process-send-queue
+    item_ref: tool:ryeos-email/system/process_send_queue
+    schedule_type: interval
+    expression: "30"
+    params: {}
+    overlap_policy: skip
+```
+
+Use scheduler services for imperative operator control (`register`,
+`pause`, `resume`, `deregister`, `show_fires`). Use project deploy
+schedule declarations for repeatable bundle/project-owned runtime jobs.
+
+Hosted deployments should treat schedule declarations as part of bundle
+activation. The operator flow is: install/verify the bundle, authorize the
+execution principal that will own the scheduled work, reconcile declared
+schedules into node schedule records, then inspect `scheduler/list` or
+`scheduler/show_fires` before enabling traffic. Disable or pause schedules
+before removing a bundle or revoking the execution principal.
+
+Long-running bundle duties should be modeled as small scheduled tools
+rather than HTTP callbacks: process send queues, run due campaign work,
+poll IMAP or provider deltas, retry ambiguous side effects, and
+rebuild/materialize projections. Each scheduled tool should be idempotent
+against bundle events or the provider's delivery IDs so missed, retried,
+or overlapping fires do not duplicate external side effects.
+
 ## Service vs Tool
 
 | Aspect | Service | Tool |
@@ -179,6 +244,33 @@ HTTP route under `.ai/node/routes/`. Examples:
 - `service:system/push-head` via `/push-head`
 - `service:objects/get` via `/objects/get`
 - `service:threads/list` via `/threads`
+
+Bundle handler routes follow the same node route table, but their source
+is a fixed same-bundle `tool:` ref. A hosted public route is live only
+after the bundle is installed into the node, its route items verify, the
+daemon route table is built/reloaded, required runtime config/secrets are
+available, and the public ingress forwards the desired path to the Rye OS
+daemon over TLS.
+
+Operator checklist for public bundle routes:
+
+1. install or update the signed bundle and verify it against configured
+   registry roots;
+2. provision declared `required_secrets` and non-secret runtime config
+   such as public base URL, OAuth redirect URI, provider region, and
+   webhook verification settings;
+3. authorize the setup/admin caller fingerprints for protected routes;
+4. configure ingress to expose only intended public paths and preserve
+   headers required by the route descriptor;
+5. reload or restart the daemon if the deployment model does not hot-load
+   route table changes;
+6. probe health/setup/callback/webhook paths with expected auth and body
+   shapes before handing the URL to the provider.
+
+Use route auth for inbound provider verification and scheduler services
+for background runtime duties. Do not make providers call generic
+`/execute`, and do not use public handler routes for recurring internal
+maintenance that can be represented as a signed schedule.
 
 ### Verb-backed services
 

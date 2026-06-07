@@ -295,6 +295,9 @@ fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
     if !is_glob_ref(item_ref) {
         let canonical = CanonicalRef::parse(item_ref)
             .map_err(|e| anyhow!("malformed canonical ref `{item_ref}`: {e}"))?;
+        if canonical.suffix.is_some() {
+            bail!("malformed canonical ref `{item_ref}`: sign refs do not support suffixes");
+        }
         return Ok(SignTarget {
             kind: canonical.kind,
             bare_id: canonical.bare_id,
@@ -749,6 +752,16 @@ mod tests {
         let target = parse_sign_target("directive:agent/**/*").unwrap();
         assert_eq!(target.kind, "directive");
         assert_eq!(target.bare_id, "agent/**/*");
+    }
+
+    #[test]
+    fn parse_sign_target_rejects_suffixes() {
+        let err = parse_sign_target("knowledge:smoke/entry@t:2026-06-07T00:00:00Z")
+            .unwrap_err();
+        assert!(err.to_string().contains("do not support suffixes"));
+
+        let err = parse_sign_target("knowledge:smoke/*@t:2026-06-07T00:00:00Z").unwrap_err();
+        assert!(err.to_string().contains("do not support suffixes"));
     }
 
     #[test]

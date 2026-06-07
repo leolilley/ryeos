@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:25Z:b8e06e309fa70c3529676d0ce0e616efe67bc240e1a08ddf8c59bef14c5a7b24:+ENSMG2RkRZXLIwD28Sk8Ss/Msq2DamnMa/fI5tMkiTmeR23MOe4OwTmJ+8plzJSeG29wK3BLWilQcLV/wGiBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T03:56:52Z:d468478dbca81e9eb491984918a9d46297a0ecd79a4b9d5f43446712a5fed48c:F9KgztXsbFlEsVz1+TuW3xOTqWXaWpcIhCpdasXLbSpKZjWU+T9NlBuH7S2S3qA5S7EcQMYmlHZgzuMwjFeJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.publish
 availability: offline
@@ -7,6 +7,7 @@ required_caps: []
 schema:
   source: string
   registry_root: string?
+  registry_roots: array?
   owner: string?
   no_trust_doc: boolean?
 description: "Full bundle release pipeline: bootstrap-sign, rebuild CAS, sign items, generate manifest, emit trust doc."

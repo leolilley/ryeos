@@ -472,6 +472,113 @@ mod tests {
     }
 
     #[test]
+    fn command_string_form_accepts_canonical_ref_glob() {
+        let command = test_command(
+            vec!["sign".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "item_ref".into(),
+                    matcher: crate::CommandArgumentKind::String,
+                }],
+            }],
+        );
+
+        let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command))
+            .unwrap();
+        assert_eq!(result["item_ref"], "tool:agent-kiwi/*");
+    }
+
+    #[test]
+    fn command_canonical_ref_form_rejects_canonical_ref_glob() {
+        let command = test_command(
+            vec!["sign".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "item_ref".into(),
+                    matcher: crate::CommandArgumentKind::CanonicalRef,
+                }],
+            }],
+        );
+
+        let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command));
+        assert!(result.unwrap_err().contains("do not match any positional form"));
+    }
+
+    #[test]
+    fn command_path_form_binds_bundle_source_positional() {
+        let command = test_command(
+            vec!["bundle".into(), "verify".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "source".into(),
+                    matcher: crate::CommandArgumentKind::Path,
+                }],
+            }],
+        );
+
+        let result = bind_argv_with_command(
+            &[
+                "bundles/core".into(),
+                "--registry-root".into(),
+                "bundles/core".into(),
+            ],
+            Some(&command),
+        )
+        .unwrap();
+
+        assert_eq!(result["source"], "bundles/core");
+        assert_eq!(result["registry_root"], "bundles/core");
+        assert!(result.get("_args").is_none());
+    }
+
+    #[test]
+    fn command_form_binds_bundle_install_positionals() {
+        let command = test_command(
+            vec!["bundle".into(), "install".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![
+                    crate::CommandArgumentSlot {
+                        field: "name".into(),
+                        matcher: crate::CommandArgumentKind::String,
+                    },
+                    crate::CommandArgumentSlot {
+                        field: "source_path".into(),
+                        matcher: crate::CommandArgumentKind::Path,
+                    },
+                ],
+            }],
+        );
+
+        let result = bind_argv_with_command(
+            &["agent-kiwi".into(), "bundles/agent-kiwi".into()],
+            Some(&command),
+        )
+        .unwrap();
+
+        assert_eq!(result["name"], "agent-kiwi");
+        assert_eq!(result["source_path"], "bundles/agent-kiwi");
+        assert!(result.get("_args").is_none());
+    }
+
+    #[test]
+    fn command_form_binds_bundle_remove_positional() {
+        let command = test_command(
+            vec!["bundle".into(), "remove".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "name".into(),
+                    matcher: crate::CommandArgumentKind::String,
+                }],
+            }],
+        );
+
+        let result = bind_argv_with_command(&["agent-kiwi".into()], Some(&command)).unwrap();
+
+        assert_eq!(result["name"], "agent-kiwi");
+        assert!(result.get("_args").is_none());
+    }
+
+    #[test]
     fn command_rejects_invalid_declared_json_argument() {
         let mut command = test_command(vec!["scheduler".into(), "register".into()], Vec::new());
         command.arguments.push(crate::CommandArgumentDef {
