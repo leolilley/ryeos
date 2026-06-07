@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-05T04:12:08Z:dcc9c2578254e609e7c50114b79f9d176c5261a8b9f2f3e0e8add36889ef6c3f:jb3W1f2eBy4LY2thbActDaH5n68PHE48mvY/FCI3xnJZAE23oUCyZyVrYiueQ0sfZJoVOBcgZCIBvjfrrO1sAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T03:08:13Z:6a664f22b9d422fda197b77fbade269d18cd0af7d3e5a24c6baa44c49583b272:IdKgwKpbF91MiSQJweNk8M1d24h2lV43rgf6oy9heLa05zu0dT1fgwyfTg76GX+POEZmtv66rBMi/+M5JBj4Cw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core
@@ -158,6 +158,57 @@ These are contributed by the standard bundle.
 | `scheduler/pause` | `scheduler.pause` | `ryeos.execute.service.scheduler.pause` |
 | `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler.resume` |
 | `scheduler/show_fires` | `scheduler.show_fires` | `ryeos.execute.service.scheduler/show_fires` |
+
+Scheduler support is a node/runtime surface, not part of HTTP route
+handling. Schedules are represented as signed node config records under
+`.ai/node/schedules/<schedule_id>.yaml` and project deploy can reconcile
+project-authored schedule declarations into that node-owned section.
+
+Schedule records include the target `item_ref`, schedule type,
+expression, params, project root, execution authority, and optional
+`managed_by` metadata. This lets a verified bundle or project declare
+periodic work such as send-queue processing, due campaign work, IMAP
+polling, or projection rebuilds without inventing a separate cron shim.
+
+Node schedule spec shape:
+
+```yaml
+spec_version: 1
+section: schedules
+schedule_id: ryeos-email.process-send-queue
+item_ref: tool:ryeos-email/system/process_send_queue
+schedule_type: interval
+expression: "30"
+params: {}
+timezone: UTC
+enabled: true
+project_root: /path/to/project-or-bundle
+execution:
+  requester_fingerprint: fp:...
+  capabilities: []
+```
+
+Project-managed declarations use the deploy/reconcile path rather than
+hand-editing node-owned schedule files. A declaration file lists desired
+schedules; deploy writes the signed node schedule records and preserves
+or validates existing execution authority.
+
+```yaml
+category: schedules/ryeos-email
+version: "1.0.0"
+schema_version: "1"
+schedules:
+  - schedule_id: ryeos-email.process-send-queue
+    item_ref: tool:ryeos-email/system/process_send_queue
+    schedule_type: interval
+    expression: "30"
+    params: {}
+    overlap_policy: skip
+```
+
+Use scheduler services for imperative operator control (`register`,
+`pause`, `resume`, `deregister`, `show_fires`). Use project deploy
+schedule declarations for repeatable bundle/project-owned runtime jobs.
 
 ## Service vs Tool
 

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T02:02:55Z:8306376255754667d969392d40bb8debec6b96aedad8930bc65693d2ae21b5c6:gygBzwtWe4JOpuWPKGnmMtlAwIaB+UvhYBsIqsX37IQPjHAH7wYFviVPAyM2L6XPfsfUm3mzYKjQxpmfH2dNAw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-07T03:08:13Z:8a3fdcdc5fbba280e82cf1eeb4ccf5f5aba213993da6015b1ce9ca5ecbc53c66:VtNxbIVZGmv6KTOEIJOQtlZk/bJm17bxIv4x/0f+H2diVEDWRdy8iAJ/lFmvGeL3Y9ot1jHHBuyBuqMJWPCPDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core/node
@@ -7,7 +7,7 @@ version: "1.0.0"
 description: >
   The data-driven route system — how 16 signed YAML files define the
   entire HTTP surface of the daemon. Covers compilation, the single
-  fallback dispatcher, 5 response modes, 8 invoker types, per-route
+  fallback dispatcher, built-in response modes, invoker types, per-route
   semaphores, auth as a route property, and ArcSwap hot-reload.
 ---
 
@@ -152,6 +152,99 @@ or:
 `item_ref`, and `parameters` in `source_config`; those belong to the
 generic execution surfaces, not bundle-declared HTTP handlers.
 
+The `source` must be a fixed bundle-qualified `tool:` ref. At compile
+time, the route file must live under `<bundle>/.ai/node/routes`, the
+source ref's bundle prefix must match that bundle, and nested or
+ambiguous `.ai/node/routes` paths are rejected. At request time, Rye OS
+resolves the tool through the engine and rejects the request unless the
+winning source file is physically under the same bundle's `.ai/tools`
+root. This prevents a same-named system/user/project tool from shadowing
+the verified bundle handler.
+
+The request envelope passed as tool parameters has this shape:
+
+```json
+{
+  "route": {"id": "ryeos-email.track_click"},
+  "request": {
+    "method": "GET",
+    "path": "/track/click",
+    "uri": "/track/click?id=00123",
+    "raw_query": "id=00123",
+    "query": {"id": "00123"},
+    "path_params": {},
+    "headers": {"user-agent": "..."},
+    "body": {"kind": "none"}
+  },
+  "principal": {
+    "id": "anonymous",
+    "verified": false,
+    "verifier": "none",
+    "metadata": {}
+  }
+}
+```
+
+`source_config.request` is deliberately opt-in:
+
+| Field | Effect |
+|---|---|
+| `query: true` | Includes parsed query object and `raw_query`; values stay strings. Duplicate keys collapse in `query` with last value winning; `raw_query` preserves the original query string. |
+| `query: false` | Omits parsed query and `raw_query`, and strips the query string from `uri`. |
+| `path_params: true` | Includes route path captures. |
+| `headers: [...]` | Includes only the listed headers whose runtime values are valid UTF-8. |
+| `body: true` | Includes the request body according to route `request.body`: `json`, `text`, `raw`/base64, or `none`. |
+
+OAuth callback example:
+
+```yaml
+id: agent-kiwi/google-callback
+path: /auth/google/callback
+methods: [GET]
+auth: none
+request:
+  body: none
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: handler
+  source: tool:agent-kiwi/oauth/callback
+  source_config:
+    request:
+      query: true
+      headers:
+        - user-agent
+    result:
+      envelope_field: response
+      response_bytes_max: 1048576
+```
+
+Webhook JSON body example:
+
+```yaml
+id: agent-kiwi/gmail-webhook
+path: /webhooks/gmail
+methods: [POST]
+auth: hmac
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: handler
+  source: tool:agent-kiwi/gmail/webhook
+  source_config:
+    request:
+      body: true
+      headers:
+        - x-goog-channel-id
+        - x-goog-resource-state
+```
+
 Handler response envelopes support `status`, `headers`, `json`, `body`,
 `body_base64`, and `content_type`. JSON responses always use
 `application/json`; text and base64 bodies may set `content_type`. Dynamic
@@ -159,6 +252,43 @@ response headers are sanitized: hop-by-hop headers, `Content-Type`, and
 `Set-Cookie` must not be supplied through `headers`. Use `content_type`
 for content type instead. `response_bytes_max` bounds encoded JSON, text,
 or decoded base64 response body bytes.
+
+Redirect response example:
+
+```json
+{
+  "response": {
+    "status": 302,
+    "headers": {
+      "Location": "https://accounts.google.com/o/oauth2/v2/auth?..."
+    }
+  }
+}
+```
+
+HTML success response example:
+
+```json
+{
+  "response": {
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<html><body>Connected.</body></html>"
+  }
+}
+```
+
+Tracking pixel response example:
+
+```json
+{
+  "response": {
+    "status": 200,
+    "content_type": "image/gif",
+    "body_base64": "R0lGODlhAQABAAAAACw="
+  }
+}
+```
 
 ## Invokers
 
