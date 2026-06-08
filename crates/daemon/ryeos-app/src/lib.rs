@@ -14,6 +14,7 @@ pub mod event_store_service;
 pub mod event_stream;
 pub mod execution_provenance;
 pub mod extension_state;
+pub mod graph_execution_projection;
 pub mod handler_context;
 pub mod handler_error;
 pub mod identity;

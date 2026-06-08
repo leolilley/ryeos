@@ -404,4 +404,45 @@ config:
             lillux::cas::sha256_hex(cleaned.as_bytes())
         );
     }
+
+    #[test]
+    fn definition_hash_ignores_signature_line_changes_but_not_body() {
+        let body = r#"version: "1.0.0"
+category: test
+config:
+  start: a
+"#;
+
+        let signed_a = format!("<!-- ryeos:signed:old -->\n{body}");
+        let signed_b = format!("<!-- ryeos:signed:new -->\n{body}");
+        let changed_body = r#"version: "1.0.0"
+category: test
+config:
+  start: b
+"#;
+        let signed_changed = format!("<!-- ryeos:signed:new -->\n{changed_body}");
+
+        let a = GraphDefinition::from_yaml(&signed_a, Some("test.yaml")).unwrap();
+        let b = GraphDefinition::from_yaml(&signed_b, Some("test.yaml")).unwrap();
+        let changed = GraphDefinition::from_yaml(&signed_changed, Some("test.yaml")).unwrap();
+
+        assert_eq!(a.definition_hash, b.definition_hash);
+        assert_ne!(a.definition_hash, changed.definition_hash);
+    }
+
+    #[test]
+    fn empty_category_uses_file_stem_without_leading_slash() {
+        let yaml = r#"
+version: "1.0.0"
+category: ""
+config:
+  start: a
+"#;
+
+        let def = GraphDefinition::from_yaml(yaml, Some("/tmp/flow.yaml")).unwrap();
+
+        assert_eq!(def.graph_id, "flow");
+        assert_eq!(def.definition_ref, "graph:flow");
+        assert!(!def.graph_id.starts_with('/'));
+    }
 }

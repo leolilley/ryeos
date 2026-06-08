@@ -995,13 +995,8 @@ impl Walker {
                     elapsed_ms,
                     error: None,
                 });
-                let r = persistence::write_node_receipt(
-                    &self.client,
-                    graph_run_id,
-                    receipts.last().unwrap(),
-                )
-                .await;
-                self.record_callback_warning("write_node_receipt", r.map(|_| ()));
+                self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
+                    .await;
 
                 self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
                     .await;
@@ -1062,14 +1057,25 @@ impl Walker {
                     error: Some(error.clone()),
                 });
 
+                self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
+                    .await;
+
                 self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error))
                     .await;
 
                 match next_on_error {
-                    NextOnError::Redirect(target) => CommitResult::Advance {
-                        next_node: target.clone(),
-                        next_step: step + 1,
-                    },
+                    NextOnError::Redirect(target) => {
+                        let next_step = step + 1;
+                        self.write_checkpoint_or_error(
+                            graph_run_id,
+                            target,
+                            next_step,
+                            state,
+                            guard,
+                            hook_list,
+                        )
+                        .await
+                    }
                     NextOnError::PolicyContinue => {
                         suppressed_errors.push(ErrorRecord {
                             step,
@@ -1164,14 +1170,25 @@ impl Walker {
                     error: Some(error.clone()),
                 });
 
+                self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
+                    .await;
+
                 self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error))
                     .await;
 
                 match next_on_error {
-                    NextOnError::Redirect(target) => CommitResult::Advance {
-                        next_node: target.clone(),
-                        next_step: step + 1,
-                    },
+                    NextOnError::Redirect(target) => {
+                        let next_step = step + 1;
+                        self.write_checkpoint_or_error(
+                            graph_run_id,
+                            target,
+                            next_step,
+                            state,
+                            guard,
+                            hook_list,
+                        )
+                        .await
+                    }
                     NextOnError::PolicyContinue => {
                         suppressed_errors.push(ErrorRecord {
                             step,
@@ -1432,7 +1449,12 @@ impl Walker {
         }
     }
 
-    // ── Event emission helpers (all route through record_callback_warning) ──
+    // ── Event/receipt emission helpers (all route through record_callback_warning) ──
+
+    async fn write_node_receipt_or_warn(&self, graph_run_id: &str, receipt: &NodeReceipt) {
+        let r = persistence::write_node_receipt(&self.client, graph_run_id, receipt).await;
+        self.record_callback_warning("write_node_receipt", r.map(|_| ()))
+    }
 
     async fn emit_graph_step_started(&self, graph_run_id: &str, step: u32, current: &str) {
         let r = self
@@ -1622,10 +1644,14 @@ fn node_ref(definition_ref: &str, node: &str) -> String {
 }
 
 fn hash_json_value(value: &Value) -> String {
-    lillux::cas::sha256_hex(serde_json::to_string(value).unwrap_or_default().as_bytes())
+    let canonical = lillux::cas::canonical_json(value);
+    lillux::cas::sha256_hex(canonical.as_bytes())
 }
 
 fn compute_cache_key(graph_id: &str, node_name: &str, action: &Value) -> String {
+    // Intentionally preserve existing cache-key serialization behavior.
+    // `node_result_hash` is portable consequence identity; this cache key is
+    // private runtime cache identity and should not change in this PR.
     let mut hasher = Sha256::new();
     hasher.update(graph_id.as_bytes());
     hasher.update(node_name.as_bytes());
@@ -2404,9 +2430,55 @@ config:
             .execute(json!({}), Some("gr-fence-test".to_string()))
             .await;
         assert!(result.success);
+        assert_eq!(result.definition_ref, "graph:test/test");
+        assert_eq!(result.graph_run_id, "gr-fence-test");
+        assert_eq!(
+            result.definition_hash,
+            lillux::cas::sha256_hex(lillux::signature::strip_signature_lines(yaml).as_bytes())
+        );
 
         let events = recorder.recorded_events();
         let types: Vec<&str> = events.iter().map(|(_, et, _, _)| et.as_str()).collect();
+
+        for (_, event_type, payload, _) in &events {
+            match event_type.as_str() {
+                "graph_started"
+                | "graph_completed"
+                | "graph_step_started"
+                | "graph_step_completed"
+                | "tool_call_start"
+                | "tool_call_result"
+                | "graph_branch_taken"
+                | "graph_foreach_iteration" => {
+                    assert_eq!(
+                        payload["definition_ref"].as_str(),
+                        Some(result.definition_ref.as_str())
+                    );
+                    assert_eq!(
+                        payload["definition_hash"].as_str(),
+                        Some(result.definition_hash.as_str())
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        for (_, event_type, payload, _) in &events {
+            match event_type.as_str() {
+                "graph_step_started"
+                | "graph_step_completed"
+                | "tool_call_start"
+                | "tool_call_result"
+                | "graph_branch_taken"
+                | "graph_foreach_iteration" => {
+                    assert_eq!(
+                        payload["node_ref"].as_str(),
+                        Some("graph:test/test#node:step1")
+                    );
+                }
+                _ => {}
+            }
+        }
 
         // graph_started is emitted before the loop starts
         let idx = types.iter().position(|&t| t == "graph_started").unwrap();
@@ -2447,6 +2519,31 @@ config:
         assert_eq!(
             completed_count, 1,
             "GraphCompleted must be emitted exactly once, got {completed_count}"
+        );
+
+        let artifacts = recorder.artifacts.lock().unwrap();
+        let receipt_artifact = artifacts
+            .iter()
+            .find(|a| a["artifact_type"] == "graph_node_receipt")
+            .expect("action receipt artifact should be published");
+        assert_eq!(
+            receipt_artifact["uri"].as_str(),
+            Some("graph://runs/gr-fence-test/node-receipts/0")
+        );
+        let receipt = &receipt_artifact["metadata"];
+        assert_eq!(
+            receipt["definition_ref"].as_str(),
+            Some(result.definition_ref.as_str())
+        );
+        assert_eq!(
+            receipt["definition_hash"].as_str(),
+            Some(result.definition_hash.as_str())
+        );
+        assert_eq!(receipt["graph_run_id"].as_str(), Some("gr-fence-test"));
+        assert_eq!(receipt["node"].as_str(), Some("step1"));
+        assert_eq!(
+            receipt["node_result_hash"].as_str(),
+            Some(hash_json_value(&json!({"msg": "hello"})).as_str())
         );
     }
 
@@ -2566,6 +2663,14 @@ config:
             .find(|(_, et, _, _)| et == "graph_branch_taken")
             .unwrap();
         assert_eq!(branch_event.2["target"], "fast_path");
+        assert_eq!(
+            branch_event.2["node_ref"].as_str(),
+            Some("graph:test/test#node:check")
+        );
+        assert_eq!(
+            branch_event.2["target_node_ref"].as_str(),
+            Some("graph:test/test#node:fast_path")
+        );
 
         // Checkpoint must exist pointing at the next node
         let checkpoint_file = tmp.path().join("latest.json");
@@ -2646,6 +2751,165 @@ config:
             step_completed, 1,
             "1 foreach step (return node is terminal, no step_completed)"
         );
+    }
+
+    #[test]
+    fn node_result_hash_uses_canonical_json() {
+        let mut left = serde_json::Map::new();
+        left.insert("b".into(), json!(2));
+        left.insert("a".into(), json!(1));
+
+        let mut right = serde_json::Map::new();
+        right.insert("a".into(), json!(1));
+        right.insert("b".into(), json!(2));
+
+        let left = Value::Object(left);
+        let right = Value::Object(right);
+        let expected = lillux::cas::sha256_hex(lillux::cas::canonical_json(&right).as_bytes());
+
+        assert_eq!(hash_json_value(&left), expected);
+        assert_eq!(hash_json_value(&left), hash_json_value(&right));
+    }
+
+    #[tokio::test]
+    async fn action_leaf_errors_publish_error_receipts() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  on_error: fail
+  nodes:
+    step1:
+      action: {item_id: "tool:test/fail"}
+"#;
+        let graph = make_graph(yaml);
+        let (w, recorder) = make_recording_walker(
+            graph,
+            vec![json!({"status": "error", "error": "forced"})],
+            None,
+        );
+
+        let result = w
+            .execute(json!({}), Some("gr-error-receipt".to_string()))
+            .await;
+        assert!(!result.success);
+
+        let artifacts = recorder.artifacts.lock().unwrap();
+        let receipt_artifact = artifacts
+            .iter()
+            .find(|a| {
+                a["artifact_type"] == "graph_node_receipt" && a["metadata"]["node"] == "step1"
+            })
+            .expect("error node receipt should be published");
+        assert_eq!(
+            receipt_artifact["uri"].as_str(),
+            Some("graph://runs/gr-error-receipt/node-receipts/0")
+        );
+        let receipt = &receipt_artifact["metadata"];
+
+        assert_eq!(
+            receipt["definition_ref"].as_str(),
+            Some(result.definition_ref.as_str())
+        );
+        assert_eq!(
+            receipt["definition_hash"].as_str(),
+            Some(result.definition_hash.as_str())
+        );
+        assert_eq!(receipt["graph_run_id"].as_str(), Some("gr-error-receipt"));
+        assert_eq!(receipt["node_result_hash"], Value::Null);
+        assert_eq!(receipt["error"].as_str(), Some("forced"));
+    }
+
+    #[tokio::test]
+    async fn action_dispatch_hard_errors_publish_error_receipts() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  on_error: fail
+  nodes:
+    step1:
+      env_requires: [RYEOS_TEST_MISSING_FOR_HARD_ERROR_RECEIPT]
+      action: {item_id: "tool:test/env"}
+"#;
+        let graph = make_graph(yaml);
+        let (w, recorder) = make_recording_walker(graph, vec![], None);
+
+        let result = w
+            .execute(json!({}), Some("gr-hard-error-receipt".to_string()))
+            .await;
+        assert!(!result.success);
+
+        let artifacts = recorder.artifacts.lock().unwrap();
+        let receipt_artifact = artifacts
+            .iter()
+            .find(|a| {
+                a["artifact_type"] == "graph_node_receipt" && a["metadata"]["node"] == "step1"
+            })
+            .expect("hard-error node receipt should be published");
+        assert_eq!(
+            receipt_artifact["uri"].as_str(),
+            Some("graph://runs/gr-hard-error-receipt/node-receipts/0")
+        );
+        let receipt = &receipt_artifact["metadata"];
+
+        assert_eq!(
+            receipt["definition_ref"].as_str(),
+            Some(result.definition_ref.as_str())
+        );
+        assert_eq!(
+            receipt["definition_hash"].as_str(),
+            Some(result.definition_hash.as_str())
+        );
+        assert_eq!(
+            receipt["graph_run_id"].as_str(),
+            Some("gr-hard-error-receipt")
+        );
+        assert_eq!(receipt["node_result_hash"], Value::Null);
+        assert!(receipt["error"]
+            .as_str()
+            .is_some_and(|err| err.contains("env preflight failed")));
+    }
+
+    #[tokio::test]
+    async fn action_error_redirects_write_checkpoint() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      on_error: handler
+      action: {item_id: "tool:test/fail"}
+    handler:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let tmp = tempfile::tempdir().unwrap();
+        let (w, _recorder) = make_recording_walker(
+            graph,
+            vec![json!({"status": "error", "error": "forced"})],
+            Some(tmp.path()),
+        );
+
+        let result = w
+            .execute(json!({}), Some("gr-error-redirect".to_string()))
+            .await;
+        assert!(result.success);
+
+        let checkpoint_file = tmp.path().join("latest.json");
+        assert!(
+            checkpoint_file.exists(),
+            "redirect advance must write checkpoint"
+        );
+        let contents = std::fs::read_to_string(&checkpoint_file).unwrap();
+        let cp: Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(cp["current_node"], "handler");
+        assert_eq!(cp["step_count"], 1);
+        assert_eq!(cp["graph_run_id"], "gr-error-redirect");
     }
 
     /// Terminal outcomes must emit GraphCompleted exactly once.

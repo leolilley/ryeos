@@ -22,7 +22,13 @@ pub async fn write_node_receipt(
         "error": receipt.error,
     });
 
-    callback.publish_artifact(receipt_json.clone()).await?;
+    callback
+        .publish_artifact(json!({
+            "artifact_type": "graph_node_receipt",
+            "uri": format!("graph://runs/{graph_run_id}/node-receipts/{}", receipt.step),
+            "metadata": receipt_json.clone(),
+        }))
+        .await?;
 
     Ok(receipt_json)
 }
@@ -162,5 +168,39 @@ mod tests {
 
         let artifacts = mock.artifacts.lock().unwrap();
         assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["artifact_type"], "graph_node_receipt");
+        assert_eq!(artifacts[0]["uri"], "graph://runs/gr-1/node-receipts/1");
+        assert_eq!(artifacts[0]["metadata"], output);
+    }
+
+    #[tokio::test]
+    async fn write_node_receipt_formats_error_receipt() {
+        let receipt = NodeReceipt {
+            node: "step1".to_string(),
+            step: 0,
+            definition_ref: "graph:test".to_string(),
+            definition_hash: "def123".to_string(),
+            result_hash: None,
+            cache_hit: false,
+            elapsed_ms: 5,
+            error: Some("boom".to_string()),
+        };
+
+        let (callback, _mock) = make_callback();
+        let output = write_node_receipt(&callback, "gr-err", &receipt)
+            .await
+            .unwrap();
+
+        assert_eq!(output["graph_run_id"], "gr-err");
+        assert_eq!(output["definition_ref"], "graph:test");
+        assert_eq!(output["definition_hash"], "def123");
+        assert_eq!(output["node_result_hash"], Value::Null);
+        assert_eq!(output["error"], "boom");
+
+        let artifacts = _mock.artifacts.lock().unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["artifact_type"], "graph_node_receipt");
+        assert_eq!(artifacts[0]["uri"], "graph://runs/gr-err/node-receipts/0");
+        assert_eq!(artifacts[0]["metadata"], output);
     }
 }
