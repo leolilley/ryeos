@@ -1,5 +1,5 @@
+<!-- ryeos:signed:2026-06-08T00:42:18Z:59a4adb45c1ddbd89fb8f1232c83585a77f6198d96e617cf47df0e055711f981:/AqYpei1RLpkiFgKlZ7wjRxqR7AXyzOD/l3FWelsLd4BGtnjMFwRmdqurEFyhZOYbfMcggYObf/daQarrCRjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:a729eb2a41f2fb70cf13c52c86377f9ae66179b4fd3c88bfcad59450ea426794:Xkv/F3+53OFxqXdq1ZndG8cg8q+ZHLx8kI732/mtVtvb/CWKdz9QAWQrp2aot5CT1U1rKFPXHD/PQPvXmLn+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-<!-- ryeos:signed:2026-05-31T08:15:57Z:e1015ee2ba758c1e374f462b57c985144884002c0324a33abec8ea17623a621b:gQnmxKa7Y2BAK098ARztlbASFyqoF8VetKLulRidLczsTEmdSsaTQPcVwdVkG9APeQfuSUWcf7jpEUqGqWA7DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, compilation, compose, handlers, plan-builder]

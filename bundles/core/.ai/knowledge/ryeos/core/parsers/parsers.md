@@ -1,5 +1,5 @@
+<!-- ryeos:signed:2026-06-08T00:42:19Z:ba69b16f437d6ddcb24c140e3f0dc2d5f11985f94e3fd2cce4897abdc6e37a96:Kq5Q+eGJ2gBRxUUaEPjYXCvDCnttWBDpMFAhlOJeWXd+TNosjIXkEZPq7txZujNr6PGHUXHCb/AAxnzuteEPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:578da9a3092b96b72a3914815df0bb04b95d3d8e1fd328d777d86d9a67c7a900:4c/7joPzCtkgJiYd+/tNnsWztoe1FPVMIIBl6tjFjHyO5HDZyURr4D1WQj03hJwu8pdiXe1QGp4kvpQyT9IiAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-<!-- ryeos:signed:2026-05-31T08:15:57Z:4be533dd23d3addf2890db5b1ee44d328d4ef169f18044e8236c6e009958eb57:hly3/o1//Mg3jWhIYpjM4WQKD1Qn/eXDmqeKcUSj3rBXwdOpljKTxwoymdo8bRVrgGkS5dlw1FNqNfyLtNxQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, parsers, formats, parsing]

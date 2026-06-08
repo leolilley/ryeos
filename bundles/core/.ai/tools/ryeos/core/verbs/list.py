@@ -1,3 +1,4 @@
+# ryeos:signed:2026-06-08T00:42:17Z:39f02cbc1badd3eaa4e3635ba2d8dcbb44db3de3711c086da850f3ff89ff7747:tX8TFbs1ISrEL3pn0FXGjdP6tgPpyA8tBeTqr+ZkMdxHrCZXQNPlst9GAERBMPdQ+R/VpNFO2/C0GJYfvbE3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos-tool:
 #   category: ryeos/core/verbs
 #   version: "1.0.0"
