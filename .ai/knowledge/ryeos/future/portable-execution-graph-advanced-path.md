@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T10:20:20Z:16f818a17da39f6b377591ca44eff21f1d38b20fb7df7e7c9346f1267bb0b40b:wlgcgfijmNu9NVlfw9Km1EaZOFDy/WMWxhxCX9zU+iNVxXDOFb/7FWto0bNgWj838LoiYXa5IUg4ZIUjyh5fCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-08T10:54:41Z:29394740d401f585efc51de1c65361acdb675b31b5ad10c7602aeb010e621e21:xnlRV3MljwjsalZx/v7GdUANHLVJkSyH/+bQ7WW5IyBK2APsyYDVjRv07zbng148gKUe8BSpPIfougkfF95rBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 tags: [future, portable-execution, execution-graph, architecture]
 version: "0.1.0"
@@ -44,6 +44,9 @@ Current regression proof:
   failure-path runtime events. The failed tool dispatch event uses
   `tool_call_result.status = "dispatch_failed"`; the graph step completion event
   uses `graph_step_completed.status = "error"`.
+- `ryeos_app::graph_execution_projection::build_graph_execution_trace` now
+  provides an internal, pure read-model primitive that groups persisted graph
+  runtime events and `graph_node_receipt` artifacts by `node_ref`.
 - This is still evidence for the identity bridge, not a public portable
   execution graph projection API.
 
@@ -177,6 +180,8 @@ For now, implementation should stay limited to:
 - ensuring runtime events and node receipts carry definition identity;
 - publishing action-node error receipts if the existing receipt shape supports
   it;
+- maintaining the internal graph execution trace projection as a helper over
+  already-persisted events and artifacts, without promoting it to a route/API;
 - documenting topology internals as a projection without changing public API.
 
 This is enough to make future projection possible without prematurely adding a
