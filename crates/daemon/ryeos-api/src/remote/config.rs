@@ -126,8 +126,20 @@ pub struct RemoteConfig {
     /// `remote configure`. Required for push to use the correct
     /// ignore rules. Re-run `remote configure` if stale.
     pub ingest_ignore: ryeos_app::ignore::IgnoreConfig,
+    /// Portable binding for the project that owns this config file.
+    ///
+    /// This is only meaningful for project-level remotes stored under
+    /// `<project>/.ai/config/remotes/remotes.yaml`. User-level remotes
+    /// should continue to use [`RemoteConfig::project_bindings`] because
+    /// one user-level remote can bind multiple local projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_binding: Option<RemoteProjectBinding>,
     /// Canonical local project path -> remote project binding.
+    ///
+    /// This is the canonical shape for user-level remotes. Project-level
+    /// remotes must use [`RemoteConfig::project_binding`] instead.
     #[serde(default)]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub project_bindings: HashMap<String, RemoteProjectBinding>,
 }
 
@@ -161,11 +173,58 @@ impl RemoteConfig {
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote '{}' vault_fingerprint must not be empty", self.name);
         }
+        if let Some(binding) = self.project_binding.as_ref() {
+            validate_remote_project_path(&binding.remote_project_path)?;
+        }
         for binding in self.project_bindings.values() {
             validate_remote_project_path(&binding.remote_project_path)?;
         }
         Ok(())
     }
+}
+
+/// Where a loaded remote config came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteConfigScope {
+    /// User-level RyeOS space.
+    User,
+    /// Project-level config rooted at this local project path.
+    Project { root: PathBuf },
+}
+
+impl RemoteConfigScope {
+    pub fn label(&self) -> &'static str {
+        match self {
+            RemoteConfigScope::User => "user",
+            RemoteConfigScope::Project { .. } => "project",
+        }
+    }
+}
+
+/// A valid remote config plus its source scope.
+#[derive(Debug, Clone)]
+pub struct LoadedRemote {
+    pub config: RemoteConfig,
+    pub scope: RemoteConfigScope,
+    pub config_path: PathBuf,
+}
+
+/// A remote entry that was present on disk but failed strict validation.
+#[derive(Debug, Clone)]
+pub struct InvalidRemote {
+    pub name: String,
+    pub scope: RemoteConfigScope,
+    pub config_path: PathBuf,
+    pub error: String,
+    pub url: Option<String>,
+    pub repair_hint: String,
+}
+
+/// Layered remote load result with both usable configs and diagnostics.
+#[derive(Debug, Clone, Default)]
+pub struct RemotesLoadReport {
+    pub remotes: HashMap<String, LoadedRemote>,
+    pub invalid: Vec<InvalidRemote>,
 }
 
 /// Resolved local/remote project path binding.
@@ -214,15 +273,27 @@ pub fn load_remotes(system_space_dir: &Path) -> Result<HashMap<String, RemoteCon
 /// Load a remotes file from an explicit absolute path. Same per-entry
 /// resilience as [`load_remotes`].
 pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
+    Ok(load_remotes_at_report(path, RemoteConfigScope::User)?
+        .remotes
+        .into_iter()
+        .map(|(name, loaded)| (name, loaded.config))
+        .collect())
+}
+
+fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<RemotesLoadReport> {
+    let mut report = RemotesLoadReport::default();
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(report);
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
     let file: RemotesFile = serde_yaml::from_str(&content)
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
-    let mut out = HashMap::with_capacity(file.remotes.len());
     for (name, raw) in file.remotes {
+        let url = raw
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
         match serde_yaml::from_value::<RemoteConfig>(raw).and_then(|cfg| {
             if cfg.name != name {
                 return Err(serde_yaml::Error::custom(format!(
@@ -235,7 +306,14 @@ pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
             Ok(cfg)
         }) {
             Ok(cfg) => {
-                out.insert(name, cfg);
+                report.remotes.insert(
+                    name,
+                    LoadedRemote {
+                        config: cfg,
+                        scope: scope.clone(),
+                        config_path: path.to_path_buf(),
+                    },
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -247,45 +325,75 @@ pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
                     name,
                     path.display(),
                 );
+                let repair_hint = match &scope {
+                    RemoteConfigScope::Project { .. } => match url.as_deref() {
+                        Some(url) => format!(
+                            "run `ryeos remote configure {} --url {}` from this project",
+                            name, url
+                        ),
+                        None => format!(
+                            "run `ryeos remote configure {} --url <https-url>` from this project",
+                            name
+                        ),
+                    },
+                    RemoteConfigScope::User => match url.as_deref() {
+                        Some(url) => format!(
+                            "run `ryeos remote configure {} --url {} --no-project`",
+                            name, url
+                        ),
+                        None => format!(
+                            "run `ryeos remote configure {} --url <https-url> --no-project`",
+                            name
+                        ),
+                    },
+                };
+                report.invalid.push(InvalidRemote {
+                    name,
+                    scope: scope.clone(),
+                    config_path: path.to_path_buf(),
+                    error: e.to_string(),
+                    url,
+                    repair_hint,
+                });
             }
         }
     }
-    Ok(out)
+    Ok(report)
 }
 
-/// Recover a remote entry's project bindings without requiring the
-/// entire entry to satisfy the current [`RemoteConfig`] schema.
-///
-/// This is used by `remote configure` when repairing older remote
-/// entries. Those entries may be missing newly-required fields such as
-/// `signing_key`, but their local-to-remote project bindings are still
-/// valuable and must not be dropped during refresh.
-pub fn load_remote_project_bindings_at(
-    path: &Path,
+/// Recover a current-schema project-local binding from a remote entry
+/// without requiring the whole entry to validate.
+pub fn load_project_binding_at(
+    project_root: &Path,
     remote_name: &str,
-) -> Result<HashMap<String, RemoteProjectBinding>> {
+) -> Result<Option<RemoteProjectBinding>> {
+    let path = remotes_config_path(project_root);
+    let Some(raw) = load_raw_remote_at(&path, remote_name)? else {
+        return Ok(None);
+    };
+    extract_project_binding_from_raw(&raw)
+}
+
+fn load_raw_remote_at(path: &Path, remote_name: &str) -> Result<Option<serde_yaml::Value>> {
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(None);
     }
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read remotes config: {}", path.display()))?;
     let file: RemotesFile = serde_yaml::from_str(&content)
         .with_context(|| format!("invalid remotes config: {}", path.display()))?;
-    let Some(raw) = file.remotes.get(remote_name) else {
-        return Ok(HashMap::new());
-    };
-    let Some(bindings) = raw.get("project_bindings") else {
-        return Ok(HashMap::new());
-    };
-    serde_yaml::from_value::<HashMap<String, RemoteProjectBinding>>(bindings.clone()).with_context(
-        || {
-            format!(
-                "invalid project_bindings for remote '{}' in {}",
-                remote_name,
-                path.display()
-            )
-        },
-    )
+    Ok(file.remotes.get(remote_name).cloned())
+}
+
+fn extract_project_binding_from_raw(
+    raw: &serde_yaml::Value,
+) -> Result<Option<RemoteProjectBinding>> {
+    if let Some(binding) = raw.get("project_binding") {
+        return serde_yaml::from_value::<RemoteProjectBinding>(binding.clone())
+            .map(Some)
+            .context("invalid project_binding");
+    }
+    Ok(None)
 }
 
 /// Locate the scope (file root) that owns a given remote name.
@@ -323,14 +431,37 @@ pub fn load_remotes_layered(
     system_space_dir: &Path,
     project_path: Option<&Path>,
 ) -> Result<HashMap<String, RemoteConfig>> {
-    let mut merged = load_remotes(system_space_dir)?;
+    Ok(load_remotes_layered_report(system_space_dir, project_path)?
+        .remotes
+        .into_iter()
+        .map(|(name, loaded)| (name, loaded.config))
+        .collect())
+}
+
+/// Load user remotes plus optional project remotes, retaining invalid
+/// entries as diagnostics for user-facing commands.
+pub fn load_remotes_layered_report(
+    system_space_dir: &Path,
+    project_path: Option<&Path>,
+) -> Result<RemotesLoadReport> {
+    let mut report = load_remotes_at_report(
+        &remotes_config_path(system_space_dir),
+        RemoteConfigScope::User,
+    )?;
     if let Some(project) = project_path {
-        let project_remotes = load_remotes_at(&remotes_config_path(project))?;
-        for (name, cfg) in project_remotes {
-            merged.insert(name, cfg);
+        let canonical_project = canonical_local_project_path(project)?;
+        let project_report = load_remotes_at_report(
+            &remotes_config_path(&canonical_project),
+            RemoteConfigScope::Project {
+                root: canonical_project,
+            },
+        )?;
+        for (name, loaded) in project_report.remotes {
+            report.remotes.insert(name, loaded);
         }
+        report.invalid.extend(project_report.invalid);
     }
-    Ok(merged)
+    Ok(report)
 }
 
 /// Save remotes config to disk.
@@ -338,18 +469,54 @@ pub fn save_remotes(
     system_space_dir: &Path,
     remotes: &HashMap<String, RemoteConfig>,
 ) -> Result<()> {
-    let path = remotes_config_path(system_space_dir);
+    save_remotes_for_scope(system_space_dir, remotes, &RemoteConfigScope::User)
+}
+
+/// Save remotes config after normalizing fields for the target scope.
+pub fn save_remotes_for_scope(
+    root: &Path,
+    remotes: &HashMap<String, RemoteConfig>,
+    scope: &RemoteConfigScope,
+) -> Result<()> {
+    let path = remotes_config_path(root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = serde_yaml::to_string(&serde_json::json!({ "remotes": remotes }))?;
+    let normalized: HashMap<String, RemoteConfig> = remotes
+        .iter()
+        .map(|(name, cfg)| (name.clone(), normalize_remote_for_scope(cfg, scope)))
+        .collect();
+    let content = serde_yaml::to_string(&serde_json::json!({ "remotes": normalized }))?;
     std::fs::write(&path, content)
         .with_context(|| format!("failed to write remotes config: {}", path.display()))?;
     Ok(())
 }
 
+fn normalize_remote_for_scope(cfg: &RemoteConfig, scope: &RemoteConfigScope) -> RemoteConfig {
+    let mut out = cfg.clone();
+    match scope {
+        RemoteConfigScope::User => {
+            out.project_binding = None;
+        }
+        RemoteConfigScope::Project { .. } => {
+            out.project_bindings.clear();
+        }
+    }
+    out
+}
+
 /// Get a named remote. Returns an error if not found.
 pub fn get_remote(remotes: &HashMap<String, RemoteConfig>, name: &str) -> Result<RemoteConfig> {
+    remotes
+        .get(name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", name))
+}
+
+pub fn get_loaded_remote(
+    remotes: &HashMap<String, LoadedRemote>,
+    name: &str,
+) -> Result<LoadedRemote> {
     remotes
         .get(name)
         .cloned()
@@ -395,6 +562,46 @@ pub fn resolve_project_binding(
         remote_project_path: binding.remote_project_path.clone(),
         sync_scope: binding.sync_scope,
     })
+}
+
+/// Resolve a local->remote binding while honoring the config's source scope.
+pub fn resolve_loaded_project_binding(
+    loaded: &LoadedRemote,
+    local_project_path: &Path,
+) -> Result<ResolvedProjectBinding> {
+    let canonical = canonical_local_project_path(local_project_path)?;
+    match &loaded.scope {
+        RemoteConfigScope::Project { root } => {
+            let canonical_root = canonical_local_project_path(root)?;
+            if canonical != canonical_root {
+                anyhow::bail!(
+                    "project-level remote '{}' belongs to '{}', not '{}'",
+                    loaded.config.name,
+                    canonical_root.display(),
+                    canonical.display(),
+                );
+            }
+            let binding = loaded
+                .config
+                .project_binding
+                .as_ref()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "remote '{}' has no project binding for this project; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope ai_only`",
+                        loaded.config.name,
+                        loaded.config.name,
+                        canonical.display(),
+                    )
+                })?;
+            validate_remote_project_path(&binding.remote_project_path)?;
+            Ok(ResolvedProjectBinding {
+                local_project_path: canonical,
+                remote_project_path: binding.remote_project_path.clone(),
+                sync_scope: binding.sync_scope,
+            })
+        }
+        RemoteConfigScope::User => resolve_project_binding(&loaded.config, &canonical),
+    }
 }
 
 /// Validate the remote path locally without canonicalizing it here.
@@ -568,6 +775,21 @@ pub fn resolve_remote_by_site_id(
     })
 }
 
+pub fn resolve_loaded_remote_by_site_id(
+    remotes: &HashMap<String, LoadedRemote>,
+    target_site_id: &str,
+) -> Result<LoadedRemote, TargetSiteError> {
+    let plain: HashMap<String, RemoteConfig> = remotes
+        .iter()
+        .map(|(name, loaded)| (name.clone(), loaded.config.clone()))
+        .collect();
+    let resolved = resolve_remote_by_site_id(&plain, target_site_id)?;
+    Ok(remotes
+        .get(&resolved.config_key)
+        .cloned()
+        .expect("resolved config key must exist in source map"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,6 +885,7 @@ node:
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig {
                     patterns: vec![".git/".into(), "target/".into()],
                 },
+                project_binding: None,
                 project_bindings: HashMap::new(),
             },
         );
@@ -704,6 +927,7 @@ node:
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig {
                     patterns: vec![".git/".into()],
                 },
+                project_binding: None,
                 project_bindings: bindings,
             },
         );
@@ -713,6 +937,70 @@ node:
         let resolved = resolve_project_binding(&loaded["railway"], &local).unwrap();
         assert_eq!(resolved.remote_project_path, "/data/projects/example");
         assert_eq!(resolved.sync_scope, ProjectSyncScope::AiOnly);
+    }
+
+    #[test]
+    fn project_level_project_binding_resolves_without_local_absolute_key() {
+        let project_root = tempfile::tempdir().unwrap();
+        let project_ai = project_root.path().join(ryeos_engine::AI_DIR);
+        std::fs::create_dir_all(&project_ai).unwrap();
+        let project_root = project_root.path().canonicalize().unwrap();
+        let loaded = LoadedRemote {
+            config: RemoteConfig {
+                name: "default".into(),
+                url: "https://example.com".into(),
+                principal_id: test_principal_id(2),
+                signing_key: test_signing_key(2),
+                site_id: "site:project".into(),
+                vault_fingerprint: "sha256:def456".into(),
+                ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+                project_binding: Some(RemoteProjectBinding {
+                    remote_project_path: "/data/projects/example".into(),
+                    sync_scope: ProjectSyncScope::AiOnly,
+                }),
+                project_bindings: HashMap::new(),
+            },
+            scope: RemoteConfigScope::Project {
+                root: project_root.clone(),
+            },
+            config_path: remotes_config_path(&project_root),
+        };
+
+        let resolved = resolve_loaded_project_binding(&loaded, &project_root).unwrap();
+        assert_eq!(resolved.remote_project_path, "/data/projects/example");
+        assert_eq!(resolved.local_project_path, project_root);
+    }
+
+    #[test]
+    fn layered_report_includes_invalid_missing_signing_key() {
+        let user_root = tempfile::tempdir().unwrap();
+        let project_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
+        let project_path = remotes_config_path(project_root.path());
+        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &project_path,
+            r#"
+remotes:
+  default:
+    name: default
+    url: https://project-level.example.com
+    principal_id: fp:stale
+    site_id: site:stale
+    vault_fingerprint: sha256:stale
+    ingest_ignore:
+      patterns: []
+"#,
+        )
+        .unwrap();
+
+        let report =
+            load_remotes_layered_report(user_root.path(), Some(project_root.path())).unwrap();
+        assert!(!report.remotes.contains_key("default"));
+        assert_eq!(report.invalid.len(), 1);
+        assert_eq!(report.invalid[0].name, "default");
+        assert!(report.invalid[0].error.contains("signing_key"));
+        assert!(report.invalid[0].repair_hint.contains("remote configure"));
     }
 
     // ── resolve_remote_by_site_id tests ─────────────────────────
@@ -727,6 +1015,7 @@ node:
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".to_string(),
             ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            project_binding: None,
             project_bindings: HashMap::new(),
         }
     }
@@ -792,6 +1081,7 @@ node:
                 site_id: MISSING_SITE_ID_SENTINEL.to_string(),
                 vault_fingerprint: "sha256:old".into(),
                 ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+                project_binding: None,
                 project_bindings: HashMap::new(),
             },
         );
@@ -943,48 +1233,6 @@ remotes:
         );
         assert!(merged.contains_key("user-only"));
         assert!(merged.contains_key("project-only"));
-    }
-
-    #[test]
-    fn load_remote_project_bindings_recovers_from_legacy_entry() {
-        let project_root = tempfile::tempdir().unwrap();
-        let project_path = remotes_config_path(project_root.path());
-        std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &project_path,
-            r#"
-remotes:
-  v2:
-    name: v2
-    url: https://project-level.example.com
-    principal_id: fp:legacy
-    site_id: site:legacy
-    vault_fingerprint: sha256:legacy
-    ingest_ignore:
-      patterns: []
-    project_bindings:
-      /workspace/projects/snap-track:
-        remote_project_path: /data/projects/snap-track
-        sync_scope: ai_only
-"#,
-        )
-        .unwrap();
-
-        let valid_remotes = load_remotes_at(&project_path).unwrap();
-        assert!(
-            valid_remotes.is_empty(),
-            "legacy entry is intentionally invalid without signing_key"
-        );
-
-        let bindings = load_remote_project_bindings_at(&project_path, "v2").unwrap();
-        assert_eq!(
-            bindings["/workspace/projects/snap-track"].remote_project_path,
-            "/data/projects/snap-track"
-        );
-        assert_eq!(
-            bindings["/workspace/projects/snap-track"].sync_scope,
-            ProjectSyncScope::AiOnly
-        );
     }
 
     #[test]

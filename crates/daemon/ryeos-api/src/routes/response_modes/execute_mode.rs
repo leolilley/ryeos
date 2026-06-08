@@ -24,7 +24,7 @@ use axum::response::IntoResponse;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::remote::config::{ProjectSyncScope, RemoteConfig, ResolvedRemote, TargetSiteError};
+use crate::remote::config::{LoadedRemote, ProjectSyncScope, ResolvedRemote, TargetSiteError};
 use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
@@ -627,10 +627,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 Some(project_ctx.effective_path.as_ref())
             };
             Some(
-                crate::remote::config::load_remotes_layered(
+                crate::remote::config::load_remotes_layered_report(
                     &state.config.system_space_dir,
                     project_for_layering,
                 )
+                .map(|report| report.remotes)
                 .map_err(|e| RouteDispatchError::Internal(format!("load remotes: {e:#}")))?,
             )
         } else {
@@ -761,7 +762,7 @@ fn plan_target_site_forward(
     no_project_requested: bool,
     current_site_id: &str,
     effective_project_path: &Path,
-    remotes: Option<&HashMap<String, RemoteConfig>>,
+    remotes: Option<&HashMap<String, LoadedRemote>>,
 ) -> Result<TargetSitePlan, ryeos_executor::dispatch_error::DispatchError> {
     let Some(target_site_id) = request.target_site_id.as_deref() else {
         return Ok(TargetSitePlan::Local);
@@ -813,23 +814,30 @@ fn plan_target_site_forward(
         }
     })?;
 
-    let remote = crate::remote::config::resolve_remote_by_site_id(remotes, target_site_id)
-        .map_err(|e| target_site_error_to_dispatch(e, target_site_id))?;
+    let loaded_remote =
+        crate::remote::config::resolve_loaded_remote_by_site_id(remotes, target_site_id)
+            .map_err(|e| target_site_error_to_dispatch(e, target_site_id))?;
+    let remote = ResolvedRemote {
+        remote: loaded_remote.config.clone(),
+        config_key: loaded_remote.config.name.clone(),
+    };
 
     let (local_project_path, remote_project_path) = if no_project_requested {
         (None, NO_PROJECT_SENTINEL.to_string())
     } else {
-        let binding =
-            crate::remote::config::resolve_project_binding(&remote.remote, effective_project_path)
-                .map_err(|e| {
-                    ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
-                        target_site_id: target_site_id.to_string(),
-                        detail: format!(
+        let binding = crate::remote::config::resolve_loaded_project_binding(
+            &loaded_remote,
+            effective_project_path,
+        )
+        .map_err(|e| {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
+                target_site_id: target_site_id.to_string(),
+                detail: format!(
                     "project binding for '{}' is required for target-site forwarding: {e:#}",
                     effective_project_path.display()
                 ),
-                    }
-                })?;
+            }
+        })?;
 
         if binding.sync_scope != ProjectSyncScope::FullProject {
             return Err(target_site_unsupported(
@@ -1073,10 +1081,10 @@ mod tests {
         }
     }
 
-    fn make_remote(name: &str, site_id: &str) -> RemoteConfig {
+    fn make_remote(name: &str, site_id: &str) -> crate::remote::config::RemoteConfig {
         let signing_key = lillux::crypto::SigningKey::from_bytes(&[name.as_bytes()[0]; 32]);
         let verifying_key = signing_key.verifying_key();
-        RemoteConfig {
+        crate::remote::config::RemoteConfig {
             name: name.to_string(),
             url: format!("https://{name}.example.com"),
             principal_id: format!("fp:{}", lillux::crypto::fingerprint(&verifying_key)),
@@ -1087,7 +1095,16 @@ mod tests {
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
             ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            project_binding: None,
             project_bindings: HashMap::new(),
+        }
+    }
+
+    fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
+        LoadedRemote {
+            config: remote,
+            scope: crate::remote::config::RemoteConfigScope::User,
+            config_path: PathBuf::new(),
         }
     }
 
@@ -1192,7 +1209,7 @@ mod tests {
     fn target_site_plan_unknown_site_is_typed_error() {
         let req = target_request(Some("site:missing"));
         let mut remotes = HashMap::new();
-        remotes.insert("gpu".into(), make_remote("gpu", "site:gpu"));
+        remotes.insert("gpu".into(), loaded(make_remote("gpu", "site:gpu")));
         let err = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1212,8 +1229,8 @@ mod tests {
     fn target_site_plan_ambiguous_site_is_resolution_error() {
         let req = target_request(Some("site:gpu"));
         let mut remotes = HashMap::new();
-        remotes.insert("gpu1".into(), make_remote("gpu1", "site:gpu"));
-        remotes.insert("gpu2".into(), make_remote("gpu2", "site:gpu"));
+        remotes.insert("gpu1".into(), loaded(make_remote("gpu1", "site:gpu")));
+        remotes.insert("gpu2".into(), loaded(make_remote("gpu2", "site:gpu")));
         let err = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1236,7 +1253,10 @@ mod tests {
         let mut remotes = HashMap::new();
         remotes.insert(
             "old".into(),
-            make_remote("old", crate::remote::config::MISSING_SITE_ID_SENTINEL),
+            loaded(make_remote(
+                "old",
+                crate::remote::config::MISSING_SITE_ID_SENTINEL,
+            )),
         );
         let err = plan_target_site_forward(
             &req,
@@ -1259,7 +1279,10 @@ mod tests {
         let mut req = target_request(Some("site:remote"));
         req.project_path = None;
         let mut remotes = HashMap::new();
-        remotes.insert("remote".into(), make_remote("remote", "site:remote"));
+        remotes.insert(
+            "remote".into(),
+            loaded(make_remote("remote", "site:remote")),
+        );
         let plan = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1283,7 +1306,10 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let req = target_request(Some("site:remote"));
         let mut remotes = HashMap::new();
-        remotes.insert("remote".into(), make_remote("remote", "site:remote"));
+        remotes.insert(
+            "remote".into(),
+            loaded(make_remote("remote", "site:remote")),
+        );
         let err = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1319,7 +1345,7 @@ mod tests {
             },
         );
         let mut remotes = HashMap::new();
-        remotes.insert("remote".into(), remote);
+        remotes.insert("remote".into(), loaded(remote));
         let err = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1355,7 +1381,7 @@ mod tests {
             },
         );
         let mut remotes = HashMap::new();
-        remotes.insert("remote".into(), remote);
+        remotes.insert("remote".into(), loaded(remote));
         let plan = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,

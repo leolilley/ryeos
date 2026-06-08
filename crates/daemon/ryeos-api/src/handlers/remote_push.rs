@@ -58,14 +58,29 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Default scope is `AiOnly` (see `ProjectSyncScope::default`) so an
     // unbound `remote push` ships only the `.ai/` subtree, never the
     // surrounding codebase or asset trees.
-    let remotes = config::load_remotes_layered(&state.config.system_space_dir, Some(&req.project))?;
-    let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    let report =
+        config::load_remotes_layered_report(&state.config.system_space_dir, Some(&req.project))?;
+    let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
+    let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
     let mut scope = ProjectSyncScope::default();
-    if let Some(cfg) = remote_cfg.as_ref() {
-        if let Some(binding) = cfg.project_bindings.get(&project_path_for_ref) {
-            scope = binding.sync_scope;
-            config::validate_remote_project_path(&binding.remote_project_path)?;
-            project_path_for_ref = binding.remote_project_path.clone();
+    if let Some(loaded) = loaded_remote.as_ref() {
+        match config::resolve_loaded_project_binding(loaded, &abs_project_path) {
+            Ok(binding) => {
+                scope = binding.sync_scope;
+                project_path_for_ref = binding.remote_project_path;
+            }
+            Err(e) if matches!(loaded.scope, config::RemoteConfigScope::Project { .. }) => {
+                anyhow::bail!(
+                    "project-level remote '{}' requires a project_binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope ai_only`: {e:#}",
+                    req.remote,
+                    abs_project_path.display(),
+                    req.remote,
+                    abs_project_path.display(),
+                );
+            }
+            Err(_) => {
+                // Preserve existing unbound fallback behavior for user-level remotes.
+            }
         }
     }
 
@@ -121,6 +136,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                                 site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
                                 vault_fingerprint: String::new(),
                                 ingest_ignore: fetched.clone(),
+                                project_binding: None,
                                 project_bindings: HashMap::new(),
                             },
                         );

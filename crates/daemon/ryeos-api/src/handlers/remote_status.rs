@@ -39,8 +39,31 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     } else {
         req.project_path.as_deref()
     };
-    let remotes = config::load_remotes_layered(&state.config.system_space_dir, project)?;
-    let remote_cfg = config::get_remote(&remotes, &req.remote)?;
+    let report = config::load_remotes_layered_report(&state.config.system_space_dir, project)?;
+    let remote_cfg = match config::get_loaded_remote(&report.remotes, &req.remote) {
+        Ok(loaded) => loaded.config,
+        Err(e) => {
+            let invalid: Vec<String> = report
+                .invalid
+                .iter()
+                .filter(|entry| entry.name == req.remote)
+                .map(|entry| {
+                    format!(
+                        "{} remote '{}' in {} is invalid: {}; {}",
+                        entry.scope.label(),
+                        entry.name,
+                        entry.config_path.display(),
+                        entry.error,
+                        entry.repair_hint,
+                    )
+                })
+                .collect();
+            if invalid.is_empty() {
+                return Err(e);
+            }
+            anyhow::bail!(invalid.join("\n"));
+        }
+    };
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     let health = client.get_health().await?;
     let pubkey = client.get_public_key().await?;
@@ -103,6 +126,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             "public_key": local_public_key,
         },
         "auth": auth_probe,
+        "project_binding": remote_cfg.project_binding,
         "project_bindings": remote_cfg.project_bindings,
         "next_step": {
             "authorize_command": authorize_command,

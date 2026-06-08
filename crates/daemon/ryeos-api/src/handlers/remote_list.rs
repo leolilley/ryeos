@@ -33,21 +33,43 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     } else {
         req.project_path.as_deref()
     };
-    let remotes = config::load_remotes_layered(&state.config.system_space_dir, project)?;
+    let report = config::load_remotes_layered_report(&state.config.system_space_dir, project)?;
 
-    let mut entries: Vec<Value> = remotes
+    let mut entries: Vec<Value> = report
+        .remotes
         .values()
-        .map(|r| {
+        .map(|loaded| {
+            let r = &loaded.config;
             serde_json::json!({
                 "name": r.name,
                 "url": r.url,
                 "principal_id": r.principal_id,
+                "scope": loaded.scope.label(),
+                "config_path": loaded.config_path,
             })
         })
         .collect();
     entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let mut invalid: Vec<Value> = report
+        .invalid
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "scope": entry.scope.label(),
+                "config_path": entry.config_path,
+                "url": entry.url,
+                "error": entry.error,
+                "repair_hint": entry.repair_hint,
+            })
+        })
+        .collect();
+    invalid.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
 
-    Ok(serde_json::json!({ "remotes": entries }))
+    Ok(serde_json::json!({
+        "remotes": entries,
+        "invalid_remotes": invalid,
+    }))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
