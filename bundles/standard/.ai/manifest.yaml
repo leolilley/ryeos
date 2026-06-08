@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:07Z:9674de84894db8478d384f586c830b100dec3b27418b29784e8e5e678fb77b73:hL9ufcsTBuVVcTER9zGEW7KSKrlCOD4Kapo+wPbCuCoAG0Ges53Y7ZWTcXppHDBaYcKPbDEtqTN4bX1ITTIDAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-08T03:48:07Z:38dcac41025bd811683ceeee6ce80b9230b112143e9d96c9e2ad8496b0a31b2f:d50sJAlYN7VgClRIsNPddC9VH1sAAmzTk2yC/PYBWv0mMrTfqJ0lXNeeKYZxQi0k8ibjzm+DMkOauiXJiNmABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: standard
 version: 0.5.0
 description: 'Workflow: directives, graphs, knowledge, model providers, scheduler, threads'
@@ -17,3 +17,4 @@ requires_kinds:
 - tool
 uses_kinds: []
 bundle_events: []
+runtime_vault: []
