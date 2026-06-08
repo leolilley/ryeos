@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T09:24:27Z:d5fa74a98991a81653b693903e91c2d8d6620ef1173e68ceb91339afb3fa4515:TvLWVmR5HUSlEoI/W+Qlbh5ugij0R1Dz+YqCps6eUgZjI5oI4qHHEKuMVUgNpTOdlVB7EHP8xObfftMgSiF7Bg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-08T10:20:20Z:16f818a17da39f6b377591ca44eff21f1d38b20fb7df7e7c9346f1267bb0b40b:wlgcgfijmNu9NVlfw9Km1EaZOFDy/WMWxhxCX9zU+iNVxXDOFb/7FWto0bNgWj838LoiYXa5IUg4ZIUjyh5fCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 tags: [future, portable-execution, execution-graph, architecture]
 version: "0.1.0"
@@ -32,6 +32,20 @@ Current stable bridge:
   `metadata` contains the node receipt payload and optional `node_result_hash`.
 - Runtime events and node receipts: realized consequences linked back to
   definition identity.
+
+Current regression proof:
+
+- The graph runtime unit tests pin the receipt/event payload shape at the
+  callback boundary.
+- The daemon graph action E2E proves successful graph execution persists
+  `graph_node_receipt` artifacts and runtime events carrying `definition_ref`,
+  `definition_hash`, `graph_run_id`, and `node_ref`.
+- The same E2E proves denied callback dispatch persists an error receipt and
+  failure-path runtime events. The failed tool dispatch event uses
+  `tool_call_result.status = "dispatch_failed"`; the graph step completion event
+  uses `graph_step_completed.status = "error"`.
+- This is still evidence for the identity bridge, not a public portable
+  execution graph projection API.
 
 `definition_hash` is exact document identity after signature-line stripping. It
 is not semantic YAML canonicalization and is not by itself a trust,
