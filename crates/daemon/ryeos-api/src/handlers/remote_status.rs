@@ -103,6 +103,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "ryeos.execute.service.push.head",
         "ryeos.execute.service.project.status",
         "ryeos.execute.service.project.apply",
+        "ryeos.execute.service.scheduler.register",
+        "ryeos.execute.service.threads.list",
+        "ryeos.execute.service.threads.get",
     ];
     let authorize_command = format!(
         "ryeos-core-tools authorize-client --system-space-dir <remote-system-space> --public-key '{}' --scopes '{}' --label local-operator-{}",
