@@ -4,6 +4,10 @@
 //! `json` response mode. YAML remains the artifact/export format for saved
 //! topology snapshots; the browser transport receives the same topology model
 //! as native JavaScript data.
+//!
+//! This handler builds a static `.ai` item/dependency topology for UI
+//! exploration. It is not the deferred portable execution projection over
+//! runtime events, node receipts, CAS objects, and refs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -137,14 +141,14 @@ pub struct TopologyViewFilters {
     pub edge_types: Vec<String>,
 }
 
-struct GraphBuilder {
+struct TopologyBuilder {
     nodes: BTreeMap<String, TopologyNode>,
     edges: BTreeMap<String, TopologyEdge>,
     kinds: BTreeSet<String>,
     edge_types: BTreeSet<String>,
 }
 
-impl GraphBuilder {
+impl TopologyBuilder {
     fn new() -> Self {
         Self {
             nodes: BTreeMap::new(),
@@ -328,7 +332,7 @@ fn build_topology(
     project_root: Option<String>,
     root_surface: Option<String>,
 ) -> TopologyGraph {
-    let mut builder = GraphBuilder::new();
+    let mut builder = TopologyBuilder::new();
     let project_path = project_root.as_ref().map(std::path::PathBuf::from);
     let roots = state.engine.resolution_roots(project_path);
 
@@ -388,7 +392,7 @@ fn build_topology(
 }
 
 fn add_kind_schema_node_and_edges(
-    builder: &mut GraphBuilder,
+    builder: &mut TopologyBuilder,
     kind: &str,
     schema: &KindSchema,
     state: &AppState,
@@ -463,7 +467,7 @@ fn add_kind_schema_node_and_edges(
     }
 }
 
-fn add_item_edges(builder: &mut GraphBuilder, item_ref: &str, path: &std::path::Path) {
+fn add_item_edges(builder: &mut TopologyBuilder, item_ref: &str, path: &std::path::Path) {
     let Some(raw) = read_item_body(path) else {
         return;
     };
@@ -491,14 +495,14 @@ fn add_item_edges(builder: &mut GraphBuilder, item_ref: &str, path: &std::path::
     if let Some(value) = &value {
         add_context_edges(builder, item_ref, value, path);
         add_client_edges(builder, item_ref, value, path);
-        add_executable_graph_edges(builder, item_ref, value, path);
+        add_workflow_definition_edges(builder, item_ref, value, path);
     }
 
     add_execute_reference_edges(builder, item_ref, &raw, path);
 }
 
 fn add_client_edges(
-    builder: &mut GraphBuilder,
+    builder: &mut TopologyBuilder,
     item_ref: &str,
     value: &serde_json::Value,
     path: &std::path::Path,
@@ -526,7 +530,7 @@ fn add_client_edges(
 }
 
 fn add_context_edges(
-    builder: &mut GraphBuilder,
+    builder: &mut TopologyBuilder,
     item_ref: &str,
     value: &serde_json::Value,
     path: &std::path::Path,
@@ -577,8 +581,13 @@ fn add_context_edges(
     }
 }
 
-fn add_executable_graph_edges(
-    builder: &mut GraphBuilder,
+/// Add authored workflow-definition edges from graph item structure.
+///
+/// These are declared/static edges derived from `.ai` item contents. They are
+/// not runtime execution trace edges and not the future portable execution graph
+/// projection over events, receipts, CAS objects, and refs.
+fn add_workflow_definition_edges(
+    builder: &mut TopologyBuilder,
     item_ref: &str,
     value: &serde_json::Value,
     path: &std::path::Path,
@@ -657,7 +666,7 @@ fn add_executable_graph_edges(
 }
 
 fn add_execute_reference_edges(
-    builder: &mut GraphBuilder,
+    builder: &mut TopologyBuilder,
     item_ref: &str,
     raw: &str,
     path: &std::path::Path,
@@ -883,7 +892,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut builder = GraphBuilder::new();
+        let mut builder = TopologyBuilder::new();
         builder.add_ref_node("surface:ryeos/studio/graph", "surface");
         builder.add_ref_node("client:ryeos/web", "client");
 
@@ -918,7 +927,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         )
         .unwrap();
 
-        let mut builder = GraphBuilder::new();
+        let mut builder = TopologyBuilder::new();
         builder.add_ref_node("directive:rye/code/quality/build", "directive");
 
         add_item_edges(
@@ -970,7 +979,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         )
         .unwrap();
 
-        let mut builder = GraphBuilder::new();
+        let mut builder = TopologyBuilder::new();
         builder.add_ref_node("graph:rye/code/build", "graph");
 
         add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
@@ -1004,7 +1013,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         )
         .unwrap();
 
-        let mut builder = GraphBuilder::new();
+        let mut builder = TopologyBuilder::new();
         builder.add_ref_node("graph:rye/code/build", "graph");
         add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
 
@@ -1038,7 +1047,7 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         )
         .unwrap();
 
-        let mut builder = GraphBuilder::new();
+        let mut builder = TopologyBuilder::new();
         builder.add_ref_node("graph:rye/code/build", "graph");
         add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
 
