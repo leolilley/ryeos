@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -584,6 +584,7 @@ pub struct BuildAndLaunchParams<'a> {
     pub provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     pub parameters: &'a Value,
     pub vault_bindings: &'a HashMap<String, String>,
+    pub extra_effective_caps: &'a [String],
     pub pre_minted_thread_id: Option<&'a str>,
 }
 
@@ -599,6 +600,7 @@ pub async fn build_and_launch(
         provenance,
         parameters,
         vault_bindings,
+        extra_effective_caps,
         pre_minted_thread_id,
     } = params;
     let engine = provenance.request_engine();
@@ -799,7 +801,12 @@ pub async fn build_and_launch(
     // without a permission model surface no `effective_caps` fact →
     // empty caps (deny-all). Runtimes consume `resolution.composed`
     // directly and never re-derive.
-    let effective_caps: Vec<String> = derive_effective_caps(&resolution.composed);
+    let effective_caps: Vec<String> = derive_effective_caps(&resolution.composed)
+        .into_iter()
+        .chain(extra_effective_caps.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     // The launching kind schema (e.g. `directive`, `graph`) drives
     // inventory build below; it does NOT carry the subprocess

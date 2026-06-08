@@ -285,6 +285,18 @@ mod tests {
         async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
+        async fn vault_put(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_get(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_delete(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_list(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"keys": []}))
+        }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }

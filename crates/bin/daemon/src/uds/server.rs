@@ -13,6 +13,9 @@ use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, Comm
 use ryeos_app::event_store_service::{
     EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
+use ryeos_app::runtime_vault_service::{
+    RuntimeVaultListParams, RuntimeVaultPutParams, RuntimeVaultRefParams, RuntimeVaultService,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{
     ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams,
@@ -167,6 +170,18 @@ pub async fn dispatch_runtime_method(
         }
         "runtime.bundle_events_scan" => {
             handle_bundle_events_scan(&clean_params, state, callback_cap.as_ref())
+        }
+        "runtime.vault_put" => {
+            handle_runtime_vault_put(&clean_params, state, callback_cap.as_ref())
+        }
+        "runtime.vault_get" => {
+            handle_runtime_vault_get(&clean_params, state, callback_cap.as_ref())
+        }
+        "runtime.vault_delete" => {
+            handle_runtime_vault_delete(&clean_params, state, callback_cap.as_ref())
+        }
+        "runtime.vault_list" => {
+            handle_runtime_vault_list(&clean_params, state, callback_cap.as_ref())
         }
         "runtime.finalize_thread" => handle_finalize(&clean_params, state),
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
@@ -331,6 +346,74 @@ fn handle_bundle_events_scan(
         params,
     )?)
     .context("failed to encode bundle_events.scan result")
+}
+
+fn handle_runtime_vault_put(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: RuntimeVaultPutParams =
+        serde_json::from_value(params.clone()).context("invalid vault.put params")?;
+    serde_json::to_value(RuntimeVaultService::put(
+        &state.vault,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode vault.put result")
+}
+
+fn handle_runtime_vault_get(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: RuntimeVaultRefParams =
+        serde_json::from_value(params.clone()).context("invalid vault.get params")?;
+    serde_json::to_value(RuntimeVaultService::get(
+        &state.vault,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode vault.get result")
+}
+
+fn handle_runtime_vault_delete(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: RuntimeVaultRefParams =
+        serde_json::from_value(params.clone()).context("invalid vault.delete params")?;
+    serde_json::to_value(RuntimeVaultService::delete(
+        &state.vault,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode vault.delete result")
+}
+
+fn handle_runtime_vault_list(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: RuntimeVaultListParams =
+        serde_json::from_value(params.clone()).context("invalid vault.list params")?;
+    serde_json::to_value(RuntimeVaultService::list(
+        &state.vault,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode vault.list result")
 }
 
 fn handle_submit_command(
@@ -547,7 +630,10 @@ mod tests {
                 hosted_node_policies: vec![],
                 command_registration_policy: Default::default(),
             }),
-            vault: Arc::new(ryeos_app::vault::EmptyVault),
+            vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
+                tmpdir.path().join("vault-store.toml"),
+                lillux::vault::VaultSecretKey::generate(),
+            )),
             command_registry: test_command_registry,
             authorizer: test_auth,
             scheduler_db: Arc::new(crate::scheduler::db::SchedulerDb::new_in_memory().unwrap()),
@@ -1158,6 +1244,190 @@ mod tests {
                 .contains("missing required capability"),
             "got: {}",
             rpc_err(&missing_cap).message
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-vault-1",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            vec![
+                "ryeos.put.vault.agent-kiwi/oauth".to_string(),
+                "ryeos.get.vault.agent-kiwi/oauth".to_string(),
+                "ryeos.list.vault.agent-kiwi/oauth".to_string(),
+                "ryeos.delete.vault.agent-kiwi/oauth".to_string(),
+            ],
+            test_provenance(&state, "/test"),
+            Some("agent-kiwi".to_string()),
+            Some("tool:agent-kiwi/oauth/connect".to_string()),
+        );
+
+        let put = dispatch(
+            rpc(
+                "runtime.vault_put",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-1",
+                    "namespace": "oauth",
+                    "key": "google_account_123",
+                    "value": "refresh-token"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(put.error.is_none(), "put failed: {:?}", put.error);
+        let vault_ref = rpc_ok(&put)["ref"].as_str().unwrap().to_string();
+        assert_eq!(
+            vault_ref,
+            format!(
+                "{}{}",
+                "vault://", "bundle/agent-kiwi/oauth/google_account_123"
+            )
+        );
+        assert!(!rpc_ok(&put).as_object().unwrap().contains_key("value"));
+
+        let get = dispatch(
+            rpc(
+                "runtime.vault_get",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-1",
+                    "ref": vault_ref
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(get.error.is_none(), "get failed: {:?}", get.error);
+        assert_eq!(rpc_ok(&get)["value"], "refresh-token");
+
+        let list = dispatch(
+            rpc(
+                "runtime.vault_list",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-1",
+                    "namespace": "oauth"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(list.error.is_none(), "list failed: {:?}", list.error);
+        assert_eq!(rpc_ok(&list)["keys"], json!(["google_account_123"]));
+
+        let delete = dispatch(
+            rpc(
+                "runtime.vault_delete",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-1",
+                    "ref": rpc_ok(&get)["ref"].as_str().unwrap()
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(delete.error.is_none(), "delete failed: {:?}", delete.error);
+        assert_eq!(rpc_ok(&delete)["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref() {
+        let (_tmp, state) = setup_app_state();
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-vault-deny",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.put.vault.agent-kiwi/oauth".to_string()],
+            test_provenance(&state, "/test"),
+            Some("agent-kiwi".to_string()),
+            Some("tool:agent-kiwi/oauth/connect".to_string()),
+        );
+
+        let caller_bundle_id = dispatch(
+            rpc(
+                "runtime.vault_put",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-deny",
+                    "bundle_id": "other-bundle",
+                    "namespace": "oauth",
+                    "key": "google_account_123",
+                    "value": "refresh-token"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&caller_bundle_id)
+                .message
+                .contains("invalid vault.put params"),
+            "got: {}",
+            rpc_err(&caller_bundle_id).message
+        );
+
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-vault-deny-2",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(&state, "/test"),
+            Some("agent-kiwi".to_string()),
+            Some("tool:agent-kiwi/oauth/connect".to_string()),
+        );
+        let missing_cap = dispatch(
+            rpc(
+                "runtime.vault_put",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-deny-2",
+                    "namespace": "oauth",
+                    "key": "google_account_123",
+                    "value": "refresh-token"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&missing_cap)
+                .message
+                .contains("missing required capability"),
+            "got: {}",
+            rpc_err(&missing_cap).message
+        );
+
+        let cbt = state.callback_tokens.generate_with_context(
+            "T-vault-deny-3",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.get.vault.agent-kiwi/oauth".to_string()],
+            test_provenance(&state, "/test"),
+            Some("agent-kiwi".to_string()),
+            Some("tool:agent-kiwi/oauth/connect".to_string()),
+        );
+        let other_bundle = dispatch(
+            rpc(
+                "runtime.vault_get",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-vault-deny-3",
+                    "ref": format!("{}{}", "vault://", "bundle/other-bundle/oauth/google_account_123")
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            rpc_err(&other_bundle).message.contains("does not match"),
+            "got: {}",
+            rpc_err(&other_bundle).message
         );
     }
 

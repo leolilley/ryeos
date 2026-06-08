@@ -1378,6 +1378,8 @@ async fn dispatch_managed_subprocess(
         plan_context: ctx.plan_ctx.clone(),
     };
 
+    let extra_effective_caps = derive_manifest_runtime_caps(&resolved, ctx)?;
+
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
     let vault_bindings = ryeos_app::vault::read_required_secrets(
         state.vault.as_ref(),
@@ -1396,6 +1398,7 @@ async fn dispatch_managed_subprocess(
         provenance: &request.provenance,
         parameters: &params,
         vault_bindings: &vault_bindings,
+        extra_effective_caps: &extra_effective_caps,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
     })
     .await
@@ -1662,7 +1665,7 @@ async fn dispatch_tool_subprocess(
     }
 
     let item_ref_for_error = resolved.item_ref.clone();
-    let effective_caps = derive_direct_tool_bundle_event_caps(&resolved, ctx)?;
+    let effective_caps = derive_manifest_runtime_caps(&resolved, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
@@ -1720,7 +1723,7 @@ async fn dispatch_tool_subprocess(
     }
 }
 
-fn derive_direct_tool_bundle_event_caps(
+fn derive_manifest_runtime_caps(
     resolved: &ResolvedExecutionRequest,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
@@ -1731,7 +1734,7 @@ fn derive_direct_tool_bundle_event_caps(
     .ok_or_else(|| {
         DispatchError::InvalidRef(
             item_ref.clone(),
-            "direct tool bundle-event authority requires a bundle-qualified tool ref".into(),
+            "manifest runtime authority requires a bundle-qualified item ref".into(),
         )
     })?;
     ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
@@ -1746,14 +1749,14 @@ fn derive_direct_tool_bundle_event_caps(
     let Some(manifest) = manifest else {
         return Ok(Vec::new());
     };
-    if manifest.bundle_events.is_empty() {
+    if manifest.bundle_events.is_empty() && manifest.runtime_vault.is_empty() {
         return Ok(Vec::new());
     }
     if manifest.name != effective_bundle_id {
         return Err(DispatchError::InvalidRef(
             item_ref,
             format!(
-                "bundle-event manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
+                "runtime-cap manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
                 manifest.name, effective_bundle_id
             ),
         ));
@@ -1787,6 +1790,32 @@ fn derive_direct_tool_bundle_event_caps(
                     ));
                 }
             }
+        }
+    }
+
+    for decl in manifest.runtime_vault {
+        ryeos_app::vault::validate_runtime_vault_segment("namespace", &decl.namespace)
+            .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
+        if decl.operations.is_empty() {
+            return Err(DispatchError::InvalidRef(
+                resolved.item_ref.clone(),
+                format!(
+                    "runtime_vault declaration for '{}' must list at least one operation",
+                    decl.namespace
+                ),
+            ));
+        }
+        for op in decl.operations {
+            let verb = match op {
+                ryeos_bundle::manifest::RuntimeVaultOperation::Put => "put",
+                ryeos_bundle::manifest::RuntimeVaultOperation::Get => "get",
+                ryeos_bundle::manifest::RuntimeVaultOperation::Delete => "delete",
+                ryeos_bundle::manifest::RuntimeVaultOperation::List => "list",
+            };
+            caps.insert(format!(
+                "ryeos.{verb}.vault.{effective_bundle_id}/{}",
+                decl.namespace
+            ));
         }
     }
 
@@ -2221,7 +2250,7 @@ metadata:
     }
 
     #[test]
-    fn direct_tool_bundle_event_caps_derive_exact_self_bundle_caps() {
+    fn manifest_runtime_caps_derive_exact_self_bundle_caps() {
         let bundle = tempdir().join("ryeos-email");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(
@@ -2235,27 +2264,34 @@ uses_kinds: []
 bundle_events:
   - event_kind: email_event
     operations: [append, scan]
+runtime_vault:
+  - namespace: oauth
+    operations: [put, get, delete, list]
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
 
-        let caps = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap();
+        let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
         assert_eq!(
             caps,
             vec![
                 "ryeos.append.bundle_events.ryeos-email/email_event".to_string(),
+                "ryeos.delete.vault.ryeos-email/oauth".to_string(),
+                "ryeos.get.vault.ryeos-email/oauth".to_string(),
+                "ryeos.list.vault.ryeos-email/oauth".to_string(),
+                "ryeos.put.vault.ryeos-email/oauth".to_string(),
                 "ryeos.scan.bundle_events.ryeos-email/email_event".to_string(),
             ]
         );
     }
 
     #[test]
-    fn direct_tool_bundle_event_caps_empty_without_signed_declarations() {
+    fn manifest_runtime_caps_empty_without_signed_declarations() {
         let bundle = tempdir().join("ryeos-email");
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
-        assert!(derive_direct_tool_bundle_event_caps(&resolved, &ctx)
+        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
 
@@ -2270,13 +2306,13 @@ uses_kinds: []
 bundle_events: []
 "#,
         );
-        assert!(derive_direct_tool_bundle_event_caps(&resolved, &ctx)
+        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
     }
 
     #[test]
-    fn direct_tool_bundle_event_caps_reject_manifest_namespace_mismatch_when_declared() {
+    fn manifest_runtime_caps_reject_manifest_namespace_mismatch_when_declared() {
         let bundle = tempdir().join("ryeos-email");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(
@@ -2294,12 +2330,12 @@ bundle_events:
         );
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
-        let err = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("namespace mismatch"), "got: {err}");
     }
 
     #[test]
-    fn direct_tool_bundle_event_caps_reject_invalid_manifest_declarations() {
+    fn manifest_runtime_caps_reject_invalid_manifest_declarations() {
         let bundle = tempdir().join("ryeos-email");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         let ctx = test_execution_context(bundle.clone());
@@ -2318,7 +2354,7 @@ bundle_events:
     operations: [append]
 "#,
         );
-        let err = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
 
         write_signed_manifest(
@@ -2334,9 +2370,28 @@ bundle_events:
     operations: []
 "#,
         );
-        let err = derive_direct_tool_bundle_event_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(
             err.to_string().contains("must list at least one operation"),
+            "got: {err}"
+        );
+
+        write_signed_manifest(
+            &ai_dir,
+            r#"name: ryeos-email
+version: "0.1.0"
+description: test
+provides_kinds: []
+requires_kinds: []
+uses_kinds: []
+runtime_vault:
+  - namespace: ../bad
+    operations: [get]
+"#,
+        );
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("must match [A-Za-z0-9_]+"),
             "got: {err}"
         );
     }
@@ -2354,7 +2409,7 @@ bundle_events:
             )]),
         );
 
-        assert!(derive_direct_tool_bundle_event_caps(&resolved, &ctx)
+        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
     }
