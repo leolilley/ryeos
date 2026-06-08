@@ -1849,6 +1849,7 @@ typo_field: oops
             requires_kinds: vec![],
             uses_kinds: vec![],
             bundle_events: vec![],
+            runtime_vault: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
