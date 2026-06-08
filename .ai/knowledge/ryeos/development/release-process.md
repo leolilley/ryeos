@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T05:16:44Z:e238118860c4e61b06558fa4cb1ef8f33235c4d7df6f91182307f59d697b2425:xKNYF1LkViOAPP1h+jCTzGvBU/SXwcS2jzzvme+Jr7Q1Pgsh78U7SMp0EgOJ77LjiDLKG/P0V0sbpN0onsZVBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-08T06:33:55Z:e41dd8958c8cf9fc4686f72bf2e4f968793a0274d910b9355b5e32aaaa5a458d:+CuUAdh51NsE+7WYfr0u15zCUJfaJJYknPf5nVRFTOWhjaKd9CxaHKhZTuzgYSTGyEYiC2Wrnu4c4j8GzyN+AA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -24,6 +24,10 @@ made by committing the fix/version bump on `next`, merging `next` into `main`
 from the `main` worktree, tagging the resulting `main` release commit, then
 pushing.
 
+The active distribution channel is GHCR. The release tag and Docker/GHCR
+workflow are the shipping path. AUR files live in the repo as packaging
+scaffolding, but AUR is not currently an active release channel.
+
 ## Critical rules
 
 - Do **not** check out `main` in `/home/leo/projects/ryeos-next` if `main` is
@@ -33,9 +37,10 @@ pushing.
 - Do **not** forget package version strings. The tag alone is not enough.
 - Do **not** confuse a successful long projection rebuild with a daemon startup
   failure.
-- Do **not** publish/update AUR from GitHub's raw tag archive unless the AUR
-  artifact flow has been fixed. Raw tag archives do not contain ignored,
-  generated bundle artifacts from `scripts/populate-bundles.sh`.
+- Do **not** treat AUR as part of the release unless explicitly requested. The
+  active release path is GHCR. Do not publish/update AUR from GitHub's raw tag
+  archive unless the AUR artifact flow has been fixed; raw tag archives do not
+  contain ignored, generated bundle artifacts from `scripts/populate-bundles.sh`.
 - Do **not** stage unrelated untracked files, especially:
   - `.ai/knowledge/ryeos/future/portable-execution-white-paper-thesis.md`
 
@@ -279,7 +284,42 @@ git ls-remote --heads origin next main
 git ls-remote --tags origin "v$new"
 ```
 
-## 8. Local packaged-layout install validation
+## 8. GHCR release channel
+
+GHCR is the active deployment channel. The Docker release workflow builds from
+the tagged repository state and runs `scripts/populate-bundles.sh` inside the
+image builder with the publisher key secret, so generated bundle binaries,
+CAS/refs/manifests, and trust docs are produced during image build rather than
+coming from the raw GitHub source archive.
+
+After pushing the tag, verify the GHCR workflow/image for the release tag:
+
+```bash
+# Check the GitHub Actions workflow for the tag in the UI or with gh if available.
+# Expected image tag:
+#   ghcr.io/leolilley/ryeosd-full:v$new
+```
+
+If a hosted-node image is part of a specific release, verify the workflow or
+manual publish step for `Dockerfile.hosted-node` separately. The default release
+workflow currently covers the full daemon image path.
+
+## 9. AUR is deferred, not the active release channel
+
+AUR is not currently used for shipping RyeOS releases. Do not update AUR as part
+of the standard release flow.
+
+The checked-in AUR PKGBUILDs are not sufficient for an official release as-is
+because they source GitHub's raw tag archive. Raw tag archives omit ignored,
+generated bundle artifacts produced by `scripts/populate-bundles.sh`, including
+bundle-owned binaries, CAS objects/refs, populated manifests, and trust docs.
+
+Before any future AUR publication, create or automate an official populated
+release tarball, point `source=...` at that artifact instead of the raw tag
+archive, replace `sha256sums=('SKIP')` with a real checksum, and validate with a
+clean `makepkg` build/install/init.
+
+## 10. Local packaged-layout install validation
 
 `scripts/pkg/install-local-direct.sh` is for fast local repair/testing. It
 intentionally bypasses the package manager/AUR flow while installing the same
