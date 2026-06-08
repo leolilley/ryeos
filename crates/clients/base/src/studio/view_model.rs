@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::event::StudioAction;
-use super::model::{StudioCore, StudioInspectorState};
+use super::model::{
+    StudioCore, StudioDockContent, StudioDockEdge, StudioDockSlotState, StudioInputRoute,
+    StudioInspectorState,
+};
 use super::scene_model::{build_scene_model, StudioSceneModel};
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
@@ -220,6 +223,52 @@ pub struct StudioWorkspaceVm {
     pub focused_tile: String,
     pub is_home: bool,
     pub tile_count: usize,
+    #[serde(default)]
+    pub docks: StudioDockPlaneVm,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StudioDockPlaneVm {
+    pub top: Option<StudioDockTileVm>,
+    pub bottom: Option<StudioDockTileVm>,
+    pub left: Option<StudioDockTileVm>,
+    pub right: Option<StudioDockTileVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioDockTileVm {
+    pub edge: StudioDockEdge,
+    pub title: String,
+    pub size: u16,
+    pub view: StudioDockViewVm,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StudioDockViewVm {
+    Input(StudioInputVm),
+    Threads {
+        title: String,
+        hint: String,
+        rows: Vec<StudioRowVm>,
+    },
+    Inspector {
+        title: String,
+        hint: String,
+    },
+    Placeholder {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioInputVm {
+    pub text: String,
+    pub cursor: usize,
+    pub route_label: String,
+    pub placeholder: String,
+    pub hint: String,
+    pub submit_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -742,6 +791,70 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
         focused_tile: tile_id_text(core.workspace.focused_tile),
         is_home: core.workspace.is_home(),
         tile_count: core.workspace.layout.tile_ids().len(),
+        docks: dock_plane_vm(core),
+    }
+}
+
+fn dock_plane_vm(core: &StudioCore) -> StudioDockPlaneVm {
+    StudioDockPlaneVm {
+        top: dock_tile_vm(core, StudioDockEdge::Top, &core.ui.docks.top),
+        bottom: dock_tile_vm(core, StudioDockEdge::Bottom, &core.ui.docks.bottom),
+        left: dock_tile_vm(core, StudioDockEdge::Left, &core.ui.docks.left),
+        right: dock_tile_vm(core, StudioDockEdge::Right, &core.ui.docks.right),
+    }
+}
+
+fn dock_tile_vm(
+    core: &StudioCore,
+    edge: StudioDockEdge,
+    state: &StudioDockSlotState,
+) -> Option<StudioDockTileVm> {
+    if !state.visible {
+        return None;
+    }
+    // Placeholder default dock contents for the first shared tile-plane slice.
+    // Real dock contents should become shared Studio state/surface config before
+    // the input, thread-listener, or inspector behavior deepens.
+    Some(StudioDockTileVm {
+        edge,
+        title: match edge {
+            StudioDockEdge::Top => "Context".to_string(),
+            StudioDockEdge::Bottom => "RyeOS input".to_string(),
+            StudioDockEdge::Left => "Directive threads".to_string(),
+            StudioDockEdge::Right => "Inspector".to_string(),
+        },
+        size: state.size,
+        view: match &state.content {
+            StudioDockContent::Input => StudioDockViewVm::Input(input_vm(core)),
+            StudioDockContent::Threads => StudioDockViewVm::Threads {
+                title: "Directive threads".to_string(),
+                hint: "Recent directive runs and events.".to_string(),
+                rows: rows_for(core, &ViewSpec::ThreadList, None),
+            },
+            StudioDockContent::Inspector => StudioDockViewVm::Inspector {
+                title: "Selection".to_string(),
+                hint: "Selection-aware inspector dock placeholder.".to_string(),
+            },
+            StudioDockContent::Context => StudioDockViewVm::Placeholder {
+                message: "Context dock placeholder.".to_string(),
+            },
+            StudioDockContent::Placeholder { message } => StudioDockViewVm::Placeholder {
+                message: message.clone(),
+            },
+        },
+    })
+}
+
+fn input_vm(core: &StudioCore) -> StudioInputVm {
+    StudioInputVm {
+        text: core.ui.input.text.clone(),
+        cursor: core.ui.input.cursor,
+        route_label: match core.ui.input.route {
+            StudioInputRoute::StudioContext => "target: current studio context".to_string(),
+        },
+        placeholder: "type RyeOS input…".to_string(),
+        hint: "Shift+Enter submit · routed input surface, not a thread viewer".to_string(),
+        submit_enabled: !core.ui.input.text.trim().is_empty(),
     }
 }
 
@@ -951,8 +1064,43 @@ pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
 
 pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = context_launcher_items(core);
+    items.extend(dock_launcher_items(core));
     items.extend(launcher_items());
     items
+}
+
+fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    [
+        (
+            StudioDockEdge::Bottom,
+            "input dock",
+            core.ui.docks.bottom.visible,
+        ),
+        (
+            StudioDockEdge::Left,
+            "directive threads dock",
+            core.ui.docks.left.visible,
+        ),
+        (
+            StudioDockEdge::Right,
+            "inspector dock",
+            core.ui.docks.right.visible,
+        ),
+        (
+            StudioDockEdge::Top,
+            "context dock",
+            core.ui.docks.top.visible,
+        ),
+    ]
+    .into_iter()
+    .map(|(edge, label, visible)| StudioLauncherItemVm {
+        label: format!("{} {label}", if visible { "Hide" } else { "Show" }),
+        hint: "toggle Studio dock tile".to_string(),
+        action: StudioAction::ToggleDock { edge },
+        secondary_action: None,
+        enabled: true,
+    })
+    .collect()
 }
 
 fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {

@@ -6,6 +6,8 @@ const atlasViewport = {
   zoom: 1,
 };
 
+const utf8Encoder = new TextEncoder();
+
 export function studioWorkspace(vm, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
   if (!vm?.root) {
@@ -16,8 +18,125 @@ export function studioWorkspace(vm, motion, dispatchUi) {
     main.classList.add("home-space");
     return main;
   }
-  main.append(layoutNode(vm.root, dispatchUi, motion));
+  main.append(workspacePlane(vm, dispatchUi, motion));
   return main;
+}
+
+function workspacePlane(vm, dispatchUi, motion) {
+  const plane = el("section", "studio-workspace-plane");
+  const docks = vm.docks || {};
+  const left = dockTile(docks.left, dispatchUi);
+  const right = dockTile(docks.right, dispatchUi);
+  const top = dockTile(docks.top, dispatchUi);
+  const bottom = dockTile(docks.bottom, dispatchUi);
+
+  if (left) {
+    plane.classList.add("has-left-dock");
+    plane.style.setProperty("--studio-dock-left", `${Math.max(18, left.__dockSize || 28)}ch`);
+  }
+  if (right) {
+    plane.classList.add("has-right-dock");
+    plane.style.setProperty("--studio-dock-right", `${Math.max(18, right.__dockSize || 34)}ch`);
+  }
+  if (top) {
+    plane.classList.add("has-top-dock");
+    plane.style.setProperty("--studio-dock-top", `${Math.max(3, top.__dockSize || 4) * 1.35}rem`);
+  }
+  if (bottom) {
+    plane.classList.add("has-bottom-dock");
+    plane.style.setProperty("--studio-dock-bottom", `${Math.max(3, bottom.__dockSize || 4) * 1.35}rem`);
+  }
+
+  if (left) plane.append(left);
+  if (right) plane.append(right);
+  if (top) plane.append(top);
+
+  const stack = el("section", "studio-workspace-stack");
+  stack.append(layoutNode(vm.root, dispatchUi, motion));
+  plane.append(stack);
+
+  if (bottom) plane.append(bottom);
+  return plane;
+}
+
+function dockTile(dockVm, dispatchUi) {
+  if (!dockVm) return null;
+  const edge = dockVm.edge || "bottom";
+  const tile = el("aside", `studio-dock-tile ${edge}`);
+  tile.__dockSize = dockVm.size;
+  const chrome = el("header", "studio-dock-chrome");
+  chrome.append(textEl("strong", dockVm.title || edge), textEl("small", edge));
+  tile.append(chrome, dockView(dockVm.view || {}, dispatchUi));
+  return tile;
+}
+
+function dockView(viewVm, dispatchUi) {
+  const body = el("div", "studio-dock-body");
+  switch (viewVm.type) {
+    case "input":
+      body.append(inputDock(viewVm, dispatchUi));
+      break;
+    case "threads":
+      body.append(dockRows(viewVm, "threads", dispatchUi));
+      break;
+    case "inspector":
+      body.append(textEl("strong", viewVm.title || viewVm.type), textEl("p", viewVm.hint || "Not connected yet."));
+      break;
+    case "placeholder":
+      body.append(textEl("p", viewVm.message || "Not connected yet."));
+      break;
+    default:
+      body.append(textEl("p", "Unknown dock view."));
+  }
+  return body;
+}
+
+function dockRows(viewVm, kind, dispatchUi) {
+  const wrap = el("section", "studio-dock-list");
+  wrap.append(textEl("strong", viewVm.title || "dock"), textEl("p", viewVm.hint || ""));
+  if ((viewVm.rows || []).length > 0) {
+    wrap.append(rows(viewVm.rows, "", kind, dispatchUi));
+  } else {
+    wrap.append(textEl("p", "No rows loaded."));
+  }
+  return wrap;
+}
+
+function inputDock(inputVm, dispatchUi) {
+  const wrap = el("section", "studio-input-dock");
+  const meta = el("div", "studio-input-meta");
+  meta.append(textEl("span", inputVm.route_label || "target: studio"), textEl("small", inputVm.hint || ""));
+
+  const row = el("div", "studio-input-row");
+  const prompt = textEl("span", "$", "studio-input-prompt");
+  const input = document.createElement("textarea");
+  input.rows = 1;
+  input.value = inputVm.text || "";
+  input.placeholder = inputVm.placeholder || "type RyeOS input…";
+  input.spellcheck = false;
+  input.autocomplete = "off";
+  input.setAttribute("data-focus-key", "studio-input-dock");
+  input.addEventListener("input", () => {
+    dispatchUi({ type: "set_input_text", text: input.value, cursor: byteCursor(input.value, input.selectionStart || 0) });
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.shiftKey) {
+      event.preventDefault();
+      dispatchUi({ type: "submit_input" });
+    }
+  });
+  const submit = el("button", "studio-input-submit");
+  submit.type = "button";
+  submit.disabled = !inputVm.submit_enabled;
+  submit.textContent = "send";
+  submit.addEventListener("click", () => dispatchUi({ type: "submit_input" }));
+  row.append(prompt, input, submit);
+  wrap.append(meta, row);
+  return wrap;
+}
+
+function byteCursor(value, codeUnitCursor) {
+  return utf8Encoder.encode(value.slice(0, codeUnitCursor)).length;
 }
 
 export function tileIdsForNode(node, ids = []) {

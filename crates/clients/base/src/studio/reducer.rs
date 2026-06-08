@@ -178,6 +178,48 @@ impl StudioCore {
                 self.bump_generation();
                 Vec::new()
             }
+            StudioUiEvent::InsertInputChar { ch } => {
+                if !self.input_surface_visible() {
+                    return Vec::new();
+                }
+                self.ui.input.insert_char(ch);
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioUiEvent::DeleteInputChar => {
+                if !self.input_surface_visible() {
+                    return Vec::new();
+                }
+                self.ui.input.delete_before_cursor();
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioUiEvent::SetInputText { text, cursor } => {
+                if !self.input_surface_visible() {
+                    return Vec::new();
+                }
+                self.ui.input.set_text(text, cursor);
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioUiEvent::SubmitInput => {
+                if !self.input_surface_visible() {
+                    return Vec::new();
+                }
+                let text = self.ui.input.text.trim().to_string();
+                if text.is_empty() {
+                    self.notice("Input is empty.", StudioTone::Warn);
+                    return Vec::new();
+                }
+                if self.is_read_only() {
+                    self.notice("This session is read-only.", StudioTone::Warn);
+                    return Vec::new();
+                }
+                vec![self.emit(StudioEffectKind::SubmitInput {
+                    route: self.ui.input.route.clone(),
+                    text,
+                })]
+            }
             StudioUiEvent::MoveLauncherSelection { delta } => {
                 let len = filtered_launcher_items(self).len();
                 if len > 0 {
@@ -316,6 +358,23 @@ impl StudioCore {
                 self.ui.bottom_status_visible = !self.ui.bottom_status_visible;
                 self.bump_generation();
                 Vec::new()
+            }
+            StudioAction::ToggleDock { edge } => {
+                let slot = match edge {
+                    super::model::StudioDockEdge::Top => &mut self.ui.docks.top,
+                    super::model::StudioDockEdge::Bottom => &mut self.ui.docks.bottom,
+                    super::model::StudioDockEdge::Left => &mut self.ui.docks.left,
+                    super::model::StudioDockEdge::Right => &mut self.ui.docks.right,
+                };
+                slot.visible = !slot.visible;
+                let should_fetch_threads = slot.visible
+                    && matches!(slot.content, super::model::StudioDockContent::Threads);
+                self.bump_generation();
+                if should_fetch_threads {
+                    vec![self.emit(StudioEffectKind::FetchThreads { limit: 100 })]
+                } else {
+                    Vec::new()
+                }
             }
             StudioAction::ResizeFocused { direction } => {
                 if self.workspace.resize_focused(direction) {
@@ -464,6 +523,10 @@ impl StudioCore {
                 StudioEffectKind::CancelThread { thread_id: pending } if pending == thread_id
             )
         })
+    }
+
+    pub(crate) fn input_surface_visible(&self) -> bool {
+        self.ui.docks.has_visible_input()
     }
 
     fn emit_fetch_items(&mut self, tile_id: TileId) -> StudioEffect {
@@ -866,7 +929,9 @@ impl StudioCore {
 
         if matches!(
             result.kind,
-            StudioEffectResultKind::ActionInvocation | StudioEffectResultKind::ThreadCancelled
+            StudioEffectResultKind::ActionInvocation
+                | StudioEffectResultKind::ThreadCancelled
+                | StudioEffectResultKind::InputSubmitted
         ) {
             let data = result
                 .data
@@ -901,6 +966,12 @@ impl StudioCore {
                     }
                     return effects;
                 }
+                StudioEffectResultKind::InputSubmitted => {
+                    self.ui.input.clear();
+                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
+                    self.bump_generation();
+                    return Vec::new();
+                }
                 _ => unreachable!(),
             }
         }
@@ -930,7 +1001,9 @@ impl StudioCore {
                     core.data.topology = Some(topology);
                 });
             }
-            StudioEffectResultKind::ActionInvocation | StudioEffectResultKind::ThreadCancelled => {
+            StudioEffectResultKind::ActionInvocation
+            | StudioEffectResultKind::ThreadCancelled
+            | StudioEffectResultKind::InputSubmitted => {
                 unreachable!("command results are handled before optional data extraction")
             }
             StudioEffectResultKind::ProjectAdded => {
@@ -1212,6 +1285,7 @@ fn effect_success_notice(expected: &StudioEffectKind, data: &serde_json::Value) 
                 json_field_text(data, &["thread_id", "id"]).unwrap_or_else(|| thread_id.clone());
             format!("Cancelled {thread}.")
         }
+        StudioEffectKind::SubmitInput { .. } => "Submitted Studio input.".to_string(),
         _ => "RyeOS command completed.".to_string(),
     }
 }
@@ -1227,6 +1301,7 @@ fn effect_failure_notice(expected: &StudioEffectKind, error: Option<&str>) -> St
         StudioEffectKind::CancelThread { thread_id } => {
             format!("Cancel {thread_id} failed: {reason}")
         }
+        StudioEffectKind::SubmitInput { .. } => format!("Submit input failed: {reason}"),
         _ => reason,
     }
 }
@@ -1313,6 +1388,9 @@ fn effect_result_kind_matches(
         ) | (
             StudioEffectKind::CancelThread { .. },
             StudioEffectResultKind::ThreadCancelled
+        ) | (
+            StudioEffectKind::SubmitInput { .. },
+            StudioEffectResultKind::InputSubmitted
         ) | (
             StudioEffectKind::SetLocationHash { .. },
             StudioEffectResultKind::BrowserOnly
@@ -1776,6 +1854,75 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[test]
+    fn launcher_includes_shared_dock_toggles() {
+        let core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let vm = build_view_model(&core);
+
+        assert!(vm.launcher.items.iter().any(|item| {
+            item.label == "Hide input dock"
+                && matches!(
+                    item.action,
+                    StudioAction::ToggleDock {
+                        edge: crate::studio::model::StudioDockEdge::Bottom
+                    }
+                )
+        }));
+        assert!(vm.launcher.items.iter().any(|item| {
+            item.label == "Show directive threads dock"
+                && matches!(
+                    item.action,
+                    StudioAction::ToggleDock {
+                        edge: crate::studio::model::StudioDockEdge::Left
+                    }
+                )
+        }));
+    }
+
+    #[test]
+    fn toggle_dock_updates_workspace_dock_vm() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        assert!(build_view_model(&core).workspace.docks.left.is_none());
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ToggleDock {
+                    edge: crate::studio::model::StudioDockEdge::Left,
+                },
+            },
+        });
+
+        assert!(build_view_model(&core).workspace.docks.left.is_some());
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::FetchThreads { limit: 100 })
+        ));
+    }
+
+    #[test]
+    fn directive_threads_dock_renders_thread_rows() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.docks.left.visible = true;
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-running",
+                "item_ref": "directive:demo/chat",
+                "status": "running"
+            })],
+        });
+
+        let vm = build_view_model(&core);
+        let dock = vm.workspace.docks.left.expect("left dock");
+        match dock.view {
+            crate::studio::view_model::StudioDockViewVm::Threads { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].primary, "T-running");
+                assert_eq!(rows[0].secondary.as_deref(), Some("directive:demo/chat"));
+            }
+            other => panic!("expected thread dock view, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2816,6 +2963,56 @@ mod tests {
             Some(StudioEffectKind::InvokeAction { command_id, args })
                 if command_id == "tool:demo/run" && args["target"] == "demo"
         ));
+    }
+
+    #[test]
+    fn writable_input_submit_emits_shared_effect() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.input.set_text("  run this  ".to_string(), 12);
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInput,
+        });
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::SubmitInput { route: crate::studio::model::StudioInputRoute::StudioContext, text })
+                if text == "run this"
+        ));
+        assert_eq!(core.ui.input.text, "  run this  ");
+    }
+
+    #[test]
+    fn input_submit_success_clears_input() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.input.set_text("run this".to_string(), 8);
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+
+        let followups = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::InputSubmitted,
+                data: Some(serde_json::json!({
+                    "route": { "type": "studio_context" },
+                    "text": "run this"
+                })),
+                error: None,
+            },
+        });
+
+        assert!(followups.is_empty());
+        assert!(core.ui.input.text.is_empty());
+        assert_eq!(
+            core.ui.notices.last().map(|notice| notice.message.as_str()),
+            Some("Submitted Studio input.")
+        );
     }
 
     #[test]

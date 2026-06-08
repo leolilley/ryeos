@@ -54,6 +54,8 @@ export async function runEffect(effect) {
       return result(effect, "thread_cancelled", await postJson("/ui/api/studio/thread/cancel", {
         thread_id: kind.thread_id,
       }));
+    case "submit_input":
+      return result(effect, "input_submitted", { route: kind.route, text: kind.text });
     case "set_location_hash":
       location.hash = kind.hash;
       return result(effect, "browser_only", null);
@@ -133,6 +135,7 @@ function resultKindFor(effect) {
   if (type === "inspect_thread") return "thread_inspection";
   if (type === "invoke_action") return "action_invocation";
   if (type === "cancel_thread") return "thread_cancelled";
+  if (type === "submit_input") return "input_submitted";
   return "browser_only";
 }
 

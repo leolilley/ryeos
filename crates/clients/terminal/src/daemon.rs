@@ -8,7 +8,7 @@ use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::Request;
 use ryeos_cli::transport::discovery::discover_audience;
-use ryeos_cli::transport::http::{post_json, resolve_daemon_url};
+use ryeos_cli::transport::http::resolve_daemon_url;
 use ryeos_cli::transport::signing::{SignHeaders, Signer};
 use ryeos_client_base::ids::RemoteId;
 use ryeos_client_base::update::{PollSnapshot, RemoteSummary, ThreadSummary};
@@ -53,6 +53,7 @@ pub struct DaemonClient {
     base_url: String,
     audience: String,
     signer: Option<Signer>,
+    ui_session_id: Option<String>,
 }
 
 impl DaemonClient {
@@ -78,6 +79,7 @@ impl DaemonClient {
             base_url,
             audience,
             signer,
+            ui_session_id: None,
         })
     }
 
@@ -98,8 +100,36 @@ impl DaemonClient {
             .map_err(ClientError::Transport)
     }
 
+    pub async fn mint_ui_session(
+        &mut self,
+        surface_ref: &str,
+        project_path: Option<&str>,
+        read_only: bool,
+    ) -> Result<(), ClientError> {
+        let body = serde_json::json!({
+            "surface_ref": surface_ref,
+            "project_path": project_path,
+            "read_only": read_only,
+        });
+        let response = self.signed_post("/ui/api/launch/mint", &body).await?;
+        let Some(session_id) = response.get("session_id").and_then(|value| value.as_str()) else {
+            return Err(ClientError::DaemonDown {
+                url: format!("{}/ui/api/launch/mint", self.base_url.trim_end_matches('/')),
+            });
+        };
+        self.ui_session_id = Some(session_id.to_string());
+        Ok(())
+    }
+
+    fn ui_cookie(&self, path: &str) -> Option<String> {
+        path.starts_with("/ui/")
+            .then(|| self.ui_session_id.as_ref())
+            .flatten()
+            .map(|session_id| format!("ryeos_session={session_id}"))
+    }
+
     /// GET request with signed headers.
-    async fn get_json(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+    pub async fn get_json(&self, path: &str) -> Result<serde_json::Value, ClientError> {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let headers = self.sign("GET", path, b"")?;
 
@@ -114,7 +144,7 @@ impl DaemonClient {
         let port = uri.port_u16().unwrap_or(80);
         let bind = format!("{host}:{port}");
 
-        let req = Request::builder()
+        let mut builder = Request::builder()
             .method("GET")
             .uri(uri.to_string())
             .header("host", &bind)
@@ -122,12 +152,16 @@ impl DaemonClient {
             .header("x-ryeos-key-id", &headers.key_id)
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
-            .header("x-ryeos-signature", &headers.signature)
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+            .header("x-ryeos-signature", &headers.signature);
+        if let Some(cookie) = self.ui_cookie(path) {
+            builder = builder.header("cookie", cookie);
+        }
+        let req = builder.body(Full::new(Bytes::new())).map_err(|e| {
+            ryeos_cli::error::CliTransportError::Unreachable {
                 bind: bind.clone(),
                 detail: format!("failed to build request: {e}"),
-            })?;
+            }
+        })?;
 
         let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
             ryeos_cli::error::CliTransportError::Unreachable {
@@ -177,8 +211,70 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign("POST", path, &body_bytes)?;
-        let result = post_json(&url, &headers, &body_bytes).await?;
-        Ok(result)
+        let uri: hyper::Uri =
+            url.parse()
+                .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+                    bind: url.clone(),
+                    detail: format!("invalid URL: {e}"),
+                })?;
+        let host = uri.host().unwrap_or("127.0.0.1");
+        let port = uri.port_u16().unwrap_or(80);
+        let bind = format!("{host}:{port}");
+
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri.to_string())
+            .header("host", &bind)
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature);
+        if let Some(cookie) = self.ui_cookie(path) {
+            builder = builder.header("cookie", cookie);
+        }
+        let req = builder
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+                bind: bind.clone(),
+                detail: format!("failed to build request: {e}"),
+            })?;
+
+        let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+            ryeos_cli::error::CliTransportError::Unreachable {
+                bind: bind.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| ryeos_cli::error::CliTransportError::Unreachable {
+                bind: bind.clone(),
+                detail: format!("HTTP handshake: {e}"),
+            })?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::warn!("daemon post connection error: {e}");
+            }
+        });
+
+        let resp = sender.send_request(req).await.map_err(|e| {
+            ryeos_cli::error::CliTransportError::Unreachable {
+                bind: bind.clone(),
+                detail: format!("request send: {e}"),
+            }
+        })?;
+
+        let status = resp.status();
+        let body_bytes = collect_body(resp.into_body()).await?;
+        if !status.is_success() {
+            return Err(ClientError::DaemonDown { url });
+        }
+        Ok(serde_json::from_slice(&body_bytes)?)
     }
 
     /// Check if the daemon is reachable.

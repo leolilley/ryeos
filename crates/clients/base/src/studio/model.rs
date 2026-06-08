@@ -123,11 +123,149 @@ pub struct StudioLauncherState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioInputState {
+    pub text: String,
+    pub cursor: usize,
+    pub route: StudioInputRoute,
+}
+
+impl Default for StudioInputState {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            route: StudioInputRoute::StudioContext,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StudioInputRoute {
+    StudioContext,
+}
+
+impl StudioInputState {
+    pub fn insert_char(&mut self, ch: char) {
+        let cursor = clamp_to_char_boundary(&self.text, self.cursor);
+        self.text.insert(cursor, ch);
+        self.cursor = cursor + ch.len_utf8();
+    }
+
+    pub fn delete_before_cursor(&mut self) {
+        let cursor = clamp_to_char_boundary(&self.text, self.cursor);
+        if cursor == 0 {
+            return;
+        }
+        let prev = self.text[..cursor]
+            .char_indices()
+            .last()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.text.drain(prev..cursor);
+        self.cursor = prev;
+    }
+
+    pub fn set_text(&mut self, text: String, cursor: usize) {
+        self.text = text;
+        self.cursor = clamp_to_char_boundary(&self.text, cursor);
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
+    }
+}
+
+fn clamp_to_char_boundary(value: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(value.len());
+    while cursor > 0 && !value.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioDockEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioDockSlotState {
+    pub visible: bool,
+    pub size: u16,
+    pub content: StudioDockContent,
+}
+
+impl StudioDockSlotState {
+    fn visible(size: u16, content: StudioDockContent) -> Self {
+        Self {
+            visible: true,
+            size,
+            content,
+        }
+    }
+
+    fn hidden(size: u16, content: StudioDockContent) -> Self {
+        Self {
+            visible: false,
+            size,
+            content,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StudioDockContent {
+    Input,
+    Threads,
+    Inspector,
+    Context,
+    Placeholder { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioDockState {
+    pub top: StudioDockSlotState,
+    pub bottom: StudioDockSlotState,
+    pub left: StudioDockSlotState,
+    pub right: StudioDockSlotState,
+}
+
+impl Default for StudioDockState {
+    fn default() -> Self {
+        Self {
+            top: StudioDockSlotState::hidden(4, StudioDockContent::Context),
+            bottom: StudioDockSlotState::visible(4, StudioDockContent::Input),
+            left: StudioDockSlotState::hidden(28, StudioDockContent::Threads),
+            right: StudioDockSlotState::hidden(34, StudioDockContent::Inspector),
+        }
+    }
+}
+
+impl StudioDockState {
+    pub fn has_visible_input(&self) -> bool {
+        [&self.top, &self.bottom, &self.left, &self.right]
+            .iter()
+            .any(|slot| slot.visible && matches!(slot.content, StudioDockContent::Input))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioUiState {
     pub inspector: StudioInspectorState,
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
+    #[serde(default)]
+    pub input: StudioInputState,
+    #[serde(default)]
+    pub docks: StudioDockState,
     #[serde(default)]
     pub atlas: AtlasUiStateVm,
     pub motion: Vec<StudioMotionEventVm>,
@@ -147,6 +285,8 @@ impl Default for StudioUiState {
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
             launcher: StudioLauncherState::default(),
+            input: StudioInputState::default(),
+            docks: StudioDockState::default(),
             atlas: AtlasUiStateVm::default(),
             motion: Vec::new(),
             loading: BTreeMap::new(),
@@ -469,5 +609,95 @@ impl Default for StudioCore {
             generation: 0,
             next_effect_id: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn studio_input_handles_non_boundary_cursor() {
+        let mut input = StudioInputState {
+            text: "é".to_string(),
+            cursor: 1,
+            route: StudioInputRoute::StudioContext,
+        };
+        input.insert_char('x');
+        assert_eq!(input.text, "xé");
+        assert_eq!(input.cursor, 1);
+
+        input.set_text("aé".to_string(), 2);
+        assert_eq!(input.cursor, 1);
+        input.delete_before_cursor();
+        assert_eq!(input.text, "é");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn studio_dock_defaults_keep_input_visible_only() {
+        let docks = StudioDockState::default();
+        assert!(!docks.top.visible);
+        assert!(docks.bottom.visible);
+        assert!(!docks.left.visible);
+        assert!(!docks.right.visible);
+        assert_eq!(docks.bottom.content, StudioDockContent::Input);
+        assert_eq!(docks.left.content, StudioDockContent::Threads);
+        assert_eq!(docks.right.content, StudioDockContent::Inspector);
+        assert_eq!(docks.top.content, StudioDockContent::Context);
+        assert!(docks.has_visible_input());
+    }
+
+    #[test]
+    fn studio_docks_detect_input_on_any_visible_edge() {
+        let mut docks = StudioDockState::default();
+        docks.bottom.visible = false;
+        assert!(!docks.has_visible_input());
+
+        docks.top.visible = true;
+        docks.top.content = StudioDockContent::Input;
+        assert!(docks.has_visible_input());
+    }
+
+    #[test]
+    fn studio_core_vm_exposes_default_input_dock() {
+        let core = StudioCore::default();
+        let vm = super::super::view_model::build_view_model(&core);
+        assert!(vm.workspace.docks.bottom.is_some());
+        assert!(vm.workspace.docks.top.is_none());
+        assert!(vm.workspace.docks.left.is_none());
+        assert!(vm.workspace.docks.right.is_none());
+    }
+
+    #[test]
+    fn hidden_input_ignores_stale_input_events() {
+        let mut core = StudioCore::default();
+        core.ui.docks.bottom.visible = false;
+
+        let effects = core.dispatch(super::super::event::StudioEvent::Ui {
+            event: super::super::event::StudioUiEvent::InsertInputChar { ch: 'x' },
+        });
+        assert!(effects.is_empty());
+        assert!(core.ui.input.text.is_empty());
+
+        core.ui.input.set_text("run this".to_string(), 8);
+        let effects = core.dispatch(super::super::event::StudioEvent::Ui {
+            event: super::super::event::StudioUiEvent::SubmitInput,
+        });
+        assert!(effects.is_empty());
+        assert!(core.ui.notices.is_empty());
+    }
+
+    #[test]
+    fn visible_input_submit_respects_read_only_default() {
+        let mut core = StudioCore::default();
+        core.ui.input.set_text("run this".to_string(), 8);
+        let effects = core.dispatch(super::super::event::StudioEvent::Ui {
+            event: super::super::event::StudioUiEvent::SubmitInput,
+        });
+        assert!(effects.is_empty());
+        assert_eq!(core.ui.notices.len(), 1);
+        assert_eq!(core.ui.notices[0].message, "This session is read-only.");
+        assert_eq!(core.ui.input.text, "run this");
     }
 }

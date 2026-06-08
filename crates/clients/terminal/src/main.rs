@@ -12,6 +12,8 @@ mod persistence;
 mod render;
 mod render_text;
 mod sse;
+mod studio_app;
+mod studio_render;
 mod terminal;
 mod transport;
 
@@ -34,12 +36,14 @@ fn main() {
     let mut surface_file: Option<String> = None;
     let mut surface_name: Option<String> = None;
     let mut read_only = false;
+    let mut studio = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--mock" => mock = true,
             "--read-only" => read_only = true,
+            "--studio" => studio = true,
             "--project" => {
                 i += 1;
                 if i < args.len() {
@@ -72,6 +76,7 @@ fn main() {
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --mock                  Use mock data (no daemon required)");
+                eprintln!("  --studio                Use shared Studio VM renderer path (daemon required)");
                 eprintln!(
                     "  --surface-file <PATH>   Load surface spec from a local file (untrusted)"
                 );
@@ -92,7 +97,11 @@ fn main() {
         i += 1;
     }
 
-    if read_only {
+    if surface_name.is_some() {
+        studio = true;
+    }
+
+    if read_only && !studio {
         eprintln!("warn: --read-only is accepted but not enforced yet");
     }
 
@@ -172,7 +181,17 @@ fn main() {
             }
         }
 
-        if let Err(e) = app::run(&project_path, mock, loaded).await {
+        let result = if studio {
+            if mock {
+                eprintln!("error: --studio requires daemon-backed Studio endpoints; omit --mock");
+                std::process::exit(1);
+            }
+            studio_app::run(&project_path, read_only, loaded).await
+        } else {
+            app::run(&project_path, mock, loaded).await
+        };
+
+        if let Err(e) = result {
             eprintln!("ryeos-tui error: {}", e);
             std::process::exit(1);
         }

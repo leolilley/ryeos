@@ -8,6 +8,7 @@
 pub mod dto;
 pub mod effect;
 pub mod event;
+pub mod keymap;
 pub mod model;
 pub mod reducer;
 pub mod scene_model;
@@ -15,6 +16,10 @@ pub mod view_model;
 
 pub use effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 pub use event::{StudioAction, StudioEvent, StudioFilterField, StudioUiEvent};
+pub use keymap::{
+    studio_key_command, StudioKey, StudioKeyCommand, StudioKeyContext, StudioKeyEvent,
+    StudioKeyModifiers,
+};
 pub use model::{BrowserSession, BrowserViewport, StudioCore, StudioEnvelope};
 pub use scene_model::StudioSceneModel;
 pub use view_model::StudioViewModel;

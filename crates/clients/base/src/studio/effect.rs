@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::model::StudioInputRoute;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioEffect {
     pub id: u64,
@@ -60,6 +62,10 @@ pub enum StudioEffectKind {
     CancelThread {
         thread_id: String,
     },
+    SubmitInput {
+        route: StudioInputRoute,
+        text: String,
+    },
     SetLocationHash {
         hash: String,
     },
@@ -101,5 +107,6 @@ pub enum StudioEffectResultKind {
     ThreadInspection,
     ActionInvocation,
     ThreadCancelled,
+    InputSubmitted,
     BrowserOnly,
 }
