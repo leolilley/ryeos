@@ -357,9 +357,9 @@ fn derive_bare_id(
 }
 
 /// Runtime support modules live below `.ai/tools/**/lib/` so runtime descriptors
-/// can add `{runtime_dir}/lib` to `PYTHONPATH`. They are source dependencies of
-/// the runtime item, not standalone `tool:`/`streaming_tool:` item roots, so the
-/// bundle item signer must not path-anchor them as tools.
+/// can pass `{runtime_dir}/lib` to controlled launchers. They are source
+/// dependencies of the runtime item, not standalone `tool:`/`streaming_tool:`
+/// item roots, so the bundle item signer must not path-anchor them as tools.
 fn is_bundle_tool_runtime_lib(
     file_path: &Path,
     kind_dir: &Path,

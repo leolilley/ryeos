@@ -658,6 +658,13 @@ mod tests {
                 vec![("PATH".to_string(), "/tool:/bin".to_string())],
             )
             .unwrap();
+        let pythonpath_err = EnvContractBuilder::new()
+            .with_bindings(
+                EnvSourceKind::RuntimePathMutation,
+                vec![("PYTHONPATH".to_string(), "/tool".to_string())],
+            )
+            .unwrap_err();
+        assert!(format!("{pythonpath_err:#}").contains("PYTHONPATH"));
         assert!(EnvContractBuilder::new()
             .with_bindings(
                 EnvSourceKind::RuntimeDescriptor,

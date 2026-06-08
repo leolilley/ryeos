@@ -14,8 +14,8 @@ use std::time::SystemTime;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::composers::ComposerRegistry;
 use ryeos_engine::contracts::{
-    EffectivePrincipal, EngineContext, ExecutionHints, LaunchMode, PlanContext, Principal,
-    ProjectContext, ThreadTerminalStatus,
+    EffectivePrincipal, EngineContext, ExecutionHints, LaunchMode, PlanContext, PlanNode,
+    Principal, ProjectContext, ThreadTerminalStatus,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_engine::kind_registry::KindRegistry;
@@ -70,6 +70,95 @@ sys.exit(0)
     let tool_dir = tools_dir.join("hello");
     fs::create_dir_all(&tool_dir).unwrap();
     fs::write(tool_dir.join("hello.py"), body).unwrap();
+    project_dir
+}
+
+fn synth_project_with_bundle_local_imports() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project_dir = std::env::temp_dir().join(format!(
+        "ryeos_python_import_test_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    let bundle_root = project_dir.join(".ai").join("tools").join("example");
+    fs::create_dir_all(bundle_root.join("lib")).unwrap();
+    fs::create_dir_all(bundle_root.join("campaign")).unwrap();
+    fs::create_dir_all(bundle_root.join("system")).unwrap();
+    fs::write(
+        project_dir.join("json.py"),
+        "raise RuntimeError('project-root json.py should not be importable')\n",
+    )
+    .unwrap();
+
+    fs::write(
+        bundle_root.join("lib").join("util.py"),
+        "def message():\n    return 'ok'\n",
+    )
+    .unwrap();
+    fs::write(
+        bundle_root.join("campaign").join("_lifecycle.py"),
+        "def suffix():\n    return 'campaign'\n",
+    )
+    .unwrap();
+
+    let body = r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: example/system
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   description: "Bundle-local import health check"
+
+import json
+from lib.util import message
+from campaign._lifecycle import suffix
+
+print(json.dumps({"message": message(), "suffix": suffix()}))
+"#;
+    fs::write(bundle_root.join("system").join("health.py"), body).unwrap();
+    project_dir
+}
+
+fn synth_project_with_function_bundle_local_imports() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let project_dir = std::env::temp_dir().join(format!(
+        "ryeos_python_function_import_test_{}_{}",
+        std::process::id(),
+        nanos
+    ));
+    let bundle_root = project_dir.join(".ai").join("tools").join("example");
+    fs::create_dir_all(bundle_root.join("lib")).unwrap();
+    fs::create_dir_all(bundle_root.join("function")).unwrap();
+    fs::write(
+        project_dir.join("json.py"),
+        "raise RuntimeError('project-root json.py should not be importable')\n",
+    )
+    .unwrap();
+
+    fs::write(
+        bundle_root.join("lib").join("util.py"),
+        "def message():\n    return 'ok'\n",
+    )
+    .unwrap();
+
+    let body = r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: example/function
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/function"
+#   description: "Bundle-local import function health check"
+
+from lib.util import message
+
+def execute(params, project_path):
+    return {"message": message(), "project_path_seen": bool(project_path)}
+"#;
+    fs::write(bundle_root.join("function").join("health.py"), body).unwrap();
     project_dir
 }
 
@@ -201,6 +290,192 @@ fn daemon_executes_python_hello_world_end_to_end() {
         stdout_text.contains("hello world"),
         "expected 'hello world' in captured stdout, got {stdout_text:?}"
     );
+}
+
+#[test]
+fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
+    ryeos_tracing::test::prime_callsites();
+    let engine = build_engine_against_bundle();
+    let project_dir = synth_project_with_bundle_local_imports();
+
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test".into(),
+            scopes: vec!["execute".into()],
+        }),
+        project_context: ProjectContext::LocalPath {
+            path: project_dir.clone(),
+        },
+        current_site_id: "site:test".into(),
+        origin_site_id: "site:test".into(),
+        execution_hints: ExecutionHints::default(),
+        validate_only: false,
+    };
+
+    let item = CanonicalRef::parse("tool:example/system/health").expect("canonical ref parses");
+    let resolved = engine
+        .resolve(&plan_ctx, &item)
+        .expect("resolve direct Python tool from project space");
+    assert_eq!(
+        resolved.metadata.executor_id.as_deref(),
+        Some("tool:ryeos/core/runtimes/python/script"),
+        "extraction rules failed to pull executor_id from health.py"
+    );
+
+    let verified = engine
+        .verify(&plan_ctx, resolved)
+        .expect("verify health.py (unsigned is allowed)");
+    let plan = engine
+        .build_plan(
+            &plan_ctx,
+            &verified,
+            &serde_json::Value::Null,
+            &plan_ctx.execution_hints,
+        )
+        .expect("build_plan walks executor chain to subprocess terminal");
+
+    let dispatch = plan
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            PlanNode::DispatchSubprocess { spec, .. } => Some(spec),
+            _ => None,
+        })
+        .expect("plan should have a DispatchSubprocess node");
+    assert!(
+        !dispatch.env.contains_key("PYTHONPATH"),
+        "python runtime must not emit PYTHONPATH env mutation"
+    );
+    assert!(
+        !dispatch.env_sources.contains_key("PYTHONPATH"),
+        "python runtime must not tag PYTHONPATH as RuntimePathMutation"
+    );
+
+    let engine_ctx = EngineContext {
+        thread_id: "thread:test".into(),
+        chain_root_id: "chain:test".into(),
+        current_site_id: "site:test".into(),
+        origin_site_id: "site:test".into(),
+        upstream_site_id: None,
+        upstream_thread_id: None,
+        continuation_from_id: None,
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test".into(),
+            scopes: vec!["execute".into()],
+        }),
+        project_context: ProjectContext::LocalPath {
+            path: project_dir.clone(),
+        },
+        launch_mode: LaunchMode::Inline,
+    };
+
+    let completion = engine
+        .execute_plan(&engine_ctx, plan)
+        .expect("dispatch.execute_plan runs the subprocess");
+
+    let _ = fs::remove_dir_all(&project_dir);
+
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "subprocess did not complete cleanly: {completion:?}"
+    );
+    let result = completion.result.expect("captured stdout in result");
+    assert_eq!(result["message"], "ok");
+    assert_eq!(result["suffix"], "campaign");
+}
+
+#[test]
+fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
+    ryeos_tracing::test::prime_callsites();
+    let engine = build_engine_against_bundle();
+    let project_dir = synth_project_with_function_bundle_local_imports();
+
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test".into(),
+            scopes: vec!["execute".into()],
+        }),
+        project_context: ProjectContext::LocalPath {
+            path: project_dir.clone(),
+        },
+        current_site_id: "site:test".into(),
+        origin_site_id: "site:test".into(),
+        execution_hints: ExecutionHints::default(),
+        validate_only: false,
+    };
+
+    let item = CanonicalRef::parse("tool:example/function/health").expect("canonical ref parses");
+    let resolved = engine
+        .resolve(&plan_ctx, &item)
+        .expect("resolve direct Python function tool from project space");
+    assert_eq!(
+        resolved.metadata.executor_id.as_deref(),
+        Some("tool:ryeos/core/runtimes/python/function"),
+        "extraction rules failed to pull executor_id from health.py"
+    );
+
+    let verified = engine
+        .verify(&plan_ctx, resolved)
+        .expect("verify health.py (unsigned is allowed)");
+    let plan = engine
+        .build_plan(
+            &plan_ctx,
+            &verified,
+            &serde_json::Value::Null,
+            &plan_ctx.execution_hints,
+        )
+        .expect("build_plan walks executor chain to subprocess terminal");
+
+    let dispatch = plan
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            PlanNode::DispatchSubprocess { spec, .. } => Some(spec),
+            _ => None,
+        })
+        .expect("plan should have a DispatchSubprocess node");
+    assert!(
+        !dispatch.env.contains_key("PYTHONPATH"),
+        "python runtime must not emit PYTHONPATH env mutation"
+    );
+    assert!(
+        !dispatch.env_sources.contains_key("PYTHONPATH"),
+        "python runtime must not tag PYTHONPATH as RuntimePathMutation"
+    );
+
+    let engine_ctx = EngineContext {
+        thread_id: "thread:test".into(),
+        chain_root_id: "chain:test".into(),
+        current_site_id: "site:test".into(),
+        origin_site_id: "site:test".into(),
+        upstream_site_id: None,
+        upstream_thread_id: None,
+        continuation_from_id: None,
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test".into(),
+            scopes: vec!["execute".into()],
+        }),
+        project_context: ProjectContext::LocalPath {
+            path: project_dir.clone(),
+        },
+        launch_mode: LaunchMode::Inline,
+    };
+
+    let completion = engine
+        .execute_plan(&engine_ctx, plan)
+        .expect("dispatch.execute_plan runs the subprocess");
+
+    let _ = fs::remove_dir_all(&project_dir);
+
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "subprocess did not complete cleanly: {completion:?}"
+    );
+    let result = completion.result.expect("captured stdout in result");
+    assert_eq!(result["message"], "ok");
+    assert_eq!(result["project_path_seen"], true);
 }
 
 /// Trace-capture test: the engine's resolve → verify → build_plan

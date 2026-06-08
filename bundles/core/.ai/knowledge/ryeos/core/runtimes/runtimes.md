@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:75e604db730ce8b39d54054658db8c38fd303a6112efdc7e83f1c9ba53637033:p8mrnCPJXDBjAU5HOze59HUJ/+9UjiITKEuWJr60NarzYbGyhPsX4t7Akjevw4XnM+C4gKE2Ko0LM3/naTNDCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-08T03:48:08Z:f7309f20adc56346a05e988637dea0ed4df778ac6a13ade4833c79761629009e:u+R1Lei1MzsRfH50ay/QtV9y6ZQNu9i3a99pZI/7tZvAdMqwe7KTnxPHGrPwQwwqfWVWZp4fZGnkcz7KXGqsCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -19,7 +19,7 @@ and knowledge runtime binaries.
 Loads a Python module and calls its `execute(params, project_path)`.
 
 - **Interpreter:** `.venv/bin/python3` → `RYE_PYTHON` → `python3`
-- **PYTHONPATH:** `{tool_dir}`
+- **Imports:** prepends runtime-derived bundle-local roots to `sys.path`
 - **Async support:** Yes (auto-detects and wraps with `asyncio.run`)
 - **Timeout:** 300s
 - **Use case:** Structured Python tools with function entry point
@@ -27,8 +27,8 @@ Loads a Python module and calls its `execute(params, project_path)`.
 ### Python Script (`tool:ryeos/core/runtimes/python/script`)
 Runs a Python script as `__main__`.
 
-- **Command:** `{interpreter} {tool_path} --project-path {project_path}`
-- **Same interpreter and PYTHONPATH resolution as function runtime**
+- **Command:** runtime launcher invokes `{tool_path}` as `__main__` with `--project-path {project_path}`
+- **Same interpreter and bundle-local `sys.path` setup as function runtime**
 - **Timeout:** 300s
 - **Use case:** Self-contained Python scripts
 
