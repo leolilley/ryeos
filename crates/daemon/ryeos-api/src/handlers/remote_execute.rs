@@ -102,20 +102,22 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     };
 
     // Load remote config for project binding and ignore rules.
-    let remotes =
-        config::load_remotes_layered(&state.config.system_space_dir, abs_project_path.as_deref())
-            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
-    let remote_cfg = config::get_remote(&remotes, &req.remote).ok();
+    let report = config::load_remotes_layered_report(
+        &state.config.system_space_dir,
+        abs_project_path.as_deref(),
+    )
+    .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
+    let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
 
     // Resolve project binding if present.
-    if let (Some(proj_path), Some(cfg)) = (abs_project_path.as_ref(), remote_cfg.as_ref()) {
-        let canonical_key = proj_path.to_string_lossy().to_string();
-        if let Some(binding) = cfg.project_bindings.get(&canonical_key) {
-            match binding.sync_scope {
+    if let (Some(proj_path), Some(loaded)) = (abs_project_path.as_ref(), loaded_remote.as_ref()) {
+        match config::resolve_loaded_project_binding(loaded, proj_path) {
+            Ok(binding) => match binding.sync_scope {
                 ryeos_state::project_sync::ProjectSyncScope::AiOnly => {
                     return Err(HandlerError::BadRequest(format!(
                         "remote execute is not supported for ai_only binding '{}' -> '{}' yet; use remote sync-project-ai for deployment or bind as full_project",
-                        canonical_key, binding.remote_project_path
+                        binding.local_project_path.display(), binding.remote_project_path
                     )));
                 }
                 ryeos_state::project_sync::ProjectSyncScope::FullProject => {
@@ -128,6 +130,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                     )?;
                     project_path_for_ref = binding.remote_project_path.clone();
                 }
+            },
+            Err(e) if matches!(loaded.scope, config::RemoteConfigScope::Project { .. }) => {
+                return Err(HandlerError::BadRequest(format!(
+                    "project-level remote '{}' requires a project_binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope full_project`: {e:#}",
+                    req.remote,
+                    proj_path.display(),
+                    req.remote,
+                    proj_path.display(),
+                )));
+            }
+            Err(_) => {
+                // Preserve existing unbound fallback behavior for user-level remotes.
             }
         }
     }
@@ -157,6 +171,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                         site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
                         vault_fingerprint: String::new(),
                         ingest_ignore: fetched.clone(),
+                        project_binding: None,
                         project_bindings: HashMap::new(),
                     },
                 );
@@ -180,6 +195,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
             vault_fingerprint: String::new(),
             ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+            project_binding: None,
             project_bindings: HashMap::new(),
         },
     };

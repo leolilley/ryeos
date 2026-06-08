@@ -37,14 +37,34 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
 
     let mut checks = Vec::new();
     let mut next_steps = Vec::new();
-    let remotes =
-        config::load_remotes_layered(&state.config.system_space_dir, req.project.as_deref())?;
-    let Some(remote_cfg) = remotes.get(&req.remote).cloned() else {
+    let report = config::load_remotes_layered_report(
+        &state.config.system_space_dir,
+        req.project.as_deref(),
+    )?;
+    let Some(loaded_remote) = report.remotes.get(&req.remote).cloned() else {
         checks.push(serde_json::json!({
             "name": "remote_configured",
             "ok": false,
             "detail": format!("remote '{}' is not configured", req.remote),
         }));
+        for invalid in report
+            .invalid
+            .iter()
+            .filter(|entry| entry.name == req.remote)
+        {
+            checks.push(serde_json::json!({
+                "name": "remote_config_invalid",
+                "ok": false,
+                "scope": invalid.scope.label(),
+                "config_path": invalid.config_path,
+                "detail": invalid.error,
+                "repair_hint": invalid.repair_hint,
+            }));
+            next_steps.push(serde_json::json!({
+                "name": "repair_remote_config",
+                "command": invalid.repair_hint,
+            }));
+        }
         next_steps.push(serde_json::json!({
             "name": "configure_remote",
             "command": format!("ryeos remote configure {} --url <https-url>", req.remote),
@@ -57,6 +77,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
             "next_steps": next_steps,
         }));
     };
+    let remote_cfg = loaded_remote.config.clone();
 
     checks.push(serde_json::json!({
         "name": "remote_configured",
@@ -162,7 +183,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
     };
 
     let project = if let Some(project_path) = req.project {
-        match config::resolve_project_binding(&remote_cfg, &project_path) {
+        match config::resolve_loaded_project_binding(&loaded_remote, &project_path) {
             Ok(binding) => {
                 checks.push(serde_json::json!({
                     "name": "project_binding",

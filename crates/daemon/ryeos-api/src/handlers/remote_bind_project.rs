@@ -32,27 +32,36 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let local_key = local.to_string_lossy().to_string();
 
     // Mutate the remote where it actually lives (project or user).
-    let scope = config::locate_remote_scope(
-        &state.config.system_space_dir,
-        Some(&req.project),
-        &req.remote,
-    )?;
+    let scope =
+        config::locate_remote_scope(&state.config.system_space_dir, Some(&local), &req.remote)?;
     let mut remotes = config::load_remotes_at(&config::remotes_config_path(&scope))?;
     let remote = remotes
         .get_mut(&req.remote)
         .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", req.remote))?;
-    remote.project_bindings.insert(
-        local_key.clone(),
-        RemoteProjectBinding {
-            remote_project_path: req.remote_project.clone(),
-            sync_scope: req.sync_scope,
-        },
-    );
-    config::save_remotes(&scope, &remotes)?;
+    let is_project_scope = scope == local;
+    let binding = RemoteProjectBinding {
+        remote_project_path: req.remote_project.clone(),
+        sync_scope: req.sync_scope,
+    };
+    if is_project_scope {
+        remote.project_binding = Some(binding);
+        remote.project_bindings.clear();
+    } else {
+        remote.project_bindings.insert(local_key.clone(), binding);
+    }
+    let remote_scope = if is_project_scope {
+        config::RemoteConfigScope::Project {
+            root: scope.clone(),
+        }
+    } else {
+        config::RemoteConfigScope::User
+    };
+    config::save_remotes_for_scope(&scope, &remotes, &remote_scope)?;
 
     Ok(serde_json::json!({
         "remote": req.remote,
-        "local_project_path": local_key,
+        "scope": remote_scope.label(),
+        "local_project_path": if is_project_scope { ".".to_string() } else { local_key },
         "remote_project_path": req.remote_project,
         "sync_scope": req.sync_scope,
     }))

@@ -1,5 +1,6 @@
 //! `remote/configure` — add or update a remote node config.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -86,22 +87,34 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Resolve target root: project-level if a project_path is bound and
     // --no-project was not requested, else user-level system space.
-    let target_root: PathBuf = match (req.no_project, req.project_path.as_ref()) {
-        (false, Some(p)) => p.clone(),
-        _ => state.config.system_space_dir.clone(),
-    };
-    let target_label = if target_root == state.config.system_space_dir {
-        "user"
+    let is_project_scope = !req.no_project && req.project_path.is_some();
+    let target_root: PathBuf = if is_project_scope {
+        config::canonical_local_project_path(
+            req.project_path
+                .as_deref()
+                .expect("checked project_path.is_some above"),
+        )?
     } else {
-        "project"
+        state.config.system_space_dir.clone()
     };
+    let target_label = if is_project_scope { "project" } else { "user" };
 
     let config_path = config::remotes_config_path(&target_root);
     let mut remotes = config::load_remotes_at(&config_path)?;
-    let existing_project_bindings = if let Some(remote) = remotes.get(&remote_name) {
+    let existing_project_binding = if is_project_scope {
+        remotes
+            .get(&remote_name)
+            .and_then(|remote| remote.project_binding.clone())
+            .or(config::load_project_binding_at(&target_root, &remote_name)?)
+    } else {
+        None
+    };
+    let existing_project_bindings = if is_project_scope {
+        HashMap::new()
+    } else if let Some(remote) = remotes.get(&remote_name) {
         remote.project_bindings.clone()
     } else {
-        config::load_remote_project_bindings_at(&config_path, &remote_name)?
+        HashMap::new()
     };
     let vault_fp = pubkey.vault_fingerprint.clone();
     let signing_key = pubkey.signing_key.clone();
@@ -113,11 +126,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         site_id: pubkey.site_id.clone(),
         vault_fingerprint: pubkey.vault_fingerprint,
         ingest_ignore,
+        project_binding: existing_project_binding,
         project_bindings: existing_project_bindings,
     };
     remote_config.validate()?;
     remotes.insert(remote_name.clone(), remote_config);
-    config::save_remotes(&target_root, &remotes)?;
+    let scope = if is_project_scope {
+        config::RemoteConfigScope::Project {
+            root: target_root.clone(),
+        }
+    } else {
+        config::RemoteConfigScope::User
+    };
+    config::save_remotes_for_scope(&target_root, &remotes, &scope)?;
 
     Ok(serde_json::json!({
         "configured": remote_name,

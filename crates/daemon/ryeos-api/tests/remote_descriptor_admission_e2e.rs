@@ -198,6 +198,7 @@ fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {
             .unwrap()
             .to_string(),
         ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
+        project_binding: None,
         project_bindings: HashMap::new(),
     }
 }

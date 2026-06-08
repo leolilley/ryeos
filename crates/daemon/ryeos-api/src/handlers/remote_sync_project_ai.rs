@@ -30,9 +30,11 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let remotes = config::load_remotes_layered(&state.config.system_space_dir, Some(&req.project))?;
-    let remote_cfg = config::get_remote(&remotes, &req.remote)?;
-    let binding = config::resolve_project_binding(&remote_cfg, &req.project)?;
+    let report =
+        config::load_remotes_layered_report(&state.config.system_space_dir, Some(&req.project))?;
+    let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)?;
+    let remote_cfg = loaded_remote.config.clone();
+    let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)?;
     if binding.sync_scope != ProjectSyncScope::AiOnly {
         anyhow::bail!(
             "remote sync-project-ai requires an ai_only binding for '{}'; got {:?}",
