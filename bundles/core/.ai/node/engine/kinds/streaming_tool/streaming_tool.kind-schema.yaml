@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:24Z:d12d8d687e9eca9fab7695e51bfbc5a0ff23fae9607c554bf35e363f9da8bf8b:S2CMlb6Zssax7nrnGnC9490OcX42/D8byXoJD3aCZEZbG/P9sHPGM6LBUS0/8kmVFEIQ8zccQ8ibMLExk4N/AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-08T00:42:14Z:01f86b2b09c22e8e5f0d6b9bb2809e4f6f713e50efb4941c654adf86025b68a2:6dK7ZmU+8OHiSnWGjnJ8IVXhYaF0GZp9xVBewHTkgFWCNZ62jeL7EBaSvQY5NFG0VZhkpft2iifzJ2XWodwDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/streaming_tool"
 version: "1.0.0"
 location:
@@ -19,7 +19,7 @@ execution:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
 formats:
   - extensions: [".py"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: "#"
       after_shebang: true

@@ -5,6 +5,7 @@ use super::model::{StudioCore, StudioInspectorState};
 use super::scene_model::{build_scene_model, StudioSceneModel};
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
+use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
 use crate::workspace::{TileState, ViewLocalState, ViewSpec};
 use std::collections::BTreeSet;
 
@@ -26,8 +27,52 @@ pub struct StudioSessionVm {
     pub session_id: String,
     pub project_path: Option<String>,
     pub surface_ref: String,
+    #[serde(default)]
+    pub ambient: StudioAmbientVm,
     pub user_principal_id: Option<String>,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioAmbientVm {
+    pub show_background: bool,
+    pub opacity: Option<f32>,
+    pub mode: StudioAmbientModeVm,
+    pub atlas: Option<StudioAmbientAtlasVm>,
+}
+
+impl Default for StudioAmbientVm {
+    fn default() -> Self {
+        Self {
+            show_background: true,
+            opacity: None,
+            mode: StudioAmbientModeVm::Ambient,
+            atlas: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioAmbientModeVm {
+    #[default]
+    Ambient,
+    NamespaceAtlas,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioAmbientAtlasVm {
+    pub style: StudioAmbientAtlasStyleVm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StudioAmbientAtlasStyleVm {
+    #[default]
+    #[serde(rename = "flat_2d")]
+    Flat2d,
+    #[serde(rename = "paper_3d")]
+    Paper3d,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -837,6 +882,7 @@ fn session_vm(core: &StudioCore) -> StudioSessionVm {
             .map(|session| session.surface_ref.clone())
             .or_else(|| dimension.map(|dimension| dimension.session.surface_ref.clone()))
             .unwrap_or_default(),
+        ambient: ambient_vm(core),
         user_principal_id: browser
             .and_then(|session| session.user_principal_id.clone())
             .or_else(|| {
@@ -846,6 +892,47 @@ fn session_vm(core: &StudioCore) -> StudioSessionVm {
             .map(|session| session.read_only)
             .or_else(|| dimension.map(|dimension| dimension.session.read_only))
             .unwrap_or(true),
+    }
+}
+
+fn ambient_vm(core: &StudioCore) -> StudioAmbientVm {
+    let Some(surface) = core
+        .data
+        .session
+        .as_ref()
+        .and_then(|session| session.effective_surface.as_ref())
+        .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+    else {
+        return StudioAmbientVm {
+            show_background: true,
+            opacity: None,
+            mode: StudioAmbientModeVm::Ambient,
+            atlas: None,
+        };
+    };
+    let Some(ambient) = surface.ambient else {
+        return StudioAmbientVm {
+            show_background: true,
+            opacity: None,
+            mode: StudioAmbientModeVm::Ambient,
+            atlas: None,
+        };
+    };
+    let atlas_style = ambient.namespace_atlas_style();
+    StudioAmbientVm {
+        show_background: ambient.show_background.unwrap_or(true),
+        opacity: ambient.opacity,
+        mode: if atlas_style.is_some() {
+            StudioAmbientModeVm::NamespaceAtlas
+        } else {
+            StudioAmbientModeVm::Ambient
+        },
+        atlas: atlas_style.map(|style| StudioAmbientAtlasVm {
+            style: match style {
+                AmbientAtlasStyleSpec::Flat2d => StudioAmbientAtlasStyleVm::Flat2d,
+                AmbientAtlasStyleSpec::Paper3d => StudioAmbientAtlasStyleVm::Paper3d,
+            },
+        }),
     }
 }
 

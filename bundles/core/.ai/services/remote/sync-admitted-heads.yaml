@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-31T08:15:51Z:050515d13467d956a12f026723351e72131ff98fac07bcaca9693cc2313896d9:/MihiyJu2Do9WCKf40Ys1JC9MMGlqp3LjYVv4BSdi1liH/rC6WJDFSEPrcnZuJIAMf6I5GJ6LXaI52oNwvIcCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T05:18:56Z:050515d13467d956a12f026723351e72131ff98fac07bcaca9693cc2313896d9:/MihiyJu2Do9WCKf40Ys1JC9MMGlqp3LjYVv4BSdi1liH/rC6WJDFSEPrcnZuJIAMf6I5GJ6LXaI52oNwvIcCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-admitted-heads
 required_caps: ["ryeos.execute.service.remote.sync-admitted-heads"]

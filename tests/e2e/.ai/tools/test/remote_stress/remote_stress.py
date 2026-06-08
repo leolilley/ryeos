@@ -1,15 +1,15 @@
-# ryeos:signed:2026-04-09T00:59:52Z:edd79b16d12bcf0e6d31df19f2f8f44c3af161a8608e19f69208138b9c6767a4:9tUE3rfkoq4sI9x7oJWtjhRetho488CA69IeIs1u-yZ4sK1bcpUhaBEWvkOg_zYlNuUzVdsIOBKhi5Ra9RWoDQ:4b987fd4e40303ac
+# ryeos:signed:2026-06-07T05:42:18Z:dcb747dfabd2a00f574629a343e7cb15e46d0388ddf444709e5473d48ca4a581:6L6vlOraNwQN3jDVpTt455BH+i7rQlyBzU/85rYz/DWpbpmE+nU7ofEb8pwtVZG1+3OldPD+rDtFLpr5VciODw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos-tool:
+#   category: test/remote_stress
+#   version: "1.0.0"
+#   tool_type: python
+#   executor_id: ryeos/core/runtimes/python/function
+#   tool_description: "Stress test for remote execution — CPU, stdlib, data structures"
 """Stress test tool for remote execution.
 
 Exercises multiple capabilities: CPU work, stdlib imports, nested data
 structures, error paths, and both sync/async execution signatures.
 """
-
-__version__ = "1.0.0"
-__tool_type__ = "python"
-__executor_id__ = "ryeos/core/runtimes/python/function"
-__category__ = "test/remote_stress"
-__tool_description__ = "Stress test for remote execution — CPU, stdlib, data structures"
 
 import hashlib
 import json

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:12Z:9bb27161dfd97df373242b48c1df7fd952700045f951f977c50ef9a3600c61c3:8ygOOon+Ih71ZjqEkElhH9bbCh5X83azRGQIa+R/t2KSSoka06vx0ba3e98uSfAwL5iqaaDeXcL9lFfzMEvvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T05:19:02Z:9bb27161dfd97df373242b48c1df7fd952700045f951f977c50ef9a3600c61c3:8ygOOon+Ih71ZjqEkElhH9bbCh5X83azRGQIa+R/t2KSSoka06vx0ba3e98uSfAwL5iqaaDeXcL9lFfzMEvvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: studio/dimension/get
 version: "1.0.0"

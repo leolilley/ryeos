@@ -16,14 +16,12 @@ use base64::Engine;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_STUDIO_SURFACE_REF: &str = "surface:ryeos/studio/base";
-
 #[derive(Parser)]
 #[command(name = "web", about = "Launch RyeOS in the browser")]
 struct Cli {
-    /// Surface ref backing Studio. Defaults to the current packaged Studio surface id.
-    #[arg(long = "surface")]
-    surface: Option<String>,
+    /// Surface ref backing Studio. Command descriptors provide the default.
+    #[arg(long = "surface", required = true)]
+    surface: String,
 
     /// Project path
     #[arg(long = "project")]
@@ -95,15 +93,10 @@ async fn main() -> Result<()> {
     // Discover daemon audience (public key fingerprint).
     let audience = discover_audience(&daemon_url).await?;
 
-    // Build the mint request with parsed args.
-    let surface_ref = cli
-        .surface
-        .unwrap_or_else(|| DEFAULT_STUDIO_SURFACE_REF.to_string());
-
     let project_path = cli.project.or_else(project_from_cli_env);
 
     let mint_req = MintRequest {
-        surface_ref,
+        surface_ref: cli.surface,
         project_path: project_path.map(|p| p.to_string_lossy().to_string()),
         read_only: cli.read_only || !cli.allow_actions,
         user_principal_id: cli

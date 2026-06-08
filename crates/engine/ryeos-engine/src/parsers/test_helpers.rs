@@ -27,8 +27,8 @@ fn mk(handler: &str, parser_config: serde_json::Value) -> ParserDescriptor {
     }
 }
 
-/// All five canonical bundle parser descriptors:
-///   * `parser:ryeos/core/python/ast`
+/// Canonical bundle parser descriptors:
+///   * `parser:ryeos/core/python/tool-header`
 ///   * `parser:ryeos/core/yaml/yaml`
 ///   * `parser:ryeos/core/markdown/directive`
 ///   * `parser:ryeos/core/markdown/frontmatter`
@@ -36,14 +36,16 @@ fn mk(handler: &str, parser_config: serde_json::Value) -> ParserDescriptor {
 pub(crate) fn dispatcher_with_canonical_bundle_descriptors() -> ParserDispatcher {
     let entries = vec![
         (
-            "parser:ryeos/core/python/ast".to_string(),
+            "parser:ryeos/core/python/tool-header".to_string(),
             mk(
-                "handler:ryeos/core/regex-kv",
+                "handler:ryeos/core/yaml-header-document",
                 json!({
-                    "patterns": [{
-                        "regex": r#"(?m)^(__\w+__)\s*=\s*"([^"]+)""#,
-                        "key_group": 1,
-                        "value_group": 2
+                    "require_header": true,
+                    "forms": [{
+                        "kind": "comment_marker",
+                        "marker": "ryeos-tool",
+                        "comment_prefix": "#",
+                        "allow_after_shebang": true
                     }]
                 }),
             ),

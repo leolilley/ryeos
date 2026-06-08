@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::dto::{
-    StudioDimensionDto, StudioFileReadDto, StudioFilesDto, StudioGcStatusDto,
+    StudioDimensionDto, StudioFileReadDto, StudioFileSpaceDto, StudioFilesDto, StudioGcStatusDto,
     StudioItemInspectionDto, StudioItemsDto, StudioProjectsDto, StudioSchedulesDto,
     StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
 };
@@ -174,6 +174,7 @@ pub struct StudioDataState {
     pub schedules: Option<StudioSchedulesDto>,
     pub gc_status: Option<StudioGcStatusDto>,
     pub files: Option<StudioFilesDto>,
+    pub file_space: Option<StudioFileSpaceDto>,
     pub tile_files: HashMap<String, StudioFilesDto>,
     pub file_read: Option<StudioFileReadDto>,
     pub item_inspection: Option<StudioItemInspectionDto>,
@@ -266,7 +267,9 @@ impl StudioCore {
         let mut needs_threads = false;
         let mut needs_schedules = false;
         let mut needs_gc = false;
-        let mut needs_atlas_items = false;
+        let needs_atlas = self.surface_uses_atlas_ambient();
+        let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
+        let mut needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
         let mut needs_topology = false;
         let mut item_tiles = Vec::new();
         let mut file_tiles = Vec::new();
@@ -279,7 +282,10 @@ impl StudioCore {
                 ViewSpec::Thread { .. } | ViewSpec::ThreadList => needs_threads = true,
                 ViewSpec::SpaceBrowser { .. } => item_tiles.push((tile_id, tile.local.clone())),
                 ViewSpec::Atlas => {
-                    needs_atlas_items = true;
+                    match self.ui.atlas.active_projection {
+                        crate::atlas::AtlasProjectionVm::AiSpace => needs_atlas_items = true,
+                        crate::atlas::AtlasProjectionVm::FileSpace => needs_file_space = true,
+                    }
                     needs_topology = true;
                 }
                 ViewSpec::Schedules => needs_schedules = true,
@@ -323,6 +329,14 @@ impl StudioCore {
                 limit: 1000,
             }));
         }
+        if needs_file_space && self.has_project_bound() {
+            effects.push(self.emit(StudioEffectKind::FetchFileSpace {
+                root: self.ui.atlas.file_space_root.clone(),
+                path: self.ui.atlas.file_space_path.clone(),
+                max_depth: 8,
+                max_entries: 3000,
+            }));
+        }
         if needs_topology {
             effects.push(self.emit(StudioEffectKind::FetchTopology));
         }
@@ -347,6 +361,16 @@ impl StudioCore {
             }));
         }
         effects
+    }
+
+    fn surface_uses_atlas_ambient(&self) -> bool {
+        self.data
+            .session
+            .as_ref()
+            .and_then(|session| session.effective_surface.as_ref())
+            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+            .and_then(|surface| surface.ambient)
+            .is_some_and(|ambient| ambient.uses_namespace_atlas())
     }
 
     pub fn bump_generation(&mut self) {

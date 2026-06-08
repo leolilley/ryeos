@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 pub struct NamespaceAtlasVm {
     pub schema_version: String,
     pub generation: u64,
+    #[serde(default)]
+    pub projection: AtlasProjectionVm,
     pub coordinate_system: String,
     pub root_label: String,
     pub bounds: AtlasBoundsVm,
@@ -39,6 +41,8 @@ pub struct AtlasNodeVm {
     pub position: [f32; 3],
     pub stack: Vec<AtlasStackItemVm>,
     pub state: AtlasVisualStateVm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<AtlasInteractionVm>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -51,6 +55,16 @@ pub struct AtlasStackItemVm {
     pub source_path: String,
     pub executable: bool,
     pub y_offset: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<AtlasInteractionVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AtlasInteractionVm {
+    InspectItem { canonical_ref: String },
+    ReadFile { root: String, path: String },
+    FocusFolder { root: Option<String>, path: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -60,7 +74,26 @@ pub enum AtlasItemKind {
     Knowledge,
     Tool,
     Directive,
+    File,
     Other,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtlasProjectionVm {
+    #[default]
+    AiSpace,
+    FileSpace,
+}
+
+impl AtlasProjectionVm {
+    pub fn is_ai_space(self) -> bool {
+        matches!(self, Self::AiSpace)
+    }
+
+    pub fn is_file_space(self) -> bool {
+        matches!(self, Self::FileSpace)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +135,12 @@ pub struct AtlasLinkVm {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtlasUiStateVm {
+    #[serde(default)]
+    pub active_projection: AtlasProjectionVm,
+    #[serde(default = "default_file_space_root")]
+    pub file_space_root: String,
+    #[serde(default)]
+    pub file_space_path: String,
     #[serde(default = "default_visible_atlas_layers")]
     pub visible_layers: BTreeSet<AtlasItemKind>,
     #[serde(default)]
@@ -119,6 +158,9 @@ pub enum AtlasLensVm {
 impl Default for AtlasUiStateVm {
     fn default() -> Self {
         Self {
+            active_projection: AtlasProjectionVm::AiSpace,
+            file_space_root: default_file_space_root(),
+            file_space_path: String::new(),
             visible_layers: default_visible_atlas_layers(),
             active_lens: AtlasLensVm::None,
         }
@@ -159,10 +201,15 @@ fn default_visible_atlas_layers() -> BTreeSet<AtlasItemKind> {
         AtlasItemKind::Tool,
         AtlasItemKind::Knowledge,
         AtlasItemKind::Config,
+        AtlasItemKind::File,
         AtlasItemKind::Other,
     ]
     .into_iter()
     .collect()
+}
+
+fn default_file_space_root() -> String {
+    "project".to_string()
 }
 
 impl AtlasItemKind {
@@ -172,6 +219,7 @@ impl AtlasItemKind {
             "tool" | "tools" => Self::Tool,
             "knowledge" => Self::Knowledge,
             "config" | "configs" | "configuration" => Self::Config,
+            "file" | "files" => Self::File,
             _ => Self::Other,
         }
     }
@@ -182,6 +230,7 @@ impl AtlasItemKind {
             Self::Knowledge => 0.35,
             Self::Tool => 0.7,
             Self::Directive => 1.05,
+            Self::File => 0.45,
             Self::Other => 0.18,
         }
     }
@@ -192,6 +241,7 @@ impl AtlasItemKind {
             Self::Tool => '⚙',
             Self::Knowledge => '◈',
             Self::Config => '◇',
+            Self::File => '□',
             Self::Other => '●',
         }
     }

@@ -1,6 +1,79 @@
 /* @ts-self-types="./ryeos_web.d.ts" */
 
 /**
+ * Apply a daemon/session event received by the browser shell.
+ * @param {any} event_json
+ * @returns {any}
+ */
+export function dispatch_daemon_event(event_json) {
+    const ret = wasm.dispatch_daemon_event(event_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Dispatch a keyboard event.
+ * @param {number} key_code
+ * @param {boolean} shift
+ * @param {boolean} ctrl
+ * @param {boolean} alt
+ * @returns {any}
+ */
+export function dispatch_key(key_code, shift, ctrl, alt) {
+    const ret = wasm.dispatch_key(key_code, shift, ctrl, alt);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Apply a browser-fetched daemon snapshot.
+ *
+ * `PollSnapshot` currently returns `Effect::RefreshState` in the shared
+ * reducer. The browser calls this function as the result of a refresh, so the
+ * returned refresh effect is deliberately not re-enqueued here.
+ * @param {any} snapshot_json
+ * @returns {any}
+ */
+export function dispatch_poll_snapshot(snapshot_json) {
+    const ret = wasm.dispatch_poll_snapshot(snapshot_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Resize the viewport.
+ * @param {number} width
+ * @param {number} height
+ * @returns {any}
+ */
+export function dispatch_resize(width, height) {
+    const ret = wasm.dispatch_resize(width, height);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Apply the daemon's renderer-neutral operational studio dimension.
+ * @param {any} dimension_json
+ * @returns {any}
+ */
+export function dispatch_studio_dimension(dimension_json) {
+    const ret = wasm.dispatch_studio_dimension(dimension_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * @param {any} file_json
  * @returns {any}
  */
@@ -75,84 +148,11 @@ export function dispatch_studio_schedules(schedules_json) {
 }
 
 /**
- * Apply the daemon's renderer-neutral operational studio dimension.
- * @param {any} dimension_json
- * @returns {any}
- */
-export function dispatch_studio_dimension(dimension_json) {
-    const ret = wasm.dispatch_studio_dimension(dimension_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
  * @param {any} inspection_json
  * @returns {any}
  */
 export function dispatch_studio_thread_inspection(inspection_json) {
     const ret = wasm.dispatch_studio_thread_inspection(inspection_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Apply a daemon/session event received by the browser shell.
- * @param {any} event_json
- * @returns {any}
- */
-export function dispatch_daemon_event(event_json) {
-    const ret = wasm.dispatch_daemon_event(event_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Dispatch a keyboard event.
- * @param {number} key_code
- * @param {boolean} shift
- * @param {boolean} ctrl
- * @param {boolean} alt
- * @returns {any}
- */
-export function dispatch_key(key_code, shift, ctrl, alt) {
-    const ret = wasm.dispatch_key(key_code, shift, ctrl, alt);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Apply a browser-fetched daemon snapshot.
- *
- * `PollSnapshot` currently returns `Effect::RefreshState` in the shared
- * reducer. The browser calls this function as the result of a refresh, so the
- * returned refresh effect is deliberately not re-enqueued here.
- * @param {any} snapshot_json
- * @returns {any}
- */
-export function dispatch_poll_snapshot(snapshot_json) {
-    const ret = wasm.dispatch_poll_snapshot(snapshot_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Resize the viewport.
- * @param {number} width
- * @param {number} height
- * @returns {any}
- */
-export function dispatch_resize(width, height) {
-    const ret = wasm.dispatch_resize(width, height);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

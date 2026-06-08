@@ -15,8 +15,8 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_standard_bundle};
 use lillux::crypto::SigningKey;
 
 /// Plant ZEN_API_KEY in the sealed vault so the preflight passes.
@@ -53,10 +53,11 @@ fn plant_echo_tool(project_dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(&tool_dir)?;
 
     let body = r#"#!/usr/bin/env python3
-__version__ = "1.0.0"
-__executor_id__ = "tool:ryeos/core/runtimes/python/script"
-__category__ = "echo"
-__description__ = "echo input as json"
+# ryeos-tool:
+#   category: echo
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   description: "echo input as json"
 
 import json, sys
 raw = sys.stdin.read()

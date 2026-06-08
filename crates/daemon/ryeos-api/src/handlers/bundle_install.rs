@@ -14,7 +14,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
-use ryeos_bundle::preflight::preflight_verify_bundle;
+use ryeos_bundle::preflight::preflight_verify_bundle_in_context;
 use ryeos_engine::roots;
 
 use crate::registry::ServiceDescriptor;
@@ -28,6 +28,16 @@ pub struct Request {
     pub name: String,
     /// Source directory to copy from.
     pub source_path: PathBuf,
+    /// Replace an existing installed bundle after preflight verification.
+    #[serde(default)]
+    pub replace: bool,
+    /// Preserve installed runtime artifacts when replacing from a sparse source.
+    ///
+    /// This keeps `.ai/bin`, `.ai/objects`, and `.ai/refs` from the existing
+    /// installation when the replacement source does not provide them. Source
+    /// files always win when present.
+    #[serde(default)]
+    pub preserve_runtime_artifacts: bool,
 }
 
 pub fn validate_name(name: &str) -> Result<()> {
@@ -59,9 +69,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let bundles_root = state.config.system_space_dir.join(".ai").join("bundles");
     let target = bundles_root.join(&req.name);
 
-    if target.exists() {
+    let replaced = target.exists();
+    if replaced && !req.replace {
         bail!(
-            "bundle '{}' already installed at {}",
+            "bundle '{}' already installed at {}; use --replace to update it from source",
             req.name,
             target.display()
         );
@@ -75,9 +86,23 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // trust docs. Bundles whose signers aren't already trusted are
     // rejected — operators must `ryeos trust pin <fingerprint>` first.
     let user_root = roots::user_root().ok();
-    preflight_verify_bundle(
+    let source_canonical = req
+        .source_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize source path {}", req.source_path.display()))?;
+    let installed_dependency_roots: Vec<PathBuf> =
+        ryeos_bundle::installed::load_installed_bundle_records(
+            &state.config.system_space_dir,
+            user_root.as_deref(),
+        )
+        .context("preflight: load installed bundle registrations")?
+        .into_iter()
+        .filter(|record| record.name != req.name && record.bundle_root != source_canonical)
+        .map(|record| record.bundle_root)
+        .collect();
+    preflight_verify_bundle_in_context(
         &req.source_path,
-        &state.config.system_space_dir,
+        &installed_dependency_roots,
         user_root.as_deref(),
     )
     .context("preflight verification refused install")?;
@@ -85,13 +110,24 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     fs::create_dir_all(&bundles_root)
         .with_context(|| format!("failed to create bundles root {}", bundles_root.display()))?;
 
-    copy_dir_recursive(&req.source_path, &target).with_context(|| {
-        format!(
-            "failed to copy bundle from {} to {}",
-            req.source_path.display(),
-            target.display()
-        )
-    })?;
+    if replaced {
+        replace_dir_atomicish(&req.source_path, &target, req.preserve_runtime_artifacts)
+            .with_context(|| {
+                format!(
+                    "failed to replace bundle from {} to {}",
+                    req.source_path.display(),
+                    target.display()
+                )
+            })?;
+    } else {
+        copy_dir_recursive(&req.source_path, &target).with_context(|| {
+            format!(
+                "failed to copy bundle from {} to {}",
+                req.source_path.display(),
+                target.display()
+            )
+        })?;
+    }
 
     let canonical_target = target
         .canonicalize()
@@ -121,8 +157,120 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "name": req.name,
         "path": canonical_target.display().to_string(),
         "config_item": config_item_path.display().to_string(),
+        "replaced": replaced,
+        "preserve_runtime_artifacts": req.preserve_runtime_artifacts,
     });
     Ok(report)
+}
+
+fn replace_dir_atomicish(
+    src: &Path,
+    target: &Path,
+    preserve_runtime_artifacts: bool,
+) -> Result<()> {
+    let source = src
+        .canonicalize()
+        .with_context(|| format!("canonicalize source path {}", src.display()))?;
+    let canonical_target = target
+        .canonicalize()
+        .with_context(|| format!("canonicalize target path {}", target.display()))?;
+    let parent = target
+        .parent()
+        .context("installed bundle target has no parent")?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("installed bundle target has no valid directory name")?;
+    let staging = parent.join(format!(".{name}.staging"));
+    let backup = parent.join(format!(".{name}.backup.prev"));
+    if source == canonical_target
+        || source.starts_with(&canonical_target)
+        || canonical_target.starts_with(&source)
+    {
+        bail!(
+            "source_path {} must be outside installed bundle target {} when using --replace",
+            source.display(),
+            canonical_target.display()
+        );
+    }
+    if staging.starts_with(&source) || backup.starts_with(&source) {
+        bail!(
+            "source_path {} must not contain bundle install staging/backup paths",
+            source.display()
+        );
+    }
+
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .with_context(|| format!("remove stale staging dir {}", staging.display()))?;
+    }
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("remove stale backup dir {}", backup.display()))?;
+    }
+
+    copy_dir_recursive(src, &staging).with_context(|| {
+        format!(
+            "copy replacement bundle from {} to staging {}",
+            src.display(),
+            staging.display()
+        )
+    })?;
+
+    if preserve_runtime_artifacts {
+        preserve_runtime_artifact_dirs(&canonical_target, &staging)?;
+    }
+
+    fs::rename(target, &backup).with_context(|| {
+        format!(
+            "move existing bundle {} to backup {}",
+            target.display(),
+            backup.display()
+        )
+    })?;
+
+    if let Err(error) = fs::rename(&staging, target) {
+        let _ = fs::rename(&backup, target);
+        return Err(error).with_context(|| {
+            format!(
+                "move staged bundle {} to target {}",
+                staging.display(),
+                target.display()
+            )
+        });
+    }
+
+    if backup.exists() {
+        fs::remove_dir_all(&backup)
+            .with_context(|| format!("remove backup dir {}", backup.display()))?;
+    }
+
+    Ok(())
+}
+
+fn preserve_runtime_artifact_dirs(existing: &Path, staging: &Path) -> Result<()> {
+    for rel in [".ai/bin", ".ai/objects", ".ai/refs"] {
+        let from = existing.join(rel);
+        if !from.exists() {
+            continue;
+        }
+        let to = staging.join(rel);
+        if to.exists() {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create runtime artifact parent {}", parent.display()))?;
+        }
+        copy_dir_recursive(&from, &to).with_context(|| {
+            format!(
+                "preserve runtime artifact directory {} -> {}",
+                from.display(),
+                to.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
@@ -161,7 +309,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = serde_json::from_value(params)
-                .context("bundle.install requires { name, source_path }")?;
+                .context("bundle.install requires { name, source_path, replace? }")?;
             handle(req, state).await
         })
     },
@@ -218,5 +366,78 @@ mod tests {
         assert_eq!(fs::read(dst.join("top.txt")).unwrap(), b"top");
         assert_eq!(fs::read(dst.join("a/mid.txt")).unwrap(), b"mid");
         assert_eq!(fs::read(dst.join("a/b/leaf.txt")).unwrap(), b"leaf");
+    }
+
+    #[test]
+    fn replace_dir_replaces_existing_tree_and_cleans_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let bundles = tmp.path().join("bundles");
+        let target = bundles.join("studio");
+        fs::create_dir_all(src.join("new")).unwrap();
+        fs::create_dir_all(target.join("old")).unwrap();
+        fs::write(src.join("new/file.txt"), b"new").unwrap();
+        fs::write(target.join("old/file.txt"), b"old").unwrap();
+
+        replace_dir_atomicish(&src, &target, false).unwrap();
+
+        assert_eq!(fs::read(target.join("new/file.txt")).unwrap(), b"new");
+        assert!(!target.join("old/file.txt").exists());
+        assert!(!bundles.join(".studio.staging").exists());
+        assert!(!bundles.join(".studio.backup.prev").exists());
+    }
+
+    #[test]
+    fn replace_dir_preserves_runtime_artifacts_when_source_is_sparse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let bundles = tmp.path().join("bundles");
+        let target = bundles.join("studio");
+        fs::create_dir_all(src.join(".ai/node/commands")).unwrap();
+        fs::create_dir_all(target.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
+        fs::create_dir_all(target.join(".ai/objects/blobs")).unwrap();
+        fs::create_dir_all(target.join(".ai/refs/bundles")).unwrap();
+        fs::write(src.join(".ai/node/commands/web.yaml"), b"web").unwrap();
+        fs::write(target.join(".ai/bin/x86_64-unknown-linux-gnu/web"), b"bin").unwrap();
+        fs::write(target.join(".ai/objects/blobs/blob"), b"blob").unwrap();
+        fs::write(target.join(".ai/refs/bundles/manifest"), b"ref").unwrap();
+
+        replace_dir_atomicish(&src, &target, true).unwrap();
+
+        assert_eq!(
+            fs::read(target.join(".ai/node/commands/web.yaml")).unwrap(),
+            b"web"
+        );
+        assert_eq!(
+            fs::read(target.join(".ai/bin/x86_64-unknown-linux-gnu/web")).unwrap(),
+            b"bin"
+        );
+        assert_eq!(
+            fs::read(target.join(".ai/objects/blobs/blob")).unwrap(),
+            b"blob"
+        );
+        assert_eq!(
+            fs::read(target.join(".ai/refs/bundles/manifest")).unwrap(),
+            b"ref"
+        );
+    }
+
+    #[test]
+    fn replace_dir_does_not_overwrite_source_runtime_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let bundles = tmp.path().join("bundles");
+        let target = bundles.join("studio");
+        fs::create_dir_all(src.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
+        fs::create_dir_all(target.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
+        fs::write(src.join(".ai/bin/x86_64-unknown-linux-gnu/web"), b"new").unwrap();
+        fs::write(target.join(".ai/bin/x86_64-unknown-linux-gnu/web"), b"old").unwrap();
+
+        replace_dir_atomicish(&src, &target, true).unwrap();
+
+        assert_eq!(
+            fs::read(target.join(".ai/bin/x86_64-unknown-linux-gnu/web")).unwrap(),
+            b"new"
+        );
     }
 }

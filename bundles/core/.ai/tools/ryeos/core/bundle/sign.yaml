@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-03T03:45:48Z:3643b107764cbba71d84cb0fee55f6ef2a1b1710dcf87cea31e5be985fb10e13:d8mpcejG8hmFxN85EdqQSmBz0hMqdh6w5v1rxcOwR5PuUUlYlLsOLQnPVBqxw/ni/4Zfl+P0MjNBPimOf24DAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T05:18:56Z:3643b107764cbba71d84cb0fee55f6ef2a1b1710dcf87cea31e5be985fb10e13:d8mpcejG8hmFxN85EdqQSmBz0hMqdh6w5v1rxcOwR5PuUUlYlLsOLQnPVBqxw/ni/4Zfl+P0MjNBPimOf24DAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "sign"
 executor_id: "@subprocess"

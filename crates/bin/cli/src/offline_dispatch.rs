@@ -90,7 +90,7 @@ pub fn try_offline_dispatch(
     let tail = &argv[matched.consumed..];
 
     if has_launch_binary_ref(&item.composed_value) {
-        return exec_client(&engine, item, tail, project_path).map(Some);
+        return exec_client(&engine, item, &matched.command, tail, project_path).map(Some);
     }
 
     if has_service_offline_dispatch(&item.composed_value) {
@@ -102,7 +102,7 @@ pub fn try_offline_dispatch(
             system_space_dir,
             project_path,
         )
-        .map(|result| result.map(OfflineDispatchOutcome::Json));
+        .map(|result| result.map(|outcome| outcome));
     }
 
     if has_tool_command(&item.composed_value) {
@@ -222,6 +222,7 @@ fn has_tool_command(value: &Value) -> bool {
 fn exec_client(
     engine: &ryeos_engine::engine::Engine,
     item: EffectiveItem,
+    command_def: &CommandDef,
     tail: &[String],
     project_path: &str,
 ) -> Result<OfflineDispatchOutcome, CliError> {
@@ -278,10 +279,7 @@ fn exec_client(
         detail: format!("resolve client binary '{binary_ref}': {e}"),
     })?;
 
-    // Clients own their argv surface. The descriptor may document structured
-    // args for later protocol-aware binding, but offline CLI dispatch forwards
-    // the caller's tail unchanged for now.
-    let args = tail.to_vec();
+    let args = client_args_from_launch(launch, command_def, tail, project_path)?;
 
     // Exec: client replaces the process (inherited stdio)
     let mut command = std::process::Command::new(&resolved.absolute_path);
@@ -310,6 +308,57 @@ fn exec_client(
     }
 
     Ok(OfflineDispatchOutcome::Silent)
+}
+
+fn client_args_from_launch(
+    launch: &Value,
+    command_def: &CommandDef,
+    tail: &[String],
+    project_path: &str,
+) -> Result<Vec<String>, CliError> {
+    let Some(arg_map) = launch.get("args").and_then(|value| value.as_object()) else {
+        return Ok(tail.to_vec());
+    };
+    let params = bind_params_minimal(tail, command_def, project_path)?;
+    let Some(params) = params.as_object() else {
+        return Ok(Vec::new());
+    };
+
+    let mut args = Vec::new();
+    for (field, flag) in arg_map {
+        let Some(flag) = flag.as_str().filter(|flag| !flag.is_empty()) else {
+            continue;
+        };
+        let Some(value) = params.get(field) else {
+            continue;
+        };
+        append_client_arg(&mut args, flag, value);
+    }
+    Ok(args)
+}
+
+fn append_client_arg(args: &mut Vec<String>, flag: &str, value: &Value) {
+    match value {
+        Value::Null | Value::Bool(false) => {}
+        Value::Bool(true) => args.push(flag.to_string()),
+        Value::String(value) => {
+            args.push(flag.to_string());
+            args.push(value.clone());
+        }
+        Value::Number(value) => {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+        Value::Array(values) => {
+            for value in values {
+                append_client_arg(args, flag, value);
+            }
+        }
+        Value::Object(_) => {
+            args.push(flag.to_string());
+            args.push(value.to_string());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +548,7 @@ fn dispatch_service(
     tail: &[String],
     system_space_dir: &Path,
     project_path: &str,
-) -> Result<Option<Value>, CliError> {
+) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
     let availability = item
         .composed_value
@@ -525,16 +574,6 @@ fn dispatch_service(
             _ => None,
         });
 
-    let Some(tool_ref) = offline_execute else {
-        return Err(CliError::Local {
-            detail: format!(
-                "service `{}` is declared offline-capable, but its descriptor \
-                 does not declare a local tool implementation (`offline_execute: tool:<id>`)",
-                command.name
-            ),
-        });
-    };
-
     // Get service schema for param validation
     let service_schema = item
         .composed_value
@@ -558,6 +597,10 @@ fn dispatch_service(
         obj.retain(|key, _| !key.starts_with('_'));
     }
 
+    let Some(tool_ref) = offline_execute else {
+        return run_standalone_service(&item.canonical_ref, params, system_space_dir).map(Some);
+    };
+
     // Dispatch tool
     let canonical = CanonicalRef::parse(&tool_ref).map_err(|e| CliError::Local {
         detail: format!("invalid offline tool ref '{tool_ref}': {e}"),
@@ -571,6 +614,86 @@ fn dispatch_service(
         system_space_dir,
         project_path,
     )
+    .map(|result| result.map(OfflineDispatchOutcome::Json))
+}
+
+fn run_standalone_service(
+    service_ref: &str,
+    params: Value,
+    system_space_dir: &Path,
+) -> Result<OfflineDispatchOutcome, CliError> {
+    ensure_daemon_stopped_for_standalone(system_space_dir)?;
+
+    let params_json = serde_json::to_string(&params).map_err(|error| CliError::Local {
+        detail: format!("encode standalone service params: {error}"),
+    })?;
+    let ryeosd = resolve_ryeosd_binary();
+    let output = std::process::Command::new(&ryeosd)
+        .arg("--system-space-dir")
+        .arg(system_space_dir)
+        .arg("run-service")
+        .arg(service_ref)
+        .arg("--params")
+        .arg(params_json)
+        .output()
+        .with_context(|| {
+            format!(
+                "run standalone service `{service_ref}` via {}",
+                ryeosd.display()
+            )
+        })
+        .map_err(local_err)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(CliError::Local {
+            detail: format!(
+                "standalone service `{service_ref}` failed with exit {:?}: {detail}",
+                output.status.code()
+            ),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Ok(OfflineDispatchOutcome::Silent);
+    }
+    match serde_json::from_str::<Value>(&stdout) {
+        Ok(value) => Ok(OfflineDispatchOutcome::Json(value)),
+        Err(_) => {
+            println!("{stdout}");
+            Ok(OfflineDispatchOutcome::Silent)
+        }
+    }
+}
+
+fn ensure_daemon_stopped_for_standalone(system_space_dir: &Path) -> Result<(), CliError> {
+    let lock_path = ryeos_app::state_lock::default_lock_path(system_space_dir);
+    match ryeos_app::state_lock::StateLock::acquire(&lock_path) {
+        Ok(lock) => {
+            drop(lock);
+            Ok(())
+        }
+        Err(error) => Err(CliError::Local {
+            detail: format!(
+                "this command is offline-only and the daemon appears to be running. Run `ryeos stop`, then retry. ({error:#})"
+            ),
+        }),
+    }
+}
+
+fn resolve_ryeosd_binary() -> PathBuf {
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let sibling = parent.join("ryeosd");
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    PathBuf::from("ryeosd")
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,7 +1391,7 @@ else:
     }
 
     #[test]
-    fn offline_service_without_tool_impl_errors_loudly() {
+    fn offline_service_without_tool_impl_dispatches_standalone_service() {
         let fixture = Fixture::new();
         fixture.write_standard_descriptors(None);
 
@@ -1276,7 +1399,10 @@ else:
 
         match err {
             CliError::Local { detail } => {
-                assert!(detail.contains("offline_execute: tool:<id>"), "{detail}");
+                assert!(
+                    detail.contains("standalone service `service:custom`"),
+                    "{detail}"
+                );
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1422,7 +1548,7 @@ else:
                 .join("clients")
                 .join("custom")
                 .join("capture.yaml"),
-            "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\nserves:\n  kind: surface\n",
+            "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\n    mock: \"--mock\"\nserves:\n  kind: surface\n",
         );
 
         let outcome = try_offline_dispatch(
@@ -1442,6 +1568,49 @@ else:
         let captured = std::fs::read_to_string(capture_file).unwrap();
         let lines: Vec<&str> = captured.lines().collect();
         assert_eq!(lines[0], fixture.project_str());
-        assert_eq!(lines[1..], ["--surface", "main", "--mock"]);
+        assert!(lines[1..]
+            .windows(2)
+            .any(|pair| pair == ["--surface", "main"]));
+        assert!(lines[1..].contains(&"--mock"));
+    }
+
+    #[test]
+    fn offline_client_maps_command_defaults_through_launch_args() {
+        let fixture = Fixture::new();
+        fixture.write_client_kind_schema();
+        let capture_file = fixture._tmp.path().join("client-default-capture.txt");
+        fixture.write_capture_bin(&capture_file);
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("commands")
+                .join("capture-base.yaml"),
+            "category: commands\nsection: commands\nname: capture-base\ntokens: [\"capture\", \"base\"]\ndescription: Capture base client command\ndefaults:\n  surface: surface:demo/base\ndispatch:\n  kind: execute_ref\n  execute: client:custom/capture\n",
+        );
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("clients")
+                .join("custom")
+                .join("capture.yaml"),
+            "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\nserves:\n  kind: surface\n",
+        );
+
+        let outcome = try_offline_dispatch(
+            &["capture".to_string(), "base".to_string()],
+            &fixture.system,
+            &fixture.project_str(),
+        )
+        .unwrap()
+        .expect("handled offline");
+
+        assert!(matches!(outcome, OfflineDispatchOutcome::Silent));
+        let captured = std::fs::read_to_string(capture_file).unwrap();
+        let lines: Vec<&str> = captured.lines().collect();
+        assert_eq!(lines[0], fixture.project_str());
+        assert_eq!(lines[1..], ["--surface", "surface:demo/base"]);
     }
 }

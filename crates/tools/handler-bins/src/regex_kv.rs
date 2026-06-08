@@ -88,37 +88,33 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn extracts_python_dunders() {
+    fn extracts_configured_string_assignments() {
         let cfg = json!({
             "patterns": [
                 {
-                    "regex": r#"(?m)^__(\w+)__\s*=\s*"([^"]+)""#,
+                    "regex": r#"(?m)^([A-Z_]+)\s*=\s*"([^"]+)""#,
                     "key_group": 1,
                     "value_group": 2
                 }
             ]
         });
-        let out = parse(
-            &cfg,
-            "__version__ = \"1.0\"\n__executor_id__ = \"native:foo\"\n",
-        )
-        .unwrap();
-        assert_eq!(out["version"], "1.0");
-        assert_eq!(out["executor_id"], "native:foo");
+        let out = parse(&cfg, "VERSION = \"1.0\"\nEXECUTOR = \"native:foo\"\n").unwrap();
+        assert_eq!(out["VERSION"], "1.0");
+        assert_eq!(out["EXECUTOR"], "native:foo");
     }
 
     #[test]
     fn multiple_patterns_all_apply() {
         let cfg = json!({
             "patterns": [
-                { "regex": r#"(?m)^__(\w+)__\s*=\s*"([^"]+)""#,
+                { "regex": r#"(?m)^([A-Z_]+)\s*=\s*"([^"]+)""#,
                   "key_group": 1, "value_group": 2 },
                 { "regex": r#"(?m)^#\s*([A-Z]+):\s*(.+)$"#,
                   "key_group": 1, "value_group": 2 }
             ]
         });
-        let out = parse(&cfg, "__version__ = \"1.0\"\n# TAG: alpha\n").unwrap();
-        assert_eq!(out["version"], "1.0");
+        let out = parse(&cfg, "VERSION = \"1.0\"\n# TAG: alpha\n").unwrap();
+        assert_eq!(out["VERSION"], "1.0");
         assert_eq!(out["TAG"], "alpha");
     }
 

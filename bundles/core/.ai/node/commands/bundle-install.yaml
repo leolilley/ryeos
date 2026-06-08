@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:04Z:212346e9e41784e64aa3d2bf377aad9dec9ac51a2db50bbc6f5002c4eb40ff84:PPO+qqIEM1vcsU2rPkPoxFnmD9jgVNNp09dxSu3DYYPyU9G6j8aFbYZ3X78g2N8J6faNaqzjhOIqjCilBKU/Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T23:56:18Z:20079e081b21e9314921f7133350a6e0e582a524b00148d778a5cd73ff87f1bb:8pHnqzPB/uXTLhLg/H+3LPHW9t9Ke5l6ItJV7RYNlPxqhFHgDKVEc1AYaqjJlb5vnq/LcT7yxv4eVHihWD+YAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: bundle-install
@@ -6,6 +6,11 @@ tokens:
 - bundle
 - install
 description: Install a bundle into the daemon's state
+forms:
+- slots:
+  - field: name
+  - field: source_path
+    matcher: path
 dispatch:
   kind: execute_ref
   execute: service:bundle/install

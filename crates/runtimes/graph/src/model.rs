@@ -142,6 +142,18 @@ struct GraphFile {
 pub struct GraphDefinition {
     pub version: String,
     pub graph_id: String,
+    /// Human/item reference for this authored execution definition.
+    ///
+    /// `graph_id` is a legacy human/runtime identifier. This ref is
+    /// the stable conceptual bridge from a realized execution trace
+    /// back to the signed portable capability that was invoked.
+    pub definition_ref: String,
+    /// Content identity of the signature-stripped authored definition body.
+    ///
+    /// This is not a trust decision by itself; it is the exact identity
+    /// that runtime events, receipts, and later trace projections can
+    /// use to connect consequence back to capability.
+    pub definition_hash: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
     /// Permissions the graph YAML declares for itself. The daemon's
@@ -155,6 +167,7 @@ pub struct GraphDefinition {
 impl GraphDefinition {
     pub fn from_yaml(raw: &str, file_path: Option<&str>) -> anyhow::Result<Self> {
         let cleaned = lillux::signature::strip_signature_lines(raw);
+        let definition_hash = lillux::cas::sha256_hex(cleaned.as_bytes());
         let file: GraphFile = serde_yaml::from_str(&cleaned)?;
         let graph_id = if let Some(fp) = file_path {
             let stem = std::path::Path::new(fp)
@@ -178,6 +191,8 @@ impl GraphDefinition {
         };
         Ok(Self {
             version: file.version,
+            definition_ref: format!("graph:{graph_id}"),
+            definition_hash,
             graph_id,
             file_path: file_path.map(String::from),
             config: file.config,
@@ -191,6 +206,8 @@ impl GraphDefinition {
 pub struct GraphResult {
     pub success: bool,
     pub graph_id: String,
+    pub definition_ref: String,
+    pub definition_hash: String,
     pub graph_run_id: String,
     pub status: String,
     pub steps: u32,
@@ -218,6 +235,8 @@ pub struct ErrorRecord {
 pub struct NodeReceipt {
     pub node: String,
     pub step: u32,
+    pub definition_ref: String,
+    pub definition_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_hash: Option<String>,
     pub cache_hit: bool,
@@ -367,5 +386,22 @@ config:
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert!(def.declared_permissions.is_empty());
+    }
+
+    #[test]
+    fn definition_identity_uses_signature_stripped_body() {
+        let yaml = r#"<!-- ryeos:signed:old -->
+version: "1.0.0"
+category: test
+config:
+  start: a
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        let cleaned = lillux::signature::strip_signature_lines(yaml);
+        assert_eq!(def.definition_ref, "graph:test/test");
+        assert_eq!(
+            def.definition_hash,
+            lillux::cas::sha256_hex(cleaned.as_bytes())
+        );
     }
 }

@@ -1,0 +1,17 @@
+# ryeos:signed:2026-06-07T05:19:02Z:7f6f6b004b867d5ac05dcda05c2a9d5a40cd5705678362341f3b93bd881e035d:XCDrt4wcIJfuo+ptxVVnw9RLNpth2oXb4fkk5Utnb7WHzXMfQAzJOFoA2wzdJJ/wfxKGmKjV5F7Zlgd4M/CYAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: routes/ui/studio
+section: routes
+id: ui/api/studio/files/tree
+path: /ui/api/studio/files/tree
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/studio/files/tree"

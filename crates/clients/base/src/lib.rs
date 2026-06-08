@@ -16,6 +16,7 @@ pub mod input;
 pub mod layout;
 pub mod math3d;
 pub mod model;
+pub mod radial_tree;
 pub mod scene;
 pub mod scene_config;
 pub mod store;

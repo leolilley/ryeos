@@ -11,16 +11,20 @@ const G = {
   bg2: 0x504945,
 };
 
-export function mountStudioAmbientScene(canvas, sceneModel = {}) {
+const FLAT_ATLAS_MIN_ZOOM = 0.35;
+const FLAT_ATLAS_MAX_ZOOM = 6.0;
+
+export function mountStudioAmbientScene(canvas, sceneModel = {}, options = {}) {
   let runtime = null;
   let latestSceneModel = sceneModel;
+  let latestOptions = options;
   let disposed = false;
 
   import("https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js")
     .then((module) => {
       if (disposed || !canvas.isConnected) return;
       THREE = module;
-      runtime = startStudioAmbientScene(canvas, latestSceneModel);
+      runtime = startStudioAmbientScene(canvas, latestSceneModel, latestOptions);
     })
     .catch((error) => {
       console.warn("RyeOS ambient scene disabled; Three.js failed to load", error);
@@ -28,9 +32,10 @@ export function mountStudioAmbientScene(canvas, sceneModel = {}) {
     });
 
   return {
-    update(nextSceneModel = {}) {
+    update(nextSceneModel = {}, nextOptions = latestOptions) {
       latestSceneModel = nextSceneModel;
-      runtime?.update(nextSceneModel);
+      latestOptions = nextOptions;
+      runtime?.update(nextSceneModel, nextOptions);
     },
     dispose() {
       disposed = true;
@@ -39,47 +44,70 @@ export function mountStudioAmbientScene(canvas, sceneModel = {}) {
   };
 }
 
-function startStudioAmbientScene(canvas, sceneModel = {}) {
+function startStudioAmbientScene(canvas, sceneModel = {}, options = {}) {
+  const namespaceAtlas = options.mode === "namespace_atlas" || options.mode === "atlas_2d" || options.mode === "atlas_paper_3d";
+  const atlasStyle = options.atlasStyle || (options.mode === "atlas_paper_3d" ? "paper_3d" : "flat_2d");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setClearColor(G.bg, 1);
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(G.bg, 0.004);
+  scene.fog = new THREE.FogExp2(G.bg, namespaceAtlas ? 0.0018 : 0.004);
 
-  const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 1000);
+  const camera = namespaceAtlas
+    ? new THREE.OrthographicCamera(-18, 18, 18, -18, 0.1, 1000)
+    : new THREE.PerspectiveCamera(55, 1, 0.1, 1000);
   const root = new THREE.Group();
   scene.add(root);
 
   const state = {
     theta: 0,
-    phi: Math.PI / 2.2,
-    radius: 45,
+    phi: namespaceAtlas ? 0.18 : Math.PI / 2.2,
+    radius: namespaceAtlas ? 38 : 45,
     homeTheta: 0,
-    homePhi: Math.PI / 2.2,
-    homeRadius: 45,
-    spinVelTheta: 0.0012,
+    homePhi: namespaceAtlas ? 0.18 : Math.PI / 2.2,
+    homeRadius: namespaceAtlas ? 38 : 45,
+    flatPanX: 0,
+    flatPanZ: 0,
+    flatZoom: 1,
+    homeFlatPanX: 0,
+    homeFlatPanZ: 0,
+    homeFlatZoom: 1,
+    spinVelTheta: namespaceAtlas ? 0 : 0.0012,
     spinVelPhi: 0,
     zoomVel: 0,
     resetting: false,
     dragging: false,
+    didDrag: false,
     lastX: 0,
     lastY: 0,
     remotes: [],
     semanticSignature: "",
+    namespaceAtlas,
+    atlasStyle,
+    atlasInteractive: [],
+    atlasAnimated: [],
+    atlasFocusables: [],
+    atlasHover: null,
+    atlasFocus: options.atlasFocus || null,
+    latestSceneModel: sceneModel,
+    canvas,
+    pointerNdc: new THREE.Vector2(2, 2),
     disposed: false,
   };
 
   const spinners = [];
-  const shard = makeShard();
-  root.add(shard.group);
+  const shard = namespaceAtlas ? null : makeShard();
+  if (shard) root.add(shard.group);
 
-  addRingBands(root, spinners);
-  const fragments = makeFragments(root);
-  const streams = makeStreams(root);
-  const stars = makeStars(scene);
+  if (!namespaceAtlas) addRingBands(root, spinners);
+  const fragments = namespaceAtlas ? [] : makeFragments(root);
+  const streams = namespaceAtlas ? null : makeStreams(root);
+  const stars = namespaceAtlas ? null : makeStars(scene);
   const semanticLayer = new THREE.Group();
   root.add(semanticLayer);
+  const raycaster = namespaceAtlas ? new THREE.Raycaster() : null;
+  if (raycaster) raycaster.domElement = canvas;
 
   const resize = () => {
     const rect = canvas.getBoundingClientRect();
@@ -87,10 +115,34 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
     const height = Math.max(1, Math.floor(rect.height || window.innerHeight));
     renderer.setSize(width, height, false);
     camera.aspect = width / height;
+    if (namespaceAtlas) {
+      const aspect = width / height;
+      const halfHeight = 18;
+      camera.left = -halfHeight * aspect;
+      camera.right = halfHeight * aspect;
+      camera.top = halfHeight;
+      camera.bottom = -halfHeight;
+    }
     camera.updateProjectionMatrix();
   };
 
   const updateCamera = () => {
+    if (isFlatAtlas(state)) {
+      camera.position.set(state.flatPanX, 38, state.flatPanZ + 0.01);
+      camera.up.set(0, 0, -1);
+      camera.lookAt(state.flatPanX, 0, state.flatPanZ);
+      camera.zoom = state.flatZoom;
+      camera.updateProjectionMatrix();
+      return;
+    }
+    if (namespaceAtlas) {
+      camera.position.set(0, state.radius, 0.01);
+      camera.up.set(0, 0, -1);
+      camera.lookAt(0, 0, 0);
+      camera.zoom = 38 / Math.max(12, state.radius);
+      camera.updateProjectionMatrix();
+      return;
+    }
     const x = state.radius * Math.sin(state.phi) * Math.sin(state.theta);
     const y = state.radius * Math.cos(state.phi);
     const z = state.radius * Math.sin(state.phi) * Math.cos(state.theta);
@@ -101,30 +153,67 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
 
   const onPointerDown = (event) => {
     if (event.button !== 0) return;
+    if (state.namespaceAtlas) updatePointerNdc(state, event);
     state.dragging = true;
+    state.didDrag = false;
     state.resetting = false;
     state.lastX = event.clientX;
     state.lastY = event.clientY;
+    if (isFlatAtlas(state)) {
+      state.spinVelTheta = 0;
+      state.spinVelPhi = 0;
+      state.zoomVel = 0;
+    }
     canvas.setPointerCapture?.(event.pointerId);
   };
   const onPointerMove = (event) => {
+    if (state.namespaceAtlas) updatePointerNdc(state, event);
     if (!state.dragging) return;
     const dx = event.clientX - state.lastX;
     const dy = event.clientY - state.lastY;
-    state.spinVelTheta = dx * 0.004;
-    state.spinVelPhi = -dy * 0.004;
     state.lastX = event.clientX;
     state.lastY = event.clientY;
+    if (Math.abs(dx) + Math.abs(dy) > 2) state.didDrag = true;
+    if (isFlatAtlas(state)) {
+      dispatchAtlasNavigate(state);
+      const units = atlasWorldUnitsPerPixel(camera, canvas);
+      state.flatPanX -= dx * units;
+      state.flatPanZ -= dy * units;
+      return;
+    }
+    state.spinVelTheta = dx * 0.004;
+    state.spinVelPhi = -dy * 0.004;
   };
   const onPointerUp = (event) => {
+    if (state.namespaceAtlas && !state.didDrag && state.atlasHover) {
+      dispatchAtlasSelect(state, state.atlasHover);
+    }
     state.dragging = false;
     canvas.releasePointerCapture?.(event.pointerId);
+  };
+  const onPointerLeave = () => {
+    if (!namespaceAtlas) return;
+    state.pointerNdc.set(2, 2);
+    setAtlasHover(state, null);
   };
   const onWheel = (event) => {
     event.preventDefault();
     state.resetting = false;
+    if (isFlatAtlas(state)) {
+      dispatchAtlasNavigate(state);
+      const before = flatAtlasPointUnderCursor(state, camera, canvas, event);
+      state.flatZoom = clamp(
+        state.flatZoom * Math.exp(-event.deltaY * 0.0012),
+        FLAT_ATLAS_MIN_ZOOM,
+        FLAT_ATLAS_MAX_ZOOM,
+      );
+      const after = flatAtlasPointUnderCursor(state, camera, canvas, event);
+      state.flatPanX += before.x - after.x;
+      state.flatPanZ += before.z - after.z;
+      return;
+    }
     state.zoomVel += event.deltaY * 0.008;
-    state.spinVelTheta += event.deltaX * 0.0004;
+    state.spinVelTheta += namespaceAtlas ? 0 : event.deltaX * 0.0004;
   };
 
   const onKeyDown = (event) => {
@@ -142,6 +231,7 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("pointerleave", onPointerLeave);
   canvas.addEventListener("wheel", onWheel, { passive: false });
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("resize", resize);
@@ -157,17 +247,29 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
 
     if (state.resetting) {
       const lerpSpeed = 0.045;
-      state.theta += (state.homeTheta - state.theta) * lerpSpeed;
-      state.phi += (state.homePhi - state.phi) * lerpSpeed;
-      state.radius += (state.homeRadius - state.radius) * lerpSpeed;
-      const delta = Math.abs(state.theta - state.homeTheta) + Math.abs(state.phi - state.homePhi) + Math.abs(state.radius - state.homeRadius);
-      if (delta < 0.01) state.resetting = false;
+      if (isFlatAtlas(state)) {
+        state.flatPanX += (state.homeFlatPanX - state.flatPanX) * lerpSpeed;
+        state.flatPanZ += (state.homeFlatPanZ - state.flatPanZ) * lerpSpeed;
+        state.flatZoom += (state.homeFlatZoom - state.flatZoom) * lerpSpeed;
+        const delta = Math.abs(state.flatPanX - state.homeFlatPanX)
+          + Math.abs(state.flatPanZ - state.homeFlatPanZ)
+          + Math.abs(state.flatZoom - state.homeFlatZoom);
+        if (delta < 0.005) state.resetting = false;
+      } else {
+        state.theta += (state.homeTheta - state.theta) * lerpSpeed;
+        state.phi += (state.homePhi - state.phi) * lerpSpeed;
+        state.radius += (state.homeRadius - state.radius) * lerpSpeed;
+        const delta = Math.abs(state.theta - state.homeTheta) + Math.abs(state.phi - state.homePhi) + Math.abs(state.radius - state.homeRadius);
+        if (delta < 0.01) state.resetting = false;
+      }
     } else {
-      state.theta += state.spinVelTheta;
-      state.phi += state.spinVelPhi;
+      if (!isFlatAtlas(state)) {
+        state.theta += state.spinVelTheta;
+        state.phi += state.spinVelPhi;
+      }
     }
     if (!state.dragging && !state.resetting) {
-      state.spinVelTheta = state.spinVelTheta * 0.965 + 0.00004;
+      state.spinVelTheta = state.spinVelTheta * 0.965 + (namespaceAtlas ? 0 : 0.00004);
       state.spinVelPhi *= 0.965;
     }
     if (!state.resetting) {
@@ -175,17 +277,19 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
       state.zoomVel *= 0.9;
     }
 
-    stars.update(t);
-    streams.update(t);
-    shard.group.rotation.y = t * 0.065;
-    shard.group.rotation.x = Math.sin(t * 0.045) * 0.08;
-    shard.group.rotation.z = Math.cos(t * 0.035) * 0.05;
-    shard.group.position.y = Math.sin(t * 0.48) * 0.7;
-    shard.glow.material.uniforms.time.value = t;
+    stars?.update(t);
+    streams?.update(t);
+    if (shard) {
+      shard.group.rotation.y = t * 0.065;
+      shard.group.rotation.x = Math.sin(t * 0.045) * 0.08;
+      shard.group.rotation.z = Math.cos(t * 0.035) * 0.05;
+      shard.group.position.y = Math.sin(t * 0.48) * 0.7;
+      shard.glow.material.uniforms.time.value = t;
+    }
 
     for (const spinner of spinners) {
       spinner.group.rotation.y += spinner.spinY * 0.28;
-      spinner.group.position.y = shard.group.position.y * spinner.bob;
+      spinner.group.position.y = (shard?.group.position.y || 0) * spinner.bob;
     }
     for (const frag of fragments) {
       const a = frag.angle + t * frag.speed + frag.phase;
@@ -198,20 +302,25 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
       frag.group.rotation.y += frag.ry * 0.18;
       frag.group.rotation.z += frag.rz * 0.18;
     }
-    root.position.y = Math.sin(t * 0.08) * 0.2;
-    root.rotation.y = t * 0.0015;
+    root.position.y = namespaceAtlas ? 0 : Math.sin(t * 0.08) * 0.2;
+    root.rotation.y = namespaceAtlas ? 0 : t * 0.0015;
     for (const remote of state.remotes) {
       remote.marker.rotation.y = -root.rotation.y;
       remote.marker.scale.setScalar(0.85 + Math.sin(t * 1.8 + remote.phase) * 0.08);
     }
-
+    animateAtlasMarkers(state, t);
     updateCamera();
+    updateAtlasHover(state, camera, raycaster);
     renderer.render(scene, camera);
   };
 
   const api = {
-    update(nextSceneModel = {}) {
+    update(nextSceneModel = {}, nextOptions = {}) {
+      state.latestSceneModel = nextSceneModel;
+      if (state.namespaceAtlas) state.atlasStyle = nextOptions.atlasStyle || state.atlasStyle;
+      state.atlasFocus = nextOptions.atlasFocus || null;
       updateSemanticObjects(semanticLayer, state, nextSceneModel);
+      applyAtlasFocus(state);
     },
     dispose() {
       state.disposed = true;
@@ -219,9 +328,11 @@ function startStudioAmbientScene(canvas, sceneModel = {}) {
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", resize);
+      disposeObject(scene);
       renderer.dispose();
     },
   };
@@ -430,15 +541,20 @@ function makeStars(scene) {
 }
 
 function updateSemanticObjects(layer, state, sceneModel) {
-  const signature = semanticSignature(sceneModel);
+  const signature = semanticSignature(sceneModel, state.namespaceAtlas);
   if (signature === state.semanticSignature) return;
   state.semanticSignature = signature;
   disposeLayer(layer);
   state.remotes = [];
-  if (sceneModel?.atlas) {
-    updateAtlasObjects(layer, sceneModel.atlas);
+  state.atlasInteractive = [];
+  state.atlasAnimated = [];
+  state.atlasFocusables = [];
+  state.atlasHover = null;
+  if (state.namespaceAtlas && sceneModel?.atlas) {
+    updateAtlasObjects(layer, sceneModel.atlas, state);
     return;
   }
+  if (state.namespaceAtlas) return;
   const objects = (sceneModel?.objects || []).filter((object) => object.kind !== "local_node");
   objects.forEach((object, index) => {
     const marker = semanticMarker(object);
@@ -453,8 +569,8 @@ function updateSemanticObjects(layer, state, sceneModel) {
   });
 }
 
-function semanticSignature(sceneModel) {
-  if (sceneModel?.atlas) {
+function semanticSignature(sceneModel, namespaceAtlas = false) {
+  if (namespaceAtlas && sceneModel?.atlas) {
     const nodes = sceneModel.atlas.nodes || [];
     const ui = sceneModel.atlas.ui || {};
     return `atlas:${sceneModel.atlas.generation}:${sceneModel.atlas.selected_ref || ""}:${(ui.visible_layers || []).join(",")}:${ui.active_lens || "none"}:` + nodes
@@ -466,13 +582,23 @@ function semanticSignature(sceneModel) {
     .join(";");
 }
 
-function updateAtlasObjects(layer, atlas) {
+function updateAtlasObjects(layer, atlas, state = {}) {
   const group = new THREE.Group();
   group.userData.sceneObjectKind = "namespace_atlas";
   const nodes = atlas?.nodes || [];
   const nodeByKey = new Map(nodes.map((node) => [node.namespace_key || "", node]));
   const nodeById = new Map(nodes.map((node) => [node.id || "", node]));
   const radiusScale = atlas?.bounds?.radius_max ? Math.min(3.2, 14 / Math.max(1, atlas.bounds.radius_max)) : 1.6;
+
+  for (const node of nodes) {
+    if (!node.path?.length) continue;
+    const anchor = atlasVec(node.position, radiusScale, 0.04);
+    const marker = atlasFolderMarker(node);
+    marker.position.copy(anchor);
+    registerAtlasMarker(state, marker, node);
+    registerAtlasFocusable(state, marker, { type: "folder", folderId: node.id, folderPath: node.namespace_key || "" });
+    group.add(marker);
+  }
 
   for (const node of nodes) {
     if (!node.path?.length) continue;
@@ -484,10 +610,36 @@ function updateAtlasObjects(layer, atlas) {
         atlasVec(parent.position, radiusScale, 0),
         atlasVec(node.position, radiusScale, 0),
       ]),
-      lineMat(node.stack?.length ? G.bg2 : G.bg2, node.stack?.length ? 0.34 : 0.16),
+      lineMat(node.stack?.length ? G.yellow : G.bg2, node.stack?.length ? 0.28 : 0.16),
     );
+    registerAtlasFocusable(state, line, {
+      type: "branch",
+      folderId: node.id,
+      folderPath: node.namespace_key || "",
+      parentPath: parent.namespace_key || "",
+    });
     group.add(line);
   }
+
+  const rootNode = nodeByKey.get("");
+  const rootAnchor = atlasVec(rootNode?.position || [0, 0, 0], radiusScale, 0.03);
+  const rootHub = new THREE.Group();
+  rootHub.position.copy(rootAnchor);
+  rootHub.add(new THREE.Mesh(
+    new THREE.SphereGeometry(0.18, 20, 14),
+    new THREE.MeshBasicMaterial({ color: G.orange, transparent: true, opacity: 0.82 }),
+  ));
+  const rootRing = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(circlePoints(0.42, 44)),
+    lineMat(G.yellow, 0.7),
+  );
+  rootRing.rotation.x = Math.PI / 2;
+  rootHub.add(rootRing);
+  rootHub.userData.baseScale = 1;
+  rootHub.userData.pulse = 0.18;
+  rootHub.userData.phase = 0;
+  state.atlasAnimated?.push(rootHub);
+  group.add(rootHub);
 
   for (const region of atlas?.regions || []) {
     const radiusMin = Math.max(0.2, (region.radius_min || 0) * radiusScale);
@@ -517,15 +669,9 @@ function updateAtlasObjects(layer, atlas) {
 
   for (const node of nodes) {
     if (!node.path?.length && !(node.stack || []).length) continue;
-    const stack = (node.stack || []).filter((item) => atlasItemVisible(atlas, item));
+    const stack = node.stack || [];
     const anchor = atlasVec(node.position, radiusScale, 0);
     if (!stack.length && !node.state?.selected && !node.state?.highlighted) {
-      const bead = new THREE.Mesh(
-        new THREE.SphereGeometry(0.035, 8, 6),
-        new THREE.MeshBasicMaterial({ color: G.bg2, transparent: true, opacity: 0.25 }),
-      );
-      bead.position.copy(anchor);
-      group.add(bead);
       continue;
     }
     if (!stack.length) {
@@ -549,6 +695,15 @@ function updateAtlasObjects(layer, atlas) {
       const marker = atlasStackMarker(item, node.state || {});
       const offset = (item.y_offset || 0) * 0.55;
       marker.position.set(anchor.x, anchor.y + 0.12 + offset, anchor.z);
+      registerAtlasMarker(state, marker, node);
+      registerAtlasFocusable(state, marker, {
+        type: "item",
+        ref: atlasItemRef(item),
+        kind: item.kind || "other",
+        folderId: node.id,
+        folderPath: node.namespace_key || "",
+        interaction: item.interaction || null,
+      });
       group.add(marker);
     }
   }
@@ -556,17 +711,189 @@ function updateAtlasObjects(layer, atlas) {
   layer.add(group);
 }
 
-function atlasItemVisible(atlas, item) {
-  const ui = atlas?.ui || {};
-  const visible = new Set(ui.visible_layers || ["directive", "tool", "knowledge", "config", "other"]);
-  const kind = item.kind || "other";
-  if (!visible.has(kind)) return false;
-  if ((ui.active_lens || "none") === "knowledge") return kind === "knowledge";
+function atlasVec(position = [0, 0, 0], scale = 1, yOffset = 0) {
+  return new THREE.Vector3((position[0] || 0) * scale, (position[1] || 0) + yOffset, (position[2] || 0) * scale);
+}
+
+function atlasFolderMarker(node) {
+  const isRootFolder = (node.path?.length || 0) === 1;
+  const hasItems = (node.stack || []).length > 0;
+  const branch = (node.angle_end || 0) - (node.angle_start || 0);
+  const radius = isRootFolder ? 0.16 : hasItems ? 0.105 : 0.07;
+  const color = node.state?.selected ? G.yellow : node.state?.highlighted ? G.orange : isRootFolder ? G.aqua : hasItems ? G.fg : G.bg2;
+  const opacity = node.state?.dimmed ? 0.18 : isRootFolder ? 0.76 : hasItems ? 0.5 : 0.34;
+  const marker = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, isRootFolder ? 18 : 12, isRootFolder ? 12 : 8),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity }),
+  );
+  marker.userData.sceneObjectId = node.id;
+  marker.userData.sceneObjectKind = isRootFolder ? "atlas_root_folder" : "atlas_folder";
+  marker.userData.sceneObjectLabel = node.namespace_key || node.label || "folder";
+  marker.userData.atlasInteraction = node.interaction || null;
+  marker.userData.baseScale = 1;
+  marker.userData.hoverScale = isRootFolder ? 1.65 : 1.9;
+  marker.userData.pulse = node.state?.selected || node.state?.highlighted ? 0.18 : isRootFolder ? 0.08 : 0;
+  marker.userData.phase = branch * 3.0;
+  return marker;
+}
+
+function registerAtlasMarker(state, marker, node) {
+  if (!state) return;
+  state.atlasInteractive?.push(marker);
+  if (marker.userData.pulse || node.state?.selected || node.state?.highlighted) {
+    state.atlasAnimated?.push(marker);
+  }
+}
+
+function registerAtlasFocusable(state, object, meta = {}) {
+  if (!state || !object) return;
+  object.userData.atlasFocus = meta;
+  if (meta.interaction) object.userData.atlasInteraction = meta.interaction;
+  object.userData.baseOpacity ??= object.material?.opacity;
+  object.traverse?.((child) => {
+    child.userData.atlasFocus = meta;
+    child.userData.baseOpacity ??= child.material?.opacity;
+  });
+  state.atlasFocusables?.push(object);
+}
+
+function isFlatAtlas(state) {
+  return state.namespaceAtlas && state.atlasStyle === "flat_2d";
+}
+
+function atlasWorldUnitsPerPixel(camera, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const height = Math.max(1, rect.height);
+  return (camera.top - camera.bottom) / height / Math.max(0.001, camera.zoom || 1);
+}
+
+function flatAtlasPointUnderCursor(state, camera, canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  const x01 = rect.width ? (event.clientX - rect.left) / rect.width : 0.5;
+  const y01 = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
+  const ndcX = x01 * 2 - 1;
+  const ndcY = -(y01 * 2 - 1);
+  const halfW = (camera.right - camera.left) / 2 / Math.max(0.001, state.flatZoom);
+  const halfH = (camera.top - camera.bottom) / 2 / Math.max(0.001, state.flatZoom);
+  return {
+    x: state.flatPanX + ndcX * halfW,
+    z: state.flatPanZ - ndcY * halfH,
+  };
+}
+
+function updatePointerNdc(state, event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = rect.width ? (event.clientX - rect.left) / rect.width : 0.5;
+  const y = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
+  state.pointerNdc.set(x * 2 - 1, -(y * 2 - 1));
+}
+
+function updateAtlasHover(state, camera, raycaster) {
+  if (!state.namespaceAtlas || !raycaster || !state.atlasInteractive?.length) return;
+  raycaster.setFromCamera(state.pointerNdc, camera);
+  const hit = raycaster.intersectObjects(state.atlasInteractive, true)[0]?.object || null;
+  setAtlasHover(state, hit);
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function setAtlasHover(state, next) {
+  if (state.atlasHover === next) return;
+  if (state.atlasHover) {
+    const base = state.atlasHover.userData.baseScale || 1;
+    state.atlasHover.scale.setScalar(base);
+    if (state.atlasHover.material?.opacity !== undefined && state.atlasHover.userData.baseOpacity !== undefined) {
+      state.atlasHover.material.opacity = state.atlasHover.userData.baseOpacity;
+    }
+  }
+  state.atlasHover = next;
+  dispatchAtlasHover(state, next);
+  if (next) {
+    next.userData.baseOpacity ??= next.material?.opacity;
+    next.scale.setScalar(next.userData.hoverScale || 1.5);
+    if (next.material?.opacity !== undefined) next.material.opacity = Math.min(1, next.material.opacity + 0.22);
+  }
+  applyAtlasFocus(state);
+}
+
+function dispatchAtlasHover(state, object) {
+  state.canvas?.dispatchEvent(new CustomEvent("studio-atlas-hover", {
+    detail: object ? {
+      id: object.userData.sceneObjectId,
+      kind: object.userData.sceneObjectKind,
+      label: object.userData.sceneObjectLabel,
+      path: object.userData.atlasFocus?.folderPath || "",
+      interaction: object.userData.atlasInteraction || object.userData.atlasFocus?.interaction || null,
+    } : null,
+  }));
+}
+
+function dispatchAtlasSelect(state, object) {
+  state.canvas?.dispatchEvent(new CustomEvent("studio-atlas-select", {
+    detail: object ? {
+      id: object.userData.sceneObjectId,
+      kind: object.userData.sceneObjectKind,
+      label: object.userData.sceneObjectLabel,
+      path: object.userData.atlasFocus?.folderPath || "",
+      interaction: object.userData.atlasInteraction || object.userData.atlasFocus?.interaction || null,
+      sceneModel: state.latestSceneModel,
+    } : null,
+  }));
+}
+
+function dispatchAtlasNavigate(state) {
+  state.canvas?.dispatchEvent(new CustomEvent("studio-atlas-navigate"));
+}
+
+function applyAtlasFocus(state) {
+  if (!state.namespaceAtlas || !state.atlasFocusables?.length) return;
+  const focus = state.atlasFocus;
+  for (const object of state.atlasFocusables) {
+    const active = !focus || atlasFocusRelated(focus, object.userData.atlasFocus || {});
+    object.traverse?.((child) => applyAtlasFocusMaterial(child, active, Boolean(focus)));
+    applyAtlasFocusMaterial(object, active, Boolean(focus));
+  }
+}
+
+function applyAtlasFocusMaterial(object, active, hasFocus) {
+  const material = object.material;
+  if (!material || material.opacity === undefined) return;
+  object.userData.baseOpacity ??= material.opacity;
+  if (!hasFocus) {
+    material.opacity = object.userData.baseOpacity;
+  } else {
+    material.opacity = active ? Math.min(1, object.userData.baseOpacity + 0.18) : Math.max(0.08, object.userData.baseOpacity * 0.25);
+  }
+}
+
+function atlasFocusRelated(focus, meta) {
+  if (!focus) return true;
+  if (focus.type === "kind") return meta.kind === focus.kind;
+  if (focus.type === "item") {
+    const ref = focus.ref || focus.id || "";
+    return Boolean(ref) && meta.ref === ref;
+  }
+  if (focus.type === "folder") {
+    const focusPath = focus.path || "";
+    return meta.folderId === focus.id
+      || meta.folderPath === focusPath
+      || (focusPath && meta.folderPath?.startsWith(`${focusPath}/`))
+      || (focusPath && meta.parentPath?.startsWith(focusPath));
+  }
   return true;
 }
 
-function atlasVec(position = [0, 0, 0], scale = 1, yOffset = 0) {
-  return new THREE.Vector3((position[0] || 0) * scale, (position[1] || 0) + yOffset, (position[2] || 0) * scale);
+function animateAtlasMarkers(state, t) {
+  for (const marker of state.atlasAnimated || []) {
+    if (marker === state.atlasHover) continue;
+    const pulse = marker.userData.pulse || 0;
+    if (!pulse) continue;
+    const base = marker.userData.baseScale || 1;
+    const phase = marker.userData.phase || 0;
+    marker.scale.setScalar(base + Math.sin(t * 2.4 + phase) * pulse);
+  }
 }
 
 function atlasStackMarker(item, state) {
@@ -589,16 +916,23 @@ function atlasStackMarker(item, state) {
     case "config":
       geometry = new THREE.BoxGeometry(0.18, 0.035, 0.18);
       break;
+    case "file":
+      geometry = new THREE.BoxGeometry(0.13, 0.02, 0.18);
+      break;
     default:
       geometry = new THREE.SphereGeometry(0.12, 10, 8);
       break;
   }
-  const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, wireframe: kind !== "config" });
+  const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity, wireframe: kind !== "config" && kind !== "file" });
   const marker = new THREE.Mesh(geometry, material);
-  marker.userData.sceneObjectId = item.canonical_ref;
+  marker.userData.sceneObjectId = atlasItemRef(item);
   marker.userData.sceneObjectKind = kind;
   marker.userData.sceneObjectLabel = item.label;
   return marker;
+}
+
+function atlasItemRef(item = {}) {
+  return item.canonical_ref || item.id || item.label || "";
 }
 
 function arcLine(radius, start, end, color, opacity) {
@@ -617,6 +951,7 @@ function atlasKindColor(kind) {
     case "tool": return G.aqua;
     case "knowledge": return G.yellow;
     case "config": return G.blue;
+    case "file": return G.fg;
     default: return G.fg;
   }
 }

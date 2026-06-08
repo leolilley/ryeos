@@ -236,6 +236,8 @@ mod tests {
             launch_mode: "detached".to_string(),
             target_site_id: Some("site:remote".to_string()),
             validate_only: true,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
             operation: Some("validate".to_string()),
             inputs: Some(serde_json::json!({"key": "val"})),
         };

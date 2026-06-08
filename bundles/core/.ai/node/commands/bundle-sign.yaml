@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:04Z:c2a831ecf67ceb23e9b80052b05412acd84db5039cdcc2f688b69ad0f5d090bd:rj25HlRWu0Y40pPwO4BE08AkEh8bjkF5O8HoNxgvbpKKsFh2JDziGChsHIq7C9oFR8J5zWw3UTDmwu8ILJQ7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T23:56:19Z:587d8804da89aa988107bc4dc14e8d1f7c30bcd835511c795c3cf606bdfbdcdf:sFmcjH+Igd+ojJMnX7obflHyzK2iTXXA7AsrHrdkCEHT6vma8zamMrPGF5t4m6Ja75MEB/qdnrRRhMRZSphcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: bundle-sign
@@ -6,6 +6,10 @@ tokens:
 - bundle
 - sign
 description: Sign all signable items in a bundle source tree
+forms:
+- slots:
+  - field: source
+    matcher: path
 dispatch:
   kind: execute_ref
   execute: service:bundle/sign

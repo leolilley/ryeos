@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-25T06:47:54Z:35298a73dd18b8a78cc5ca37a8fb04c4e8adbcd82bb6035e6f127730183bba50:C1401OXVvAXtJWlPYpnOc+EkxEer7wcZ+v1jdQA9N2aP3xIwCbqKvNSkagTVyUCYPpMQYh+x1mXe1o+VWu0qDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-07T03:30:53Z:354fce363bdba7081fb53a4b60dadc4385fba506271062e658d9246955e3f7ae:blCGu+ZhQc7bK0GRWLjzq0AHS4oZGbpB6m2hdFwCuw6AG+yuwc4xDswwfp62CsKcR6Kp3WSAN3XMdD0dSle/Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -89,11 +89,15 @@ Project `.ai/` items are different from bundle items. They are signed with the
 operator/user key, not the publisher key.
 
 ```bash
-ryeos sign .ai/knowledge/my/entry.md
+ryeos sign knowledge:my/entry
+ryeos sign 'tool:agent-kiwi/*'
+ryeos sign 'node:routes/*'
 ```
 
-Use this for project knowledge/directive/tool files. Use `populate-bundles.sh`
-for `bundles/`.
+Use this for project knowledge/directive/tool/node files. The `sign` verb takes
+canonical refs, and it accepts `*`/`?` globs in the bare-id part for batch
+project signing. Quote globs so the shell does not expand them. Use
+`populate-bundles.sh` for `bundles/`.
 
 ## Do not do these
 

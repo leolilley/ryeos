@@ -729,6 +729,7 @@ fn bundle_publish_dependency_roots(
     user_root: Option<&Path>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     if !registry_roots.is_empty() {
+        reject_unpublished_source_registry_roots(source_path, &registry_roots)?;
         return bundle_verify_dependency_roots(
             source_path,
             registry_roots,
@@ -742,6 +743,33 @@ fn bundle_publish_dependency_roots(
     }
 
     bundle_verify_dependency_roots(source_path, registry_roots, system_space_dir, user_root)
+}
+
+fn reject_unpublished_source_registry_roots(
+    source_path: &Path,
+    registry_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    for root in registry_roots {
+        let canonical_root = std::fs::canonicalize(root)
+            .with_context(|| format!("resolve registry root {}", root.display()))?;
+        if canonical_root == source_path {
+            continue;
+        }
+        let ai_dir = root.join(ryeos_engine::AI_DIR);
+        if ai_dir.join("manifest.source.yaml").exists()
+            && !ai_dir
+                .join("refs")
+                .join("bundles")
+                .join("manifest")
+                .exists()
+        {
+            anyhow::bail!(
+                "--registry-root {} looks like an unpublished source checkout, not a published dependency root. Omit --registry-root to use installed bundle dependencies, or publish/install that dependency first.",
+                root.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn source_bundle_name(source_path: &Path) -> anyhow::Result<Option<String>> {
@@ -839,6 +867,7 @@ fn bundle_verify_dependency_roots(
     user_root: Option<&Path>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut dependency_roots: Vec<PathBuf> = Vec::new();
+    let source_name = source_bundle_name(source_path)?;
     if !registry_roots.is_empty() {
         for root in registry_roots {
             let root = std::fs::canonicalize(&root)
@@ -852,7 +881,7 @@ fn bundle_verify_dependency_roots(
             ryeos_bundle::installed::load_installed_bundle_records(system_space_dir, user_root)
                 .context("bundle verify: load installed bundle registrations")?
                 .into_iter()
-                .filter(|r| r.bundle_root != source_path)
+                .filter(|r| r.bundle_root != source_path && Some(&r.name) != source_name.as_ref())
                 .map(|r| r.bundle_root);
         dependency_roots.extend(installed_roots);
     }
@@ -1238,8 +1267,8 @@ fn run_sign(
     let batch = run_sign(&item_ref, project.as_deref(), source)?;
     println!("{}", serde_json::to_string_pretty(&batch)?);
     if !batch.is_total_success() {
-        eprintln!(
-            "✗ {}/{} items failed validation or signing",
+        anyhow::bail!(
+            "{}/{} items failed validation or signing",
             batch.failed.len(),
             batch.total()
         );
@@ -1622,6 +1651,57 @@ mod tests {
                 && msg.contains("manifest"),
             "unexpected error: {msg}"
         );
+    }
+
+    #[test]
+    fn bundle_publish_rejects_unpublished_source_checkout_as_registry_root() {
+        let fixture = InstalledFixture::new();
+        let source = fixture.system.join("source");
+        let registry = fixture.system.join("registry-source");
+        std::fs::create_dir_all(source.join(ryeos_engine::AI_DIR)).unwrap();
+        std::fs::create_dir_all(registry.join(ryeos_engine::AI_DIR)).unwrap();
+        std::fs::write(
+            registry
+                .join(ryeos_engine::AI_DIR)
+                .join("manifest.source.yaml"),
+            "name: core\nversion: 0.0.0\nitems: []\n",
+        )
+        .unwrap();
+
+        let err = bundle_publish_dependency_roots(
+            &source.canonicalize().unwrap(),
+            vec![registry.clone()],
+            &fixture.system,
+            Some(&fixture.user),
+        )
+        .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unpublished source checkout"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("Omit --registry-root"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[test]
+    fn bundle_publish_without_registry_root_uses_installed_dependency_loader() {
+        let fixture = InstalledFixture::new();
+        let source = fixture.system.join("source");
+        std::fs::create_dir_all(source.join(ryeos_engine::AI_DIR)).unwrap();
+
+        let roots = bundle_publish_dependency_roots(
+            &source.canonicalize().unwrap(),
+            Vec::new(),
+            &fixture.system,
+            Some(&fixture.user),
+        )
+        .unwrap();
+
+        assert!(roots.is_empty());
     }
 
     #[test]

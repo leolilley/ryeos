@@ -143,11 +143,9 @@ fn extract_string_seq_from_value(parsed: &Value, key: &str) -> Vec<String> {
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect(),
-        // Python dunder metadata currently comes from the regex-kv
-        // parser, which emits scalar strings. Let string-sequence
-        // metadata such as `__required_secrets__` use a compact
-        // comma-separated form without requiring a Python-specific
-        // parser feature for list literals.
+        // Some parser handlers emit scalar strings. Let string-sequence
+        // metadata use a compact comma-separated form without requiring
+        // every parser to support list literals.
         Some(Value::String(s)) => s
             .split(',')
             .map(str::trim)
@@ -177,7 +175,7 @@ pub struct ExtensionSpec {
     /// File extension including the dot, e.g. `".py"`, `".md"`
     pub ext: String,
     /// Canonical parser tool ref, e.g.
-    /// `"parser:ryeos/core/python/ast"`. The boot validator
+    /// `"parser:ryeos/core/python/tool-header"`. The boot validator
     /// guarantees this resolves through `ParserRegistry`.
     pub parser: String,
     /// Signature embedding envelope for this file type
@@ -1390,7 +1388,7 @@ fn parse_optional_string_seq(
                     None => {
                         return Err(EngineError::SchemaLoaderError {
                             reason: format!("{display}: `{key}[{i}]` must be a string, got {v:?}"),
-                        })
+                        });
                     }
                 }
             }
@@ -1979,7 +1977,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -1992,7 +1990,7 @@ formats:
     signature:
       prefix: \"//\"
   - extensions: [\".sh\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -2002,10 +2000,10 @@ metadata:
       from: filename
     version:
       from: path
-      key: __version__
+      key: version
     executor_id:
       from: path
-      key: __executor_id__
+      key: executor_id
 ";
 
     const DIRECTIVE_SCHEMA: &str = "\
@@ -2191,7 +2189,7 @@ metadata:
 
         // Parser lookups
         let py_spec = reg.spec_for("tool", ".py").unwrap();
-        assert_eq!(py_spec.parser, "parser:ryeos/core/python/ast");
+        assert_eq!(py_spec.parser, "parser:ryeos/core/python/tool-header");
 
         let ts_spec = reg.spec_for("tool", ".ts").unwrap();
         assert_eq!(ts_spec.parser, "parser:ryeos/core/javascript/javascript");
@@ -2263,7 +2261,7 @@ metadata:
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
         let fmt = reg.resolved_format_for("tool", ".py").unwrap();
         assert_eq!(fmt.extension, ".py");
-        assert_eq!(fmt.parser, "parser:ryeos/core/python/ast");
+        assert_eq!(fmt.parser, "parser:ryeos/core/python/tool-header");
         assert_eq!(fmt.signature.prefix, "#");
         assert!(fmt.signature.after_shebang);
 
@@ -2289,7 +2287,7 @@ metadata:
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
             tool_dir.join("tool.kind-schema.yaml"),
-            "location:\n  directory: tools\nformats:\n  - extensions: [\".py\"]\n    parser: parser:ryeos/core/python/ast\n    signature:\n      prefix: \"#\"\n",
+            "location:\n  directory: tools\nformats:\n  - extensions: [\".py\"]\n    parser: parser:ryeos/core/python/tool-header\n    signature:\n      prefix: \"#\"\n",
         )
         .unwrap();
 
@@ -2381,7 +2379,7 @@ metadata:
         let yaml = "\
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -2446,7 +2444,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
 ";
         sign_and_write_schema(&tmp, "tool", yaml, &sk);
 
@@ -2477,7 +2475,7 @@ formats:
         assert_eq!(
             tool.extraction_rules.get("version").map(|r| &r.extractor),
             Some(&ExtractionRule::Path {
-                key: "__version__".into()
+                key: "version".into()
             })
         );
         assert_eq!(
@@ -2485,7 +2483,7 @@ formats:
                 .get("executor_id")
                 .map(|r| &r.extractor),
             Some(&ExtractionRule::Path {
-                key: "__executor_id__".into()
+                key: "executor_id".into()
             })
         );
 
@@ -2518,7 +2516,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -3227,7 +3225,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -3282,7 +3280,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
 metadata:
@@ -3311,7 +3309,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
 metadata:
@@ -3340,7 +3338,7 @@ location:
   directory: tools
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
 metadata:

@@ -9,7 +9,7 @@ Deferred architecture direction. Not part of the current implementation.
 The current development loop still uses GitHub-era assumptions:
 
 - source coordination through Git refs and PRs;
-- broad validation through local `scripts/gate.sh` or GitHub Actions;
+- broad validation through local test scripts or GitHub Actions;
 - bundle publication that can mutate checked-in bundle trees;
 - expensive test/build artifacts landing on the developer machine unless
   manually redirected;
@@ -41,8 +41,8 @@ GitHub concepts should become projections of richer RyeOS-native objects:
 
 1. Isolate bundle population output so local validation does not dirty tracked
    bundle trees.
-2. Wrap `scripts/gate.sh` as a RyeOS tool/service with explicit artifact and
-   target-dir handling.
+2. Wrap targeted test and explicit bundle-refresh workflows as RyeOS
+   tools/services with artifact and target-dir handling.
 3. Model check runs as durable thread/check records with logs in CAS.
 4. Add scheduler-managed runner execution for expensive checks.
 5. Add Studio/TUI review surfaces for change records and check results.

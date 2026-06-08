@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:04Z:2471e3bcd8949e9e63399cadc11e2b3dc2a36e65d2b0e1c5c290a1bdff6dab91:dA5iON+/FUx2O8PL5hPYv8Tp6EE+H90wnLPa5A86x2NjlvwLfyYTghpFpfFZLor8BJuFQ+yhFUPfW96L/IEBDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T23:56:19Z:07b926e9ea8e45d06e4410f9523c14a77dfe9e8d136f895fb6d6f84a3b6b1188:vWXpliUyBR44eNBs8cxZCY6opUS0E46bBd/3Oh9NPVTZcKDkvy8Ik4yPB+Q6DdhAEGNVuXsktfkCre/cAJr7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: bundle-publish
@@ -6,6 +6,10 @@ tokens:
 - bundle
 - publish
 description: Full bundle release pipeline (sign, manifest, trust doc)
+forms:
+- slots:
+  - field: source
+    matcher: path
 dispatch:
   kind: execute_ref
   execute: service:bundle/publish

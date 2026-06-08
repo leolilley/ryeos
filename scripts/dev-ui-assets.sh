@@ -22,7 +22,9 @@ Options:
   --background      Run the proxy in the background
   --open            Mint a normal RyeOS web launch URL, rewrite it through the
                     dev proxy, and open it in the browser. Implies --background
-  --pid-file PATH   PID file for --background (default: /tmp/ryeos-ui-assets.pid)
+  --surface REF     Surface ref to pass when minting --open launch URLs
+  --project PATH    Project path to pass when minting --open launch URLs
+  --pid-file PATH   PID file for --background (default: .tmp/ryeos-ui-assets.pid)
   --stop            Stop the background proxy from --pid-file
   --print-env       Print the daemon-side RYEOS_UI_ASSET_DIR env var and exit
   --direct-start    Start ryeos with RYEOS_UI_ASSET_DIR directly. This is not
@@ -45,13 +47,15 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 asset_dir="$repo_root/crates/clients/web/pkg"
 port=7411
 upstream="http://127.0.0.1:7400"
-pid_file="/tmp/ryeos-ui-assets.pid"
+pid_file="$repo_root/.tmp/ryeos-ui-assets.pid"
 restart=0
 print_env=0
 background=0
 stop=0
 direct_start=0
 open_ui=0
+surface_ref=""
+project_path=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,6 +77,16 @@ while [[ $# -gt 0 ]]; do
             open_ui=1
             background=1
             shift
+            ;;
+        --surface)
+            [[ $# -ge 2 ]] || { echo "--surface requires REF" >&2; exit 2; }
+            surface_ref="$2"
+            shift 2
+            ;;
+        --project)
+            [[ $# -ge 2 ]] || { echo "--project requires PATH" >&2; exit 2; }
+            project_path="$2"
+            shift 2
             ;;
         --pid-file)
             [[ $# -ge 2 ]] || { echo "--pid-file requires PATH" >&2; exit 2; }
@@ -127,7 +141,14 @@ if [[ $stop -eq 1 ]]; then
 fi
 
 open_dev_ui() {
-    launch_url="$(ryeos web --no-open --print-url)"
+    ryeos_args=(web --no-open --print-url)
+    if [[ -n "$surface_ref" ]]; then
+        ryeos_args+=(--surface "$surface_ref")
+    fi
+    if [[ -n "$project_path" ]]; then
+        ryeos_args+=(--project "$project_path")
+    fi
+    launch_url="$(ryeos "${ryeos_args[@]}")"
     dev_launch_url="$($PYTHON_BIN - "$launch_url" "$port" <<'PY'
 import sys
 import urllib.parse

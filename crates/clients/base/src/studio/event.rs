@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::effect::StudioEffectResult;
 use super::model::{BrowserSession, BrowserViewport};
-use crate::atlas::{AtlasItemKind, AtlasLensVm};
+use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
 use crate::layout::SplitAxis;
 use crate::workspace::{FocusDirection, ViewSpec};
 
@@ -118,6 +118,15 @@ pub enum StudioUiEvent {
     },
     SetAtlasLens {
         lens: AtlasLensVm,
+    },
+    SetAtlasProjection {
+        projection: AtlasProjectionVm,
+        #[serde(default)]
+        root: Option<String>,
+    },
+    SetAtlasFileSpacePath {
+        root: String,
+        path: String,
     },
     FocusChanged {
         target: Option<String>,

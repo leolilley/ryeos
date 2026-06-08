@@ -701,6 +701,9 @@ struct PreflightCommandRecord {
     forms: Vec<PreflightCommandForm>,
     #[allow(dead_code)]
     #[serde(default)]
+    defaults: std::collections::BTreeMap<String, serde_json::Value>,
+    #[allow(dead_code)]
+    #[serde(default)]
     parameter_binding: Option<PreflightCommandParameterBinding>,
     #[allow(dead_code)]
     #[serde(default)]

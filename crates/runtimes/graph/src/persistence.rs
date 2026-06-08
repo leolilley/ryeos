@@ -12,6 +12,8 @@ pub async fn write_node_receipt(
     let receipt_json = json!({
         "node": receipt.node,
         "step": receipt.step,
+        "definition_ref": receipt.definition_ref,
+        "definition_hash": receipt.definition_hash,
         "graph_run_id": graph_run_id,
         "node_result_hash": receipt.result_hash,
         "cache_hit": receipt.cache_hit,
@@ -128,6 +130,8 @@ mod tests {
         let receipt = NodeReceipt {
             node: "step1".to_string(),
             step: 1,
+            definition_ref: "graph:test".to_string(),
+            definition_hash: "def123".to_string(),
             result_hash: Some("abc123".to_string()),
             cache_hit: false,
             elapsed_ms: 142,
@@ -139,6 +143,8 @@ mod tests {
             .unwrap();
         assert_eq!(output["cache_hit"], false);
         assert_eq!(output["elapsed_ms"], 142);
+        assert_eq!(output["definition_ref"], "graph:test");
+        assert_eq!(output["definition_hash"], "def123");
         assert_eq!(output["node_result_hash"], "abc123");
         assert!(output.get("timestamp").is_some());
 

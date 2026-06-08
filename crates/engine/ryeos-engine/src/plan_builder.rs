@@ -24,7 +24,7 @@ use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::resolution::TrustClass;
 use crate::runtime::{
-    compile_with_handlers, ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry,
+    ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry, compile_with_handlers,
 };
 use crate::trust::TrustStore;
 
@@ -692,7 +692,7 @@ execution:
     \"@subprocess\": \"tool:ryeos/core/subprocess/execute\"
 formats:
   - extensions: [\".py\"]
-    parser: parser:ryeos/core/python/ast
+    parser: parser:ryeos/core/python/tool-header
     signature:
       prefix: \"#\"
       after_shebang: true
@@ -708,10 +708,6 @@ runtime:
     - version
     - category
     - description
-    - __executor_id__
-    - __version__
-    - __description__
-    - __category__
     - required_secrets
     - name
     - executor_id
@@ -719,7 +715,7 @@ metadata:
   rules:
     executor_id:
       from: path
-      key: __executor_id__
+      key: executor_id
 ";
 
     fn write_tool_schema(kinds_dir: &Path) {
@@ -760,7 +756,7 @@ metadata:
             signature_header: None,
             source_format: ResolvedSourceFormat {
                 extension: ".py".to_string(),
-                parser: "parser:ryeos/core/python/ast".to_string(),
+                parser: "parser:ryeos/core/python/tool-header".to_string(),
                 signature: SignatureEnvelope {
                     prefix: "#".to_string(),
                     suffix: None,
@@ -795,7 +791,7 @@ metadata:
         }
     }
 
-    // ── Helper: write a tool with __executor_id__ on disk ──────────────
+    // ── Helper: write a tool with a ryeos-tool header on disk ──────────
 
     fn write_chain_tool(dir: &Path, name: &str, executor_id: Option<&str>) -> PathBuf {
         let tool_dir = dir.join(AI_DIR).join("tools");
@@ -807,8 +803,8 @@ metadata:
         fs::create_dir_all(&d).unwrap();
         let file_path = d.join(format!("{}.py", parts.last().unwrap()));
         let content = match executor_id {
-            Some(id) => format!("__executor_id__ = \"{id}\"\n"),
-            None => "# terminal — no executor_id\n".to_string(),
+            Some(id) => format!("# ryeos-tool:\n#   executor_id: \"{id}\"\n"),
+            None => "# ryeos-tool:\n#   note: terminal — no executor_id\n".to_string(),
         };
         fs::write(&file_path, &content).unwrap();
         file_path
@@ -895,10 +891,11 @@ config:
 
         assert_eq!(plan.root_ref, "tool:my_tool");
         // Chain should include @subprocess and the resolved terminal
-        assert!(plan
-            .executor_chain
-            .iter()
-            .any(|id| id.contains("subprocess")));
+        assert!(
+            plan.executor_chain
+                .iter()
+                .any(|id| id.contains("subprocess"))
+        );
     }
 
     // ── Test: chain cycle detected ─────────────────────────────────────
@@ -1066,8 +1063,8 @@ config:
     // `compile_with_handlers`.
 
     use crate::runtime::{
-        compile_with_handlers, ChainIntermediate as RChainIntermediate, HostEnvBindings,
-        RuntimeHandlerRegistry,
+        ChainIntermediate as RChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry,
+        compile_with_handlers,
     };
 
     fn empty_roots() -> ResolutionRoots {
@@ -1083,7 +1080,6 @@ config:
             "version".into(),
             "category".into(),
             "description".into(),
-            "__executor_id__".into(),
             "executor_id".into(),
         ]
     }
@@ -1447,9 +1443,9 @@ config:
     //
     // Chain: root tool → runtime (with @subprocess alias + interpreter) → terminal
     //
-    //   my_tool.py         __executor_id__ = "tool:runtimes/python/script"
-    //     → script.yaml    __executor_id__ = "@subprocess"   (has config + env_config)
-    //       → execute.yaml __executor_id__ = null             (terminal)
+    //   my_tool.py         executor_id = "tool:runtimes/python/script"
+    //     → script.yaml    executor_id = "@subprocess"   (has config + env_config)
+    //       → execute.yaml executor_id = null             (terminal)
     //
     // Verifies that the final SubprocessSpec has the correct expanded
     // {interpreter} template, tool_path, project_path, and timeout_secs.
@@ -1471,7 +1467,7 @@ config:
         fs::write(&fake_python, "#!/bin/sh\necho fake-python").unwrap();
 
         // 2. Write runtime YAML: runtimes/python/script.yaml
-        //    - __executor_id__: "@subprocess"
+        //    - executor_id: "@subprocess"
         //    - env_config with interpreter pointing to .venv/bin
         //    - config with {interpreter} template
         let runtime_dir = project_dir
@@ -1481,7 +1477,7 @@ config:
             .join("python");
         fs::create_dir_all(&runtime_dir).unwrap();
 
-        let runtime_content = r#"__executor_id__: "@subprocess"
+        let runtime_content = r#"executor_id: "@subprocess"
 category: ryeos/core/runtimes/python
 env_config:
   interpreter:
@@ -1514,7 +1510,7 @@ config:
             .join("subprocess");
         fs::create_dir_all(&terminal_dir).unwrap();
         let terminal_content = "\
-__executor_id__: null\n\
+executor_id: null\n\
 category: ryeos/core/subprocess\n";
         fs::write(terminal_dir.join("execute.yaml"), terminal_content).unwrap();
 

@@ -98,6 +98,7 @@ mod tests {
                         matcher: ryeos_runtime::CommandArgumentKind::String,
                     }],
                 }],
+                defaults: Default::default(),
                 parameter_binding: None,
                 project: Some(ryeos_runtime::CommandProjectPolicy {
                     resolution: ryeos_runtime::CommandProjectResolution::Optional,

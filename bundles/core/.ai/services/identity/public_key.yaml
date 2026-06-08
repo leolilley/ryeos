@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-23T12:06:26Z:d088cbc6c135e1c6dcccf519b11f7a616f6dd5549ddc4f8d4cee57f8b7680a78:bwOxpdvjGakgauHOzHkGcWhSfHQ3hdjmdoLoaasI9KdJhm8MLRiTluXTbFXOV//EaRemCFD9wAVVx/ys4goUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T05:18:56Z:d088cbc6c135e1c6dcccf519b11f7a616f6dd5549ddc4f8d4cee57f8b7680a78:bwOxpdvjGakgauHOzHkGcWhSfHQ3hdjmdoLoaasI9KdJhm8MLRiTluXTbFXOV//EaRemCFD9wAVVx/ys4goUAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: identity.public_key
 required_caps: []

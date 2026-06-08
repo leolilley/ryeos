@@ -9,8 +9,12 @@ pub mod layout;
 pub mod model;
 pub mod text;
 
-pub use build::{build_namespace_atlas, AtlasInput, AtlasItemInput};
+pub use build::{
+    build_file_space_atlas, build_namespace_atlas, AtlasFileInput, AtlasFileSpaceInput, AtlasInput,
+    AtlasItemInput,
+};
 pub use model::{
-    AtlasBoundsVm, AtlasItemKind, AtlasLensVm, AtlasLinkVm, AtlasNodeVm, AtlasRegionVm, AtlasScope,
-    AtlasStackItemVm, AtlasUiStateVm, AtlasVisualStateVm, NamespaceAtlasVm,
+    AtlasBoundsVm, AtlasItemKind, AtlasLensVm, AtlasLinkVm, AtlasNodeVm, AtlasProjectionVm,
+    AtlasRegionVm, AtlasScope, AtlasStackItemVm, AtlasUiStateVm, AtlasVisualStateVm,
+    NamespaceAtlasVm,
 };

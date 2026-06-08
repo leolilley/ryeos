@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:04Z:456ff692805ee33a2aaee21bfd27772fb26f14effba3b7a53570866733c8218e:PyTOF9iDVOjR863akNetAgubsM9msIZe69JEbYE2DgYz7cSUQXN+7EO4anPvJ3Z1DJkmsodHlyokkeFdesbvCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-07T23:56:19Z:4e90a22e34723389eaba46de01133f707f9474034b113a6aa24c0b747db10ae3:/FnaCz9BxWCJz7PnetIbnXP2d7cXpljuMKcJ9qupfajTSGU0b9BEZUXTnEjInlt7Lxdng8Ecqp6n/qRROgQGBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: bundle-verify
@@ -6,6 +6,10 @@ tokens:
 - bundle
 - verify
 description: Validate all bundle items, signatures, and manifest
+forms:
+- slots:
+  - field: source
+    matcher: path
 dispatch:
   kind: execute_ref
   execute: service:bundle/verify

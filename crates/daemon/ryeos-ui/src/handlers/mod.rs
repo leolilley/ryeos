@@ -32,6 +32,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_studio_gc::DESCRIPTOR,
     ui_studio_files::FILES_LIST_DESCRIPTOR,
     ui_studio_files::FILES_READ_DESCRIPTOR,
+    ui_studio_files::FILES_TREE_DESCRIPTOR,
     ui_studio_projects::PROJECTS_LIST_DESCRIPTOR,
     ui_studio_projects::PROJECTS_ADD_DESCRIPTOR,
     ui_studio_projects::PROJECTS_FORGET_DESCRIPTOR,

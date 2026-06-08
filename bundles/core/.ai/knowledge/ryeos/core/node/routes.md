@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:8084f3f8411744af1a4566095806bab11efc76a92b86f0e3419667bc7043e66e:eVOI16K8YsutQ6xQMB8gLnVKHGwBZBrOvmRMRl3PwWSA3J1YjVqatqsu15xd4fqbNGv3rxo9OLHpnatjx3TbAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-07T23:56:22Z:29b0e4f8b04dc1ccb0cd40da0fd6d2321fc1e1d8eeea7f44f9847df73c804838:nFrXIUHXe8Dm7Xg4b7/eoIs3QVAE8OimgqcrMogD79gyaC+jlZH50g2KGXSEMdfgosu88GV4aCRiPL01JhDECA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/node
@@ -7,7 +7,7 @@ version: "1.0.0"
 description: >
   The data-driven route system — how 16 signed YAML files define the
   entire HTTP surface of the daemon. Covers compilation, the single
-  fallback dispatcher, 5 response modes, 8 invoker types, per-route
+  fallback dispatcher, built-in response modes, invoker types, per-route
   semaphores, auth as a route property, and ArcSwap hot-reload.
 ---
 
@@ -72,7 +72,7 @@ The dispatcher does:
 
 ### Step 4: Response modes bridge HTTP to business logic
 
-Five built-in modes, each a trait implementation:
+Built-in modes, each a trait implementation:
 
 | Mode | What it does | Source |
 |---|---|---|
@@ -81,14 +81,242 @@ Five built-in modes, each a trait implementation:
 | `execute` | Full dispatch pipeline (token → engine) | Implicit (from body) |
 | `event_stream` | SSE stream (gateway or subscription) | `dispatch_launch` or `thread_events` |
 | `launch` | Fire-and-forget dispatch, returns 202 | `response.source_config` |
+| `handler` | Calls a fixed route handler with a request envelope; the handler returns an HTTP response envelope | `tool:<bundle>/<path>` |
+| `browser_launch` | UI-specific session-cookie + redirect adapter | `service:ui/launch` |
 
-The `accepted` key is an alias for `launch`.
+The `accepted` key is a legacy alias for `launch`; new route descriptors
+should use `launch`.
 
 Each mode is strict about what it accepts. The `execute` mode rejects a
 route that declares `response.source` or static fields — it's a
 dedicated pipeline. The `json` mode requires `response.source` and
 rejects `execute` fields. You can't accidentally wire the wrong handler
 type to the wrong mode.
+
+### Handler mode
+
+`handler` is for fixed-target HTTP endpoints such as public webhooks,
+tracking pixels, redirects, and small HTML/text responses. Unlike
+`execute`, the request cannot choose an `item_ref` or `project_path`.
+Unlike `json`, the route target owns the HTTP response envelope.
+
+```yaml
+id: ryeos-email.track_click
+path: /track/click
+methods: [GET]
+auth: none
+request:
+  body: none
+response:
+  mode: handler
+  source: tool:ryeos-email/webhook/track_click
+  source_config:
+    request:
+      query: true
+      path_params: true
+      headers:
+        - user-agent
+        - x-forwarded-for
+    result:
+      envelope_field: response
+      response_bytes_max: 1048576
+```
+
+The daemon builds a request envelope and passes it as tool parameters.
+The handler tool returns a response envelope such as:
+
+```json
+{
+  "response": {
+    "status": 302,
+    "headers": {
+      "Location": "https://example.com/target"
+    }
+  }
+}
+```
+
+or:
+
+```json
+{
+  "response": {
+    "status": 200,
+    "content_type": "image/gif",
+    "body_base64": "..."
+  }
+}
+```
+
+`handler` mode rejects execution-identity fields such as `project_path`,
+`item_ref`, and `parameters` in `source_config`; those belong to the
+generic execution surfaces, not bundle-declared HTTP handlers.
+
+The `source` must be a fixed bundle-qualified `tool:` ref. At compile
+time, the route file must live under `<bundle>/.ai/node/routes`, the
+source ref's bundle prefix must match that bundle, and nested or
+ambiguous `.ai/node/routes` paths are rejected. At request time, Rye OS
+resolves the tool through the engine and rejects the request unless the
+winning source file is physically under the same bundle's `.ai/tools`
+root. This prevents a same-named system/user/project tool from shadowing
+the verified bundle handler.
+
+The request envelope passed as tool parameters has this shape:
+
+```json
+{
+  "route": {"id": "ryeos-email.track_click"},
+  "request": {
+    "method": "GET",
+    "path": "/track/click",
+    "uri": "/track/click?id=00123",
+    "raw_query": "id=00123",
+    "query": {"id": "00123"},
+    "path_params": {},
+    "headers": {"user-agent": "..."},
+    "body": {"kind": "none"}
+  },
+  "principal": {
+    "id": "anonymous",
+    "verified": false,
+    "verifier": "none",
+    "metadata": {}
+  }
+}
+```
+
+`principal.id` is the stable application allowlist key. For
+`auth: ryeos_signed`, the verifier sets it to the request signing
+fingerprint in `fp:<fingerprint>` form; use that exact string for
+bundle/project allowlists and durable ownership records. The
+`principal.verifier` field identifies which verifier produced the
+principal (`none`, `ryeos_signed`, `hmac`, and future verifier names) and
+should be treated as mechanism metadata, not the allowlist key.
+
+Handler tools should derive tenant, owner, and account authority from
+the verified principal or from server-side state that was created under a
+verified principal. Query-string values are request data, not authority,
+even on callback routes.
+
+`source_config.request` is deliberately opt-in:
+
+| Field | Effect |
+|---|---|
+| `query: true` | Includes parsed query object and `raw_query`; values stay strings. Duplicate keys collapse in `query` with last value winning; `raw_query` preserves the original query string. |
+| `query: false` | Omits parsed query and `raw_query`, and strips the query string from `uri`. |
+| `path_params: true` | Includes route path captures. |
+| `headers: [...]` | Includes only the listed headers whose runtime values are valid UTF-8. |
+| `body: true` | Includes the request body according to route `request.body`: `json`, `text`, `raw`/base64, or `none`. |
+
+OAuth callback example:
+
+```yaml
+id: agent-kiwi/google-callback
+path: /auth/google/callback
+methods: [GET]
+auth: none
+request:
+  body: none
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: handler
+  source: tool:agent-kiwi/oauth/callback
+  source_config:
+    request:
+      query: true
+      headers:
+        - user-agent
+    result:
+      envelope_field: response
+      response_bytes_max: 1048576
+```
+
+OAuth integrations should use a two-route pattern:
+
+1. a protected setup/connect route (`auth: ryeos_signed`) that creates a
+   one-time state record bound to `principal.id`, selected provider,
+   redirect URI, and any local account context;
+2. a public provider callback route (`auth: none`) that consumes that
+   state exactly once, exchanges the provider code, stores resulting
+   tokens through the bundle's chosen secret/state mechanism, and returns
+   the final redirect or HTML response.
+
+Do not trust `owner`, `account`, `bundle`, or redirect destination from
+callback query parameters. The callback should derive those from the
+consumed state record and reject missing, expired, reused, or mismatched
+state before exchanging the provider code.
+
+Webhook JSON body example:
+
+```yaml
+id: agent-kiwi/gmail-webhook
+path: /webhooks/gmail
+methods: [POST]
+auth: hmac
+request:
+  body: json
+limits:
+  body_bytes_max: 1048576
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: handler
+  source: tool:agent-kiwi/gmail/webhook
+  source_config:
+    request:
+      body: true
+      headers:
+        - x-goog-channel-id
+        - x-goog-resource-state
+```
+
+Handler response envelopes support `status`, `headers`, `json`, `body`,
+`body_base64`, and `content_type`. JSON responses always use
+`application/json`; text and base64 bodies may set `content_type`. Dynamic
+response headers are sanitized: hop-by-hop headers, `Content-Type`, and
+`Set-Cookie` must not be supplied through `headers`. Use `content_type`
+for content type instead. `response_bytes_max` bounds encoded JSON, text,
+or decoded base64 response body bytes.
+
+Redirect response example:
+
+```json
+{
+  "response": {
+    "status": 302,
+    "headers": {
+      "Location": "https://accounts.google.com/o/oauth2/v2/auth?..."
+    }
+  }
+}
+```
+
+HTML success response example:
+
+```json
+{
+  "response": {
+    "status": 200,
+    "content_type": "text/html; charset=utf-8",
+    "body": "<html><body>Connected.</body></html>"
+  }
+}
+```
+
+Tracking pixel response example:
+
+```json
+{
+  "response": {
+    "status": 200,
+    "content_type": "image/gif",
+    "body_base64": "R0lGODlhAQABAAAAACw="
+  }
+}
+```
 
 ## Invokers
 
@@ -156,6 +384,22 @@ global auth middleware.
 This means a webhook endpoint from Stripe can use HMAC while the
 `/execute` endpoint uses Ed25519 signatures — no conflict, no middleware
 ordering concerns.
+
+### Choosing central auth vs route auth
+
+Use central Rye OS auth (`auth: ryeos_signed`) when the caller is a Rye OS
+operator, project, agent, or trusted service that can sign requests and
+you want grants/scopes to flow through the daemon's normal authorization
+model. This is the right default for setup/admin routes, remote-control
+operations, and any route that chooses durable ownership.
+
+Use route-specific auth when the caller is an external provider with its
+own verification scheme: `auth: none` only for callbacks whose authority
+comes from one-time state, `auth: hmac` for providers that sign webhook
+deliveries, and future provider verifiers for protocols such as SNS-style
+certificate verification. Keep provider identity at the route boundary;
+after verification, write bundle events or state under the derived
+principal/state, not under query parameters supplied by the provider.
 
 ## Per-Route Semaphores
 

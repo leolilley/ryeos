@@ -369,6 +369,44 @@ pub struct StudioFileEntryDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioFileSpaceDto {
+    #[serde(default)]
+    pub schema_version: String,
+    #[serde(default)]
+    pub root: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub max_depth: usize,
+    #[serde(default)]
+    pub max_entries: usize,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub watchable: bool,
+    #[serde(default)]
+    pub supports_expand: bool,
+    #[serde(default)]
+    pub ignore_mode: String,
+    #[serde(default)]
+    pub entries: Vec<StudioFileSpaceEntryDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StudioFileSpaceEntryDto {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub is_dir: bool,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioFileReadDto {
     #[serde(default)]
     pub root: String,
