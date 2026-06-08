@@ -37,10 +37,77 @@ done
 if [[ -z "$KEY"   ]]; then echo "populate-bundles.sh: --key <pem-path> is required"   >&2; exit 2; fi
 if [[ -z "$OWNER" ]]; then echo "populate-bundles.sh: --owner <label> is required"    >&2; exit 2; fi
 if [[ ! -s "$KEY" ]]; then echo "populate-bundles.sh: key file is empty or missing: $KEY" >&2; exit 2; fi
+if ! command -v openssl >/dev/null 2>&1; then echo "populate-bundles.sh: openssl is required" >&2; exit 2; fi
+if ! command -v sha256sum >/dev/null 2>&1; then echo "populate-bundles.sh: sha256sum is required" >&2; exit 2; fi
+if ! command -v base64 >/dev/null 2>&1; then echo "populate-bundles.sh: base64 is required" >&2; exit 2; fi
 case "$BUNDLE_SET" in
   full|hosted-node) ;;
   *) echo "populate-bundles.sh: --bundle-set must be 'full' or 'hosted-node', got: $BUNDLE_SET" >&2; exit 2 ;;
 esac
+
+base64_one_line() {
+  base64 -w0 2>/dev/null || base64 | tr -d '\n'
+}
+
+publisher_pubkey_raw_b64() {
+  openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 \
+    | base64_one_line
+}
+
+publisher_fingerprint() {
+  openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 \
+    | sha256sum \
+    | cut -d' ' -f1
+}
+
+sign_seed_yaml() {
+  local file="$1"
+  local body_tmp hash_tmp sig_tmp tmp timestamp hash sig
+
+  [[ -f "$file" ]] || { echo "populate-bundles.sh: seed YAML missing: $file" >&2; exit 2; }
+  body_tmp="$(mktemp)"
+  hash_tmp="$(mktemp)"
+  sig_tmp="$(mktemp)"
+  tmp="$file.tmp.$$"
+
+  sed '/^# ryeos:signed:/d' "$file" > "$body_tmp"
+  hash="$(sha256sum "$body_tmp" | cut -d' ' -f1)"
+  printf '%s' "$hash" > "$hash_tmp"
+  openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$hash_tmp" -out "$sig_tmp" 2>/dev/null
+  sig="$(base64_one_line < "$sig_tmp")"
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  {
+    printf '# ryeos:signed:%s:%s:%s:%s\n' "$timestamp" "$hash" "$sig" "$PUBLISHER_FP"
+    cat "$body_tmp"
+  } > "$tmp"
+  mv "$tmp" "$file"
+  rm -f "$body_tmp" "$hash_tmp" "$sig_tmp"
+}
+
+write_seed_trust_doc() {
+  local target="$ROOT/bundles/.ai/PUBLISHER_TRUST.toml"
+  cat > "$target" <<EOF
+public_key = "ed25519:$PUBLISHER_PUBKEY_RAW_B64"
+fingerprint = "$PUBLISHER_FP"
+owner = "$OWNER"
+EOF
+}
+
+assert_no_legacy_seed_paths() {
+  local stale
+  for stale in \
+    "$SOURCE_ROOT_AI/node/command_registration" \
+    "$SOURCE_ROOT_AI/node/bundle_registration_grants"
+  do
+    if [[ -e "$stale" ]]; then
+      echo "populate-bundles.sh: stale legacy source-root seed path exists: $stale" >&2
+      exit 2
+    fi
+  done
+}
 
 # ── Setup ────────────────────────────────────────────────────────────
 
@@ -69,6 +136,10 @@ STD="$ROOT/bundles/standard"
 WEB="$ROOT/bundles/web"
 STUDIO="$ROOT/bundles/studio"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
+SOURCE_ROOT_AI="$ROOT/bundles/.ai"
+INIT_SEED="$SOURCE_ROOT_AI/node/init"
+PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
+PUBLISHER_FP="$(publisher_fingerprint)"
 
 case "$BUNDLE_SET" in
   full)
@@ -166,6 +237,12 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
 fi
 
 # ── Publish ──────────────────────────────────────────────────────────
+
+echo "[populate-bundles] signing source-root seed data…"
+assert_no_legacy_seed_paths
+sign_seed_yaml "$INIT_SEED/command-registration/default.yaml"
+sign_seed_yaml "$INIT_SEED/bundle-registration-grants/default.yaml"
+write_seed_trust_doc
 
 # Bundle publishing is an offline authoring operation. Use the maintainer
 # binary directly rather than `ryeos publish`, because `publish` is no longer

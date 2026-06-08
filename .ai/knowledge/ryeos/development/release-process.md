@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-06T04:44:25Z:660aa9a687ae240797c9b83ca3084142536477c5d533c925421c1ec15a1532f4:aZrMSgJLRcWBb19luCx4kU5SFYzJbxFw1ZMVyk81oUz4jr5r7K2jZjGiBqdfdV3uYZ6D/x4zGrZx0Xp/jq0aCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-08T05:16:44Z:e238118860c4e61b06558fa4cb1ef8f33235c4d7df6f91182307f59d697b2425:xKNYF1LkViOAPP1h+jCTzGvBU/SXwcS2jzzvme+Jr7Q1Pgsh78U7SMp0EgOJ77LjiDLKG/P0V0sbpN0onsZVBQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -33,6 +33,9 @@ pushing.
 - Do **not** forget package version strings. The tag alone is not enough.
 - Do **not** confuse a successful long projection rebuild with a daemon startup
   failure.
+- Do **not** publish/update AUR from GitHub's raw tag archive unless the AUR
+  artifact flow has been fixed. Raw tag archives do not contain ignored,
+  generated bundle artifacts from `scripts/populate-bundles.sh`.
 - Do **not** stage unrelated untracked files, especially:
   - `.ai/knowledge/ryeos/future/portable-execution-white-paper-thesis.md`
 

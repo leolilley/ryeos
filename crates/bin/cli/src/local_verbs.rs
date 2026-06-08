@@ -119,7 +119,7 @@ struct InitArgs {
     /// Additional publisher trust doc(s) to pin before verifying bundles.
     /// Each file should be a PUBLISHER_TRUST.toml with public_key and fingerprint.
     /// Repeatable: `--trust-file a.toml --trust-file b.toml`.
-    /// Note: trust docs are also auto-discovered from bundle roots.
+    /// Non-official/dev publisher keys must be supplied explicitly.
     #[arg(long = "trust-file", action = clap::ArgAction::Append)]
     trust_files: Vec<PathBuf>,
 }

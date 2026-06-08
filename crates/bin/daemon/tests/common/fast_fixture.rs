@@ -198,7 +198,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     // ── Node-owned command registration policy ──
     //
     // Real `ryeos init` verifies the publisher-signed seed policy from
-    // bundles/.ai/node/command_registration and re-signs it with the node
+    // bundles/.ai/node/init/command-registration and re-signs it with the node
     // identity. The node-config loader intentionally requires this section and
     // requires the node signer, so the fast fixture mirrors that fail-closed
     // boot contract rather than making command registration optional.
@@ -411,7 +411,8 @@ fn materialize_seed_command_registration_policy(
         .join("bundles")
         .join(AI_DIR)
         .join("node")
-        .join("command_registration")
+        .join("init")
+        .join("command-registration")
         .join("default.yaml");
     let raw = fs::read_to_string(&source)
         .with_context(|| format!("read command registration seed {}", source.display()))?;

@@ -1,6 +1,6 @@
 # Maintainer: Leo Lilley <leo.lml.lilley@gmail.com>
 pkgname=ryeos-mcp
-pkgver=0.5.0
+pkgver=0.5.8
 pkgrel=1
 pkgdesc="MCP server wrapper for ryeos — stdio bridge to the ryeos CLI"
 arch=('any')

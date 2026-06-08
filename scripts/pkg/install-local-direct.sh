@@ -241,6 +241,10 @@ done
 [[ -d "$repo_root/bundles/.ai" ]] || die "missing source-root seed data: bundles/.ai"
 [[ -f "$repo_root/bundles/.ai/PUBLISHER_TRUST.toml" ]] || \
     die "missing source-root trust doc: bundles/.ai/PUBLISHER_TRUST.toml"
+[[ -f "$repo_root/bundles/.ai/node/init/command-registration/default.yaml" ]] || \
+    die "missing source-root command-registration seed: bundles/.ai/node/init/command-registration/default.yaml"
+[[ -f "$repo_root/bundles/.ai/node/init/bundle-registration-grants/default.yaml" ]] || \
+    die "missing source-root bundle-registration-grants seed: bundles/.ai/node/init/bundle-registration-grants/default.yaml"
 
 echo "[install-local-direct] installing binaries -> $bin_dir"
 for b in "${required_bins[@]}"; do

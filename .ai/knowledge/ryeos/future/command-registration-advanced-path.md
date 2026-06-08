@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-04T06:46:50Z:b1a754551351b2b42e287807abe6c1e9fe3f3561cf0b8e84842d56795eb48849:dv+BUZ18oQaRyBzQUeyVVFDD3QP4CG+cjZCDrfHSyQenyRRsGI9az+MQZpMotq8YJmWRUFJYfnNgYOOJtWlgCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-08T04:59:36Z:b1014f1a85de922c349700ff2383cd5b42cf83a3f76f52414d1e03c54f15bc71:vNdT0y58z4r2xCsI46e7s7/KAz6PWvtpIS7Tk/ziSas4nWd9a5bTPPMh+/Klm0GHQ2Z8yQoGZbzvm9C8FsDWAA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 # Future: Command Registration Advanced Path
 
 ## Status
@@ -19,10 +19,11 @@ The current model is intentionally narrow:
 - Rust derives structural registration claims from command descriptors.
 - A single node-owned `command_registration` policy maps claims to required registration caps.
 - Signed node-owned bundle registrations grant `command_registration_caps` to commands loaded from that bundle root.
-- `ryeos init` verifies publisher-signed source seed data, then materializes node-owned policy signed by the node key.
+- `ryeos init` verifies publisher-signed source-root seed data from `<source>/.ai/node/init/...`, then materializes node-owned policy signed by the node key.
 - Runtime loading requires the installed command registration policy to be signed by the node identity.
 - Normal bundles may not ship `.ai/node/command_registration`.
 - Local lifecycle verbs remain a bootstrap carve-out: they are the minimum needed to start, stop, and initialize RyeOS before descriptor dispatch is available.
+- The source root itself is an AI root: `<source>/.ai/node/init/...` contains bootstrap seed, while `<source>/<bundle>/.ai` contains bundle payload.
 
 This is enough for the current security boundary. The advanced path should not be used to reintroduce `node/verbs`, bundle-name branching, descriptor self-authorization, or legacy compatibility refs.
 
@@ -85,11 +86,25 @@ Seed files should express desired initial policy/grants. Runtime should consume 
 If the seed format grows, keep it clearly separate from normal bundle content:
 
 ```text
-<source-root>/.ai/node/command_registration/default.yaml
-<source-root>/.ai/node/bundle_registration_grants/default.yaml
+<source-root>/.ai/node/init/command-registration/default.yaml
+<source-root>/.ai/node/init/bundle-registration-grants/default.yaml
 ```
 
 Normal bundles should continue to be unable to ship effective command registration policy.
+
+Do not move seed authority into `core/.ai`. The seed is install/bootstrap authority for the selected source root, not runtime content owned by one bundle. Keeping it at the source root avoids making `core` self-authorizing or special-cased in init.
+
+Future hardening should validate grant bundle names against the selected source-root profile or discovered bundle set, and validate granted caps against the command-registration policy claim vocabulary.
+
+RyeOS should not auto-trust `PUBLISHER_TRUST.toml` merely because it is present in a source root. Official trust is pinned from the hardcoded official publisher key; non-official/dev publishers must be supplied explicitly via `--trust-file` by the operator, image entrypoint, or package/local installer.
+
+If source-root distribution metadata grows beyond init seed files, prefer a signed bundle-set manifest under the source root AI space, for example:
+
+```text
+<source-root>/.ai/bundle-set/manifest.yaml
+```
+
+That manifest could later declare bundle-set name, version, selected profile, expected bundles, bundle hashes, init seed path, channels, and partial install profiles. Do not add this until source roots need reproducible bundle-set hashing, multiple profiles beyond today's `full` / `hosted-node`, or remote registry/mirror verification.
 
 ### 3. Operator-managed grant commands
 

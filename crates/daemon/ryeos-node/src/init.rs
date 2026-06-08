@@ -12,6 +12,10 @@
 //!
 //! Source layout (e.g. `/usr/share/ryeos`):
 //! ```text
+//! .ai/
+//!   PUBLISHER_TRUST.toml
+//!   node/init/command-registration/default.yaml
+//!   node/init/bundle-registration-grants/default.yaml
 //! core/
 //!   .ai/
 //!     handlers/ parsers/ services/ tools/ config/ knowledge/
@@ -230,37 +234,6 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         bundles = ?discovered.iter().map(|(n, _)| n).collect::<Vec<_>>(),
         "discovered bundles"
     );
-
-    // ── 6a. Auto-pin trust docs from discovered bundles ──
-    // Each bundle root may contain a PUBLISHER_TRUST.toml placed by the
-    // publisher. Pinning these automatically means `ryeos init` works
-    // without `--trust-file` in both packaged installs (official key
-    // hardcoded above) and dev/source installs (dev trust doc discovered
-    // from the bundle root).
-    for (name, source_path) in &discovered {
-        let trust_doc = source_path.join("PUBLISHER_TRUST.toml");
-        if trust_doc.exists() {
-            pin_trust_file(&trust_doc, &trust_dir).with_context(|| {
-                format!(
-                    "auto-pin trust doc from bundle {} at {}",
-                    name,
-                    trust_doc.display()
-                )
-            })?;
-        }
-    }
-    let source_seed_trust_doc = opts
-        .source_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("PUBLISHER_TRUST.toml");
-    if source_seed_trust_doc.exists() {
-        pin_trust_file(&source_seed_trust_doc, &trust_dir).with_context(|| {
-            format!(
-                "auto-pin source-root seed trust doc at {}",
-                source_seed_trust_doc.display()
-            )
-        })?;
-    }
 
     // Source-root seed data owns node registration grants. Init reads this
     // declarative data and materializes signed node registrations; it does not
@@ -486,17 +459,25 @@ struct InitBundleRegistrationGrant {
     command_registration_caps: Vec<String>,
 }
 
+fn source_node_init_dir(source_dir: &Path) -> PathBuf {
+    source_dir
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("init")
+}
+
 fn load_init_bundle_registration_grants(
     source_dir: &Path,
     trust_store: &TrustStore,
 ) -> Result<HashMap<String, Vec<String>>> {
-    let path = source_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("bundle_registration_grants")
+    let path = source_node_init_dir(source_dir)
+        .join("bundle-registration-grants")
         .join("default.yaml");
     if !path.exists() {
-        return Ok(HashMap::new());
+        bail!(
+            "missing init bundle registration grants seed file {}",
+            path.display()
+        );
     }
     let raw = read_trusted_seed_yaml(&path, trust_store)
         .with_context(|| format!("verify init bundle registration grants {}", path.display()))?;
@@ -516,10 +497,7 @@ fn materialize_seed_command_registration_policy(
     trust_store: &TrustStore,
     node_key: &SigningKey,
 ) -> Result<()> {
-    let source = source_dir
-        .join(ryeos_engine::AI_DIR)
-        .join("node")
-        .join("command_registration");
+    let source = source_node_init_dir(source_dir).join("command-registration");
     let source_meta = fs::symlink_metadata(&source).with_context(|| {
         format!(
             "missing command registration policy seed dir {}",
@@ -1177,6 +1155,12 @@ mod tests {
         // Registrations
         assert!(state.join(".ai/node/bundles/core.yaml").exists());
         assert!(state.join(".ai/node/bundles/standard.yaml").exists());
+        let core_registration = fs::read_to_string(state.join(".ai/node/bundles/core.yaml"))
+            .expect("read core registration");
+        assert!(
+            core_registration.contains("ryeos.register.command.root.help"),
+            "core registration should include source-root grant caps: {core_registration}"
+        );
         // Kind schemas inside core
         assert!(
             state
@@ -1337,6 +1321,9 @@ mod tests {
         fs::create_dir_all(&source).unwrap();
         copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
             .expect("copy core bundle");
+        copy_source_seed(&source);
+        fs::remove_dir_all(source.join(".ai/node/init/command-registration"))
+            .expect("remove command-registration seed");
 
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
@@ -1357,48 +1344,70 @@ mod tests {
     }
 
     #[test]
-    fn run_init_auto_pins_bundle_trust_docs() {
-        // Init without --trust-file should still work when bundles ship
-        // PUBLISHER_TRUST.toml at their root (the dev case).
+    fn run_init_fails_when_bundle_registration_grants_seed_missing() {
+        let tmp_source = tempfile::tempdir().unwrap();
+        let source = tmp_source.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        copy_dir_recursive(&workspace_root().join("bundles/core"), &source.join("core"))
+            .expect("copy core bundle");
+        copy_source_seed(&source);
+        fs::remove_file(
+            source
+                .join(".ai/node/init/bundle-registration-grants")
+                .join("default.yaml"),
+        )
+        .expect("remove grants seed");
+
+        let tmp_state = tempfile::tempdir().unwrap();
+        let state = tmp_state.path().join("state");
+        let user = tmp_state.path().join("home");
+        let opts = InitOptions {
+            system_space_dir: state,
+            user_root: user,
+            source_dir: source,
+            trust_files: vec![dev_trust_file()],
+            skip_preflight: true,
+        };
+
+        let err = run_init(&opts).expect_err("missing grants seed must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing init bundle registration grants seed file"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_init_requires_explicit_trust_for_dev_signed_source() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
         let user = tmp.path().join("home");
         let opts = InitOptions {
-            system_space_dir: state.to_path_buf(),
-            user_root: user.to_path_buf(),
+            system_space_dir: state,
+            user_root: user,
             source_dir: workspace_root().join("bundles"),
-            trust_files: vec![], // no explicit trust file — rely on auto-discovery
+            trust_files: vec![],
             skip_preflight: true,
         };
-        let report = run_init(&opts).expect("init without --trust-file");
+
+        let err = run_init(&opts).expect_err("dev source without explicit trust must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not trusted") || msg.contains("signature"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_init_accepts_explicit_trust_for_dev_signed_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        let user = tmp.path().join("home");
+        let report = run_init(&make_opts(&state, &user)).expect("init with explicit trust");
         assert!(
             !report.bundles_installed.is_empty(),
             "bundles should install"
         );
-
-        // Every discovered bundle that ships a PUBLISHER_TRUST.toml must
-        // have its publisher key auto-pinned into the trust store.
-        let trust_dir = user.join(".ai/config/keys/trusted");
-        for bundle_name in &report.bundles_installed {
-            let trust_doc = workspace_root()
-                .join("bundles")
-                .join(bundle_name)
-                .join("PUBLISHER_TRUST.toml");
-            if !trust_doc.exists() {
-                continue;
-            }
-            let content = fs::read_to_string(&trust_doc)
-                .with_context(|| format!("read {}", trust_doc.display()))
-                .unwrap();
-            let doc = ryeos_engine::trust::PublisherTrustDoc::parse(&content).unwrap();
-            let pinned = trust_dir.join(format!("{}.toml", doc.fingerprint));
-            assert!(
-                pinned.exists(),
-                "bundle '{}' publisher key should be auto-pinned at {}",
-                bundle_name,
-                pinned.display()
-            );
-        }
     }
 
     #[test]
@@ -1722,7 +1731,7 @@ typo_field: oops
             system_space_dir: state.clone(),
             user_root: user,
             source_dir: source,
-            trust_files: vec![],
+            trust_files: vec![dev_trust_file()],
             skip_preflight: true,
         };
 
