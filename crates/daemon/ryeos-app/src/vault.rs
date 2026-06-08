@@ -52,6 +52,7 @@
 use std::collections::HashMap;
 use std::env::VarError;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
 
@@ -65,6 +66,93 @@ use ryeos_engine::roots;
 pub use ryeos_vault::paths::default_sealed_store_path;
 pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
 pub use ryeos_vault::sealed::write_sealed_secrets;
+
+pub const INTERNAL_RUNTIME_VAULT_PREFIX: &str = "INTERNAL_RUNTIME_VAULT_";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultScope {
+    OperatorEnv {
+        principal: String,
+    },
+    RuntimeBundle {
+        bundle_id: String,
+        namespace: String,
+    },
+}
+
+impl VaultScope {
+    pub fn operator_env(principal: impl Into<String>) -> Self {
+        Self::OperatorEnv {
+            principal: principal.into(),
+        }
+    }
+
+    pub fn runtime_bundle(
+        bundle_id: impl Into<String>,
+        namespace: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let bundle_id = bundle_id.into();
+        let namespace = namespace.into();
+        ryeos_state::objects::validate_bundle_identifier("bundle_id", &bundle_id)?;
+        validate_runtime_vault_segment("namespace", &namespace)?;
+        Ok(Self::RuntimeBundle {
+            bundle_id,
+            namespace,
+        })
+    }
+}
+
+pub fn runtime_vault_ref(bundle_id: &str, namespace: &str, key: &str) -> String {
+    format!("vault://bundle/{bundle_id}/{namespace}/{key}")
+}
+
+pub fn validate_runtime_vault_segment(label: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("runtime vault {label} must not be empty");
+    }
+    if value.len() > 64 {
+        bail!("runtime vault {label} is too long");
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        bail!("runtime vault {label} must match [A-Za-z0-9_]+");
+    }
+    Ok(())
+}
+
+pub fn is_internal_runtime_vault_key(name: &str) -> bool {
+    name.starts_with(INTERNAL_RUNTIME_VAULT_PREFIX)
+}
+
+fn validate_operator_secret_name(name: &str) -> Result<()> {
+    if is_internal_runtime_vault_key(name) {
+        bail!("vault: secret name uses reserved internal runtime vault prefix");
+    }
+    Ok(())
+}
+
+fn runtime_physical_key(bundle_id: &str, namespace: &str, key: &str) -> Result<String> {
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_runtime_vault_segment("namespace", namespace)?;
+    validate_runtime_vault_segment("key", key)?;
+    Ok(format!(
+        "{INTERNAL_RUNTIME_VAULT_PREFIX}{}_{}_{namespace}_{key}",
+        lillux::cas::sha256_hex(bundle_id.as_bytes()),
+        namespace.len()
+    ))
+}
+
+fn runtime_physical_prefix(bundle_id: &str, namespace: &str) -> Result<String> {
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", bundle_id)?;
+    validate_runtime_vault_segment("namespace", namespace)?;
+    Ok(format!(
+        "{INTERNAL_RUNTIME_VAULT_PREFIX}{}_{}_{namespace}_",
+        lillux::cas::sha256_hex(bundle_id.as_bytes()),
+        namespace.len()
+    ))
+}
 
 /// Read-only operator-secret store. Daemon-owned, swappable backend.
 pub trait NodeVault: Send + Sync + std::fmt::Debug {
@@ -86,6 +174,61 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
 
     /// Delete a secret by name. Returns `true` if the key existed.
     fn delete_secret(&self, principal: &str, name: &str) -> Result<bool>;
+
+    fn put_scoped_secret(&self, scope: &VaultScope, key: &str, value: &str) -> Result<()> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => self.set_secret(principal, key, value),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => self.set_secret("", &runtime_physical_key(bundle_id, namespace, key)?, value),
+        }
+    }
+
+    fn get_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<Option<String>> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => {
+                validate_operator_secret_name(key)?;
+                Ok(self.read_all(principal)?.get(key).cloned())
+            }
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => Ok(self
+                .read_all("")?
+                .get(&runtime_physical_key(bundle_id, namespace, key)?)
+                .cloned()),
+        }
+    }
+
+    fn delete_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<bool> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => self.delete_secret(principal, key),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => self.delete_secret("", &runtime_physical_key(bundle_id, namespace, key)?),
+        }
+    }
+
+    fn list_scoped_secret_keys(&self, scope: &VaultScope) -> Result<Vec<String>> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => self.list_keys(principal),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => {
+                let prefix = runtime_physical_prefix(bundle_id, namespace)?;
+                let mut keys: Vec<String> = self
+                    .list_keys("")?
+                    .into_iter()
+                    .filter_map(|name| name.strip_prefix(&prefix).map(str::to_string))
+                    .collect();
+                keys.sort();
+                Ok(keys)
+            }
+        }
+    }
 }
 
 /// Read only the secrets declared on the spawning item's
@@ -133,6 +276,7 @@ pub fn read_required_secrets(
         return Ok(HashMap::new());
     }
     for key in required_secrets {
+        validate_operator_secret_name(key)?;
         crate::process::validate_spawn_secret_name(key)
             .map_err(|e| anyhow!("vault: invalid declared secret `{key}`: {e:#}"))?;
     }
@@ -253,6 +397,7 @@ impl NodeVault for EmptyVault {
 pub struct SealedEnvelopeVault {
     store_path: PathBuf,
     secret_key: lillux::vault::VaultSecretKey,
+    io_lock: Arc<Mutex<()>>,
 }
 
 impl SealedEnvelopeVault {
@@ -261,6 +406,7 @@ impl SealedEnvelopeVault {
         Self {
             store_path,
             secret_key,
+            io_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -324,6 +470,10 @@ impl SealedEnvelopeVault {
         &self,
         modify: impl FnOnce(&mut HashMap<String, String>) -> Result<T>,
     ) -> Result<T> {
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| anyhow!("vault: sealed store lock poisoned"))?;
         let mut map = if self.store_path.exists() {
             self.read_all_internal()?
         } else {
@@ -339,10 +489,15 @@ impl SealedEnvelopeVault {
 
 impl NodeVault for SealedEnvelopeVault {
     fn read_all(&self, _principal: &str) -> Result<HashMap<String, String>> {
-        self.read_all_internal()
+        Ok(self
+            .read_all_internal()?
+            .into_iter()
+            .filter(|(key, _)| !is_internal_runtime_vault_key(key))
+            .collect())
     }
 
     fn set_secret(&self, _principal: &str, name: &str, value: &str) -> Result<()> {
+        validate_operator_secret_name(name)?;
         // Validate key name
         validate_key_name(name)?;
         self.read_modify_write(|map| {
@@ -353,15 +508,80 @@ impl NodeVault for SealedEnvelopeVault {
 
     fn list_keys(&self, _principal: &str) -> Result<Vec<String>> {
         let map = self.read_all_internal()?;
-        let mut keys: Vec<String> = map.into_keys().collect();
+        let mut keys: Vec<String> = map
+            .into_keys()
+            .filter(|key| !is_internal_runtime_vault_key(key))
+            .collect();
         keys.sort();
         Ok(keys)
     }
 
     fn delete_secret(&self, _principal: &str, name: &str) -> Result<bool> {
+        validate_operator_secret_name(name)?;
         // Validate key name before attempting delete
         validate_key_name(name)?;
         self.read_modify_write(|map| Ok(map.remove(name).is_some()))
+    }
+
+    fn put_scoped_secret(&self, scope: &VaultScope, key: &str, value: &str) -> Result<()> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => self.set_secret(principal, key, value),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => {
+                let physical_key = runtime_physical_key(bundle_id, namespace, key)?;
+                self.read_modify_write(|map| {
+                    map.insert(physical_key, value.to_string());
+                    Ok(())
+                })
+            }
+        }
+    }
+
+    fn get_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<Option<String>> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => read_named_secret(self, principal, key),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => Ok(self
+                .read_all_internal()?
+                .get(&runtime_physical_key(bundle_id, namespace, key)?)
+                .cloned()),
+        }
+    }
+
+    fn delete_scoped_secret(&self, scope: &VaultScope, key: &str) -> Result<bool> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => self.delete_secret(principal, key),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => {
+                let physical_key = runtime_physical_key(bundle_id, namespace, key)?;
+                self.read_modify_write(|map| Ok(map.remove(&physical_key).is_some()))
+            }
+        }
+    }
+
+    fn list_scoped_secret_keys(&self, scope: &VaultScope) -> Result<Vec<String>> {
+        match scope {
+            VaultScope::OperatorEnv { principal } => self.list_keys(principal),
+            VaultScope::RuntimeBundle {
+                bundle_id,
+                namespace,
+            } => {
+                let prefix = runtime_physical_prefix(bundle_id, namespace)?;
+                let mut keys: Vec<String> = self
+                    .read_all_internal()?
+                    .into_keys()
+                    .filter_map(|name| name.strip_prefix(&prefix).map(str::to_string))
+                    .collect();
+                keys.sort();
+                Ok(keys)
+            }
+        }
     }
 }
 
@@ -373,6 +593,7 @@ pub fn read_named_secret(
     principal: &str,
     name: &str,
 ) -> Result<Option<String>> {
+    validate_operator_secret_name(name)?;
     let map = vault.read_all(principal)?;
     Ok(map.get(name).cloned())
 }
@@ -386,6 +607,7 @@ pub fn read_explicit_secret(
     name: &str,
     dotenv_search_dirs: &[PathBuf],
 ) -> Result<Option<String>> {
+    validate_operator_secret_name(name)?;
     crate::process::validate_spawn_secret_name(name)
         .map_err(|e| anyhow!("vault: invalid explicit secret `{name}`: {e:#}"))?;
     let required = vec![name.to_string()];
@@ -978,6 +1200,77 @@ mod tests {
         let all = v.read_all("op").unwrap();
         assert_eq!(all.get("KEY"), Some(&"new".to_string()));
         assert_eq!(all.len(), 1, "should have exactly one key");
+    }
+
+    #[test]
+    fn runtime_bundle_scope_is_hidden_from_operator_env_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+        let scope = VaultScope::runtime_bundle("agent-kiwi", "oauth").unwrap();
+
+        v.put_scoped_secret(&scope, "google_account_123", "refresh-token")
+            .unwrap();
+        v.set_secret("op", "OPENAI_API_KEY", "sk-op").unwrap();
+
+        assert_eq!(
+            v.get_scoped_secret(&scope, "google_account_123").unwrap(),
+            Some("refresh-token".to_string())
+        );
+        assert_eq!(
+            read_named_secret(&v, "op", "OPENAI_API_KEY").unwrap(),
+            Some("sk-op".into())
+        );
+        assert_eq!(
+            read_named_secret(&v, "op", "google_account_123").unwrap(),
+            None
+        );
+        assert_eq!(
+            v.read_all("op").unwrap(),
+            HashMap::from([("OPENAI_API_KEY".to_string(), "sk-op".to_string())])
+        );
+        assert_eq!(v.list_keys("op").unwrap(), vec!["OPENAI_API_KEY"]);
+    }
+
+    #[test]
+    fn runtime_bundle_scope_disambiguates_namespace_key_underscores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+        let scope_a = VaultScope::runtime_bundle("agent-kiwi", "a").unwrap();
+        let scope_b = VaultScope::runtime_bundle("agent-kiwi", "a_b").unwrap();
+
+        v.put_scoped_secret(&scope_a, "b_c", "one").unwrap();
+        v.put_scoped_secret(&scope_b, "c", "two").unwrap();
+
+        assert_eq!(
+            v.get_scoped_secret(&scope_a, "b_c").unwrap(),
+            Some("one".to_string())
+        );
+        assert_eq!(
+            v.get_scoped_secret(&scope_b, "c").unwrap(),
+            Some("two".to_string())
+        );
+        assert_eq!(v.list_scoped_secret_keys(&scope_a).unwrap(), vec!["b_c"]);
+        assert_eq!(v.list_scoped_secret_keys(&scope_b).unwrap(), vec!["c"]);
+    }
+
+    #[test]
+    fn operator_secret_reads_reject_internal_runtime_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("store.enc");
+        let sk = lillux::vault::VaultSecretKey::generate();
+        let v = SealedEnvelopeVault::new(store_path, sk);
+        let name = format!("{INTERNAL_RUNTIME_VAULT_PREFIX}abc_oauth_key");
+
+        let err = read_required_secrets(&v, "op", std::slice::from_ref(&name), &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("reserved internal runtime vault prefix"));
+        let err = read_named_secret(&v, "op", &name).unwrap_err();
+        assert!(format!("{err:#}").contains("reserved internal runtime vault prefix"));
+        let err = read_explicit_secret(&v, "op", &name, &[]).unwrap_err();
+        assert!(format!("{err:#}").contains("reserved internal runtime vault prefix"));
     }
 
     // ── Remote vault E2E simulation ──

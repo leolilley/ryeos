@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:ddd1858d1500f94b38f1d6243f89ffacaad69d1b8a7b7a97acbd1be5c9b97d81:SPNmiuqPy6Wv/hBvmt7pfxvEk1aYEJIH0SxxnYt2EBdGsWIDnESohTWgQrsQTOyR0XaNJ6vRQnS7J95F9Qw7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-08T03:48:08Z:d396bb956f63fc340e97ece6cc67c0b584082273efcbf8938d4172edbb133ca8:EY8Svz4x2RFYReOGx7RDIxvOhz8DtAcUcYnjUiNF4LQDc/QxDJD3Fd0R85Sc2QwTUFDPxvxuRPvi6BKtV9lVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -66,13 +66,9 @@ config:
   cwd: "{tool_dir}"
 ```
 
-And in `env_config.env_paths`:
-```yaml
-env_config:
-  env_paths:
-    PYTHONPATH:
-      prepend: ["{tool_dir}", "{runtime_dir}/lib"]
-```
+The Python runtimes no longer set `PYTHONPATH`; they derive
+bundle-local import roots from `{tool_path}` and prepend them to
+`sys.path` inside the runtime launcher.
 
 ---
 
@@ -99,8 +95,8 @@ env_config:
     PYTHONUNBUFFERED: "1"               # Literal (no expansion)
     PROJECT_VENV_PYTHON: "{interpreter}" # Pass 2: engine token
   env_paths:
-    PYTHONPATH:
-      prepend: ["{tool_dir}", "{runtime_dir}/lib"]
+    PATH:
+      prepend: ["{runtime_dir}/bin"]
 ```
 
 ### Design Note

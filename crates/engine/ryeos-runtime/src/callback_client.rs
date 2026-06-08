@@ -301,6 +301,58 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    pub async fn vault_put(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback vault_put called without an inner UDS client \
+                 (socket missing); cannot store runtime vault secret"
+            )
+        })?;
+        client
+            .vault_put(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub async fn vault_get(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback vault_get called without an inner UDS client \
+                 (socket missing); cannot read runtime vault secret"
+            )
+        })?;
+        client
+            .vault_get(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub async fn vault_delete(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback vault_delete called without an inner UDS client \
+                 (socket missing); cannot delete runtime vault secret"
+            )
+        })?;
+        client
+            .vault_delete(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub async fn vault_list(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback vault_list called without an inner UDS client \
+                 (socket missing); cannot list runtime vault secrets"
+            )
+        })?;
+        client
+            .vault_list(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread_by_id(&self, thread_id: &str) -> Result<Value> {
         match &self.inner {
@@ -638,6 +690,34 @@ mod tests {
             _request: Value,
         ) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
+        }
+        async fn vault_put(
+            &self,
+            _thread_id: &str,
+            request: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(request)
+        }
+        async fn vault_get(
+            &self,
+            _thread_id: &str,
+            request: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(request)
+        }
+        async fn vault_delete(
+            &self,
+            _thread_id: &str,
+            request: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(request)
+        }
+        async fn vault_list(
+            &self,
+            _thread_id: &str,
+            request: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(request)
         }
         async fn claim_commands(&self, _thread_id: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))

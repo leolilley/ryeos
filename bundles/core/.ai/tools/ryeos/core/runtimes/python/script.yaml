@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:56Z:0baf32e5e1c0afad58546755d9fbcef997f1edfcee3f878c10e7f6ffccae951f:uhKSaynhVjYZDDHYHqI+V3FIzQYMS/gwKRGdbHVVpVKH4BIwRiFXHXekYJgxO8kwRznN7hIZSYYjbgILfBYABg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-08T03:48:05Z:5680f72ee77a19c6509ac25a01a0c9b08366bb2d04534673bd75e339a995ac6f:cDLHsM8JYAQYNYC9gUbapNtVb0rB+PMbKHn4Kdqa+C0KVDnFVGSFfuDIPQrxRN4NYCRn0xGT5rZafQZhya3MAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -15,9 +15,6 @@ env_config:
   env:
     PYTHONUNBUFFERED: "1"
     PROJECT_VENV_PYTHON: "{interpreter}"
-  env_paths:
-    PYTHONPATH:
-      prepend: ["{tool_dir}", "{runtime_dir}/lib"]
 
 verify_deps:
   enabled: true
@@ -35,8 +32,44 @@ config_resolve:
 config:
   command: "{interpreter}"
   args:
+    - "-I"
+    - "-u"
+    - "-c"
+    - |
+      import runpy, sys
+      from pathlib import Path
+
+      def prepend(path):
+          value = str(path)
+          if value and value not in sys.path:
+              sys.path.insert(0, value)
+
+      tool_path = Path(sys.argv[1]).resolve()
+      runtime_lib = Path(sys.argv[2]).resolve()
+      project_path = sys.argv[3]
+
+      tools_root = None
+      for candidate in [tool_path.parent, *tool_path.parents]:
+          if candidate.name == "tools" and candidate.parent.name == ".ai":
+              tools_root = candidate
+              break
+      if tools_root is None:
+          raise SystemExit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
+
+      rel = tool_path.relative_to(tools_root)
+      if len(rel.parts) < 2:
+          raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
+
+      bundle_tool_root = tools_root / rel.parts[0]
+      tool_dir = tool_path.parent
+
+      for path in reversed([tool_dir, bundle_tool_root, bundle_tool_root / "lib", runtime_lib]):
+          prepend(path)
+
+      sys.argv = [str(tool_path), "--project-path", project_path]
+      runpy.run_path(str(tool_path), run_name="__main__")
     - "{tool_path}"
-    - "--project-path"
+    - "{runtime_dir}/lib"
     - "{project_path}"
   input_data: "{params_json}"
   timeout_secs: 300

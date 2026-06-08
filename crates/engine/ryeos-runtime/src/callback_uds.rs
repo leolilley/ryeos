@@ -221,6 +221,50 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn vault_put(&self, thread_id: &str, mut request: Value) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.vault_put", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn vault_get(&self, thread_id: &str, mut request: Value) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.vault_get", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn vault_delete(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.vault_delete", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn vault_list(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        request["thread_id"] = json!(thread_id);
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.vault_list", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);

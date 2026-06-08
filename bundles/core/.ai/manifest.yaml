@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:57Z:ee4554507af16d97bc622caaa842554c60ab607196df74aaadd284f4d898d257:I+T7+u6oEL6Dwtxdu80lZFdyKu2mQrg8DTzbN5jp5u6uWAJnKMF7yjBpuSbosCCB2YSsIUC6oiPDvyL9AEEiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-08T03:48:06Z:a2f1141d6b013d2f097d5c7ca58758cf0531885a028b887efe872ef8c2816b16:xcRzxJ2hapwTqC7YepGS5j4VRoZ35LLnBhxhpLHY88KctCK1CjA5dqWvUAX1I0tko4E76Ws4DGbIii9kMZPwBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -15,3 +15,4 @@ provides_kinds:
 requires_kinds: []
 uses_kinds: []
 bundle_events: []
+runtime_vault: []

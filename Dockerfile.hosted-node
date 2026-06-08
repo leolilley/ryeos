@@ -34,6 +34,7 @@ COPY --from=builder /build/target/release/ryeosd           /usr/local/bin/ryeosd
 COPY --from=builder /build/target/release/ryeos            /usr/local/bin/ryeos
 COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
 
+COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
 COPY --from=builder /build/bundles/core        /opt/ryeos/core
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 

@@ -10,6 +10,7 @@ post_install() {
     echo
     echo "Initialize with:"
     echo "  ryeos init \\"
+    echo "    --trust-file /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml \\"
     echo "    --trust-file /usr/share/ryeos/core/PUBLISHER_TRUST.toml \\"
     echo "    --trust-file /usr/share/ryeos/standard/PUBLISHER_TRUST.toml \\"
     echo "    --trust-file /usr/share/ryeos/web/PUBLISHER_TRUST.toml \\"

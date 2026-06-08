@@ -14,10 +14,26 @@ pub enum BundleEventOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeVaultOperation {
+    Put,
+    Get,
+    Delete,
+    List,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleEventDecl {
     pub event_kind: String,
     pub operations: Vec<BundleEventOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeVaultDecl {
+    pub namespace: String,
+    pub operations: Vec<RuntimeVaultOperation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +49,8 @@ pub struct BundleManifestSource {
     pub uses_kinds: Vec<String>,
     #[serde(default)]
     pub bundle_events: Vec<BundleEventDecl>,
+    #[serde(default)]
+    pub runtime_vault: Vec<RuntimeVaultDecl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +67,8 @@ pub struct BundleManifest {
     pub uses_kinds: Vec<String>,
     #[serde(default)]
     pub bundle_events: Vec<BundleEventDecl>,
+    #[serde(default)]
+    pub runtime_vault: Vec<RuntimeVaultDecl>,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -99,6 +119,7 @@ pub fn materialize_manifest(
         requires_kinds: source.requires_kinds,
         uses_kinds: source.uses_kinds,
         bundle_events: source.bundle_events,
+        runtime_vault: source.runtime_vault,
     })
 }
 
@@ -750,6 +771,7 @@ typo_field: oops
             requires_kinds: vec![],
             uses_kinds: vec![],
             bundle_events: vec![],
+            runtime_vault: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

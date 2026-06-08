@@ -1092,7 +1092,7 @@ mod tests {
         let target = dir.path().join(".ai/node/command_registration");
         fs::create_dir_all(&target).unwrap();
         fs::copy(
-            workspace.join("bundles/.ai/node/command_registration/default.yaml"),
+            workspace.join("bundles/.ai/node/init/command-registration/default.yaml"),
             target.join("default.yaml"),
         )
         .unwrap();

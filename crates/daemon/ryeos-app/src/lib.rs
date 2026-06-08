@@ -26,6 +26,7 @@ pub mod node_config;
 pub mod process;
 pub mod route_raw;
 pub mod runtime_db;
+pub mod runtime_vault_service;
 pub mod service_registry;
 pub mod standalone_audit;
 pub mod state;

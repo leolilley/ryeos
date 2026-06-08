@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T00:42:19Z:a59e0626a83b4681c0665a1e2158ae124a157bf557be6b47db34124fef05d636:V3P2Zmyku2/H6Ycr53v/zuFixTAnaTVx08qTxRnHmzYB5TWmR5WdIRnQNXHe/YlD7bdDLYST9DJm8HjDLS3kBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-08T03:48:08Z:edba6f7bba6d0bd6e7a1569b70df94b41c72eb3fbfe468385086f895bfe910bc:vJk9rYfkkboT8aU2dr444Mi4wltl+6/PFvy+xiAwtSdfHyNjR7h/F84ETxh14uDp+sRthu9SbWM5S+K23wpqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:88cc30a76a0843c8ac374a4852f0765162468c5fac7ed40f3adec782c9bc1006:nIUMON9IQccg1zVXYUWUSrazOVAiuL/xzlRkuHs9xGoXtGN6Cgy2cjxRDzFNXNyOvAEScITKerSBQ/7j2kXeCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 category: ryeos/core
@@ -110,7 +110,8 @@ there is no separate Bash runtime descriptor.
 ### Python Function (`ryeos/core/runtimes/python/function`)
 Loads a Python module, calls its `execute(params, project_path)`
 function. Resolves interpreter from `.venv/bin/python3` or `RYE_PYTHON`.
-Adds `{tool_dir}` to `PYTHONPATH`.
+Prepends runtime-derived bundle-local roots to `sys.path` without setting
+`PYTHONPATH`.
 
 ### Python Script (`ryeos/core/runtimes/python/script`)
 Runs Python scripts that manage their own `__main__` entry point.

@@ -144,7 +144,8 @@ impl RuntimeHandler for EnvConfigHandler {
 
         // Always-present extra: this element's directory. Templates
         // may reference `{runtime_dir}` to locate sibling files
-        // (e.g. PYTHONPATH entries) without cross-element peeking.
+        // (e.g. PATH entries or runtime launcher args) without
+        // cross-element peeking.
         // Last-write-wins across the chain, matching env_paths
         // layering.
         if let Some(parent) = intermediate.source_path.parent() {
@@ -182,8 +183,8 @@ impl RuntimeHandler for EnvConfigHandler {
         // PATH-style mutations. Templated values are expanded
         // against the same `template_ctx` that `tool_dir`,
         // `runtime_dir`, `interpreter`, etc. already populated, so
-        // bundle YAMLs can write `{prepend: ["{tool_dir}",
-        // "{runtime_dir}/lib"]}` directly.
+        // bundle YAMLs can write entries like
+        // `{prepend: ["{runtime_dir}/bin"]}` directly.
         apply_env_paths(
             &env_config.env_paths,
             &mut ctx.env,

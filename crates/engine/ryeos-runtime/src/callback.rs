@@ -97,6 +97,14 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         request: Value,
     ) -> Result<Value, CallbackError>;
 
+    async fn vault_put(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;
+
+    async fn vault_get(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;
+
+    async fn vault_delete(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;
+
+    async fn vault_list(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     async fn complete_command(

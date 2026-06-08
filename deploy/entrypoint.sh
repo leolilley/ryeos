@@ -22,7 +22,7 @@ mkdir -p /data
 # dev images this is whichever key built the image. Either way, init
 # needs the bundle's signer trusted before it preflights bundle items.
 TRUST_ARGS=()
-for f in /opt/ryeos/*/PUBLISHER_TRUST.toml; do
+for f in /opt/ryeos/.ai/PUBLISHER_TRUST.toml /opt/ryeos/*/PUBLISHER_TRUST.toml; do
   if [ -f "$f" ]; then
     TRUST_ARGS+=(--trust-file "$f")
   fi
