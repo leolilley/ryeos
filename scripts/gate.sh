@@ -68,6 +68,22 @@ if [[ "$skip_tests" == "1" ]]; then
     exit 0
 fi
 
-echo "gate: cargo nextest run --workspace --no-fail-fast ${nextest_args[*]:-}"
+# Resource caps. The workspace has heavy integration tests (some spawn daemons),
+# so running them at full parallelism can exhaust memory and lock up the machine.
+# Default to half the available cores for both compilation and test execution.
+# Override with GATE_TEST_THREADS / GATE_BUILD_JOBS, or set either to 0 to let
+# cargo/nextest use their own defaults.
+default_jobs="$(( $(nproc 2>/dev/null || echo 2) / 2 ))"
+(( default_jobs < 1 )) && default_jobs=1
+test_threads="${GATE_TEST_THREADS:-$default_jobs}"
+build_jobs="${GATE_BUILD_JOBS:-$default_jobs}"
+
+cargo_jobs_args=()
+[[ "$build_jobs" != "0" ]] && cargo_jobs_args=(--build-jobs "$build_jobs")
+test_threads_args=()
+[[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
+
+echo "gate: cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
 RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
-    "$CARGO" nextest run --workspace --no-fail-fast "${nextest_args[@]:-}"
+    "$CARGO" nextest run --workspace --no-fail-fast \
+    "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"
