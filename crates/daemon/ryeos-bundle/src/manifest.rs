@@ -36,7 +36,7 @@ pub struct RuntimeVaultDecl {
     pub operations: Vec<RuntimeVaultOperation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifestSource {
     pub name: String,
@@ -53,7 +53,7 @@ pub struct BundleManifestSource {
     pub runtime_vault: Vec<RuntimeVaultDecl>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifest {
     pub name: String,

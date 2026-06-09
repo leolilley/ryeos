@@ -129,7 +129,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             "public_key": local_public_key,
         },
         "auth": auth_probe,
-        "project_binding": remote_cfg.project_binding,
         "project_bindings": remote_cfg.project_bindings,
         "next_step": {
             "authorize_command": authorize_command,

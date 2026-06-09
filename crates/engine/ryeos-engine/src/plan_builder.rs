@@ -24,7 +24,7 @@ use crate::kind_registry::KindRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::resolution::TrustClass;
 use crate::runtime::{
-    ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry, compile_with_handlers,
+    compile_with_handlers, ChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry,
 };
 use crate::trust::TrustStore;
 
@@ -891,11 +891,10 @@ config:
 
         assert_eq!(plan.root_ref, "tool:my_tool");
         // Chain should include @subprocess and the resolved terminal
-        assert!(
-            plan.executor_chain
-                .iter()
-                .any(|id| id.contains("subprocess"))
-        );
+        assert!(plan
+            .executor_chain
+            .iter()
+            .any(|id| id.contains("subprocess")));
     }
 
     // ── Test: chain cycle detected ─────────────────────────────────────
@@ -1063,8 +1062,8 @@ config:
     // `compile_with_handlers`.
 
     use crate::runtime::{
-        ChainIntermediate as RChainIntermediate, HostEnvBindings, RuntimeHandlerRegistry,
-        compile_with_handlers,
+        compile_with_handlers, ChainIntermediate as RChainIntermediate, HostEnvBindings,
+        RuntimeHandlerRegistry,
     };
 
     fn empty_roots() -> ResolutionRoots {

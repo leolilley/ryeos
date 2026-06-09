@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T04:30:04Z:26462901ad653d6aeb61d5d79eeeae9ef7b8c66b61f6b95344f77de7a4b668ad:xlpRF5uC8RMjFnJNvmwIcJGpsgkdMSQWBcmO2ml/UgGdfgp3aGDzQ1cuKpXF4dxJg86PmwXUlLxEXGJbtCCuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-09T07:59:10Z:c2246bf46a49a57f3d4a3d7638f6ff048d27810a6758ac5c4878af7b9f912485:eFkKhR4l4homGyZ8NXp9PGOsDgLrrYkTyIE3u2hMTTNGhmLU0TA2XBpG20bO/YoUpt+dcLYd2WoIsiVCypojDg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 
 ---
 category: ryeos/core/state
@@ -135,20 +135,20 @@ identity, authorization, storage, and attribution.
 Bundle manifests declare event kinds and allowed operations:
 
 ```yaml
-name: ryeos-email
+name: example-bundle
 bundle_events:
-  - event_kind: email_event
+  - event_kind: example_event
     operations: [append, scan]
 ```
 
 When a verified bundle-qualified tool executes, Rye OS derives callback
 capabilities from the signed manifest and the tool ref. For the manifest
-above, a direct `tool:ryeos-email/...` execution receives callback caps
+above, a direct `tool:example-bundle/...` execution receives callback caps
 such as:
 
 ```text
-ryeos.append.bundle_events.ryeos-email/email_event
-ryeos.scan.bundle_events.ryeos-email/email_event
+ryeos.append.bundle-events.example-bundle/example_event
+ryeos.scan.bundle-events.example-bundle/example_event
 ```
 
 Bundle code must not pass `bundle_id`. The daemon mints callback tokens
@@ -161,9 +161,9 @@ Runtime callback operations:
 
 | Operation | Capability checked | Purpose |
 |---|---|---|
-| `bundle_events_append` | `ryeos.append.bundle_events.<bundle>/<event_kind>` | Append one event to a bundle chain. |
-| `bundle_events_read_chain` | `ryeos.scan.bundle_events.<bundle>/<event_kind>` | Read one chain for an event kind. |
-| `bundle_events_scan` | `ryeos.scan.bundle_events.<bundle>/<event_kind>` | Scan all records for an event kind. |
+| `bundle_events_append` | `ryeos.append.bundle-events.<bundle>/<event_kind>` | Append one event to a bundle chain. |
+| `bundle_events_read_chain` | `ryeos.scan.bundle-events.<bundle>/<event_kind>` | Read one chain for an event kind. |
+| `bundle_events_scan` | `ryeos.scan.bundle-events.<bundle>/<event_kind>` | Scan all records for an event kind. |
 
 `read_chain` is covered by the `scan` manifest operation in the current
 schema. If a future manifest adds an explicit `read` or `read_chain`
@@ -174,12 +174,12 @@ Append request shape:
 
 ```json
 {
-  "event_kind": "email_event",
-  "chain_id": "email_123",
-  "event_type": "email_planned",
+  "event_kind": "example_event",
+  "chain_id": "example_123",
+  "event_type": "example_planned",
   "schema_version": 1,
   "payload": {"campaign_id": "campaign_abc"},
-  "idempotency_key": "email_plan:email_123",
+  "idempotency_key": "example_record:example_123",
   "expected_chain_head_hash": null,
   "correlation_id": null,
   "causation_id": null
@@ -190,8 +190,8 @@ Read-chain request shape:
 
 ```json
 {
-  "event_kind": "email_event",
-  "chain_id": "email_123"
+  "event_kind": "example_event",
+  "chain_id": "example_123"
 }
 ```
 
@@ -199,7 +199,7 @@ Scan request shape:
 
 ```json
 {
-  "event_kind": "email_event"
+  "event_kind": "example_event"
 }
 ```
 

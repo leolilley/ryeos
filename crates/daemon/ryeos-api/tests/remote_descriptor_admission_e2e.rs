@@ -12,9 +12,10 @@ use base64::Engine as _;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
-use ryeos_api::handlers::{remote_admit, remote_configure};
+use ryeos_api::handlers::{remote_admit, remote_bind_project, remote_configure};
 use ryeos_api::remote::config::{self, RemoteConfig};
 use ryeos_app::state::AppState;
+use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(Clone)]
 struct MockRemote {
@@ -75,8 +76,6 @@ async fn remote_configure_descriptor_match_writes_config() {
             remote: None,
             url: None,
             descriptor: Some(descriptor_path),
-            project_path: None,
-            no_project: true,
         },
         Arc::new(local_state),
     )
@@ -103,8 +102,6 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
             remote: None,
             url: None,
             descriptor: Some(descriptor_path),
-            project_path: None,
-            no_project: true,
         },
         Arc::new(local_state),
     )
@@ -146,6 +143,53 @@ async fn remote_admit_refuses_to_send_token_on_live_identity_mismatch() {
 
     assert!(result.is_err());
     assert_eq!(claims.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn remote_bind_project_copies_project_only_remote_to_user_config() {
+    let (_local_tmp, local_state) = test_state::build_test_state();
+    let (_remote_tmp, remote_state) = test_state::build_test_state();
+    let public_key = public_key_response(&remote_state);
+    let project_root = tempfile::tempdir().unwrap();
+    let project_root = project_root.path().canonicalize().unwrap();
+
+    let mut project_remotes = HashMap::new();
+    project_remotes.insert(
+        "prod".to_string(),
+        remote_config("prod", "https://project.example.com", &public_key),
+    );
+    config::save_remotes(&project_root, &project_remotes).unwrap();
+
+    let result = remote_bind_project::handle(
+        remote_bind_project::Request {
+            remote: "prod".to_string(),
+            project: project_root.clone(),
+            remote_project: "/srv/project".to_string(),
+            sync_scope: ProjectSyncScope::FullProject,
+        },
+        Arc::new(local_state.clone()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result["scope"], "user");
+    assert_eq!(result["remote_project_path"], "/srv/project");
+
+    let user_remotes = config::load_remotes(&local_state.config.system_space_dir).unwrap();
+    let user_remote = user_remotes.get("prod").unwrap();
+    assert_eq!(user_remote.url, "https://project.example.com");
+    let local_key = project_root.to_string_lossy().to_string();
+    assert_eq!(
+        user_remote
+            .project_bindings
+            .get(&local_key)
+            .unwrap()
+            .remote_project_path,
+        "/srv/project"
+    );
+
+    let project_remotes_after = config::load_remotes(&project_root).unwrap();
+    assert!(project_remotes_after["prod"].project_bindings.is_empty());
 }
 
 fn public_key_response(state: &AppState) -> Value {
@@ -198,7 +242,6 @@ fn remote_config(name: &str, url: &str, public_key: &Value) -> RemoteConfig {
             .unwrap()
             .to_string(),
         ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-        project_binding: None,
         project_bindings: HashMap::new(),
     }
 }

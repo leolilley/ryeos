@@ -44,7 +44,19 @@ pub fn sign_content_at(
     suffix: Option<&str>,
     signed_at: &str,
 ) -> String {
-    let hash = content_hash(body);
+    sign_content_at_with_options(body, signing_key, prefix, suffix, signed_at, false)
+}
+
+pub fn sign_content_at_with_options(
+    body: &str,
+    signing_key: &SigningKey,
+    prefix: &str,
+    suffix: Option<&str>,
+    signed_at: &str,
+    after_shebang: bool,
+) -> String {
+    let (shebang, signed_body) = split_shebang_body(body, after_shebang);
+    let hash = content_hash(signed_body);
     let signature: ed25519_dalek::Signature = signing_key.sign(hash.as_bytes());
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
     let fp = compute_fingerprint(&signing_key.verifying_key());
@@ -54,7 +66,10 @@ pub fn sign_content_at(
         None => format!("{prefix} {SIGNATURE_PREFIX}{signed_at}:{hash}:{sig_b64}:{fp}"),
     };
 
-    format!("{sig_line}\n{body}")
+    match shebang {
+        Some(shebang) => format!("{shebang}\n{sig_line}\n{signed_body}"),
+        None => format!("{sig_line}\n{signed_body}"),
+    }
 }
 
 pub fn sign_content(
@@ -63,13 +78,38 @@ pub fn sign_content(
     prefix: &str,
     suffix: Option<&str>,
 ) -> String {
-    sign_content_at(
+    sign_content_with_options(body, signing_key, prefix, suffix, false)
+}
+
+pub fn sign_content_with_options(
+    body: &str,
+    signing_key: &SigningKey,
+    prefix: &str,
+    suffix: Option<&str>,
+    after_shebang: bool,
+) -> String {
+    sign_content_at_with_options(
         body,
         signing_key,
         prefix,
         suffix,
         &crate::time::iso8601_now(),
+        after_shebang,
     )
+}
+
+pub fn content_to_sign(body: &str, after_shebang: bool) -> &str {
+    split_shebang_body(body, after_shebang).1
+}
+
+fn split_shebang_body(body: &str, after_shebang: bool) -> (Option<&str>, &str) {
+    if !after_shebang || !body.starts_with("#!") {
+        return (None, body);
+    }
+    match body.find('\n') {
+        Some(idx) => (Some(&body[..idx]), &body[idx + 1..]),
+        None => (Some(body), ""),
+    }
 }
 
 pub fn parse_signature_line(
@@ -210,16 +250,17 @@ pub fn content_hash_after_signature(
         return None;
     }
 
-    let candidates: Vec<usize> = if after_shebang {
-        let mut c = Vec::new();
-        if lines.len() > 1 {
-            c.push(1);
-        }
-        c.push(0);
-        c
-    } else {
-        vec![0]
-    };
+    let candidates: Vec<usize> =
+        if after_shebang && lines.first().is_some_and(|line| line.starts_with("#!")) {
+            let mut c = Vec::new();
+            if lines.len() > 1 {
+                c.push(1);
+            }
+            c.push(0);
+            c
+        } else {
+            vec![0]
+        };
 
     for idx in candidates {
         if is_signature_line(lines[idx], prefix, suffix) {
@@ -296,6 +337,36 @@ mod tests {
     }
 
     #[test]
+    fn sign_with_shebang_keeps_shebang_first() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let body = "#!/usr/bin/env python3\n# ryeos-tool:\n#   category: example\n";
+        let signed =
+            sign_content_at_with_options(body, &sk, "#", None, "2026-01-01T00:00:00Z", true);
+        let mut lines = signed.lines();
+        assert_eq!(lines.next().unwrap(), "#!/usr/bin/env python3");
+        let sig_line = lines.next().unwrap();
+        assert!(sig_line.starts_with("# ryeos:signed:"));
+        assert_eq!(lines.next().unwrap(), "# ryeos-tool:");
+
+        let header = parse_signature_line(sig_line, "#", None).unwrap();
+        assert_eq!(
+            header.content_hash,
+            content_hash("# ryeos-tool:\n#   category: example\n")
+        );
+    }
+
+    #[test]
+    fn sign_without_after_shebang_keeps_existing_first_line_behavior() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let body = "#!/usr/bin/env python3\nprint('hello')\n";
+        let signed =
+            sign_content_at_with_options(body, &sk, "#", None, "2026-01-01T00:00:00Z", false);
+        let mut lines = signed.lines();
+        assert!(lines.next().unwrap().starts_with("# ryeos:signed:"));
+        assert_eq!(lines.next().unwrap(), "#!/usr/bin/env python3");
+    }
+
+    #[test]
     fn strip_signature_lines_removes_signed_lines() {
         let content = "# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\nprint('hello')\n";
         assert_eq!(strip_signature_lines(content), "print('hello')\n");
@@ -369,6 +440,22 @@ mod tests {
         let content = format!("#!/usr/bin/env python3\n{sig_line}\n{body}");
         let hash = content_hash_after_signature(&content, "#", None, true).unwrap();
         assert_eq!(hash, content_hash(body));
+    }
+
+    #[test]
+    fn content_hash_after_signature_rejects_line_two_without_shebang() {
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let body = "actual content\n";
+        let sig_line = {
+            let hash = content_hash(body);
+            let sig: ed25519_dalek::Signature = sk.sign(hash.as_bytes());
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+            let fp = compute_fingerprint(&sk.verifying_key());
+            format!("# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fp}")
+        };
+        let content = format!("not a shebang\n{sig_line}\n{body}");
+
+        assert!(content_hash_after_signature(&content, "#", None, true).is_none());
     }
 
     #[test]

@@ -237,7 +237,6 @@ fn remote_config(name: &str, url: &str, remote: &AppState) -> RemoteConfig {
         site_id: remote.threads.site_id().to_string(),
         vault_fingerprint: "sha256:test-vault".to_string(),
         ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-        project_binding: None,
         project_bindings: HashMap::new(),
     }
 }

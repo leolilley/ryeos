@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-05T04:12:08Z:b87d84cad516fcadacb22456e8d7984c7284716d26ab1b1f7bb4416e62ee05b2:YFP8nKnfDFioKCKPrO7KlTuk1RqFahWQtLnJtsmjbhKirnnbAJkDAW+NZj2hbL1eyeQhG3lLJYijp6JwdrFSDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-09T07:59:10Z:a5f45f8c825c72eb81b94350f5f256e3b26108351d3c92702ff30186cfba019d:WEU7inZ4RHNAUwJZDsDcV0ZRArpD9ThrY36dfb+yYKNopZuJTRBi7nLrNuobiOoNhoXQIEnAKBzpgMiILy3wDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -561,7 +561,9 @@ remotes:
   production:
     name: production
     url: https://ryeos.example.com
-    principal_id: principal_abc123
+    principal_id: fp:<remote-signing-key-fingerprint>
+    signing_key: ed25519:<base64-remote-public-key>
+    site_id: site:production
     vault_fingerprint: sha256:def456...
     ingest_ignore:
       patterns:

@@ -583,11 +583,12 @@ fn sign_in_place(
         });
     }
 
-    let signed = lillux::signature::sign_content(
+    let signed = lillux::signature::sign_content_with_options(
         &stripped,
         &signing_key,
         &envelope.prefix,
         envelope.suffix.as_deref(),
+        envelope.after_shebang,
     );
 
     // Atomic write
@@ -626,11 +627,12 @@ fn is_already_validly_signed_operator(
         return false;
     };
 
+    let signed_body = lillux::signature::content_to_sign(body, envelope.after_shebang);
     lillux::signature::is_valid_signature_for(
         &header.content_hash,
         &header.signature_b64,
         &header.signer_fingerprint,
-        body,
+        signed_body,
         verifying_key,
         fingerprint,
     )

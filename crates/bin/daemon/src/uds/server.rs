@@ -1127,12 +1127,12 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             vec![
-                "ryeos.append.bundle_events.ryeos-email/email_event".to_string(),
-                "ryeos.scan.bundle_events.ryeos-email/email_event".to_string(),
+                "ryeos.append.bundle-events.example-bundle/example_event".to_string(),
+                "ryeos.scan.bundle-events.example-bundle/example_event".to_string(),
             ],
             test_provenance(&state, "/test"),
-            Some("ryeos-email".to_string()),
-            Some("tool:ryeos-email/send".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/send".to_string()),
         );
 
         let append = dispatch(
@@ -1141,12 +1141,12 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-bundle-1",
-                    "event_kind": "email_event",
-                    "chain_id": "email_1",
-                    "event_type": "email_planned",
+                    "event_kind": "example_event",
+                    "chain_id": "example_1",
+                    "event_type": "example_planned",
                     "schema_version": 1,
-                    "payload": {"email_id": "email_1"},
-                    "idempotency_key": "plan:email_1"
+                    "payload": {"example_id": "example_1"},
+                    "idempotency_key": "record:example_1"
                 }),
             ),
             &state,
@@ -1154,10 +1154,10 @@ mod tests {
         .await;
         assert!(append.error.is_none(), "append failed: {:?}", append.error);
         let event_hash = rpc_ok(&append)["event_hash"].as_str().unwrap();
-        assert_eq!(rpc_ok(&append)["event"]["bundle_id"], "ryeos-email");
+        assert_eq!(rpc_ok(&append)["event"]["bundle_id"], "example-bundle");
         assert_eq!(
             rpc_ok(&append)["event"]["attribution"]["tool"],
-            "tool:ryeos-email/send"
+            "tool:example-bundle/send"
         );
 
         let scan = dispatch(
@@ -1166,7 +1166,7 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-bundle-1",
-                    "event_kind": "email_event",
+                    "event_kind": "example_event",
                 }),
             ),
             &state,
@@ -1184,10 +1184,10 @@ mod tests {
             "T-bundle-deny",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
-            vec!["ryeos.append.bundle_events.ryeos-email/email_event".to_string()],
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
             test_provenance(&state, "/test"),
-            Some("ryeos-email".to_string()),
-            Some("tool:ryeos-email/send".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/send".to_string()),
         );
 
         let caller_bundle_id = dispatch(
@@ -1197,9 +1197,9 @@ mod tests {
                     "callback_token": cbt.token,
                     "thread_id": "T-bundle-deny",
                     "bundle_id": "other-bundle",
-                    "event_kind": "email_event",
-                    "chain_id": "email_1",
-                    "event_type": "email_planned",
+                    "event_kind": "example_event",
+                    "chain_id": "example_1",
+                    "event_type": "example_planned",
                     "payload": {}
                 }),
             ),
@@ -1220,8 +1220,8 @@ mod tests {
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
-            Some("ryeos-email".to_string()),
-            Some("tool:ryeos-email/send".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/send".to_string()),
         );
         let missing_cap = dispatch(
             rpc(
@@ -1229,9 +1229,9 @@ mod tests {
                 json!({
                     "callback_token": cbt.token,
                     "thread_id": "T-bundle-deny-2",
-                    "event_kind": "email_event",
-                    "chain_id": "email_1",
-                    "event_type": "email_planned",
+                    "event_kind": "example_event",
+                    "chain_id": "example_1",
+                    "event_type": "example_planned",
                     "payload": {}
                 }),
             ),
@@ -1255,14 +1255,14 @@ mod tests {
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             vec![
-                "ryeos.put.vault.agent-kiwi/oauth".to_string(),
-                "ryeos.get.vault.agent-kiwi/oauth".to_string(),
-                "ryeos.list.vault.agent-kiwi/oauth".to_string(),
-                "ryeos.delete.vault.agent-kiwi/oauth".to_string(),
+                "ryeos.put.vault.example-bundle/oauth".to_string(),
+                "ryeos.get.vault.example-bundle/oauth".to_string(),
+                "ryeos.list.vault.example-bundle/oauth".to_string(),
+                "ryeos.delete.vault.example-bundle/oauth".to_string(),
             ],
             test_provenance(&state, "/test"),
-            Some("agent-kiwi".to_string()),
-            Some("tool:agent-kiwi/oauth/connect".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/oauth/connect".to_string()),
         );
 
         let put = dispatch(
@@ -1285,7 +1285,7 @@ mod tests {
             vault_ref,
             format!(
                 "{}{}",
-                "vault://", "bundle/agent-kiwi/oauth/google_account_123"
+                "vault://", "bundle/example-bundle/oauth/google_account_123"
             )
         );
         assert!(!rpc_ok(&put).as_object().unwrap().contains_key("value"));
@@ -1343,10 +1343,10 @@ mod tests {
             "T-vault-deny",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
-            vec!["ryeos.put.vault.agent-kiwi/oauth".to_string()],
+            vec!["ryeos.put.vault.example-bundle/oauth".to_string()],
             test_provenance(&state, "/test"),
-            Some("agent-kiwi".to_string()),
-            Some("tool:agent-kiwi/oauth/connect".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/oauth/connect".to_string()),
         );
 
         let caller_bundle_id = dispatch(
@@ -1378,8 +1378,8 @@ mod tests {
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
-            Some("agent-kiwi".to_string()),
-            Some("tool:agent-kiwi/oauth/connect".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/oauth/connect".to_string()),
         );
         let missing_cap = dispatch(
             rpc(
@@ -1407,10 +1407,10 @@ mod tests {
             "T-vault-deny-3",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
-            vec!["ryeos.get.vault.agent-kiwi/oauth".to_string()],
+            vec!["ryeos.get.vault.example-bundle/oauth".to_string()],
             test_provenance(&state, "/test"),
-            Some("agent-kiwi".to_string()),
-            Some("tool:agent-kiwi/oauth/connect".to_string()),
+            Some("example-bundle".to_string()),
+            Some("tool:example-bundle/oauth/connect".to_string()),
         );
         let other_bundle = dispatch(
             rpc(

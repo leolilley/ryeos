@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:b7f90f2038e21ff8c13e1031e27a399eef6dab9b5bd0862b9b8f8df8a35603ba:1mJygPAWMnVZ4zoOsFRKY/liYNIjooJ2motIO1pr1YvSO1AScG5Dcy12jBw8IcJ1cStjFI8/FXMzh3pQJh4cCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-09T07:30:26Z:c5be19951851228d874ba5bd5d175e12b658e3199723fcdcd41a15f0d705976c:zNfj/OCrKdiqAu6AFErjOVzyeMCfUmPUhgqBsk/v37tkFMzPmI+upJFS13Xrigix6fLmhb3+3z7wXkcXHPqlCQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
 category: commands
 section: commands
 name: remote-configure
@@ -10,10 +10,6 @@ description: Add or update a remote node configuration, optionally from a descri
 forms:
 - slots:
   - field: remote
-project:
-  resolution: optional
-  bind_parameter: project
-  no_project_flag: true
 dispatch:
   kind: execute_ref
   execute: service:remote/configure

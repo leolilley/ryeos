@@ -16,9 +16,9 @@ mod common;
 
 use std::path::Path;
 
-use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
+use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
 /// Plant the `model-providers/mock` config under
@@ -569,19 +569,18 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "X"}),
     );
-    let (status, body) = match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut)
-        .await
-    {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => panic!("post /execute failed: {e}"),
-        Err(_) => {
-            let stderr = h.drain_stderr_nonblocking().await;
-            panic!(
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
                 "POST /execute timed out after 30s — denial path hung instead of failing cleanly.\n\
                  --- daemon stderr ---\n{stderr}"
             );
-        }
-    };
+            }
+        };
 
     assert_eq!(
         status,
