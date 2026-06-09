@@ -313,18 +313,21 @@ pub fn parse_signature_header(
         return None;
     }
 
-    // Determine which lines to inspect
-    let candidates: Vec<usize> = if envelope.after_shebang {
-        // Check line 2 first (after shebang), then line 1
-        let mut c = Vec::new();
-        if lines.len() > 1 {
-            c.push(1);
-        }
-        c.push(0);
-        c
-    } else {
-        vec![0]
-    };
+    // Determine which lines to inspect. Line 2 is only a signature
+    // candidate when line 1 is a real shebang; otherwise accepting a
+    // line-2 signature would exclude arbitrary line 1 content from the
+    // signed hash.
+    let candidates: Vec<usize> =
+        if envelope.after_shebang && lines.first().is_some_and(|line| line.starts_with("#!")) {
+            let mut c = Vec::new();
+            if lines.len() > 1 {
+                c.push(1);
+            }
+            c.push(0);
+            c
+        } else {
+            vec![0]
+        };
 
     for idx in candidates {
         let line = lines[idx];
@@ -619,6 +622,18 @@ mod tests {
         assert_eq!(header.content_hash, "abc123");
         assert_eq!(header.signature_b64, "sigB64data");
         assert_eq!(header.signer_fingerprint, "fp_signer");
+    }
+
+    #[test]
+    fn parse_signature_header_rejects_line_two_without_shebang() {
+        let content = "not a shebang\n# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigB64data:fp_signer\nprint('hello')";
+        let envelope = SignatureEnvelope {
+            prefix: "#".to_owned(),
+            suffix: None,
+            after_shebang: true,
+        };
+
+        assert!(parse_signature_header(content, &envelope).is_none());
     }
 
     // ── Trace-capture tests ──────────────────────────────────────

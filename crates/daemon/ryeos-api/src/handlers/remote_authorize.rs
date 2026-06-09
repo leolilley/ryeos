@@ -1,5 +1,6 @@
 //! `remote/authorize` — local CLI wrapper to authorize a key on a remote node.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -16,6 +17,14 @@ pub struct Request {
     /// Remote name (default: "default").
     #[serde(default = "default_remote")]
     pub remote: String,
+    /// Optional local project path. When supplied, project-level remotes are
+    /// layered over user-level so a project can authorize against its own
+    /// configured remote.
+    #[serde(default, alias = "project")]
+    pub project_path: Option<PathBuf>,
+    /// Pass-through for the CLI's `--no-project` flag.
+    #[serde(default)]
+    pub no_project: bool,
     /// Ed25519 public key in "ed25519:<base64>" format.
     pub public_key: String,
     /// Human-readable label.
@@ -32,7 +41,12 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
+    let project = if req.no_project {
+        None
+    } else {
+        req.project_path.as_deref()
+    };
+    let client = RemoteClient::from_named_remote(&state, &req.remote, project)?;
     let resp = client
         .authorize_key(&req.public_key, &req.label, &req.scopes)
         .await?;

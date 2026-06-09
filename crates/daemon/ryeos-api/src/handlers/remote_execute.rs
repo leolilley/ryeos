@@ -6,7 +6,6 @@
 //! request parsing, project binding resolution, and ignore rule loading
 //! in the handler.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -56,9 +55,6 @@ fn default_remote() -> String {
 pub use ryeos_executor::execution::project_source::NO_PROJECT_SENTINEL;
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote, req.project.as_deref())
-        .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
-
     // Build the project spec from the two flat CLI fields.
     let project_spec = match (req.no_project, req.project.as_ref()) {
         (true, Some(_)) => {
@@ -101,6 +97,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         }
     };
 
+    let client = RemoteClient::from_named_remote(&state, &req.remote, abs_project_path.as_deref())
+        .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
+
     // Load remote config for project binding and ignore rules.
     let report = config::load_remotes_layered_report(
         &state.config.system_space_dir,
@@ -131,24 +130,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                     project_path_for_ref = binding.remote_project_path.clone();
                 }
             },
-            Err(e) if matches!(loaded.scope, config::RemoteConfigScope::Project { .. }) => {
-                return Err(HandlerError::BadRequest(format!(
-                    "project-level remote '{}' requires a project_binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope full_project`: {e:#}",
-                    req.remote,
-                    proj_path.display(),
-                    req.remote,
-                    proj_path.display(),
-                )));
-            }
             Err(_) => {
-                // Preserve existing unbound fallback behavior for user-level remotes.
+                // No binding is required for an unbound execute; use the
+                // canonical local project path as the remote path ref.
             }
         }
     }
 
-    // Load remote's cached ignore rules (required). Inline fetch on cache miss.
-    let remote_ignore = match remote_cfg {
-        Some(ref cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)
+    // Load remote's cached ignore rules (required). Inline fetch on cache miss,
+    // without persisting partial/invalid remote configs.
+    let remote_ignore = match remote_cfg.as_ref() {
+        Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)
             .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?,
         None => {
             let fetched = client.get_ingest_ignore().await.map_err(|e| {
@@ -158,47 +150,18 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
                     req.remote, req.remote
                 ))
             })?;
-            let _ = (|| -> Result<(), HandlerError> {
-                let mut remotes = config::load_remotes(&state.config.system_space_dir)
-                    .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
-                remotes.insert(
-                    req.remote.clone(),
-                    config::RemoteConfig {
-                        name: req.remote.clone(),
-                        url: client.base_url().to_string(),
-                        principal_id: String::new(),
-                        signing_key: String::new(),
-                        site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
-                        vault_fingerprint: String::new(),
-                        ingest_ignore: fetched.clone(),
-                        project_binding: None,
-                        project_bindings: HashMap::new(),
-                    },
-                );
-                config::save_remotes(&state.config.system_space_dir, &remotes)
-                    .map_err(|e| HandlerError::Internal(format!("save remotes: {e:#}")))?;
-                Ok(())
-            })();
             IgnoreMatcher::from_config(&fetched)
                 .map_err(|e| HandlerError::Internal(format!("remote ignore: {e:#}")))?
         }
     };
 
     // Build a ResolvedRemote for the shared helper.
-    let remote_config = match remote_cfg {
-        Some(cfg) => cfg.clone(),
-        None => config::RemoteConfig {
-            name: req.remote.clone(),
-            url: client.base_url().to_string(),
-            principal_id: String::new(),
-            signing_key: String::new(),
-            site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
-            vault_fingerprint: String::new(),
-            ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-            project_binding: None,
-            project_bindings: HashMap::new(),
-        },
-    };
+    let remote_config = remote_cfg.ok_or_else(|| {
+        HandlerError::BadRequest(format!(
+            "remote '{}' is not configured; run `ryeos remote configure {}` first",
+            req.remote, req.remote
+        ))
+    })?;
     let resolved_remote = ResolvedRemote {
         remote: remote_config,
         config_key: req.remote.clone(),

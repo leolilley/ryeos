@@ -861,12 +861,11 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
             }
         }
     }
-    // Verb and kind tokens must not contain underscores.
-    // Canonical caps use dot-separated path elements: verb tokens are
-    // kebab-case or single words, kind tokens likewise. An underscore
-    // in these positions indicates an old or misspelled scope.
-    // Subject tokens (parts[3..]) may contain dots for their own
-    // hierarchy (e.g. "bundle.install") — those are NOT checked.
+    // Verb tokens must not contain underscores. Verbs are controlled
+    // capability vocabulary (`execute`, `append`, `scan`, ...), while
+    // resource/surface and subject tokens are intentionally less strict
+    // so existing platform names and user-defined resource identifiers do
+    // not become invalid solely because they contain `_`.
     if parts.len() >= 2 && parts[1].contains('_') {
         return Err(format!(
             "scope '{}' has an underscore in the verb token '{}': \
@@ -875,13 +874,6 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
              (e.g. 'ryeos.execute.service.push.head', not \
              'ryeos.execute.service.push_head')",
             scope, parts[1]
-        ));
-    }
-    if parts.len() >= 3 && parts[2].contains('_') {
-        return Err(format!(
-            "scope '{}' has an underscore in the kind token '{}': \
-             kind tokens must be dot-separated, not underscore-separated",
-            scope, parts[2]
         ));
     }
     Ok(())
@@ -896,6 +888,10 @@ mod validate_scope_pattern_tests {
         assert!(validate_scope_pattern("ryeos.execute.service.bundle.install").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.remote.admin").is_ok());
         assert!(validate_scope_pattern("ryeos.fetch.tool.ryeos/file-system/read").is_ok());
+        assert!(validate_scope_pattern(
+            "ryeos.append.bundle-events.example-bundle/oauth_token_event"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -950,12 +946,17 @@ mod validate_scope_pattern_tests {
     }
 
     #[test]
-    fn rejects_underscore_in_kind_token() {
-        let err = validate_scope_pattern("ryeos.execute.some_kind.x").unwrap_err();
+    fn accepts_bundle_events_runtime_callback_capability_kind() {
         assert!(
-            err.contains("underscore") && err.contains("kind token"),
-            "error should mention underscore in kind token, got: {err}"
+            validate_scope_pattern("ryeos.append.bundle-events.example-bundle/example_event")
+                .is_ok()
         );
+        assert!(validate_scope_pattern("ryeos.scan.bundle-events.*").is_ok());
+    }
+
+    #[test]
+    fn accepts_underscore_in_resource_token() {
+        assert!(validate_scope_pattern("ryeos.execute.some_kind.x").is_ok());
     }
 
     #[test]

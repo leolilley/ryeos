@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::AI_DIR;
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::{
@@ -17,6 +16,7 @@ use crate::parsers::ParserDispatcher;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
+use crate::AI_DIR;
 
 /// Request for an effective, composed item value.
 #[derive(Debug, Clone)]

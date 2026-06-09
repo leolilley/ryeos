@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::effect::StudioEffectResult;
-use super::model::{BrowserSession, BrowserViewport};
+use super::model::{BrowserSession, BrowserViewport, StudioDockEdge};
 use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
 use crate::layout::SplitAxis;
 use crate::workspace::{FocusDirection, ViewSpec};
@@ -47,6 +47,9 @@ pub enum StudioAction {
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
+    ToggleDock {
+        edge: StudioDockEdge,
+    },
     ResizeFocused {
         direction: FocusDirection,
     },
@@ -139,6 +142,15 @@ pub enum StudioUiEvent {
     SetLauncherQuery {
         query: String,
     },
+    InsertInputChar {
+        ch: char,
+    },
+    DeleteInputChar,
+    SetInputText {
+        text: String,
+        cursor: usize,
+    },
+    SubmitInput,
     MoveLauncherSelection {
         delta: i32,
     },

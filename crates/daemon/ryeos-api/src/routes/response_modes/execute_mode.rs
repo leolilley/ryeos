@@ -886,7 +886,7 @@ fn target_site_error_to_dispatch(
             target_site_id,
             known_sites,
         },
-        TargetSiteError::AmbiguousSite { .. } | TargetSiteError::MissingSiteId { .. } => {
+        TargetSiteError::AmbiguousSite { .. } => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed {
                 target_site_id: requested_target_site_id.to_string(),
                 detail: e.to_string(),
@@ -1095,7 +1095,6 @@ mod tests {
             site_id: site_id.to_string(),
             vault_fingerprint: "sha256:test".into(),
             ingest_ignore: ryeos_app::ignore::IgnoreConfig { patterns: vec![] },
-            project_binding: None,
             project_bindings: HashMap::new(),
         }
     }
@@ -1245,33 +1244,6 @@ mod tests {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed { .. }
         ));
         assert!(err.to_string().contains("ambiguous"));
-    }
-
-    #[test]
-    fn target_site_plan_missing_site_sentinel_is_resolution_error() {
-        let req = target_request(Some("site:remote"));
-        let mut remotes = HashMap::new();
-        remotes.insert(
-            "old".into(),
-            loaded(make_remote(
-                "old",
-                crate::remote::config::MISSING_SITE_ID_SENTINEL,
-            )),
-        );
-        let err = plan_target_site_forward(
-            &req,
-            &ProjectSource::LiveFs,
-            true,
-            "site:local",
-            Path::new("/tmp/project"),
-            Some(&remotes),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            ryeos_executor::dispatch_error::DispatchError::TargetSiteResolutionFailed { .. }
-        ));
-        assert!(err.to_string().contains("remote configure"));
     }
 
     #[test]

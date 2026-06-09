@@ -12,7 +12,9 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
-use crate::manifest::{derive_provides_kinds, BundleManifest};
+use crate::manifest::{
+    derive_provides_kinds, materialize_manifest, BundleManifest, BundleManifestSource,
+};
 
 const IDENTITY_COMPOSER: &str = "handler:ryeos/core/identity";
 
@@ -434,8 +436,15 @@ pub fn verify_manifest_signature(
     trust_store: &TrustStore,
 ) -> Result<()> {
     let manifest_path = ai_dir.join("manifest.yaml");
-    if !manifest_path.exists() {
-        return Ok(());
+    let manifest_meta = match fs::symlink_metadata(&manifest_path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("stat manifest {}", manifest_path.display()))
+        }
+    };
+    if !manifest_meta.file_type().is_file() {
+        bail!("manifest.yaml must be a regular file, not a symlink or directory");
     }
 
     let raw = fs::read_to_string(&manifest_path)
@@ -499,6 +508,39 @@ pub fn verify_manifest_signature(
             manifest.provides_kinds,
             actual_kinds
         );
+    }
+
+    let source_manifest_path = ai_dir.join("manifest.source.yaml");
+    let source_meta = match fs::symlink_metadata(&source_manifest_path) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!("stat manifest source {}", source_manifest_path.display())
+            })
+        }
+    };
+    if let Some(source_meta) = source_meta {
+        if !source_meta.file_type().is_file() {
+            bail!("manifest.source.yaml must be a regular file, not a symlink or directory");
+        }
+        if source_meta.modified()? > manifest_meta.modified()? {
+            bail!(
+                "manifest.yaml is older than manifest.source.yaml — regenerate and re-sign manifest.yaml"
+            );
+        }
+        let source_raw = fs::read_to_string(&source_manifest_path)
+            .with_context(|| format!("read manifest source {}", source_manifest_path.display()))?;
+        let source_body = lillux::signature::strip_signature_lines(&source_raw);
+        let source_manifest: BundleManifestSource = serde_yaml::from_str(&source_body)
+            .with_context(|| format!("parse manifest source {}", source_manifest_path.display()))?;
+        let expected_manifest = materialize_manifest(source_manifest, ai_dir, dir_name)
+            .context("materialize manifest.source.yaml for staleness check")?;
+        if manifest != expected_manifest {
+            bail!(
+                "manifest.yaml is stale relative to manifest.source.yaml — regenerate and re-sign manifest.yaml with the publish pipeline"
+            );
+        }
     }
 
     tracing::info!(
@@ -1173,6 +1215,17 @@ fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
     if record.response.mode.is_empty() {
         bail!("route response missing non-empty 'mode'");
     }
+    // `response.source` is mode-specific: some modes (e.g. `handler`) use
+    // canonical refs while others (e.g. `event_stream`) use registry source
+    // names such as `dispatch_launch`/`thread_events`. The owning subsystem is
+    // the route compiler / `ResponseModeRegistry`, so preflight only performs
+    // mode-independent structural validation here and must not parse the value
+    // as a canonical ref.
+    if let Some(source) = record.response.source.as_deref() {
+        if source.trim().is_empty() {
+            bail!("route response source must be non-empty when present");
+        }
+    }
     if let Some(execute) = &record.execute {
         ryeos_engine::canonical_ref::CanonicalRef::parse(&execute.item_ref)
             .with_context(|| format!("invalid route execute item_ref '{}'", execute.item_ref))?;
@@ -1688,6 +1741,131 @@ description: "fixed parser handler for preflight tests"
         assert!(
             msg.contains("fake-kind"),
             "should mention claimed kind: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_manifest_rejects_stale_manifest_source() {
+        let layout = BundleLayout::new("test-bundle");
+        fs::write(
+            layout.ai_dir.join("manifest.source.yaml"),
+            "name: test-bundle\nversion: '2.0'\ndescription: changed\n",
+        )
+        .unwrap();
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\ndescription: old\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nbundle_events: []\nruntime_vault: []\n",
+        );
+        let ts = layout.trust_store();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stale relative to manifest.source.yaml"),
+            "should reject stale signed manifest: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_manifest_accepts_manifest_matching_source() {
+        let layout = BundleLayout::new("test-bundle");
+        fs::write(
+            layout.ai_dir.join("manifest.source.yaml"),
+            "name: test-bundle\nversion: '1.0'\ndescription: same\n",
+        )
+        .unwrap();
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\ndescription: same\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nbundle_events: []\nruntime_vault: []\n",
+        );
+        let ts = layout.trust_store();
+        assert!(verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_manifest_rejects_manifest_symlink() {
+        let layout = BundleLayout::new("test-bundle");
+        std::os::unix::fs::symlink(
+            layout.ai_dir.join("missing-manifest.yaml"),
+            layout.ai_dir.join("manifest.yaml"),
+        )
+        .unwrap();
+
+        let ts = layout.trust_store();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("manifest.yaml must be a regular file"),
+            "should reject manifest symlink: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_manifest_rejects_manifest_source_symlink() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nbundle_events: []\nruntime_vault: []\n",
+        );
+        std::os::unix::fs::symlink(
+            layout.ai_dir.join("missing-manifest.source.yaml"),
+            layout.ai_dir.join("manifest.source.yaml"),
+        )
+        .unwrap();
+
+        let ts = layout.trust_store();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("manifest.source.yaml must be a regular file"),
+            "should reject manifest source symlink: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_route_accepts_registry_source_names_without_canonical_ref() {
+        // `response.source` semantics are owned by the route compiler /
+        // ResponseModeRegistry, not by generic bundle preflight. Registry-backed
+        // sources (e.g. the real core `event_stream` route\'s `dispatch_launch`)
+        // are NOT canonical refs and must not be parsed as such here. This is the
+        // exact case that broke `ryeos init` on the core bundle.
+        let event_stream_route = serde_json::json!({
+            "section": "routes",
+            "id": "execute/stream",
+            "path": "/execute/stream",
+            "methods": ["POST"],
+            "auth": "ryeos_signed",
+            "response": {
+                "mode": "event_stream",
+                "source": "dispatch_launch"
+            }
+        });
+        assert!(
+            validate_node_route_record(&event_stream_route).is_ok(),
+            "registry source name `dispatch_launch` must pass generic preflight"
+        );
+
+        // A canonical-ref-shaped source (e.g. `handler` mode) is equally valid:
+        // preflight does not care which form the owning mode uses.
+        let handler_route = serde_json::json!({
+            "section": "routes",
+            "id": "test-route",
+            "path": "/test",
+            "methods": ["GET"],
+            "auth": "none",
+            "response": {
+                "mode": "handler",
+                "source": "handler:test/route-handler"
+            }
+        });
+        assert!(validate_node_route_record(&handler_route).is_ok());
+
+        // The only mode-independent structural rule preflight enforces: when
+        // `source` is present it must be non-empty.
+        let mut empty_source = handler_route.clone();
+        empty_source["response"]["source"] = serde_json::Value::String("   ".to_string());
+        let err = validate_node_route_record(&empty_source).unwrap_err();
+        assert!(
+            err.to_string().contains("must be non-empty"),
+            "should reject blank response source: {err}"
         );
     }
 

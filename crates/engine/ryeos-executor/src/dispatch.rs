@@ -1779,13 +1779,13 @@ fn derive_manifest_runtime_caps(
             match op {
                 ryeos_bundle::manifest::BundleEventOperation::Append => {
                     caps.insert(format!(
-                        "ryeos.append.bundle_events.{effective_bundle_id}/{}",
+                        "ryeos.append.bundle-events.{effective_bundle_id}/{}",
                         decl.event_kind
                     ));
                 }
                 ryeos_bundle::manifest::BundleEventOperation::Scan => {
                     caps.insert(format!(
-                        "ryeos.scan.bundle_events.{effective_bundle_id}/{}",
+                        "ryeos.scan.bundle-events.{effective_bundle_id}/{}",
                         decl.event_kind
                     ));
                 }
@@ -2193,11 +2193,11 @@ metadata:
 
     fn resolved_tool(bundle_root: &std::path::Path, item_ref: &str) -> ResolvedExecutionRequest {
         let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
-        let source_path = ai_dir.join("tools/ryeos-email/send.yaml");
+        let source_path = ai_dir.join("tools/example-bundle/send.yaml");
         fs::create_dir_all(source_path.parent().unwrap()).unwrap();
         fs::write(
             &source_path,
-            "category: ryeos-email\nexecutor_id: '@subprocess'\n",
+            "category: example-bundle\nexecutor_id: '@subprocess'\n",
         )
         .unwrap();
         let canonical_ref = CanonicalRef::parse(item_ref).unwrap();
@@ -2251,18 +2251,18 @@ metadata:
 
     #[test]
     fn manifest_runtime_caps_derive_exact_self_bundle_caps() {
-        let bundle = tempdir().join("ryeos-email");
+        let bundle = tempdir().join("example-bundle");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(
             &ai_dir,
-            r#"name: ryeos-email
+            r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
 bundle_events:
-  - event_kind: email_event
+  - event_kind: example_event
     operations: [append, scan]
 runtime_vault:
   - namespace: oauth
@@ -2270,34 +2270,34 @@ runtime_vault:
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
 
         let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
         assert_eq!(
             caps,
             vec![
-                "ryeos.append.bundle_events.ryeos-email/email_event".to_string(),
-                "ryeos.delete.vault.ryeos-email/oauth".to_string(),
-                "ryeos.get.vault.ryeos-email/oauth".to_string(),
-                "ryeos.list.vault.ryeos-email/oauth".to_string(),
-                "ryeos.put.vault.ryeos-email/oauth".to_string(),
-                "ryeos.scan.bundle_events.ryeos-email/email_event".to_string(),
+                "ryeos.append.bundle-events.example-bundle/example_event".to_string(),
+                "ryeos.delete.vault.example-bundle/oauth".to_string(),
+                "ryeos.get.vault.example-bundle/oauth".to_string(),
+                "ryeos.list.vault.example-bundle/oauth".to_string(),
+                "ryeos.put.vault.example-bundle/oauth".to_string(),
+                "ryeos.scan.bundle-events.example-bundle/example_event".to_string(),
             ]
         );
     }
 
     #[test]
     fn manifest_runtime_caps_empty_without_signed_declarations() {
-        let bundle = tempdir().join("ryeos-email");
+        let bundle = tempdir().join("example-bundle");
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
         assert!(derive_manifest_runtime_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
 
         write_signed_manifest(
             &bundle.join(ryeos_engine::AI_DIR),
-            r#"name: ryeos-email
+            r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
@@ -2313,7 +2313,7 @@ bundle_events: []
 
     #[test]
     fn manifest_runtime_caps_reject_manifest_namespace_mismatch_when_declared() {
-        let bundle = tempdir().join("ryeos-email");
+        let bundle = tempdir().join("example-bundle");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         write_signed_manifest(
             &ai_dir,
@@ -2324,26 +2324,26 @@ provides_kinds: []
 requires_kinds: []
 uses_kinds: []
 bundle_events:
-  - event_kind: email_event
+  - event_kind: example_event
     operations: [append]
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
         let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("namespace mismatch"), "got: {err}");
     }
 
     #[test]
     fn manifest_runtime_caps_reject_invalid_manifest_declarations() {
-        let bundle = tempdir().join("ryeos-email");
+        let bundle = tempdir().join("example-bundle");
         let ai_dir = bundle.join(ryeos_engine::AI_DIR);
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:ryeos-email/send");
+        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
 
         write_signed_manifest(
             &ai_dir,
-            r#"name: ryeos-email
+            r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
@@ -2359,14 +2359,14 @@ bundle_events:
 
         write_signed_manifest(
             &ai_dir,
-            r#"name: ryeos-email
+            r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
 bundle_events:
-  - event_kind: email_event
+  - event_kind: example_event
     operations: []
 "#,
         );
@@ -2378,7 +2378,7 @@ bundle_events:
 
         write_signed_manifest(
             &ai_dir,
-            r#"name: ryeos-email
+            r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
@@ -2398,11 +2398,11 @@ runtime_vault:
 
     #[test]
     fn direct_tool_required_caps_do_not_become_callback_caps() {
-        let bundle = tempdir().join("ryeos-email");
+        let bundle = tempdir().join("example-bundle");
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool_with_extra(
             &bundle,
-            "tool:ryeos-email/send",
+            "tool:example-bundle/send",
             std::collections::HashMap::from([(
                 "required_caps".to_string(),
                 serde_json::json!(["ryeos.*"]),

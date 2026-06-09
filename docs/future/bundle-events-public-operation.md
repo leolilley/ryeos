@@ -10,8 +10,8 @@ runtime package.
 
 - `bundle_events:` in a signed bundle manifest declares event kinds and allowed
   operations.
-- The executor derives `ryeos.append.bundle_events.<bundle>/<event_kind>` and
-  `ryeos.scan.bundle_events.<bundle>/<event_kind>` capabilities from the
+- The executor derives `ryeos.append.bundle-events.<bundle>/<event_kind>` and
+  `ryeos.scan.bundle-events.<bundle>/<event_kind>` capabilities from the
   verified bundle manifest.
 - The daemon callback path derives the effective bundle from the verified
   executing tool context and authorizes against those capabilities.
@@ -44,9 +44,9 @@ Append input shape:
 
 ```json
 {
-  "event_kind": "email_event",
-  "chain_id": "email_123",
-  "event_type": "email_planned",
+  "event_kind": "example_event",
+  "chain_id": "example_123",
+  "event_type": "example_planned",
   "schema_version": 1,
   "payload": {},
   "expected_chain_head_hash": null,
@@ -60,8 +60,8 @@ Read-chain input shape:
 
 ```json
 {
-  "event_kind": "email_event",
-  "chain_id": "email_123"
+  "event_kind": "example_event",
+  "chain_id": "example_123"
 }
 ```
 
@@ -69,7 +69,7 @@ Initial scan input shape:
 
 ```json
 {
-  "event_kind": "email_event"
+  "event_kind": "example_event"
 }
 ```
 

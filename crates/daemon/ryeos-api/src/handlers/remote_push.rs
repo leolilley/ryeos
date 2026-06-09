@@ -1,6 +1,5 @@
 //! `remote/push` — push project content to a remote node.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -33,8 +32,6 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let client = RemoteClient::from_named_remote(&state, &req.remote, Some(&req.project))?;
-
     let path = &req.project;
     if !path.is_absolute() {
         return Err(anyhow::anyhow!(
@@ -54,6 +51,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut project_path_for_ref = canonical_abs.to_string_lossy().to_string();
     let abs_project_path = canonical_abs;
 
+    let client = RemoteClient::from_named_remote(&state, &req.remote, Some(&abs_project_path))?;
+
     // Resolve scope and remote-path-for-ref from any configured binding.
     // Default scope is `AiOnly` (see `ProjectSyncScope::default`) so an
     // unbound `remote push` ships only the `.ai/` subtree, never the
@@ -69,17 +68,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 scope = binding.sync_scope;
                 project_path_for_ref = binding.remote_project_path;
             }
-            Err(e) if matches!(loaded.scope, config::RemoteConfigScope::Project { .. }) => {
-                anyhow::bail!(
-                    "project-level remote '{}' requires a project_binding for '{}'; run `ryeos remote bind-project --remote {} --project {} --remote-project <remote-path> --sync-scope ai_only`: {e:#}",
-                    req.remote,
-                    abs_project_path.display(),
-                    req.remote,
-                    abs_project_path.display(),
-                );
-            }
             Err(_) => {
-                // Preserve existing unbound fallback behavior for user-level remotes.
+                // No binding is required for the default ai_only push; use
+                // the canonical local project path as the remote path ref.
             }
         }
     }
@@ -112,7 +103,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
         ProjectSyncScope::FullProject => {
             // Full-project push requires the remote's ingest ignore rules.
-            // Fetch + cache inline on miss.
+            // Fetch inline on miss, but do not persist partial/invalid remote
+            // config. Operators should use `remote configure` for durable config.
             let remote_ignore = match remote_cfg {
                 Some(cfg) => IgnoreMatcher::from_config(&cfg.ingest_ignore)?,
                 None => {
@@ -124,24 +116,6 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                             req.remote
                         )
                     })?;
-                    let _ = (|| -> Result<()> {
-                        let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
-                        remotes.insert(
-                            req.remote.clone(),
-                            config::RemoteConfig {
-                                name: req.remote.clone(),
-                                url: client.base_url().to_string(),
-                                principal_id: String::new(),
-                                signing_key: String::new(),
-                                site_id: config::MISSING_SITE_ID_SENTINEL.to_string(),
-                                vault_fingerprint: String::new(),
-                                ingest_ignore: fetched.clone(),
-                                project_binding: None,
-                                project_bindings: HashMap::new(),
-                            },
-                        );
-                        config::save_remotes(&state.config.system_space_dir, &remotes)
-                    })();
                     IgnoreMatcher::from_config(&fetched)?
                 }
             };

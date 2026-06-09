@@ -293,6 +293,7 @@ fn authorize_command(local_public_key: &str, local_fingerprint: &str) -> String 
         "ryeos.execute.service.push.head",
         "ryeos.execute.service.project.status",
         "ryeos.execute.service.project.apply",
+        "ryeos.execute.service.scheduler.register",
         "ryeos.execute.service.threads.list",
         "ryeos.execute.service.threads.get",
     ];

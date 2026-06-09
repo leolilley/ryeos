@@ -182,6 +182,9 @@ fn materialize_files(
         let rel_path = entry["path"].as_str().unwrap_or("");
         let hash = entry["hash"].as_str().unwrap_or("");
 
+        ryeos_state::project_sync::validate_safe_relative_path(rel_path)
+            .with_context(|| format!("invalid exported bundle path '{rel_path}'"))?;
+
         let bytes = blob_data
             .get(hash)
             .ok_or_else(|| anyhow::anyhow!("blob {} missing after pre-check", hash))?;

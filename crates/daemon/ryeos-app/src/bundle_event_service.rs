@@ -174,7 +174,7 @@ fn authorize_bundle_event(
     bundle_id: &str,
     event_kind: &str,
 ) -> anyhow::Result<()> {
-    let required = format!("ryeos.{verb}.bundle_events.{bundle_id}/{event_kind}");
+    let required = format!("ryeos.{verb}.bundle-events.{bundle_id}/{event_kind}");
     authorizer
         .authorize(effective_caps, &AuthorizationPolicy::require(&required))
         .with_context(|| format!("missing required capability: {required}"))
@@ -216,7 +216,7 @@ mod tests {
             effective_caps,
             provenance: ExecutionProvenance::root_live_fs(PathBuf::from("/tmp/test"), engine),
             effective_bundle_id: effective_bundle_id.map(str::to_string),
-            item_ref: Some("tool:ryeos-email/send".into()),
+            item_ref: Some("tool:example-bundle/send".into()),
         }
     }
 
@@ -224,15 +224,15 @@ mod tests {
     fn authorizes_bundle_event_capability() {
         let authorizer = Authorizer::new();
         let cap = cap(
-            vec!["ryeos.append.bundle_events.ryeos-email/email_event".into()],
-            Some("ryeos-email"),
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".into()],
+            Some("example-bundle"),
         );
         authorize_bundle_event(
             &authorizer,
             &cap.effective_caps,
             "append",
-            "ryeos-email",
-            "email_event",
+            "example-bundle",
+            "example_event",
         )
         .unwrap();
     }
@@ -240,8 +240,8 @@ mod tests {
     #[test]
     fn validates_identifiers_before_capability_check() {
         let cap = cap(
-            vec!["ryeos.scan.bundle_events.*".into()],
-            Some("ryeos-email"),
+            vec!["ryeos.scan.bundle-events.*".into()],
+            Some("example-bundle"),
         );
         let bundle_id = effective_bundle_id(&cap).unwrap();
         let err = validate_bundle_identifiers(&bundle_id, "../bad").unwrap_err();

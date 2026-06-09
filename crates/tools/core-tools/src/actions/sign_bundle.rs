@@ -291,11 +291,12 @@ fn sign_one_item(
     }
 
     // Sign in place (atomic)
-    let signed = lillux::signature::sign_content(
+    let signed = lillux::signature::sign_content_with_options(
         &stripped,
         signing_key,
         &source_format.signature.prefix,
         source_format.signature.suffix.as_deref(),
+        source_format.signature.after_shebang,
     );
 
     let tmp = file_path.with_extension(format!("signed.tmp.{}", std::process::id()));
@@ -326,11 +327,12 @@ fn is_already_validly_signed(
 
     let verifying_key = signing_key.verifying_key();
     let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
+    let signed_body = lillux::signature::content_to_sign(body, envelope.after_shebang);
     lillux::signature::is_valid_signature_for(
         &header.content_hash,
         &header.signature_b64,
         &header.signer_fingerprint,
-        body,
+        signed_body,
         &verifying_key,
         &fingerprint,
     )

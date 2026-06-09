@@ -31,37 +31,37 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let local = config::canonical_local_project_path(&req.project)?;
     let local_key = local.to_string_lossy().to_string();
 
-    // Mutate the remote where it actually lives (project or user).
-    let scope =
-        config::locate_remote_scope(&state.config.system_space_dir, Some(&local), &req.remote)?;
-    let mut remotes = config::load_remotes_at(&config::remotes_config_path(&scope))?;
+    let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
+    if !remotes.contains_key(&req.remote) {
+        let report =
+            config::load_remotes_layered_report(&state.config.system_space_dir, Some(&local))?;
+        let loaded = config::get_loaded_remote(&report.remotes, &req.remote).map_err(|_| {
+            anyhow::anyhow!(
+                "remote '{}' not found in operator config; run `ryeos remote configure {}` first",
+                req.remote,
+                req.remote,
+            )
+        })?;
+        let mut cfg = loaded.config;
+        cfg.project_bindings.clear();
+        remotes.insert(req.remote.clone(), cfg);
+    }
     let remote = remotes
         .get_mut(&req.remote)
-        .ok_or_else(|| anyhow::anyhow!("remote '{}' not found in config", req.remote))?;
-    let is_project_scope = scope == local;
-    let binding = RemoteProjectBinding {
-        remote_project_path: req.remote_project.clone(),
-        sync_scope: req.sync_scope,
-    };
-    if is_project_scope {
-        remote.project_binding = Some(binding);
-        remote.project_bindings.clear();
-    } else {
-        remote.project_bindings.insert(local_key.clone(), binding);
-    }
-    let remote_scope = if is_project_scope {
-        config::RemoteConfigScope::Project {
-            root: scope.clone(),
-        }
-    } else {
-        config::RemoteConfigScope::User
-    };
-    config::save_remotes_for_scope(&scope, &remotes, &remote_scope)?;
+        .expect("remote is present after read-through or prior user config load");
+    remote.project_bindings.insert(
+        local_key.clone(),
+        RemoteProjectBinding {
+            remote_project_path: req.remote_project.clone(),
+            sync_scope: req.sync_scope,
+        },
+    );
+    config::save_remotes(&state.config.system_space_dir, &remotes)?;
 
     Ok(serde_json::json!({
         "remote": req.remote,
-        "scope": remote_scope.label(),
-        "local_project_path": if is_project_scope { ".".to_string() } else { local_key },
+        "scope": "user",
+        "local_project_path": local_key,
         "remote_project_path": req.remote_project,
         "sync_scope": req.sync_scope,
     }))
