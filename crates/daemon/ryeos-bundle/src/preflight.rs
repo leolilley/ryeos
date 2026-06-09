@@ -1215,12 +1215,16 @@ fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
     if record.response.mode.is_empty() {
         bail!("route response missing non-empty 'mode'");
     }
+    // `response.source` is mode-specific: some modes (e.g. `handler`) use
+    // canonical refs while others (e.g. `event_stream`) use registry source
+    // names such as `dispatch_launch`/`thread_events`. The owning subsystem is
+    // the route compiler / `ResponseModeRegistry`, so preflight only performs
+    // mode-independent structural validation here and must not parse the value
+    // as a canonical ref.
     if let Some(source) = record.response.source.as_deref() {
         if source.trim().is_empty() {
             bail!("route response source must be non-empty when present");
         }
-        ryeos_engine::canonical_ref::CanonicalRef::parse(source)
-            .with_context(|| format!("invalid route response source '{source}'"))?;
     }
     if let Some(execute) = &record.execute {
         ryeos_engine::canonical_ref::CanonicalRef::parse(&execute.item_ref)
@@ -1817,8 +1821,31 @@ description: "fixed parser handler for preflight tests"
     }
 
     #[test]
-    fn validate_route_source_when_present_requires_canonical_ref() {
-        let mut route = serde_json::json!({
+    fn validate_route_accepts_registry_source_names_without_canonical_ref() {
+        // `response.source` semantics are owned by the route compiler /
+        // ResponseModeRegistry, not by generic bundle preflight. Registry-backed
+        // sources (e.g. the real core `event_stream` route\'s `dispatch_launch`)
+        // are NOT canonical refs and must not be parsed as such here. This is the
+        // exact case that broke `ryeos init` on the core bundle.
+        let event_stream_route = serde_json::json!({
+            "section": "routes",
+            "id": "execute/stream",
+            "path": "/execute/stream",
+            "methods": ["POST"],
+            "auth": "ryeos_signed",
+            "response": {
+                "mode": "event_stream",
+                "source": "dispatch_launch"
+            }
+        });
+        assert!(
+            validate_node_route_record(&event_stream_route).is_ok(),
+            "registry source name `dispatch_launch` must pass generic preflight"
+        );
+
+        // A canonical-ref-shaped source (e.g. `handler` mode) is equally valid:
+        // preflight does not care which form the owning mode uses.
+        let handler_route = serde_json::json!({
             "section": "routes",
             "id": "test-route",
             "path": "/test",
@@ -1829,14 +1856,16 @@ description: "fixed parser handler for preflight tests"
                 "source": "handler:test/route-handler"
             }
         });
-        assert!(validate_node_route_record(&route).is_ok());
+        assert!(validate_node_route_record(&handler_route).is_ok());
 
-        route["response"]["source"] = serde_json::Value::String("not a ref".to_string());
-        let err = validate_node_route_record(&route).unwrap_err();
-        let msg = err.to_string();
+        // The only mode-independent structural rule preflight enforces: when
+        // `source` is present it must be non-empty.
+        let mut empty_source = handler_route.clone();
+        empty_source["response"]["source"] = serde_json::Value::String("   ".to_string());
+        let err = validate_node_route_record(&empty_source).unwrap_err();
         assert!(
-            msg.contains("invalid route response source"),
-            "should reject invalid response source: {msg}"
+            err.to_string().contains("must be non-empty"),
+            "should reject blank response source: {err}"
         );
     }
 
