@@ -29,7 +29,7 @@ use crate::routes::compile::{
 use crate::routes::invocation::{
     InvocationCheck, RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
 };
-use crate::routes::invokers::dispatch_invocation::CompiledDispatchInvoker;
+use crate::routes::invokers::dispatch_invocation::{CompiledDispatchInvoker, DispatchAuthority};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
@@ -42,6 +42,8 @@ pub struct CompiledHandlerMode {
     request_config: HandlerRequestConfig,
     result_config: HandlerResultConfig,
     request_body_mode: RawRequestBody,
+    execution_principal_id: String,
+    execution_scopes: Vec<String>,
     invoker: Arc<CompiledDispatchInvoker>,
 }
 
@@ -237,6 +239,8 @@ impl ResponseMode for HandlerMode {
                 ),
             });
         }
+        let execution_principal_id = format!("route-handler:{}:{}", route_bundle_id, raw.id);
+        let execution_scopes = vec![handler_execute_scope(source_ref, &raw.id)?];
 
         Ok(Arc::new(CompiledHandlerMode {
             source_ref: source_ref.to_string(),
@@ -244,8 +248,14 @@ impl ResponseMode for HandlerMode {
             request_config: config.request,
             result_config: config.result,
             request_body_mode: raw.request.body.clone(),
+            execution_principal_id: execution_principal_id.clone(),
+            execution_scopes: execution_scopes.clone(),
             invoker: Arc::new(CompiledDispatchInvoker {
                 item_ref: source_ref.to_string(),
+                authority: DispatchAuthority::FixedPrincipal {
+                    fingerprint: execution_principal_id,
+                    scopes: execution_scopes,
+                },
             }),
         }))
     }
@@ -266,7 +276,13 @@ impl CompiledResponseMode for CompiledHandlerMode {
         compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<Response, RouteDispatchError> {
-        assert_resolved_handler_source_anchored(&ctx, &self.source_ref, &self.project_root)?;
+        assert_resolved_handler_source_anchored(
+            &ctx,
+            &self.source_ref,
+            &self.project_root,
+            &self.execution_principal_id,
+            &self.execution_scopes,
+        )?;
 
         let envelope = build_route_envelope(
             compiled,
@@ -336,6 +352,8 @@ fn assert_resolved_handler_source_anchored(
     ctx: &RouteDispatchContext,
     source_ref: &str,
     project_root: &Path,
+    execution_principal_id: &str,
+    execution_scopes: &[String],
 ) -> Result<(), RouteDispatchError> {
     let canonical_ref = CanonicalRef::parse(source_ref).map_err(|err| {
         RouteDispatchError::Internal(format!(
@@ -345,8 +363,8 @@ fn assert_resolved_handler_source_anchored(
     let site_id = ctx.state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: ctx.principal.id.clone(),
-            scopes: ctx.principal.scopes.clone(),
+            fingerprint: execution_principal_id.to_string(),
+            scopes: execution_scopes.to_vec(),
         }),
         project_context: ProjectContext::LocalPath {
             path: project_root.to_path_buf(),
@@ -368,6 +386,20 @@ fn assert_resolved_handler_source_anchored(
         })?;
 
     validate_resolved_handler_source_path(&resolved.source_path, project_root, source_ref)
+}
+
+fn handler_execute_scope(source_ref: &str, route_id: &str) -> Result<String, RouteConfigError> {
+    let (kind, subject) =
+        source_ref
+            .split_once(':')
+            .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
+                id: route_id.into(),
+                src: source_ref.into(),
+                reason: "handler source is not a valid canonical ref".into(),
+            })?;
+    Ok(ryeos_runtime::authorizer::canonical_cap(
+        kind, subject, "execute",
+    ))
 }
 
 fn validate_resolved_handler_source_path(
@@ -786,6 +818,38 @@ mod tests {
         }));
 
         HandlerMode.compile(&raw).unwrap();
+    }
+
+    #[test]
+    fn compile_uses_fixed_route_handler_authority() {
+        let raw = raw_handler_route(Value::Null);
+
+        let compiled = HandlerMode.compile(&raw).unwrap();
+        let handler = compiled
+            .as_any()
+            .downcast_ref::<CompiledHandlerMode>()
+            .unwrap();
+
+        assert_eq!(
+            handler.execution_principal_id,
+            "route-handler:ryeos-email:ryeos-email.track_click"
+        );
+        assert_eq!(
+            handler.execution_scopes,
+            vec!["ryeos.execute.tool.ryeos-email/webhook/track_click"]
+        );
+        match &handler.invoker.authority {
+            DispatchAuthority::FixedPrincipal {
+                fingerprint,
+                scopes,
+            } => {
+                assert_eq!(fingerprint, &handler.execution_principal_id);
+                assert_eq!(scopes, &handler.execution_scopes);
+            }
+            DispatchAuthority::CallerPrincipal => {
+                panic!("handler mode must not use caller authority")
+            }
+        }
     }
 
     #[test]
