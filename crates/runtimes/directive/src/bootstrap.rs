@@ -29,12 +29,11 @@ pub struct BootstrapOutput {
     pub sampling: Option<SamplingConfig>,
 }
 
-/// Filesystem roots needed for bootstrap resolution.
+/// Filebundle roots needed for bootstrap resolution.
 #[allow(dead_code)] // Used by future bootstrap features (context loading, etc.)
 pub struct BootstrapRoots<'a> {
     pub project_root: &'a Path,
-    pub user_root: Option<&'a Path>,
-    pub system_roots: &'a [PathBuf],
+    pub bundle_roots: &'a [PathBuf],
 }
 
 pub fn bootstrap(
@@ -304,9 +303,9 @@ fn project_tool_inventory(
 }
 
 fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefinition>> {
-    // Use `load_config_strict` for correct project > user > system
+    // Use `load_config_strict` for correct project > bundle
     // precedence with deep merge. The old code used `scan_kind` which
-    // gave system > user > project (first-found-wins), silently
+    // gave bundle > project (first-found-wins), silently
     // discarding project-level hook overrides.
     let Some(config): Option<serde_yaml::Value> = loader
         .load_config_strict("ryeos-runtime/hook_conditions")

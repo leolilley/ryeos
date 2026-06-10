@@ -286,14 +286,15 @@ fn ephemeral_record(
 
 impl StateStore {
     pub fn new(
-        state_root: PathBuf,
+        runtime_state_dir: PathBuf,
         runtime_db_path: PathBuf,
         signer: Arc<dyn Signer>,
         write_barrier: WriteBarrier,
     ) -> Result<Self> {
-        std::fs::create_dir_all(&state_root).context("failed to create state_root directory")?;
+        std::fs::create_dir_all(&runtime_state_dir)
+            .context("failed to create runtime_state_dir directory")?;
 
-        let state_db = StateDb::open(&state_root)?;
+        let state_db = StateDb::open(&runtime_state_dir)?;
         let runtime_db = runtime_db::RuntimeDb::open(&runtime_db_path)?;
 
         Ok(Self {

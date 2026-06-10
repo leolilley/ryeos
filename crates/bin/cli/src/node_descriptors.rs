@@ -21,13 +21,14 @@ impl LoadedCommandDescriptor {
     }
 }
 
-pub fn load_verified_snapshot(system_space_dir: &Path) -> anyhow::Result<NodeConfigSnapshot> {
-    let user_root = ryeos_engine::roots::user_root().ok();
-    let trust_store =
-        ryeos_engine::trust::TrustStore::load_three_tier(None, user_root.as_deref(), &[])
-            .context("load trust store for verified node config")?;
+pub fn load_verified_snapshot(app_root: &Path) -> anyhow::Result<NodeConfigSnapshot> {
+    let trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+    )
+    .context("load trust store for verified node config")?;
     let loader = BootstrapLoader {
-        system_space_dir,
+        app_root,
         trust_store: &trust_store,
     };
     let bundles = loader

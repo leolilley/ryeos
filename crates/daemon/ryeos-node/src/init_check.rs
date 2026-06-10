@@ -11,7 +11,7 @@ pub enum InitState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InitDiagnostics {
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
     pub bundles_dir: PathBuf,
     pub code: InitDiagnosticCode,
     pub message: String,
@@ -25,19 +25,19 @@ pub enum InitDiagnosticCode {
     NoBundleRegistrations,
 }
 
-pub fn init_state(system_space_dir: &Path) -> Result<InitState> {
-    let bundles_dir = system_space_dir
+pub fn init_state(app_root: &Path) -> Result<InitState> {
+    let bundles_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("bundles");
 
-    if !system_space_dir.exists() {
+    if !app_root.exists() {
         return Ok(InitState::NotInitialized {
             diagnostics: InitDiagnostics {
-                system_space_dir: system_space_dir.to_path_buf(),
+                app_root: app_root.to_path_buf(),
                 bundles_dir,
                 code: InitDiagnosticCode::SystemSpaceMissing,
-                message: format!("system space dir missing at {}", system_space_dir.display()),
+                message: format!("app root missing at {}", app_root.display()),
             },
         });
     }
@@ -45,7 +45,7 @@ pub fn init_state(system_space_dir: &Path) -> Result<InitState> {
     if !bundles_dir.is_dir() {
         return Ok(InitState::NotInitialized {
             diagnostics: InitDiagnostics {
-                system_space_dir: system_space_dir.to_path_buf(),
+                app_root: app_root.to_path_buf(),
                 bundles_dir: bundles_dir.clone(),
                 code: InitDiagnosticCode::BundleRegistrationsMissing,
                 message: format!(
@@ -72,7 +72,7 @@ pub fn init_state(system_space_dir: &Path) -> Result<InitState> {
     if !has_registration {
         return Ok(InitState::NotInitialized {
             diagnostics: InitDiagnostics {
-                system_space_dir: system_space_dir.to_path_buf(),
+                app_root: app_root.to_path_buf(),
                 bundles_dir: bundles_dir.clone(),
                 code: InitDiagnosticCode::NoBundleRegistrations,
                 message: format!(
@@ -86,8 +86,8 @@ pub fn init_state(system_space_dir: &Path) -> Result<InitState> {
     Ok(InitState::Initialized)
 }
 
-pub fn require_initialized(system_space_dir: &Path) -> Result<()> {
-    match init_state(system_space_dir)? {
+pub fn require_initialized(app_root: &Path) -> Result<()> {
+    match init_state(app_root)? {
         InitState::Initialized => Ok(()),
         InitState::NotInitialized { diagnostics } => bail!(
             "RyeOS is not initialized: {}\nRun: ryeos init",
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_system_space_is_not_initialized() {
+    fn missing_app_root_is_not_initialized() {
         let tmp = tempfile::tempdir().unwrap();
         let state = init_state(&tmp.path().join("missing")).unwrap();
         assert!(matches!(state, InitState::NotInitialized { .. }));

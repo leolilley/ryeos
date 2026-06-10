@@ -270,7 +270,7 @@ fn write_admission_token_file_with_issued_at(
     let token_hash = lillux::cas::sha256_hex(token.as_bytes());
     let token_dir = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("admission")
@@ -289,7 +289,7 @@ fn write_admission_token_file_with_issued_at(
         doc.push_str(&format!("label = \"{label}\"\n"));
     }
     std::fs::write(
-        admission_token_path(&state.config.system_space_dir, &token_hash),
+        admission_token_path(&state.config.app_root, &token_hash),
         doc,
     )
     .unwrap();
@@ -355,8 +355,8 @@ fn sign_claim(
     base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
 }
 
-fn admission_token_path(system_space_dir: &Path, token_hash: &str) -> std::path::PathBuf {
-    system_space_dir
+fn admission_token_path(app_root: &Path, token_hash: &str) -> std::path::PathBuf {
+    app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("admission")

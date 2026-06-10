@@ -45,7 +45,7 @@ pub async fn handle(
 
     let node_dir = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let yaml_path = node_dir

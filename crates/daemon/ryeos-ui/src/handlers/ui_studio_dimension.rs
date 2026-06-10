@@ -200,8 +200,7 @@ fn build_dimension_projection(
         .iter()
         .map(|r| SpaceSummary {
             space: match r.space {
-                ryeos_engine::contracts::ItemSpace::System => "system".to_string(),
-                ryeos_engine::contracts::ItemSpace::User => "user".to_string(),
+                ryeos_engine::contracts::ItemSpace::Bundle => "system".to_string(),
                 ryeos_engine::contracts::ItemSpace::Project => "project".to_string(),
             },
             label: r.label.clone(),
@@ -320,13 +319,13 @@ fn load_remotes(state: &AppState, project_path: Option<&PathBuf>) -> Vec<RemoteS
     // Import remote config loading from ryeos-api's remote module.
     // We can't directly depend on ryeos-api's remote module from ryeos-ui,
     // so we load remotes using the layered config function exposed via
-    // the AppState's system_space_dir.
+    // the AppState's app_root.
     let project = project_path.map(|p| p.as_path());
-    let system_space = &state.config.system_space_dir;
+    let app_root = &state.config.app_root;
 
     // Try to load remotes — the config module is in ryeos-api which we
     // depend on transitively. Use the public config loading function.
-    match ryeos_api::remote::config::load_remotes_layered(system_space, project) {
+    match ryeos_api::remote::config::load_remotes_layered(app_root, project) {
         Ok(remotes_map) => {
             let mut entries: Vec<RemoteSummary> = remotes_map
                 .values()
@@ -357,15 +356,15 @@ fn load_schedule_summary(state: &AppState) -> (usize, usize) {
 
 /// Load GC read-only status: check lock file, read recent event log.
 fn load_gc_summary(state: &AppState) -> GcSummary {
-    let state_root = state.config.system_space_dir.join(".ai").join("state");
+    let runtime_state_dir = state.config.runtime_state_dir();
 
     // Check if GC is currently running (lock file + state sidecar exist).
-    let lock_path = state_root.join("gc.lock");
-    let state_sidecar = state_root.join("gc.state.json");
+    let lock_path = runtime_state_dir.join("gc.lock");
+    let state_sidecar = runtime_state_dir.join("gc.state.json");
     let running = lock_path.exists() && state_sidecar.exists();
 
     // Read recent GC events from the JSONL log.
-    let log_path = state_root.join("logs").join("gc.jsonl");
+    let log_path = runtime_state_dir.join("logs").join("gc.jsonl");
     let recent_events = read_recent_gc_events(&log_path, 5);
 
     GcSummary {

@@ -43,8 +43,7 @@ pub async fn handle_remotes_list(
 
     let project = session.project_root.as_deref().map(std::path::Path::new);
 
-    let remotes =
-        ryeos_api::remote::config::load_remotes_layered(&state.config.system_space_dir, project)?;
+    let remotes = ryeos_api::remote::config::load_remotes_layered(&state.config.app_root, project)?;
 
     let mut entries: Vec<Value> = remotes
         .values()
@@ -84,8 +83,7 @@ pub async fn handle_remotes_probe(
     let req: ProbeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let remotes =
-        ryeos_api::remote::config::load_remotes_layered(&state.config.system_space_dir, project)?;
+    let remotes = ryeos_api::remote::config::load_remotes_layered(&state.config.app_root, project)?;
     let remote_cfg = ryeos_api::remote::config::get_remote(&remotes, &req.remote)?;
 
     let client = ryeos_api::remote::client::RemoteClient::from_remote_cfg(&state, &remote_cfg);

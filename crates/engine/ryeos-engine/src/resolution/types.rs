@@ -7,11 +7,11 @@ use std::path::PathBuf;
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrustClass {
     /// Item from immutable system bundle.
-    TrustedSystem,
-    /// Item from user space.
-    TrustedUser,
+    TrustedBundle,
+    /// Item from a trusted project source.
+    TrustedProject,
     /// Item from project or untrusted sources.
-    UntrustedUserSpace,
+    UntrustedProject,
     /// Item not signed or signature invalid.
     Unsigned,
 }
@@ -460,9 +460,9 @@ impl TrustClass {
     /// to fold an extends chain into a single effective scalar.
     pub fn strength(self) -> u8 {
         match self {
-            TrustClass::TrustedSystem => 3,
-            TrustClass::TrustedUser => 2,
-            TrustClass::UntrustedUserSpace => 1,
+            TrustClass::TrustedBundle => 3,
+            TrustClass::TrustedProject => 2,
+            TrustClass::UntrustedProject => 1,
             TrustClass::Unsigned => 0,
         }
     }
@@ -489,7 +489,7 @@ impl TrustClass {
 /// into the effective scalar.
 ///
 /// Order (strongest → weakest):
-/// `TrustedSystem` > `TrustedUser` > `UntrustedUserSpace` > `Unsigned`.
+/// `TrustedBundle` > `TrustedProject` > `UntrustedProject` > `Unsigned`.
 pub fn effective_trust(root: TrustClass, chain: &[ResolvedAncestor]) -> TrustClass {
     let mut weakest = root;
     for hop in chain {
@@ -521,12 +521,12 @@ mod tests {
     #[test]
     fn effective_trust_picks_weakest_in_chain() {
         let chain = vec![
-            ancestor(TrustClass::TrustedSystem),
+            ancestor(TrustClass::TrustedBundle),
             ancestor(TrustClass::Unsigned),
-            ancestor(TrustClass::TrustedUser),
+            ancestor(TrustClass::TrustedProject),
         ];
         assert_eq!(
-            effective_trust(TrustClass::TrustedSystem, &chain),
+            effective_trust(TrustClass::TrustedBundle, &chain),
             TrustClass::Unsigned
         );
     }
@@ -534,14 +534,14 @@ mod tests {
     #[test]
     fn effective_trust_returns_root_when_chain_empty() {
         assert_eq!(
-            effective_trust(TrustClass::TrustedUser, &[]),
-            TrustClass::TrustedUser
+            effective_trust(TrustClass::TrustedProject, &[]),
+            TrustClass::TrustedProject
         );
     }
 
     #[test]
     fn effective_trust_root_can_be_weakest() {
-        let chain = vec![ancestor(TrustClass::TrustedSystem)];
+        let chain = vec![ancestor(TrustClass::TrustedBundle)];
         assert_eq!(
             effective_trust(TrustClass::Unsigned, &chain),
             TrustClass::Unsigned
@@ -550,20 +550,20 @@ mod tests {
 
     #[test]
     fn effective_trust_ranking_order() {
-        // TrustedSystem > TrustedUser > UntrustedUserSpace > Unsigned
+        // TrustedBundle > TrustedProject > UntrustedProject > Unsigned
         let cases = [
             (
-                TrustClass::TrustedSystem,
-                TrustClass::TrustedUser,
-                TrustClass::TrustedUser,
+                TrustClass::TrustedBundle,
+                TrustClass::TrustedProject,
+                TrustClass::TrustedProject,
             ),
             (
-                TrustClass::TrustedUser,
-                TrustClass::UntrustedUserSpace,
-                TrustClass::UntrustedUserSpace,
+                TrustClass::TrustedProject,
+                TrustClass::UntrustedProject,
+                TrustClass::UntrustedProject,
             ),
             (
-                TrustClass::UntrustedUserSpace,
+                TrustClass::UntrustedProject,
                 TrustClass::Unsigned,
                 TrustClass::Unsigned,
             ),

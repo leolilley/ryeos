@@ -230,7 +230,7 @@ impl TrustStore {
     ///
     /// Used by the per-request engine overlay to UNION a
     /// caller-pushed trust overlay with the remote's persistent
-    /// three-tier trust store, without mutating either source.
+    /// trust store, without mutating either source.
     pub fn extend_from(&mut self, other: &TrustStore) -> usize {
         let mut added = 0;
         for (fp, signer) in other.signers.iter() {
@@ -311,49 +311,26 @@ impl TrustStore {
         Ok(Self { signers })
     }
 
-    /// Load trusted keys with operator-tier resolution: project > user.
+    /// Load trusted keys from project and operator config roots.
     ///
     /// Trust is operator-side state. Bundles MUST NOT auto-trust their
-    /// own keys — `system_roots` is preserved in the signature for caller
-    /// convenience but is intentionally NOT iterated for trust loading.
-    /// Operators pin publisher keys explicitly via `ryeos init` (platform
-    /// author key) and `ryeos trust pin <fingerprint>` (third parties).
+    /// own keys. Operators pin publisher keys explicitly via `ryeos init`
+    /// (platform author key) and trust-management commands.
     ///
     /// First match wins: a key present in the project tier is not
-    /// overridden by user.
-    ///
-    /// If any path in `system_roots` contains a `.ai/config/keys/trusted/`
-    /// directory, a warning is emitted to alert the operator to old
-    /// bundle-internal trust docs that the engine ignores.
-    pub fn load_three_tier(
+    /// overridden by operator config.
+    pub fn load(
         project_root: Option<&Path>,
-        user_root: Option<&Path>,
-        system_roots: &[PathBuf],
+        operator_config_root: &Path,
     ) -> Result<Self, EngineError> {
         let mut signers = HashMap::new();
-        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
 
-        // Collect operator-tier dirs only. system_roots is NOT a trust source.
+        // Collect trust dirs only. Bundles are NOT a trust source.
         let mut dirs: Vec<PathBuf> = Vec::new();
         if let Some(root) = project_root {
-            dirs.push(root.join(&trust_subdir));
+            dirs.push(root.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR));
         }
-        if let Some(root) = user_root {
-            dirs.push(root.join(&trust_subdir));
-        }
-
-        // Diagnostic: warn on old bundle-internal trust dirs that are
-        // now ignored. Helps operators who paste-installed an old bundle
-        // and wonder why trust didn't propagate.
-        for root in system_roots {
-            let candidate = root.join(&trust_subdir);
-            if candidate.is_dir() {
-                tracing::warn!(
-                    path = %candidate.display(),
-                    "ignoring bundle-internal trust dir — pin the publisher key with `ryeos trust pin <fingerprint>` instead"
-                );
-            }
-        }
+        dirs.push(operator_config_root.join("keys").join("trusted"));
 
         for dir in &dirs {
             if !dir.is_dir() {
@@ -376,6 +353,20 @@ impl TrustStore {
         }
 
         Ok(Self { signers })
+    }
+
+    /// Warn about bundle-internal trust dirs. They are never loaded.
+    pub fn warn_ignored_bundle_trust_dirs(bundle_roots: &[PathBuf]) {
+        let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
+        for root in bundle_roots {
+            let candidate = root.join(&trust_subdir);
+            if candidate.is_dir() {
+                tracing::warn!(
+                    path = %candidate.display(),
+                    "ignoring bundle-internal trust dir — pin the publisher key in operator config instead"
+                );
+            }
+        }
     }
 
     /// Check whether a fingerprint is trusted.
@@ -1263,28 +1254,28 @@ mod tests {
         assert!(store.is_trusted(&fp));
     }
 
-    // ── Three-tier resolution tests ────────────────────────────────
+    // ── Project + operator trust tests ─────────────────────────────
 
     #[test]
-    fn three_tier_project_overrides_user() {
+    fn load_project_overrides_operator() {
         let project = tempdir();
-        let user = tempdir();
+        let operator_config = tempdir();
 
         let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
         let project_trust = project.join(&trust_subdir);
-        let user_trust = user.join(&trust_subdir);
+        let operator_trust = operator_config.join("keys").join("trusted");
         fs::create_dir_all(&project_trust).unwrap();
-        fs::create_dir_all(&user_trust).unwrap();
+        fs::create_dir_all(&operator_trust).unwrap();
 
         let (_, vk, fp) = gen_key();
 
         // Same fingerprint in both spaces, different labels
         let project_toml = build_key_doc_toml(&fp, "project_owner", &vk);
-        let user_toml = build_key_doc_toml(&fp, "user_owner", &vk);
+        let operator_toml = build_key_doc_toml(&fp, "operator_owner", &vk);
         fs::write(project_trust.join(format!("{fp}.toml")), &project_toml).unwrap();
-        fs::write(user_trust.join(format!("{fp}.toml")), &user_toml).unwrap();
+        fs::write(operator_trust.join(format!("{fp}.toml")), &operator_toml).unwrap();
 
-        let store = TrustStore::load_three_tier(Some(&project), Some(&user), &[]).unwrap();
+        let store = TrustStore::load(Some(&project), &operator_config).unwrap();
 
         assert_eq!(store.len(), 1);
         // Project wins — label should be "project_owner"
@@ -1295,15 +1286,15 @@ mod tests {
     }
 
     #[test]
-    fn three_tier_merges_across_spaces() {
+    fn load_merges_project_and_operator() {
         let project = tempdir();
-        let user = tempdir();
+        let operator_config = tempdir();
 
         let trust_subdir = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
         let project_trust = project.join(&trust_subdir);
-        let user_trust = user.join(&trust_subdir);
+        let operator_trust = operator_config.join("keys").join("trusted");
         fs::create_dir_all(&project_trust).unwrap();
-        fs::create_dir_all(&user_trust).unwrap();
+        fs::create_dir_all(&operator_trust).unwrap();
 
         let (_, vk1, fp1) = gen_key();
         let (_, vk2, fp2) = gen_key2();
@@ -1312,11 +1303,11 @@ mod tests {
         let t1 = build_key_doc_toml(&fp1, "alice", &vk1);
         fs::write(project_trust.join(format!("{fp1}.toml")), &t1).unwrap();
 
-        // Key 2 in user only
+        // Key 2 in operator config only
         let t2 = build_key_doc_toml(&fp2, "bob", &vk2);
-        fs::write(user_trust.join(format!("{fp2}.toml")), &t2).unwrap();
+        fs::write(operator_trust.join(format!("{fp2}.toml")), &t2).unwrap();
 
-        let store = TrustStore::load_three_tier(Some(&project), Some(&user), &[]).unwrap();
+        let store = TrustStore::load(Some(&project), &operator_config).unwrap();
 
         assert_eq!(store.len(), 2);
         assert!(store.is_trusted(&fp1));
@@ -1324,11 +1315,10 @@ mod tests {
     }
 
     #[test]
-    fn three_tier_empty_when_no_dirs_exist() {
-        let store = TrustStore::load_three_tier(
+    fn load_empty_when_no_dirs_exist() {
+        let store = TrustStore::load(
             Some(Path::new("/nonexistent/project")),
-            Some(Path::new("/nonexistent/user")),
-            &[],
+            Path::new("/nonexistent/operator/.ai/config"),
         )
         .unwrap();
         assert!(store.is_empty());

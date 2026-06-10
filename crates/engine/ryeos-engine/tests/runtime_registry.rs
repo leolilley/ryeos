@@ -134,7 +134,7 @@ fn parse_via_registry(body: &str) -> Result<RuntimeYaml, EngineError> {
     write_signed_runtime(&bundle, "rt", body);
     let kinds = directive_kind_registry(&bundle);
     let registry = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &kinds,
     )?;
@@ -234,7 +234,7 @@ abi_version: v1
 fn registry_empty_when_no_bundles_have_runtimes() {
     let bundle = tempdir(); // no .ai/runtimes/ subdir
     let registry = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -249,7 +249,7 @@ fn registry_one_runtime_serving_kind_returned() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
     let registry = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -286,7 +286,7 @@ abi_version: v1
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -323,7 +323,7 @@ abi_version: v1
     );
 
     let err = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -362,7 +362,7 @@ abi_version: v1
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -382,7 +382,7 @@ fn registry_lookup_by_ref_returns_runtime() {
     let bundle = tempdir();
     write_signed_runtime(&bundle, "default", MINIMAL_RUNTIME_YAML);
     let registry = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -409,7 +409,7 @@ fn registry_tampered_yaml_aborts_build() {
     fs::write(&path, tampered).unwrap();
 
     let err = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &directive_kind_registry(&bundle),
     )
@@ -491,7 +491,7 @@ abi_version: "v1"
     );
 
     let err = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &kinds,
     )
@@ -528,6 +528,7 @@ location:
   directory: no_exec_items
 effective_trust:
   include_references: false
+resolution: []
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -565,7 +566,7 @@ abi_version: "v1"
     );
 
     let err = RuntimeRegistry::build_from_bundles(
-        &[(bundle.clone(), TrustClass::TrustedSystem)],
+        &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &kinds,
     )

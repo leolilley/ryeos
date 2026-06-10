@@ -4,8 +4,8 @@
 //! `kind: node` items in `system` space — the daemon's own node-config
 //! writes (bundle registrations, route entries, etc.).
 //!
-//! For operator edits in project/user space, use `ryeos-core-tools` (invokes
-//! `ryeos_tools::actions::sign::run_sign` with the user key).
+//! For operator edits in project space, use `ryeos-core-tools` (invokes
+//! `ryeos_tools::actions::sign::run_sign` with the operator key).
 //! For bundle authoring, use `ryeos publish sign-items` (uses the
 //! author key explicitly).
 
@@ -30,7 +30,6 @@ use ryeos_executor::executor::ServiceAvailability;
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum SignSpace {
     System,
-    User,
     Project,
 }
 
@@ -38,7 +37,6 @@ impl SignSpace {
     fn label(self) -> &'static str {
         match self {
             Self::System => "system",
-            Self::User => "user",
             Self::Project => "project",
         }
     }
@@ -103,10 +101,10 @@ fn run_node_sign(req: &Request, state: &AppState) -> Result<BatchReport> {
     // node-sign is daemon-internal only. Reject all non-system spaces
     // and reject system space for non-node kinds.
     match req.space {
-        SignSpace::User | SignSpace::Project => {
+        SignSpace::Project => {
             bail!(
                 "service:node-sign does not sign {}-space items — \
-                 use `ryeos-core-tools` for operator edits (invokes the user signing key)",
+                 use `ryeos-core-tools` for operator edits (invokes the operator signing key)",
                 req.space.label()
             );
         }
@@ -227,22 +225,12 @@ fn space_kind_dirs(
     match req.space {
         SignSpace::System => {
             let mut out = Vec::new();
-            for sys_root in &state.engine.system_roots {
+            for sys_root in &state.engine.bundle_roots {
                 let ai_root = sys_root.join(AI_DIR);
                 let kind_dir = ai_root.join(&kind_schema.directory);
                 out.push((ai_root, kind_dir));
             }
             Ok(out)
-        }
-        SignSpace::User => {
-            let user_root = state
-                .engine
-                .user_root
-                .as_ref()
-                .ok_or_else(|| anyhow!("space=user requested but daemon has no user root"))?;
-            let ai_root = user_root.join(AI_DIR);
-            let kind_dir = ai_root.join(&kind_schema.directory);
-            Ok(vec![(ai_root, kind_dir)])
         }
         SignSpace::Project => {
             let proj = req

@@ -745,7 +745,7 @@ mod tests {
             item: ComposeItemContext {
                 requested_id: "item:r".into(),
                 resolved_ref: "item:r".into(),
-                trust_class: TrustClassWire::TrustedSystem,
+                trust_class: TrustClassWire::TrustedBundle,
             },
             parsed,
         }
@@ -756,7 +756,7 @@ mod tests {
             item: ComposeItemContext {
                 requested_id: format!("item:{name}"),
                 resolved_ref: format!("item:{name}"),
-                trust_class: TrustClassWire::TrustedSystem,
+                trust_class: TrustClassWire::TrustedBundle,
             },
             parsed,
         }

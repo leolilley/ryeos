@@ -75,7 +75,7 @@ mod tests {
 
     /// The original `/flow` failure mode (5.5δ-flakes root cause): a
     /// leading slash in `graph_id` once made `Path::join` clobber the
-    /// base path and write to filesystem root (EACCES). Rebuilding
+    /// base path and write to filebundle root (EACCES). Rebuilding
     /// from Normal components only neutralises this.
     #[test]
     fn leading_slash_does_not_escape_base() {

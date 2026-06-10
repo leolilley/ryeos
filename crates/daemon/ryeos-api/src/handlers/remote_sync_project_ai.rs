@@ -30,8 +30,7 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let report =
-        config::load_remotes_layered_report(&state.config.system_space_dir, Some(&req.project))?;
+    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)?;
     let remote_cfg = loaded_remote.config.clone();
     let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)?;

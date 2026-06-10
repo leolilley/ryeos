@@ -19,7 +19,7 @@ pub struct Request {}
 pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
     let config_path = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_app::ignore::IGNORE_CONFIG_RELATIVE);
 
     if config_path.exists() {

@@ -58,7 +58,7 @@ impl SubscriberConfig {
     ///
     /// Installs the stderr layer (human-readable) PLUS a second
     /// `fmt::layer().json()` that appends structured ndjson lines to
-    /// `<system_space_dir>/.ai/state/trace-events.ndjson`. The file is opened
+    /// `<app_root>/.ai/state/trace-events.ndjson`. The file is opened
     /// once with append mode and shared across all writes via
     /// `Arc<Mutex<File>>`. Survives daemon restart — the file
     /// persists so test harnesses can tail across runs.

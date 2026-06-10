@@ -4,7 +4,7 @@
 //! author key. Validates metadata anchoring for every item before signing.
 //!
 //! This is NOT the operator-side `ryeos-core-tools` (which uses the user key and
-//! resolves through the three-tier engine space). This is the bundle
+//! resolves through the engine space). This is the bundle
 //! authoring path: explicit `--source`, explicit `--registry-root`,
 //! explicit `--key`. No ambient machine state.
 //!
@@ -133,12 +133,12 @@ pub fn sign_bundle_items_with_trust(
     let mut handler_roots: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = registry_roots
         .iter()
         .cloned()
-        .map(|root| (root, ryeos_engine::resolution::TrustClass::TrustedSystem))
+        .map(|root| (root, ryeos_engine::resolution::TrustClass::TrustedBundle))
         .collect();
     if !registry_roots.iter().any(|root| root == source) {
         handler_roots.push((
             source.to_path_buf(),
-            ryeos_engine::resolution::TrustClass::TrustedSystem,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
         ));
     }
     let handlers = HandlerRegistry::load_base(&handler_roots, &trust_store)

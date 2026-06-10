@@ -1,7 +1,7 @@
 //! Authorize an HTTP client to call the daemon's authenticated endpoints.
 //!
 //! Writes a node-signed authorized-key TOML to
-//! `<system_space_dir>/.ai/node/auth/authorized_keys/<fp>.toml`.
+//! `<app_root>/.ai/node/auth/authorized_keys/<fp>.toml`.
 //!
 //! The daemon's auth loader reads these files at startup (and on hot-reload).
 //! Each file must be signed by the node identity key.
@@ -21,8 +21,8 @@ use crate::actions::hosted_policy::load_hosted_policy;
 
 /// Parameters for the authorize-client action.
 pub struct AuthorizeClientParams {
-    /// System space directory (contains `.ai/node/identity/`).
-    pub system_space_dir: PathBuf,
+    /// App root directory (contains `.ai/node/identity/`).
+    pub app_root: PathBuf,
     /// Client public key as raw 32-byte Ed25519 verifying key.
     pub public_key: VerifyingKey,
     /// Scopes to grant (e.g. `["remote.admin", "bundle.install"]`).
@@ -44,8 +44,8 @@ pub struct AuthorizeClientResult {
 }
 
 pub struct MintAdmissionTokenParams {
-    /// System space directory for the target node.
-    pub system_space_dir: PathBuf,
+    /// App root directory for the target node.
+    pub app_root: PathBuf,
     /// Capabilities this one-time token is allowed to grant.
     pub scopes: Vec<String>,
     /// Optional default label for the eventual authorized-key entry.
@@ -95,7 +95,7 @@ struct AdmissionTokenFile<'a> {
 /// TOML format is identical to what the daemon's own handler produces.
 pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeClientResult> {
     let node_key_path = params
-        .system_space_dir
+        .app_root
         .join(".ai")
         .join("node")
         .join("identity")
@@ -114,7 +114,7 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(params.public_key.as_bytes());
 
     let auth_dir = params
-        .system_space_dir
+        .app_root
         .join(".ai")
         .join("node")
         .join("auth")
@@ -153,7 +153,7 @@ pub fn run_mint_admission_token(
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
     }
-    if let Some(policy) = load_hosted_policy(&params.system_space_dir)? {
+    if let Some(policy) = load_hosted_policy(&params.app_root)? {
         if params.ttl_secs > policy.admission.token_ttl_secs {
             bail!(
                 "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
@@ -197,7 +197,7 @@ pub fn run_mint_admission_token(
     let token_hash = lillux::cas::sha256_hex(token.as_bytes());
     let label = params.label.clone();
     let token_dir = params
-        .system_space_dir
+        .app_root
         .join(".ai")
         .join("node")
         .join("admission")
@@ -272,7 +272,7 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("USER_SPACE", &user);
+            std::env::set_var("RYEOS_APP_ROOT", &user);
             Self {
                 _env_guard: env_guard,
                 _user: user,
@@ -283,16 +283,16 @@ mod tests {
 
     impl Drop for HostedPolicyFixture {
         fn drop(&mut self) {
-            std::env::remove_var("USER_SPACE");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 
     fn write_hosted_policy(
-        system_space_dir: &std::path::Path,
+        app_root: &std::path::Path,
         token_ttl_secs: u64,
         key: &lillux::crypto::SigningKey,
     ) {
-        let path = system_space_dir.join(".ai/node/hosted/policy.yaml");
+        let path = app_root.join(".ai/node/hosted/policy.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = format!(
             r#"
@@ -333,7 +333,7 @@ operations:
         write_hosted_policy(tmp.path(), 60, &fixture.key);
 
         let err = match run_mint_admission_token(MintAdmissionTokenParams {
-            system_space_dir: tmp.path().to_path_buf(),
+            app_root: tmp.path().to_path_buf(),
             scopes: vec!["ryeos.execute.service.threads".into()],
             label: None,
             ttl_secs: 600,

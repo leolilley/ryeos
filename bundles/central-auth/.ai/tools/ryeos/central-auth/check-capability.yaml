@@ -20,9 +20,9 @@ config_schema:
     project_path:
       type: string
       description: "Project root used for .ai/state/central-auth storage."
-    state_root:
+    runtime_state_dir:
       type: string
-      description: "Optional absolute central-auth state root override."
+      description: "Optional absolute central-auth runtime state dir override."
     realm_id:
       type: string
       description: "Realm/app namespace, e.g. tv-tracker."

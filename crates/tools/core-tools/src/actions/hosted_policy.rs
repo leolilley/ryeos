@@ -12,18 +12,19 @@ use ryeos_app::node_config::loader::BootstrapLoader;
 use ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord;
 use ryeos_app::node_config::SectionTable;
 
-/// Load the single installed hosted-node policy for `system_space_dir`.
+/// Load the single installed hosted-node policy for `app_root`.
 ///
 /// Returns `Ok(None)` when no hosted policy is installed. Returns an error if
 /// more than one policy is present because precedence/override semantics have
 /// not been designed yet.
-pub fn load_hosted_policy(system_space_dir: &Path) -> Result<Option<HostedNodePolicyRecord>> {
-    let user_root = ryeos_engine::roots::user_root().ok();
-    let trust_store =
-        ryeos_engine::trust::TrustStore::load_three_tier(None, user_root.as_deref(), &[])
-            .context("hosted policy: load trust store")?;
+pub fn load_hosted_policy(app_root: &Path) -> Result<Option<HostedNodePolicyRecord>> {
+    let trust_store = ryeos_engine::trust::TrustStore::load(
+        None,
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
+    )
+    .context("hosted policy: load trust store")?;
     let loader = BootstrapLoader {
-        system_space_dir,
+        app_root,
         trust_store: &trust_store,
     };
     let bundles = loader
@@ -109,7 +110,7 @@ operations:
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("USER_SPACE", &user);
+            std::env::set_var("RYEOS_APP_ROOT", &user);
 
             Self {
                 system: tmp.path().join("system"),
@@ -126,7 +127,7 @@ operations:
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            std::env::remove_var("USER_SPACE");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 

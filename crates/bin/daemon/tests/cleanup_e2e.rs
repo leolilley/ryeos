@@ -63,14 +63,9 @@ async fn cli_daemon_up_uses_execute() {
     let out = tokio::process::Command::new(&ryeos)
         .arg("execute")
         .arg("service:system/status")
-        .env("RYEOS_SYSTEM_SPACE_DIR", &h.state_path)
+        .env("RYEOS_APP_ROOT", &h.state_path)
         .env("RYEOSD_BIN", ryeosd_binary())
         .env("HOME", h.user_space.path())
-        // The fast fixture writes the user signing key at
-        // <user_space>/.ai/config/keys/signing/. Without USER_SPACE
-        // set, user_root() resolves to <HOME>/.ryeos which would miss
-        // the fixture-planted key (post user-space redesign commit 2a9b0080).
-        .env("USER_SPACE", h.user_space.path())
         .output()
         .await
         .expect("spawn ryeos");
@@ -90,21 +85,23 @@ async fn cli_daemon_up_uses_execute() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cli_initialized_but_stopped_suggests_start() {
-    let state = tempfile::tempdir().expect("state tempdir");
+    // Core bundle content must exist at the registered path so the offline
+    // verified snapshot can resolve `execute` — otherwise command resolution
+    // fails before lifecycle preflight can report the stopped node.
+    let (_core_tmp, state_path) = common::copy_core_to_temp();
     let user_space = tempfile::tempdir().expect("user tempdir");
-    let fixture = common::fast_fixture::populate_initialized_state(state.path(), user_space.path())
+    let fixture = common::fast_fixture::populate_initialized_state(&state_path, user_space.path())
         .expect("populate initialized state");
-    common::fast_fixture::register_core_bundle_at_state(state.path(), &fixture)
+    common::fast_fixture::register_core_bundle_at_state(&state_path, &fixture)
         .expect("register core");
-    common::fast_fixture::register_standard_bundle(state.path(), &fixture)
+    common::fast_fixture::register_standard_bundle(&state_path, &fixture)
         .expect("register standard");
 
     let ryeos = ryeos_binary();
     let out = tokio::process::Command::new(&ryeos)
         .arg("execute")
         .arg("service:system/status")
-        .env("RYEOS_SYSTEM_SPACE_DIR", state.path())
-        .env("USER_SPACE", user_space.path())
+        .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
         .output()
         .await
@@ -183,18 +180,12 @@ async fn cli_execute_defaults_project_path_to_dot() {
     let ryeos = ryeos_binary();
 
     // The CLI sends raw tokens (`["status"]`) to the daemon's /execute
-    // endpoint. The daemon resolves via its AliasRegistry (synthesized from
-    // the core bundle's verb aliases). RYEOS_SYSTEM_SPACE_DIR locates
-    // the daemon's bind socket. HOME points the user tier at the harness
-    // user space (where `populate_user_space` pre-loaded the
-    // trusted-signers fixture).
+    // endpoint. The daemon resolves via its command registry. The app root
+    // locates daemon metadata and the operator signing key.
     let out = tokio::process::Command::new(&ryeos)
         .arg("status") // alias → service:system/status, no --project-path
-        .env("RYEOS_SYSTEM_SPACE_DIR", &h.state_path)
+        .env("RYEOS_APP_ROOT", &h.state_path)
         .env("HOME", h.user_space.path())
-        // See cli_daemon_up_uses_execute for the USER_SPACE rationale —
-        // CLI needs it to find the fast-fixture-planted signing key.
-        .env("USER_SPACE", h.user_space.path())
         .output()
         .await
         .expect("spawn ryeos");
@@ -207,11 +198,74 @@ async fn cli_execute_defaults_project_path_to_dot() {
     );
 }
 
+// ── Test 7b: maintenance/gc token command defaults params ───────────────
+//   Catches the token-command path for `ryeos maintenance gc` specifically;
+//   service:maintenance/gc direct execution is covered elsewhere.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_maintenance_gc_token_command_runs_with_default_params() {
+    let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+    let ryeos = ryeos_binary();
+
+    let cas_root = h.state_path.join(".ai/state/objects");
+    let orphan_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let orphan_object = lillux::shard_path(&cas_root, "objects", orphan_hash, ".json");
+    std::fs::create_dir_all(orphan_object.parent().expect("orphan parent"))
+        .expect("create orphan CAS shard");
+    std::fs::write(&orphan_object, br#"{"kind":"orphan"}"#)
+        .expect("write orphan CAS object");
+    assert!(orphan_object.is_file(), "orphan object should exist before GC");
+
+    let out = tokio::process::Command::new(&ryeos)
+        .args(["maintenance", "gc"])
+        .env("RYEOS_APP_ROOT", &h.state_path)
+        .env("RYEOSD_BIN", ryeosd_binary())
+        .env("HOME", h.user_space.path())
+        .output()
+        .await
+        .expect("spawn ryeos maintenance gc");
+
+    assert!(
+        out.status.success(),
+        "ryeos maintenance gc failed; exit={:?}\nstdout={}\nstderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("freed_bytes") && stdout.contains("duration_ms"),
+        "maintenance gc should print GC result fields, stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("\"deleted_objects\": 1") || stdout.contains("\"deleted_objects\":1"),
+        "maintenance gc should report the planted orphan object as deleted, stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("\"freed_bytes\": 17") || stdout.contains("\"freed_bytes\":17"),
+        "maintenance gc should report the planted orphan object's bytes as freed, stdout={stdout}"
+    );
+    assert!(
+        !orphan_object.exists(),
+        "real maintenance gc should delete the planted orphan object at {}",
+        orphan_object.display()
+    );
+
+    let gc_log = h.state_path.join(".ai/state/logs/gc.jsonl");
+    let gc_log_body = std::fs::read_to_string(&gc_log)
+        .unwrap_or_else(|err| panic!("read GC event log {}: {err}", gc_log.display()));
+    assert!(
+        gc_log_body.contains("\"dry_run\":false") && gc_log_body.contains("\"compact\":false"),
+        "bare maintenance gc should write a real non-compact runtime-state GC event, log={gc_log_body}"
+    );
+}
+
 // ── Test 8: daemon init surface must not exist or mutate system space ────────
 //   (Catches regressions that reintroduce daemon-side init and pollute bundles/core.)
 
 #[tokio::test(flavor = "multi_thread")]
-async fn daemon_init_only_is_rejected_and_does_not_mutate_system_space() {
+async fn daemon_init_only_is_rejected_and_does_not_mutate_app_root() {
     use std::collections::BTreeMap;
     use std::fs;
 
@@ -260,17 +314,15 @@ async fn daemon_init_only_is_rejected_and_does_not_mutate_system_space() {
     let outer = tempfile::tempdir().expect("state tempdir");
     let state_path = outer.path().join("state");
     let user_space = tempfile::tempdir().expect("user tempdir");
-    common::populate_user_space(user_space.path());
 
     // Try the removed daemon init surface against the COPIED system bundle.
     let init = std::process::Command::new(ryeosd_binary())
         .arg("--init-only")
-        .arg("--system-space-dir")
+        .arg("--app-root")
         .arg(&state_path)
         .arg("--uds-path")
         .arg(state_path.join("ryeosd.sock"))
-        .env("RYEOS_SYSTEM_SPACE_DIR", &sys_root)
-        .env("USER_SPACE", user_space.path())
+        .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
         .output()
         .expect("ryeosd --init-only rejection");
@@ -284,7 +336,7 @@ async fn daemon_init_only_is_rejected_and_does_not_mutate_system_space() {
     let after = snapshot(&sys_root);
     assert_eq!(
         before, after,
-        "RYEOS_SYSTEM_SPACE_DIR was mutated by removed --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
+        "RYEOS_APP_ROOT was mutated by removed --init-only — daemon bootstrap must NEVER touch operator-managed bundle content"
     );
 }
 
@@ -295,7 +347,7 @@ async fn direct_daemon_start_on_fresh_state_creates_no_runtime_state() {
     let runtime_path = outer.path().join("runtime");
 
     let out = std::process::Command::new(ryeosd_binary())
-        .arg("--system-space-dir")
+        .arg("--app-root")
         .arg(&state_path)
         .arg("--uds-path")
         .arg(runtime_path.join("ryeosd.sock"))
@@ -381,7 +433,7 @@ async fn uds_namespace_rejects_service_methods() {
 }
 
 // ── Test 10: State lock prevents concurrent daemons (Gate 8 daemon-spawn) ──
-//   Two daemons sharing the same system_space_dir: the second must fail to acquire
+//   Two daemons sharing the same app_root: the second must fail to acquire
 //   the state lock and exit with an error. This closes the TODO at
 //   cleanup_invariants.rs:289.
 
@@ -411,14 +463,14 @@ async fn state_lock_prevents_concurrent_daemons() {
     // first. It must fail on the state lock before touching the live daemon's
     // socket path.
     let mut cmd = tokio::process::Command::new(common::ryeosd_binary());
-    cmd.arg("--system-space-dir")
+    cmd.arg("--app-root")
         .arg(&state_path)
         .arg("--bind")
         .arg(bind.to_string())
         .arg("--uds-path")
         .arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("USER_SPACE", user_space.path())
+        .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

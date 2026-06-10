@@ -732,8 +732,8 @@ mod tests {
         use crate::StateDb;
 
         let tmp = tempfile::tempdir().unwrap();
-        let state_root = tmp.path();
-        let db = StateDb::open(state_root).unwrap();
+        let runtime_state_dir = tmp.path();
+        let db = StateDb::open(runtime_state_dir).unwrap();
         let signer = TestSigner::default();
 
         let cas_root = db.cas_root();

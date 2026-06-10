@@ -450,7 +450,7 @@ fn pin_localpath_snapshot_if_needed(
     state: &AppState,
     launch_metadata: &mut ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     pre_manifest_hash: &Option<String>,
-    pre_user_manifest_hash: &Option<String>,
+    _pre_user_manifest_hash: &Option<String>,
     base_snapshot_hash: &Option<String>,
 ) -> Result<Option<String>> {
     if launch_metadata.native_resume.is_none() {
@@ -465,12 +465,9 @@ fn pin_localpath_snapshot_if_needed(
     };
     let cas_root = state.state_store.cas_root()?;
     let cas = lillux::cas::CasStore::new(cas_root);
-    // Preserve the pre-execution user_manifest_hash so result
-    // snapshots derived from this pin carry user-space lineage. When
-    // user-space sync is inactive, this is None.
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash,
-        user_manifest_hash: pre_user_manifest_hash.clone(),
+        user_manifest_hash: None,
         message: None,
         project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
         parent_hashes: Vec::new(),
@@ -615,11 +612,11 @@ fn mint_callback_env(
         thread_id: thread_id.to_string(),
         project_path: project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
         acting_principal: acting_principal.to_string(),
-        cas_root: state.config.system_space_dir.join("cas"),
+        cas_root: state.config.app_root.join("cas"),
         callback_token: Some(cap.token.clone()),
         callback_socket_path: Some(state.config.uds_path.to_string_lossy().to_string()),
         vault_handle: None,
-        system_space_dir: state.config.system_space_dir.clone(),
+        app_root: state.config.app_root.clone(),
         thread_auth_token: Some(thread_auth.token.clone()),
         params: json!({}),
         resolution_output: None,
@@ -629,7 +626,7 @@ fn mint_callback_env(
         (EnvInjectionSource::CallbackSocketPath, "RYEOSD_SOCKET_PATH"),
         (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN"),
         (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID"),
-        (EnvInjectionSource::SystemSpaceDir, "RYEOS_SYSTEM_SPACE_DIR"),
+        (EnvInjectionSource::AppRoot, "RYEOS_APP_ROOT"),
         (
             EnvInjectionSource::ThreadAuthToken,
             "RYEOSD_THREAD_AUTH_TOKEN",
@@ -743,16 +740,16 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
 
-    // Daemon-owned per-thread state dir under config.system_space_dir — does
+    // Daemon-owned per-thread state dir under config.app_root — does
     // NOT live under the (ephemeral, CAS-checkout) working directory,
     // so checkpoints survive working-dir cleanup and daemon restart.
     // See `launch_metadata::daemon_thread_state_dir`.
     let thread_state_dir =
-        ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.system_space_dir, &tid);
+        ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, &tid);
     let inline_snapshot = base_snapshot_hash.clone();
     let inline_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
-        &state.config.system_space_dir,
+        &state.config.app_root,
     );
     let mut spawned = match task::spawn_blocking(move || {
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
@@ -787,7 +784,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
 
     // Pin LocalPath native_resume to a snapshot before attach.
     // pre_user_manifest_hash is intentionally None here: the
-    // LocalPath flow runs against the daemon's live user space, not
+    // LocalPath flow runs against the daemon's live app root, not
     // a captured snapshot, so there's no pre-execution user manifest
     // to pin alongside the project manifest. The pushed_head flow is
     // where user-manifest lineage matters and is handled separately.
@@ -985,7 +982,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
     let bg_base_snapshot_hash = base_snapshot_hash;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
-    let bg_state_root = state.config.system_space_dir.clone();
+    let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
@@ -1001,7 +998,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_project_path,
         bg_temp_dir,
         bg_skip_snapshot_lifecycle,
-        bg_state_root,
+        bg_runtime_state_dir,
         false, // is_resume
         None,  // prior_status_for_mark_running
         bg_cb_token,
@@ -1040,7 +1037,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_state, bg_chain_root_id, bg_resolved, bg_engine, bg_vault,
         bg_cb_bindings, bg_acting_principal, bg_pre_manifest_hash,
         bg_base_snapshot_hash,
-        bg_project_path, bg_temp_dir, bg_skip_snapshot_lifecycle, bg_state_root,
+        bg_project_path, bg_temp_dir, bg_skip_snapshot_lifecycle, bg_runtime_state_dir,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token
     ),
@@ -1065,7 +1062,7 @@ async fn dispatch_detached_bg_task(
     bg_project_path: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_skip_snapshot_lifecycle: bool,
-    bg_state_root: PathBuf,
+    bg_runtime_state_dir: PathBuf,
     is_resume: bool,
     prior_status_for_mark_running: Option<String>,
     bg_cb_token: Option<String>,
@@ -1087,7 +1084,7 @@ async fn dispatch_detached_bg_task(
     };
 
     let thread_state_dir =
-        ryeos_app::launch_metadata::daemon_thread_state_dir(&bg_state_root, &bg_thread_id);
+        ryeos_app::launch_metadata::daemon_thread_state_dir(&bg_runtime_state_dir, &bg_thread_id);
 
     let tid_for_spawn = bg_thread_id.clone();
     let crid_for_spawn = bg_chain_root_id.clone();
@@ -1104,7 +1101,7 @@ async fn dispatch_detached_bg_task(
         };
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &eng_for_spawn.resolution_roots(project_root),
-            &bg_state_root,
+            &bg_runtime_state_dir,
         );
         thread_lifecycle::spawn_item(thread_lifecycle::SpawnItemParams {
             engine: &eng_for_spawn,
@@ -1148,7 +1145,7 @@ async fn dispatch_detached_bg_task(
     // Pin LocalPath native_resume to a snapshot before attach.
     // pre_user_manifest_hash is intentionally None for the same
     // reason as the inline-spawn path: LocalPath runs against the
-    // daemon's live user space, not a captured snapshot.
+    // daemon's live app root, not a captured snapshot.
     if !bg_skip_snapshot_lifecycle {
         match pin_localpath_snapshot_if_needed(
             &bg_state,
@@ -1656,7 +1653,7 @@ pub async fn run_existing_detached(
     let bg_base_snapshot_hash = base_snapshot_hash;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
-    let bg_state_root = state.config.system_space_dir.clone();
+    let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
         bg_state,
@@ -1672,7 +1669,7 @@ pub async fn run_existing_detached(
         bg_project_path,
         bg_temp_dir,
         bg_skip_snapshot_lifecycle,
-        bg_state_root,
+        bg_runtime_state_dir,
         true, // is_resume
         Some(prior_status),
         bg_cb_token,

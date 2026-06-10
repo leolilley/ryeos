@@ -204,7 +204,6 @@ mod tests {
                 ryeos_engine::parsers::registry::ParserRegistry::empty(),
                 Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
             ),
-            None,
             vec![],
         ));
         CallbackCapability {

@@ -192,7 +192,7 @@ fn references_bfs_does_not_drop_edges_on_long_path_first() {
     write_signed_yaml(&nodes_dir.join("c.yaml"), "refs:\n  - node:d\n");
     write_signed_yaml(&nodes_dir.join("d.yaml"), "refs: []\n");
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let _ = ItemSpace::Project;
 
     let parsers = dispatcher_for_yaml_and_markdown_directive();
@@ -243,7 +243,7 @@ fn trusted_fingerprint_with_bogus_signature_is_rejected() {
     )
     .unwrap();
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let parsers = ParserDispatcher::new(
         ParserRegistry::from_entries(vec![]),
         Arc::new(HandlerRegistry::empty()),
@@ -316,7 +316,7 @@ fn raw_content_uses_envelope_aware_strip_for_markdown() {
                 post-marker\n";
     fs::write(directives_dir.join("sample.md"), body).unwrap();
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
     let handlers = load_live_handler_registry();
@@ -389,7 +389,7 @@ fn composition_violation_returns_typed_resolution_error() {
     let tools_dir = project_dir.join(".ai").join("tools");
     write_tool_item(&tools_dir, "my_tool", "name: my_tool\nbody: hello\n");
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
     let handlers = load_live_handler_registry();
@@ -457,7 +457,7 @@ composed_value_contract:
         "name: my_tool\nlaunch:\n  mode: web_server\n",
     );
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
     let handlers = load_live_handler_registry();
@@ -494,7 +494,7 @@ fn valid_composition_passes_through() {
         "name: ok_tool\nmode: cli_exec\ntimeout: 30\n",
     );
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
     let handlers = load_live_handler_registry();
@@ -527,7 +527,7 @@ fn warnings_do_not_block_effective_item() {
         "name: warn_tool\nmode: cli_exec\nunknown_field: surprise\n",
     );
 
-    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), None, vec![]);
+    let roots = ResolutionRoots::from_flat(Some(project_dir.join(".ai")), vec![]);
     let parsers = dispatcher_for_yaml_and_markdown_directive();
     let trust = trust_store();
     let handlers = load_live_handler_registry();

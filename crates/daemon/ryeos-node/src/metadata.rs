@@ -12,16 +12,16 @@ pub struct DaemonMetadata {
     pub started_at: Option<String>,
     pub version: Option<String>,
     #[serde(default)]
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
 }
 
 impl DaemonMetadata {
-    pub fn path(system_space_dir: &Path) -> PathBuf {
-        system_space_dir.join("daemon.json")
+    pub fn path(app_root: &Path) -> PathBuf {
+        app_root.join("daemon.json")
     }
 
-    pub fn read(system_space_dir: &Path) -> Result<Option<Self>> {
-        let path = Self::path(system_space_dir);
+    pub fn read(app_root: &Path) -> Result<Option<Self>> {
+        let path = Self::path(app_root);
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -29,14 +29,14 @@ impl DaemonMetadata {
         };
         let mut metadata: DaemonMetadata = serde_json::from_str(&raw)
             .with_context(|| format!("parse daemon metadata at {}", path.display()))?;
-        if metadata.system_space_dir.as_os_str().is_empty() {
-            metadata.system_space_dir = system_space_dir.to_path_buf();
+        if metadata.app_root.as_os_str().is_empty() {
+            metadata.app_root = app_root.to_path_buf();
         }
         Ok(Some(metadata))
     }
 
-    pub fn write(&self, system_space_dir: &Path) -> Result<()> {
-        let path = Self::path(system_space_dir);
+    pub fn write(&self, app_root: &Path) -> Result<()> {
+        let path = Self::path(app_root);
         let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)
             .with_context(|| format!("write {}", tmp.display()))?;

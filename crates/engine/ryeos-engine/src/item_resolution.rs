@@ -1,7 +1,6 @@
-//! Item resolution — system-first space search with clash diagnostics.
+//! Item resolution — project-first space search with clash diagnostics.
 //!
-//! Resolution order: system(node) → system(bundles) → user → project.
-//! System is authoritative — the platform defines the baseline.
+//! Resolution order: project → bundles.
 //! Clash warnings emitted when items exist in multiple spaces.
 //!
 //! All directory names and extension lists come from `KindSchema`.
@@ -18,7 +17,7 @@ use crate::kind_registry::KindSchema;
 #[derive(Debug, Clone)]
 pub struct ResolutionRoot {
     pub space: ItemSpace,
-    /// Human-readable label, e.g. "system(node)", "system(bundle:standard)", "user", "project"
+    /// Human-readable label, e.g. "project", "bundle:standard"
     pub label: String,
     /// Path to the `.ai/` directory
     pub ai_root: PathBuf,
@@ -26,7 +25,7 @@ pub struct ResolutionRoot {
 
 /// Ordered list of search roots for item resolution.
 ///
-/// Constructed in system-first order: node, bundles, user, project.
+/// Constructed in project-first order: project, then bundles.
 #[derive(Debug, Clone)]
 pub struct ResolutionRoots {
     /// Search roots in resolution priority order (first match wins)
@@ -35,40 +34,23 @@ pub struct ResolutionRoots {
 
 impl ResolutionRoots {
     /// Convenience: build from flat fields.
-    /// System roots are ordered first, then user, then project.
-    pub fn from_flat(
-        project: Option<PathBuf>,
-        user: Option<PathBuf>,
-        system: Vec<PathBuf>,
-    ) -> Self {
+    /// Project roots are ordered first, then bundle roots.
+    pub fn from_flat(project: Option<PathBuf>, bundles: Vec<PathBuf>) -> Self {
         let mut ordered = Vec::new();
-
-        for (i, sys_root) in system.iter().enumerate() {
-            let label = if i == 0 {
-                "system(node)".to_owned()
-            } else {
-                format!("system(bundle:{i})")
-            };
-            ordered.push(ResolutionRoot {
-                space: ItemSpace::System,
-                label,
-                ai_root: sys_root.clone(),
-            });
-        }
-
-        if let Some(user_root) = user {
-            ordered.push(ResolutionRoot {
-                space: ItemSpace::User,
-                label: "user".to_owned(),
-                ai_root: user_root,
-            });
-        }
 
         if let Some(project_root) = project {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Project,
                 label: "project".to_owned(),
                 ai_root: project_root,
+            });
+        }
+
+        for (i, bundle_root) in bundles.iter().enumerate() {
+            ordered.push(ResolutionRoot {
+                space: ItemSpace::Bundle,
+                label: format!("bundle:{i}"),
+                ai_root: bundle_root.clone(),
             });
         }
 
@@ -93,7 +75,7 @@ pub struct ResolutionResult {
 
 /// Resolve a canonical ref to a concrete file path, space, and clash info.
 ///
-/// Searches roots in order (system-first). Returns the first match plus
+/// Searches roots in order (project-first). Returns the first match plus
 /// all lower-priority matches (shadowed candidates).
 #[tracing::instrument(
     level = "debug",
@@ -437,17 +419,17 @@ mod tests {
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
 
-        // When only project has it (system root empty), project wins
-        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), None, vec![system_root]);
+        // When only project has it (bundle root empty), project wins
+        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), vec![system_root]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (_path, space, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(space, ItemSpace::System); // system root is searched first
+        assert_eq!(space, ItemSpace::Project);
         assert_eq!(ext, ".py");
     }
 
     #[test]
-    fn resolve_system_wins_over_project() {
+    fn resolve_project_wins_over_system() {
         let project_root = tempdir();
         let system_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
@@ -455,41 +437,27 @@ mod tests {
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
 
-        let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![system_root.clone()]);
+        let roots =
+            ResolutionRoots::from_flat(Some(project_root.clone()), vec![system_root.clone()]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(space, ItemSpace::System);
-        assert!(path.starts_with(&system_root));
+        assert_eq!(space, ItemSpace::Project);
+        assert!(path.starts_with(&project_root));
     }
 
     #[test]
-    fn resolve_finds_user_space() {
-        let user_root = tempdir();
-        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
-
-        write_item(&user_root, "tools", "my_tool", ".py", "# user");
-
-        let roots = ResolutionRoots::from_flat(None, Some(user_root.clone()), vec![]);
-        let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
-
-        let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(space, ItemSpace::User);
-        assert!(path.starts_with(&user_root));
-    }
-
-    #[test]
-    fn resolve_finds_system_space() {
+    fn resolve_finds_app_root() {
         let system_root = tempdir();
         let schema = make_kind_schema("directives", vec![(".md", "markdown/xml")]);
 
         write_item(&system_root, "directives", "init", ".md", "# system");
 
-        let roots = ResolutionRoots::from_flat(None, None, vec![system_root.clone()]);
+        let roots = ResolutionRoots::from_flat(None, vec![system_root.clone()]);
         let ref_ = CanonicalRef::parse("directive:init").unwrap();
 
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
-        assert_eq!(space, ItemSpace::System);
+        assert_eq!(space, ItemSpace::Bundle);
         assert!(path.starts_with(&system_root));
     }
 
@@ -505,7 +473,7 @@ mod tests {
         write_item(&project_root, "tools", "my_tool", ".py", "# python");
         write_item(&project_root, "tools", "my_tool", ".yaml", "name: yaml");
 
-        let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_root), vec![]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let (path, _, ext) = resolve_item(&roots, &schema, &ref_).unwrap();
@@ -518,7 +486,7 @@ mod tests {
         let project_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
-        let roots = ResolutionRoots::from_flat(Some(project_root), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_root), vec![]);
         let ref_ = CanonicalRef::parse("tool:nonexistent").unwrap();
 
         let err = resolve_item(&roots, &schema, &ref_).unwrap_err();
@@ -537,24 +505,20 @@ mod tests {
     #[test]
     fn resolve_clash_diagnostics() {
         let project_root = tempdir();
-        let user_root = tempdir();
         let system_root = tempdir();
         let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
 
         write_item(&system_root, "tools", "my_tool", ".py", "# system");
-        write_item(&user_root, "tools", "my_tool", ".py", "# user");
         write_item(&project_root, "tools", "my_tool", ".py", "# project");
 
-        let roots =
-            ResolutionRoots::from_flat(Some(project_root), Some(user_root), vec![system_root]);
+        let roots = ResolutionRoots::from_flat(Some(project_root), vec![system_root]);
         let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
 
         let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
-        assert_eq!(result.winner_space, ItemSpace::System);
-        assert_eq!(result.winner_label, "system(node)");
-        assert_eq!(result.shadowed.len(), 2);
-        assert_eq!(result.shadowed[0].space, ItemSpace::User);
-        assert_eq!(result.shadowed[1].space, ItemSpace::Project);
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert_eq!(result.winner_label, "project");
+        assert_eq!(result.shadowed.len(), 1);
+        assert_eq!(result.shadowed[0].space, ItemSpace::Bundle);
     }
 
     #[test]
@@ -645,7 +609,7 @@ mod tests {
         let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
         write_item(&project_root, "tools", "trace_tool", ".py", "# content");
 
-        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), None, vec![system_root]);
+        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), vec![system_root]);
         let ref_ = CanonicalRef::parse("tool:trace_tool").unwrap();
 
         let (_, spans) = trace_test::capture_traces(|| {

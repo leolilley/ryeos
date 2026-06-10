@@ -29,7 +29,6 @@ pub mod signer;
 pub mod sqlite_schema;
 pub mod state_db;
 pub mod sync;
-pub mod user_sync;
 pub mod verify;
 
 pub use admission::{admit_root, AdmissionRequest, AdmissionResult};

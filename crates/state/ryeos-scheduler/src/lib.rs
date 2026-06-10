@@ -39,8 +39,8 @@ use tokio::sync::RwLock;
 /// The scheduler defines what it needs; the daemon satisfies the interface.
 /// Uses generic parameters (not `dyn`) for zero-cost abstraction.
 pub trait SchedulerContext: Send + Sync + 'static {
-    /// The system space directory (`.ai` lives here).
-    fn system_space_dir(&self) -> &Path;
+    /// The app rootectory (`.ai` lives here).
+    fn app_root(&self) -> &Path;
 
     /// The scheduler projection database.
     fn scheduler_db(&self) -> Arc<db::SchedulerDb>;
@@ -87,8 +87,8 @@ pub trait SchedulerContext: Send + Sync + 'static {
 // Needed because timer::run takes Arc<Ctx> and passes &ctx to functions
 // that expect &Ctx.
 impl<T: SchedulerContext> SchedulerContext for Arc<T> {
-    fn system_space_dir(&self) -> &Path {
-        (**self).system_space_dir()
+    fn app_root(&self) -> &Path {
+        (**self).app_root()
     }
 
     fn scheduler_db(&self) -> Arc<db::SchedulerDb> {

@@ -1,7 +1,7 @@
 //! `bundle.remove` — remove a bundle via node-config deletion.
 //!
-//! Deletes the signed `kind: node` item at `<system_space_dir>/.ai/node/bundles/<name>.yaml`
-//! and the bundle directory at `<system_space_dir>/.ai/bundles/<name>/`.
+//! Deletes the signed `kind: node` item at `<app_root>/.ai/node/bundles/<name>.yaml`
+//! and the bundle directory at `<app_root>/.ai/bundles/<name>/`.
 //!
 //! OfflineOnly: the daemon must be stopped (engine reload not implemented).
 
@@ -18,7 +18,7 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// Bundle name (directory under `<system_space_dir>/.ai/bundles/`).
+    /// Bundle name (directory under `<app_root>/.ai/bundles/`).
     pub name: String,
 }
 
@@ -43,7 +43,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Delete the signed node-config item
     let config_item_path = state
         .config
-        .system_space_dir
+        .app_root
         .join(".ai")
         .join("node")
         .join("bundles")
@@ -67,7 +67,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Delete the bundle directory
     let bundle_dir = state
         .config
-        .system_space_dir
+        .app_root
         .join(".ai")
         .join("bundles")
         .join(&req.name);

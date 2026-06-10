@@ -176,7 +176,7 @@ bin_dir="/usr/bin"
 share_dir="/usr/share/ryeos"
 doc_dir="/usr/share/doc/ryeos"
 target_dir="$repo_root/target/release"
-init_system_space_dir="${RYEOS_SYSTEM_SPACE_DIR:-}"
+init_app_root="${RYEOS_APP_ROOT:-}"
 
 # Only user-facing binaries go in /usr/bin/.
 # All handler/runtime/tool binaries live inside bundles under
@@ -323,7 +323,7 @@ fi
 
 if [[ $run_init -eq 1 ]]; then
     echo "[install-local-direct] running ryeos init from PATH"
-    state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
+    state_root="${init_app_root:-$HOME/.local/share/ryeos}"
     for path in "$state_root/.ai/bundles"/*; do
         [[ -d "$path/.ai" ]] || continue
         name="$(basename "$path")"
@@ -360,13 +360,13 @@ if [[ $run_init -eq 1 ]]; then
         trust_args+=(--trust-file "$trust_file")
     done
     init_args=(init --source "$share_dir")
-    if [[ -n "$init_system_space_dir" ]]; then
-        init_args+=(--system-space-dir "$init_system_space_dir")
+    if [[ -n "$init_app_root" ]]; then
+        init_args+=(--app-root "$init_app_root")
     fi
     ryeos "${init_args[@]}" "${trust_args[@]}"
 
     echo "[install-local-direct] verifying initialized bundle state"
-    state_root="${init_system_space_dir:-$HOME/.local/share/ryeos}"
+    state_root="${init_app_root:-$HOME/.local/share/ryeos}"
     for name in "${bundle_names[@]}"; do
         test -d "$state_root/.ai/bundles/$name/.ai" || \
             die "initialized $name bundle missing from $state_root"
@@ -401,7 +401,7 @@ echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
 echo "  bundle set:   $bundle_set"
 echo "  bundle src:   $share_dir/{$bundle_names_csv}"
-echo "  local state:  ${init_system_space_dir:-$HOME/.local/share/ryeos}"
+echo "  app root:     ${init_app_root:-$HOME/.local/share/ryeos}"
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "  daemon:       restarted"
 fi

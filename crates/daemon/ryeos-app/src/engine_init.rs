@@ -1,9 +1,9 @@
 //! Engine initialization for ryeosd (Model B).
 //!
 //! Constructs a `ryeos_engine::engine::Engine` at daemon startup using
-//! only registered bundle roots — NOT the system_space_dir itself.
-//! Model B: bundles live under `<system_space_dir>/.ai/bundles/{name}/`,
-//! each registered at `<system_space_dir>/.ai/node/bundles/{name}.yaml`.
+//! only registered bundle roots — NOT the app_root itself.
+//! Model B: bundles live under `<app_root>/.ai/bundles/{name}/`,
+//! each registered at `<app_root>/.ai/node/bundles/{name}.yaml`.
 //! The engine crate is kind-agnostic — all kind definitions come from
 //! `*.kind-schema.yaml` files found under `{AI_DIR}/node/engine/kinds/`.
 
@@ -19,7 +19,6 @@ use ryeos_engine::kind_registry::{KindRegistry, TerminatorDecl};
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::protocols::ProtocolRegistry;
 use ryeos_engine::resolution::TrustClass;
-use ryeos_engine::roots;
 use ryeos_engine::runtime::HostEnvBindings;
 use ryeos_engine::runtime_registry::RuntimeRegistry;
 use ryeos_engine::trust::TrustStore;
@@ -29,16 +28,14 @@ use crate::config::Config;
 /// Build the native engine from daemon configuration (Model B).
 ///
 /// Thin wrapper around [`build_engine_for_roots`] that pulls the
-/// daemon's own `user_root` from the global config. Use this for the
-/// daemon's startup engine; use `build_engine_for_roots` directly for
+/// daemon's operator config root from the resolved app root. Use this for
+/// the daemon's startup engine; use `build_engine_for_roots` directly for
 /// the per-request (pushed_head) engine overlay.
 pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine> {
-    let user_root = roots::user_root().ok();
     build_engine_for_roots(
         config,
         bundle_roots,
         None, // no project root at startup — resolved per-request
-        user_root.as_deref(),
         None, // no overlay — daemon's persistent trust store wins
     )
 }
@@ -55,17 +52,11 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
 /// * `bundle_roots` — system-tier bundle roots installed on this node.
 ///   The remote node's own bundles — same for every request.
 /// * `project_root` — optional materialised project root for the
-///   request. Currently used only for trust-store loading
-///   (`TrustStore::load_three_tier` takes a project root for the
-///   project-tier search); the engine itself resolves project items
-///   via `ResolutionRoots` at request time, not from this argument.
-/// * `user_root` — optional user-space root. Daemon startup passes its
-///   own `roots::user_root()`; per-request `pushed_head` passes the
-///   materialised temp dir derived from the caller's user manifest.
-///   `None` means no user-tier items (strict-or-empty rule for
-///   `pushed_head` requests with no `user_manifest_hash`).
+///   request. Currently used for project trust loading; the engine itself
+///   resolves project items via `ResolutionRoots` at request time, not from
+///   this argument.
 /// * `trust_overlay` — optional caller-pinned trust store to UNION
-///   with the persistent three-tier trust store. Used by per-request
+///   with the persistent trust store. Used by per-request
 ///   overlay so caller-trusted-only publishers can verify for the
 ///   thread without leaking into the remote's persistent trust.
 ///   `None` means use only the persistent trust store.
@@ -75,7 +66,7 @@ pub fn build_engine(config: &Config, bundle_roots: &[PathBuf]) -> Result<Engine>
 /// Without this refactor, the per-request engine cache would have to
 /// duplicate every load step. Having both call sites go through the
 /// same function guarantees that:
-/// - the user-tier item resolution semantics are identical
+/// - item resolution semantics are identical
 /// - kind / parser / handler / protocol load ordering is identical
 /// - boot validation runs the same way against both engine variants
 /// - changes only have to land in one place
@@ -83,7 +74,6 @@ pub fn build_engine_for_roots(
     config: &Config,
     bundle_roots: &[PathBuf],
     project_root: Option<&std::path::Path>,
-    user_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
 ) -> Result<Engine> {
     // 1. Validate bundle roots exist and are readable
@@ -102,15 +92,14 @@ pub fn build_engine_for_roots(
         }
     }
 
-    // 2. System roots = registered bundles only (Model B).
-    //    system_space_dir is NOT a root — it contains node state, not content.
-    let system_roots: Vec<PathBuf> = bundle_roots.to_vec();
-    let user_root: Option<PathBuf> = user_root.map(|p| p.to_path_buf());
+    // 2. Bundle roots = registered bundles only (Model B).
+    //    app_root is NOT a root — it contains node state, not content.
+    let bundle_roots: Vec<PathBuf> = bundle_roots.to_vec();
 
-    // 3. Collect kind schema search roots from all system roots + user space
+    // 3. Collect kind schema search roots from all bundle roots.
     let mut schema_roots = Vec::new();
 
-    for root in &system_roots {
+    for root in &bundle_roots {
         let kinds_dir = root
             .join(ryeos_engine::AI_DIR)
             .join(ryeos_engine::KIND_SCHEMAS_DIR);
@@ -119,49 +108,40 @@ pub fn build_engine_for_roots(
         }
     }
 
-    if let Some(ref ur) = user_root {
-        let user_kinds = ur
-            .join(ryeos_engine::AI_DIR)
-            .join(ryeos_engine::KIND_SCHEMAS_DIR);
-        if user_kinds.is_dir() {
-            schema_roots.push(user_kinds);
-        }
-    }
-
-    // 4. Load trust store. Trust is operator-tier ONLY (project > user);
-    //    system_roots is passed in for diagnostic warnings about
-    //    bundle-internal trust dirs but is NOT consulted for trust
-    //    admission. Trust store loads BEFORE kind schemas because kind
+    // 4. Load trust store. Trust comes from project + operator config only.
+    //    Bundle-internal trust dirs are warning-only and never loaded.
+    //    Trust store loads BEFORE kind schemas because kind
     //    schema verification requires the trust store. Both use raw
     //    filesystem scanning (no item resolution dependency), so there
     //    is no bootstrap cycle.
-    let trust_store =
-        match TrustStore::load_three_tier(project_root, user_root.as_deref(), &system_roots) {
-            Ok(mut store) => {
-                tracing::info!(count = store.len(), "loaded operator trust store");
-                if let Some(overlay) = trust_overlay {
-                    // Caller-scoped overlay: pins the caller trusts but the
-                    // remote does not — never written to the remote's
-                    // persistent trust dir. The overlay lives for this
-                    // engine's lifetime only.
-                    let added = store.extend_from(overlay);
-                    tracing::info!(
-                        overlay_added = added,
-                        total = store.len(),
-                        "applied per-request trust overlay"
-                    );
-                }
-                store
+    let operator_config_root = config.runtime_root().config();
+    TrustStore::warn_ignored_bundle_trust_dirs(&bundle_roots);
+    let trust_store = match TrustStore::load(project_root, &operator_config_root) {
+        Ok(mut store) => {
+            tracing::info!(count = store.len(), "loaded operator trust store");
+            if let Some(overlay) = trust_overlay {
+                // Caller-scoped overlay: pins the caller trusts but the
+                // remote does not — never written to the remote's
+                // persistent trust dir. The overlay lives for this
+                // engine's lifetime only.
+                let added = store.extend_from(overlay);
+                tracing::info!(
+                    overlay_added = added,
+                    total = store.len(),
+                    "applied per-request trust overlay"
+                );
             }
-            Err(err) => {
-                tracing::error!(error = %err, "failed to load trust store");
-                anyhow::bail!("failed to load trust store: {err}");
-            }
-        };
+            store
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "failed to load trust store");
+            anyhow::bail!("failed to load trust store: {err}");
+        }
+    };
 
     // 5. Load kind registry from filesystem (requires trust store for verification)
     let kinds = if schema_roots.is_empty() {
-        anyhow::bail!("no kind schema roots found; set system_space_dir or RYEOS_SYSTEM_SPACE_DIR to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
+        anyhow::bail!("no kind schema roots found; set app_root or RYEOS_APP_ROOT to a directory containing {}/{}/", ryeos_engine::AI_DIR, ryeos_engine::KIND_SCHEMAS_DIR);
     } else {
         KindRegistry::load_base(&schema_roots, &trust_store)
             .context("failed to load kind schemas")?
@@ -177,11 +157,8 @@ pub fn build_engine_for_roots(
     }
 
     // 6. Load parser tool descriptors using the same search roots as
-    //    the kind schemas (system roots + optional user root).
-    let mut parser_search_roots: Vec<PathBuf> = system_roots.clone();
-    if let Some(ref ur) = user_root {
-        parser_search_roots.push(ur.clone());
-    }
+    //    the kind schemas.
+    let parser_search_roots: Vec<PathBuf> = bundle_roots.clone();
     let (parser_tools, parser_duplicates) =
         ParserRegistry::load_base(&parser_search_roots, &trust_store, &kinds)
             .context("failed to load parser tool descriptors")?;
@@ -197,17 +174,12 @@ pub fn build_engine_for_roots(
     //    "parser not registered" failures downstream instead of pointing
     //    at the real load problem (no signed descriptors, bad manifest,
     //    untrusted publisher, etc.).
-    // Build a tier-tagged root list. System roots are TrustedSystem;
-    // the optional user root is TrustedUser. Registries that record a
+    // Build a tier-tagged root list. Bundle roots are TrustedBundle.
+    // Registries that record a
     // per-item trust class derive it from the originating root tier.
-    let tagged_roots: Vec<(PathBuf, TrustClass)> = system_roots
+    let tagged_roots: Vec<(PathBuf, TrustClass)> = bundle_roots
         .iter()
-        .map(|r| (r.clone(), TrustClass::TrustedSystem))
-        .chain(
-            user_root
-                .iter()
-                .map(|r| (r.clone(), TrustClass::TrustedUser)),
-        )
+        .map(|r| (r.clone(), TrustClass::TrustedBundle))
         .collect();
 
     let handler_registry = HandlerRegistry::load_base(&tagged_roots, &trust_store)
@@ -283,7 +255,7 @@ pub fn build_engine_for_roots(
     //     no second construction site that could drift.
     let parser_dispatcher = ParserDispatcher::new(parser_tools, handler_registry);
 
-    // Scan every bundle root (system + user, when present) for verified
+    // Scan every bundle root for verified
     // `kind: runtime` YAMLs. Fail-closed on any verification error or
     // multi-default conflict — runtime catalog drift is a startup-time
     // problem, not a per-request one.
@@ -295,7 +267,7 @@ pub fn build_engine_for_roots(
         "loaded runtime registry"
     );
 
-    let engine = Engine::new(kinds, parser_dispatcher, user_root, system_roots)
+    let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
         .with_composers(composers)
         .with_protocols(protocol_registry)

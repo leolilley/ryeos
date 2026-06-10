@@ -170,7 +170,7 @@ impl ParserRegistry {
     /// same canonical ref.
     ///
     /// **This is the ONLY sanctioned override path.** All other
-    /// discovery layers (`load_base` across user + system roots) are
+    /// discovery layers (`load_base` across user + bundle roots) are
     /// required to be unique — a duplicate ref across base roots is a
     /// fatal boot issue, not a silent shadow. Per-project customization
     /// flows exclusively through this overlay.

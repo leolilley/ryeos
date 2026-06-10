@@ -190,9 +190,7 @@ impl EnvelopeCallback {
 #[serde(deny_unknown_fields)]
 pub struct EnvelopeRoots {
     pub project_root: PathBuf,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_root: Option<PathBuf>,
-    pub system_roots: Vec<PathBuf>,
+    pub bundle_roots: Vec<PathBuf>,
 }
 
 /// Intentionally open payload — shape is kind-defined.
@@ -311,8 +309,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
-                user_root: None,
-                system_roots: vec![],
+                bundle_roots: vec![],
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
@@ -420,8 +417,7 @@ mod tests {
             "T-builder".to_string(),
             EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
-                user_root: None,
-                system_roots: vec![],
+                bundle_roots: vec![],
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),

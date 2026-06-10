@@ -38,7 +38,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Check bundle doesn't already exist locally.
     let bundles_root = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("bundles");
     let local_target = bundles_root.join(&req.bundle_name);
@@ -121,11 +121,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let (files_installed, total_bytes) = materialize_result.unwrap();
 
     // 5. Preflight verification — fail closed if bundle integrity is bad.
-    if let Err(e) = ryeos_bundle::preflight::preflight_verify_bundle(
-        &local_target,
-        &state.config.system_space_dir,
-        None,
-    ) {
+    if let Err(e) =
+        ryeos_bundle::preflight::preflight_verify_bundle(&local_target, &state.config.app_root)
+    {
         tracing::error!(error = %e, "preflight verification failed, cleaning up");
         let _ = std::fs::remove_dir_all(&local_target);
         bail!(
@@ -143,7 +141,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     ryeos_app::node_config::writer::write_signed_node_item(
         &state
             .config
-            .system_space_dir
+            .app_root
             .join(ryeos_engine::AI_DIR)
             .join("node"),
         "bundles",

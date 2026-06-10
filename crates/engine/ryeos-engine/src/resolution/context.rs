@@ -337,10 +337,9 @@ pub(crate) fn load_item_at(
             })?;
 
             match (contract_trust, result.winner_space) {
-                (ContractTrustClass::Trusted, ItemSpace::System) => TrustClass::TrustedSystem,
-                (ContractTrustClass::Trusted, ItemSpace::User) => TrustClass::TrustedUser,
-                (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::UntrustedUserSpace,
-                (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedUserSpace,
+                (ContractTrustClass::Trusted, ItemSpace::Bundle) => TrustClass::TrustedBundle,
+                (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedProject,
+                (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
                 (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
             }
         }

@@ -319,15 +319,14 @@ metadata:
         p
     }
 
-    /// Build a (kinds, parsers, trust, roots) test rig with three
-    /// space tiers all rooted at unique tempdirs.
+    /// Build a (kinds, parsers, trust, roots) test rig with project and
+    /// bundle roots at unique tempdirs.
     struct TestRig {
         kinds: KindRegistry,
         parsers: crate::parsers::dispatcher::ParserDispatcher,
         trust: TrustStore,
         roots: ResolutionRoots,
         system_ai: PathBuf,
-        user_ai: PathBuf,
         project_ai: PathBuf,
     }
 
@@ -336,13 +335,10 @@ metadata:
 
         // System .ai/ also hosts the kind schemas the registry loader scans.
         let system_root = tempdir("sys");
-        let user_root = tempdir("user");
         let project_root = tempdir("proj");
         let system_ai = system_root.join(".ai");
-        let user_ai = user_root.join(".ai");
         let project_ai = project_root.join(".ai");
         fs::create_dir_all(&system_ai).unwrap();
-        fs::create_dir_all(&user_ai).unwrap();
         fs::create_dir_all(&project_ai).unwrap();
 
         // Kind schema lives only in the system tier (loader scans
@@ -359,19 +355,14 @@ metadata:
         let roots = ResolutionRoots {
             ordered: vec![
                 ResolutionRoot {
-                    space: crate::contracts::ItemSpace::System,
-                    label: "system(node)".into(),
-                    ai_root: system_ai.clone(),
-                },
-                ResolutionRoot {
-                    space: crate::contracts::ItemSpace::User,
-                    label: "user".into(),
-                    ai_root: user_ai.clone(),
-                },
-                ResolutionRoot {
                     space: crate::contracts::ItemSpace::Project,
                     label: "project".into(),
                     ai_root: project_ai.clone(),
+                },
+                ResolutionRoot {
+                    space: crate::contracts::ItemSpace::Bundle,
+                    label: "system(node)".into(),
+                    ai_root: system_ai.clone(),
                 },
             ],
         };
@@ -382,7 +373,6 @@ metadata:
             trust,
             roots,
             system_ai,
-            user_ai,
             project_ai,
         }
     }
@@ -413,7 +403,7 @@ metadata:
             kinds: &rig.kinds,
             trust_store: &rig.trust,
             project_root: None,
-            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
+            root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };
         ConfigResolveHandler.apply(&block, &mut ctx)?;
@@ -508,7 +498,6 @@ metadata:
     fn first_match_returns_project_version() {
         let rig = build_rig();
         write_signed_config(&rig.system_ai, "alpha.yaml", "winner: system\n");
-        write_signed_config(&rig.user_ai, "alpha.yaml", "winner: user\n");
         write_signed_config(&rig.project_ai, "alpha.yaml", "winner: project\n");
 
         let chain = vec![fake_intermediate("git", json!({}))];
@@ -519,7 +508,7 @@ metadata:
         assert_eq!(
             params["resolved_config"]["winner"],
             json!("project"),
-            "first_match must walk project → user → system"
+            "first_match must walk project → system"
         );
     }
 

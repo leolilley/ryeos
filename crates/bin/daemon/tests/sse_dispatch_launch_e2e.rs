@@ -574,14 +574,14 @@ fn sse_dispatch_launch_collision() {
     use std::sync::Arc;
 
     let tmpdir = tempfile::TempDir::new().expect("tempdir");
-    let state_root = tmpdir.path().join(".ai").join("state");
+    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
 
     let identity = NodeIdentity::create(&key_path).expect("create identity");
     let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
     let write_barrier = WriteBarrier::new();
-    let state_store = StateStore::new(state_root, runtime_db_path, signer, write_barrier)
+    let state_store = StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier)
         .expect("open state store");
 
     let id = new_thread_id();

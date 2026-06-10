@@ -8,28 +8,28 @@ use serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct IdentityParams {
     #[serde(default)]
-    pub system_space_dir: Option<String>,
+    pub app_root: Option<String>,
     #[serde(default)]
     pub project_path: Option<String>,
 }
 
 pub fn run_identity(params: IdentityParams) -> Result<Value> {
-    let system_space_dir = match params.system_space_dir {
+    let app_root = match params.app_root {
         Some(ref p) => std::path::PathBuf::from(p),
         None => {
-            // 1. RYEOS_SYSTEM_SPACE_DIR (set by the daemon for subprocess tools)
+            // 1. RYEOS_APP_ROOT (set by the daemon for subprocess tools)
             // 2. XDG data dir / ryeos
-            if let Ok(env_dir) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+            if let Ok(env_dir) = std::env::var("RYEOS_APP_ROOT") {
                 std::path::PathBuf::from(env_dir)
             } else {
                 dirs::data_dir()
                     .map(|d| d.join("ryeos"))
-                    .ok_or_else(|| anyhow!("could not determine system space directory (no system_space_dir param, no RYEOS_SYSTEM_SPACE_DIR env, no XDG data dir)"))?
+                    .ok_or_else(|| anyhow!("could not determine app rootectory (no app_root param, no RYEOS_APP_ROOT env, no XDG data dir)"))?
             }
         }
     };
 
-    let identity_path = system_space_dir
+    let identity_path = app_root
         .join(".ai")
         .join("node")
         .join("identity")

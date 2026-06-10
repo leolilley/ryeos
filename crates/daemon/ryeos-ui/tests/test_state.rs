@@ -17,16 +17,16 @@ use ryeos_engine::trust::TrustStore;
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let state_root = tmpdir.path().join(".ai").join("state");
+    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
     let config = ryeos_app::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
         uds_path: tmpdir.path().join("test.sock"),
-        system_space_dir: tmpdir.path().to_path_buf(),
+        app_root: tmpdir.path().to_path_buf(),
         node_signing_key_path: key_path.clone(),
-        user_signing_key_path: tmpdir.path().join("user-key.pem"),
+        operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
         tool_env_passthrough: Vec::new(),
@@ -38,7 +38,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
         ryeos_app::state_store::StateStore::new(
-            state_root,
+            runtime_state_dir,
             runtime_db_path,
             signer,
             write_barrier.clone(),
@@ -69,7 +69,6 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
             ryeos_engine::parsers::ParserRegistry::empty(),
             Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
         ),
-        None,
         Vec::new(),
     );
 
@@ -93,16 +92,16 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
 pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
     let tmpdir = tempfile::TempDir::new().unwrap();
-    let state_root = tmpdir.path().join(".ai").join("state");
+    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
     let key_path = tmpdir.path().join("identity").join("node-key.pem");
     let config = ryeos_app::config::Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         db_path: runtime_db_path.clone(),
         uds_path: tmpdir.path().join("test.sock"),
-        system_space_dir: tmpdir.path().to_path_buf(),
+        app_root: tmpdir.path().to_path_buf(),
         node_signing_key_path: key_path.clone(),
-        user_signing_key_path: tmpdir.path().join("user-key.pem"),
+        operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
         tool_env_passthrough: Vec::new(),
@@ -114,7 +113,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
         ryeos_app::state_store::StateStore::new(
-            state_root,
+            runtime_state_dir,
             runtime_db_path,
             signer,
             write_barrier.clone(),
@@ -193,7 +192,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, None, bundle_roots)
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
         .with_composers(composers)
 }

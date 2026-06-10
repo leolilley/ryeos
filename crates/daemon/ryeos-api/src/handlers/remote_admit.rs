@@ -45,7 +45,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     } else {
         req.project_path.as_deref()
     };
-    let remotes = config::load_remotes_layered(&state.config.system_space_dir, project)?;
+    let remotes = config::load_remotes_layered(&state.config.app_root, project)?;
     let remote_cfg = config::get_remote(&remotes, &req.remote)?;
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
     let live_identity = client.get_public_key().await?;

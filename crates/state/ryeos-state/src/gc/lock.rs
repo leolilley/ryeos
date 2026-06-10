@@ -3,8 +3,8 @@
 //! Prevents concurrent `ryeos gc` invocations from corrupting state.
 //! Uses RAII: lock acquired on creation, released on drop.
 //!
-//! Lock file at `state_root/gc.lock`.
-//! State file at `state_root/gc.state.json` for observability.
+//! Lock file at `runtime_state_dir/gc.lock`.
+//! State file at `runtime_state_dir/gc.state.json` for observability.
 
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
@@ -15,7 +15,7 @@ use serde_json::json;
 
 /// RAII guard for the GC lock.
 ///
-/// Acquires an exclusive flock on `state_root/gc.lock`. The lock is
+/// Acquires an exclusive flock on `runtime_state_dir/gc.lock`. The lock is
 /// released when this guard is dropped (or the process exits).
 #[derive(Debug)]
 pub struct GcLock {
@@ -26,15 +26,15 @@ pub struct GcLock {
 impl GcLock {
     /// Acquire the GC lock. Blocks until acquired or times out.
     ///
-    /// Creates a JSON sidecar file at `state_root/gc.state.json`
+    /// Creates a JSON sidecar file at `runtime_state_dir/gc.state.json`
     /// for observability (who holds the lock, current phase, PID).
-    pub fn acquire(state_root: &Path, node_id: &str) -> Result<Self> {
-        let lock_path = state_root.join("gc.lock");
-        let state_path = state_root.join("gc.state.json");
+    pub fn acquire(runtime_state_dir: &Path, node_id: &str) -> Result<Self> {
+        let lock_path = runtime_state_dir.join("gc.lock");
+        let state_path = runtime_state_dir.join("gc.state.json");
 
-        // Ensure state_root exists
+        // Ensure runtime_state_dir exists
         if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).context("failed to create state_root for GC lock")?;
+            fs::create_dir_all(parent).context("failed to create runtime_state_dir for GC lock")?;
         }
 
         // Open (create if needed) and lock
@@ -114,29 +114,29 @@ mod tests {
     #[test]
     fn lock_acquire_and_release() {
         let tmp = TempDir::new().unwrap();
-        let state_root = tmp.path().join("state");
-        fs::create_dir_all(&state_root).unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        fs::create_dir_all(&runtime_state_dir).unwrap();
 
         {
-            let _lock = GcLock::acquire(&state_root, "test-node").unwrap();
-            assert!(state_root.join("gc.lock").exists());
-            assert!(state_root.join("gc.state.json").exists());
+            let _lock = GcLock::acquire(&runtime_state_dir, "test-node").unwrap();
+            assert!(runtime_state_dir.join("gc.lock").exists());
+            assert!(runtime_state_dir.join("gc.state.json").exists());
         }
 
         // After drop, state file is cleaned up
-        assert!(!state_root.join("gc.state.json").exists());
+        assert!(!runtime_state_dir.join("gc.state.json").exists());
         // Lock file stays (it's the persistent lock anchor)
     }
 
     #[test]
     fn lock_concurrent_fails() {
         let tmp = TempDir::new().unwrap();
-        let state_root = tmp.path().join("state");
-        fs::create_dir_all(&state_root).unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        fs::create_dir_all(&runtime_state_dir).unwrap();
 
-        let _lock1 = GcLock::acquire(&state_root, "node-1").unwrap();
+        let _lock1 = GcLock::acquire(&runtime_state_dir, "node-1").unwrap();
 
-        let result = GcLock::acquire(&state_root, "node-2");
+        let result = GcLock::acquire(&runtime_state_dir, "node-2");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -147,13 +147,13 @@ mod tests {
     #[test]
     fn lock_update_phase() {
         let tmp = TempDir::new().unwrap();
-        let state_root = tmp.path().join("state");
-        fs::create_dir_all(&state_root).unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        fs::create_dir_all(&runtime_state_dir).unwrap();
 
-        let lock = GcLock::acquire(&state_root, "test-node").unwrap();
+        let lock = GcLock::acquire(&runtime_state_dir, "test-node").unwrap();
         lock.update_phase("compact").unwrap();
 
-        let content = fs::read_to_string(state_root.join("gc.state.json")).unwrap();
+        let content = fs::read_to_string(runtime_state_dir.join("gc.state.json")).unwrap();
         assert!(content.contains("\"compact\""));
     }
 }

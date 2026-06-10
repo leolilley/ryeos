@@ -1,8 +1,8 @@
-//! User-space path and YAML helpers for Studio/user-principal state.
+//! Principal path and YAML helpers for Studio state.
 //!
 //! This module is the local-install seam for future principal/tenant-aware
 //! resolution. Callers should use logical `config/*` and `state/*` paths here
-//! instead of constructing `<user_root>/.ai/...` ad hoc.
+//! instead of constructing app-root paths ad hoc.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -14,24 +14,24 @@ use tokio::sync::{Mutex, MutexGuard};
 /// Synthetic principal for the current local single-user install.
 ///
 /// Hosted/multi-principal mode should derive a real principal from the
-/// authenticated caller and resolve through [`UserSpaceResolver`] without
-/// changing callers that operate on [`UserSpacePaths`].
+/// authenticated caller and resolve through [`PrincipalResolver`] without
+/// changing callers that operate on [`PrincipalPaths`].
 pub const LOCAL_PRINCIPAL_ID: &str = "local";
 
-static USER_SPACE_YAML_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PRINCIPAL_YAML_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UserSpacePaths {
+pub struct PrincipalPaths {
     pub root: PathBuf,
 }
 
-impl UserSpacePaths {
+impl PrincipalPaths {
     pub fn resolve() -> Result<Self> {
-        LocalUserSpaceResolver.resolve(LOCAL_PRINCIPAL_ID)
+        LocalPrincipalResolver.resolve(LOCAL_PRINCIPAL_ID)
     }
 
     fn resolve_local() -> Result<Self> {
-        let root = ryeos_engine::roots::user_root().context("failed to resolve user space root")?;
+        let root = ryeos_engine::roots::app_root().context("failed to resolve app root")?;
         Ok(Self { root })
     }
 
@@ -60,45 +60,45 @@ impl UserSpacePaths {
     }
 }
 
-/// Resolves logical user-space storage for a principal.
+/// Resolves logical storage space for a principal.
 ///
-/// Local RyeOS maps every caller to the same local user space. Future hosted
+/// Local RyeOS maps every caller to the same local space. Future hosted
 /// mode can replace this with a resolver backed by per-principal filesystem,
 /// database, or object storage while preserving the logical config/state paths.
-pub trait UserSpaceResolver {
-    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths>;
+pub trait PrincipalResolver {
+    fn resolve(&self, principal_id: &str) -> Result<PrincipalPaths>;
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct LocalUserSpaceResolver;
+pub struct LocalPrincipalResolver;
 
-impl UserSpaceResolver for LocalUserSpaceResolver {
-    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+impl PrincipalResolver for LocalPrincipalResolver {
+    fn resolve(&self, principal_id: &str) -> Result<PrincipalPaths> {
         if principal_id.trim().is_empty() {
-            anyhow::bail!("principal id is required to resolve user space");
+            anyhow::bail!("principal id is required to resolve principal space");
         }
-        UserSpacePaths::resolve_local()
+        PrincipalPaths::resolve_local()
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct PrincipalUserSpaceResolver {
+pub struct HostedPrincipalResolver {
     principal_root: PathBuf,
 }
 
-impl PrincipalUserSpaceResolver {
-    pub fn for_system_space(system_space_dir: impl Into<PathBuf>) -> Self {
+impl HostedPrincipalResolver {
+    pub fn for_app_root(app_root: impl Into<PathBuf>) -> Self {
         Self {
-            principal_root: system_space_dir.into().join(".ai").join("principals"),
+            principal_root: app_root.into().join(".ai").join("principals"),
         }
     }
 }
 
-impl UserSpaceResolver for PrincipalUserSpaceResolver {
-    fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+impl PrincipalResolver for HostedPrincipalResolver {
+    fn resolve(&self, principal_id: &str) -> Result<PrincipalPaths> {
         let principal_key = principal_storage_key(principal_id)?;
-        Ok(UserSpacePaths::new(
-            self.principal_root.join(principal_key).join("user-space"),
+        Ok(PrincipalPaths::new(
+            self.principal_root.join(principal_key).join("space"),
         ))
     }
 }
@@ -114,46 +114,46 @@ pub fn principal_storage_key(principal_id: &str) -> Result<String> {
 }
 
 #[derive(Debug, Clone)]
-pub struct UserSpaceStore {
-    paths: UserSpacePaths,
+pub struct PrincipalStore {
+    paths: PrincipalPaths,
 }
 
-pub struct LockedUserSpaceStore {
-    store: UserSpaceStore,
+pub struct LockedPrincipalStore {
+    store: PrincipalStore,
     _guard: MutexGuard<'static, ()>,
 }
 
-impl UserSpaceStore {
+impl PrincipalStore {
     pub fn resolve_principal(principal_id: &str) -> Result<Self> {
-        Self::resolve_with(&LocalUserSpaceResolver, principal_id)
+        Self::resolve_with(&LocalPrincipalResolver, principal_id)
     }
 
     pub fn resolve_with<R>(resolver: &R, principal_id: &str) -> Result<Self>
     where
-        R: UserSpaceResolver,
+        R: PrincipalResolver,
     {
         Ok(Self {
             paths: resolver.resolve(principal_id)?,
         })
     }
 
-    pub async fn locked_principal(principal_id: &str) -> Result<LockedUserSpaceStore> {
-        Self::locked_with(&LocalUserSpaceResolver, principal_id).await
+    pub async fn locked_principal(principal_id: &str) -> Result<LockedPrincipalStore> {
+        Self::locked_with(&LocalPrincipalResolver, principal_id).await
     }
 
-    pub async fn locked_with<R>(resolver: &R, principal_id: &str) -> Result<LockedUserSpaceStore>
+    pub async fn locked_with<R>(resolver: &R, principal_id: &str) -> Result<LockedPrincipalStore>
     where
-        R: UserSpaceResolver,
+        R: PrincipalResolver,
     {
         let store = Self::resolve_with(resolver, principal_id)?;
-        let guard = user_space_yaml_lock().lock().await;
-        Ok(LockedUserSpaceStore {
+        let guard = principal_yaml_lock().lock().await;
+        Ok(LockedPrincipalStore {
             store,
             _guard: guard,
         })
     }
 
-    pub fn paths(&self) -> &UserSpacePaths {
+    pub fn paths(&self) -> &PrincipalPaths {
         &self.paths
     }
 
@@ -165,7 +165,7 @@ impl UserSpaceStore {
     }
 }
 
-impl LockedUserSpaceStore {
+impl LockedPrincipalStore {
     pub fn write_yaml<T>(&self, path: &Path, value: &T) -> Result<()>
     where
         T: Serialize,
@@ -174,16 +174,16 @@ impl LockedUserSpaceStore {
     }
 }
 
-impl std::ops::Deref for LockedUserSpaceStore {
-    type Target = UserSpaceStore;
+impl std::ops::Deref for LockedPrincipalStore {
+    type Target = PrincipalStore;
 
     fn deref(&self) -> &Self::Target {
         &self.store
     }
 }
 
-fn user_space_yaml_lock() -> &'static Mutex<()> {
-    USER_SPACE_YAML_LOCK.get_or_init(|| Mutex::new(()))
+fn principal_yaml_lock() -> &'static Mutex<()> {
+    PRINCIPAL_YAML_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 pub fn read_yaml_or_default<T>(path: &Path) -> Result<T>
@@ -281,18 +281,18 @@ mod tests {
         root: PathBuf,
     }
 
-    impl UserSpaceResolver for FixedResolver {
-        fn resolve(&self, principal_id: &str) -> Result<UserSpacePaths> {
+    impl PrincipalResolver for FixedResolver {
+        fn resolve(&self, principal_id: &str) -> Result<PrincipalPaths> {
             if principal_id != "fp:test" {
                 anyhow::bail!("unexpected principal {principal_id}");
             }
-            Ok(UserSpacePaths::new(self.root.clone()))
+            Ok(PrincipalPaths::new(self.root.clone()))
         }
     }
 
     #[test]
     fn logical_paths_live_under_user_ai_config_and_state() {
-        let paths = UserSpacePaths::new(PathBuf::from("/tmp/user"));
+        let paths = PrincipalPaths::new(PathBuf::from("/tmp/user"));
         assert_eq!(
             paths.projects_config(),
             PathBuf::from("/tmp/user/.ai/config/projects.yaml")
@@ -305,18 +305,18 @@ mod tests {
 
     #[test]
     fn local_resolver_requires_a_principal_but_keeps_local_storage() {
-        let err = LocalUserSpaceResolver.resolve("").unwrap_err();
+        let err = LocalPrincipalResolver.resolve("").unwrap_err();
         assert!(err.to_string().contains("principal id is required"));
 
-        let resolved = LocalUserSpaceResolver
+        let resolved = LocalPrincipalResolver
             .resolve("fp:test")
             .expect("local resolver should ignore principal storage partitioning");
-        assert_eq!(resolved, UserSpacePaths::resolve().unwrap());
+        assert_eq!(resolved, PrincipalPaths::resolve().unwrap());
     }
 
     #[test]
-    fn principal_resolver_maps_fp_to_isolated_user_space() {
-        let resolver = PrincipalUserSpaceResolver::for_system_space("/tmp/system");
+    fn principal_resolver_maps_fp_to_isolated_space() {
+        let resolver = HostedPrincipalResolver::for_app_root("/tmp/system");
         let principal = format!("fp:{}", "AB".repeat(32));
         let paths = resolver.resolve(&principal).unwrap();
 
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(
             paths.root,
             PathBuf::from(format!(
-                "/tmp/system/.ai/principals/{}/user-space",
+                "/tmp/system/.ai/principals/{}/space",
                 "ab".repeat(32)
             ))
         );
@@ -355,18 +355,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_space_store_resolves_principal_and_serializes_yaml() {
+    async fn principal_store_resolves_principal_and_serializes_yaml() {
         let tmp = tempfile::tempdir().unwrap();
         let resolver = FixedResolver {
             root: tmp.path().to_path_buf(),
         };
-        let store = UserSpaceStore::resolve_with(&resolver, "fp:test").unwrap();
+        let store = PrincipalStore::resolve_with(&resolver, "fp:test").unwrap();
         let path = store.paths().studio_config();
 
         let missing: Demo = store.load_yaml(&path).unwrap();
         assert_eq!(missing, Demo::default());
 
-        let locked = UserSpaceStore::locked_with(&resolver, "fp:test")
+        let locked = PrincipalStore::locked_with(&resolver, "fp:test")
             .await
             .expect("locked store should resolve through supplied resolver");
         locked
@@ -426,7 +426,7 @@ mod tests {
             .join(".ai")
             .join("principals")
             .join("ab".repeat(32))
-            .join("user-space")
+            .join("space")
             .join(".ai")
             .join("config")
             .join("studio.yaml");
@@ -438,9 +438,9 @@ mod tests {
             ".ai".to_string(),
             ".ai/principals".to_string(),
             format!(".ai/principals/{principal_key}"),
-            format!(".ai/principals/{principal_key}/user-space"),
-            format!(".ai/principals/{principal_key}/user-space/.ai"),
-            format!(".ai/principals/{principal_key}/user-space/.ai/config"),
+            format!(".ai/principals/{principal_key}/space"),
+            format!(".ai/principals/{principal_key}/space/.ai"),
+            format!(".ai/principals/{principal_key}/space/.ai/config"),
         ];
         for dir in dirs {
             let mode = std::fs::metadata(tmp.path().join(&dir))

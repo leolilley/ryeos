@@ -1,8 +1,8 @@
-//! Operator-side `ryeos init` (Model B) — bootstraps user space, node space,
+//! Operator-side `ryeos init` (Model B) — bootstraps operator config, node space,
 //! pins the official publisher key into the operator's trust store, discovers
 //! bundles from a source directory, installs them under
-//! `<system_space_dir>/.ai/bundles/`, and writes signed registration records
-//! at `<system_space_dir>/.ai/node/bundles/<name>.yaml`.
+//! `<app_root>/.ai/bundles/`, and writes signed registration records
+//! at `<app_root>/.ai/node/bundles/<name>.yaml`.
 //!
 //! # Bundle discovery
 //!
@@ -27,7 +27,7 @@
 //!     ...same shape...
 //! ```
 //!
-//! After init, installed at `<system_space_dir>/.ai/bundles/`:
+//! After init, installed at `<app_root>/.ai/bundles/`:
 //! ```text
 //! core/.ai/...      ← copied from source/core/
 //! standard/.ai/...  ← copied from source/standard/
@@ -38,7 +38,7 @@
 //! tools, config, knowledge, binaries). Runtime-only state directories
 //! (`state/objects/`, `state/refs/`, `node/identity/`, `node/vault/`,
 //! `node/bundles/`) are never present in source bundles and are not
-//! created by init — they belong to the system space runtime layout.
+//! created by init — they belong to the app-root runtime layout.
 //!
 //! Directories that are NOT immediate children of `--source`, or that
 //! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
@@ -81,11 +81,10 @@ pub const OFFICIAL_PUBLISHER_PUBKEY: [u8; 32] = [
 
 #[derive(Debug)]
 pub struct InitOptions {
-    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
-    /// Contains mutable node state and installed bundle content.
-    pub system_space_dir: PathBuf,
-    /// User space root (parent of `.ai/`). Defaults to the canonical user root.
-    pub user_root: PathBuf,
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// Contains operator config, mutable node state, and installed bundle
+    /// content — there is no separate user-space tier.
+    pub app_root: PathBuf,
     /// Source directory containing one or more bundle subdirectories.
     /// Each immediate child that contains a `.ai/` directory is a bundle;
     /// the bundle name is its directory name.
@@ -106,7 +105,7 @@ pub struct InitOptions {
 
 #[derive(Debug, Serialize)]
 pub struct InitReport {
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
     pub user_key_fingerprint: String,
     pub node_key_fingerprint: String,
     pub official_publisher_pinned: String,
@@ -123,9 +122,9 @@ pub struct InitReport {
 /// Run `ryeos init` end-to-end (Model B).
 ///
 /// Order:
-///   1. Layout: create `<system_space_dir>/.ai/{node,state,bundles}` + user space
-///   2. User key (load-or-create at `<user>/.ai/config/keys/signing/private_key.pem`)
-///   3. Node key (load-or-create at `<system_space_dir>/.ai/node/identity/private_key.pem`)
+///   1. Layout: create `<app_root>/.ai/{node,state,bundles,config}`
+///   2. Operator key (load-or-create at `<app_root>/.ai/config/keys/signing/private_key.pem`)
+///   3. Node key (load-or-create at `<app_root>/.ai/node/identity/private_key.pem`)
 ///   4. Self-trust both keys (write signed `<fp>.toml` into user trust dir)
 ///   5. Pin official publisher key into user trust dir + additional trust files
 ///   6. Discover bundles in `source_dir` — scan for child dirs containing `.ai/`
@@ -146,10 +145,14 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 1. Layout ──
-    create_layout(&opts.system_space_dir, &opts.user_root)?;
+    create_layout(&opts.app_root)?;
+
+    // Operator config root (`<app_root>/.ai/config`) — the single trust
+    // source for `ryeos init`. Bundles are never a trust source.
+    let operator_config_root = opts.app_root.join(ryeos_engine::AI_DIR).join("config");
 
     let trust_dir = opts
-        .user_root
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("config")
         .join("keys")
@@ -159,7 +162,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
     // ── 2. User key ──
     let user_key_path = opts
-        .user_root
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("config")
         .join("keys")
@@ -171,7 +174,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
     // ── 3. Node key ──
     let node_key_path = opts
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("identity")
@@ -179,6 +182,15 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let node_key = load_or_create_key(&node_key_path, false)
         .with_context(|| format!("node key at {}", node_key_path.display()))?;
     let node_fp = compute_fingerprint(&node_key.verifying_key());
+    ryeos_app::identity::NodeIdentity::load(&node_key_path)
+        .with_context(|| format!("load node identity {}", node_key_path.display()))?
+        .write_public_identity(&node_key_path.with_file_name("public-identity.json"))
+        .with_context(|| {
+            format!(
+                "write node public identity {}",
+                node_key_path.with_file_name("public-identity.json").display()
+            )
+        })?;
 
     // ── 4. Self-trust both keys ──
     pin_key(
@@ -238,7 +250,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     // Source-root seed data owns node registration grants. Init reads this
     // declarative data and materializes signed node registrations; it does not
     // infer command registration authority from bundle names or discovery.
-    let seed_trust_store = TrustStore::load_three_tier(None, Some(opts.user_root.as_path()), &[])
+    let seed_trust_store = TrustStore::load(None, &operator_config_root)
         .context("load trust store for source-root seed data")?;
     let command_registration_grants =
         load_init_bundle_registration_grants(&opts.source_dir, &seed_trust_store).with_context(
@@ -251,7 +263,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         )?;
     materialize_seed_command_registration_policy(
         &opts.source_dir,
-        &opts.system_space_dir,
+        &opts.app_root,
         &seed_trust_store,
         &node_key,
     )
@@ -280,7 +292,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             ryeos_bundle::preflight::preflight_verify_bundle_in_context(
                 &job.subject_root,
                 &job.dependency_roots,
-                Some(opts.user_root.as_path()),
+                &operator_config_root,
             )
             .with_context(|| {
                 format!("verify {} source against pinned publisher key", job.subject)
@@ -299,7 +311,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             bail!("init source-set plan unexpectedly included installed bundle {name}");
         };
         let target = opts
-            .system_space_dir
+            .app_root
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
@@ -322,7 +334,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             // fail-closed semantics instead of preserving malformed-but-signed
             // old records.
             let node_dir = opts
-                .system_space_dir
+                .app_root
                 .join(ryeos_engine::AI_DIR)
                 .join("node");
             let grants = command_registration_grants
@@ -343,13 +355,11 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 .cloned()
                 .unwrap_or_default();
             install_bundle(
-                &opts.system_space_dir,
+                &opts.app_root,
                 name,
                 source_path,
                 &grants,
                 &node_key,
-                &opts.system_space_dir,
-                opts.user_root.as_path(),
                 true,
             )?;
         }
@@ -359,7 +369,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
     // ── 8. Vault X25519 keypair ──
     let vault_dir = opts
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault");
@@ -381,7 +391,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
     // ── 8b. Default ingest ignore config ──
     let ignore_dir = opts
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("ingest");
@@ -401,12 +411,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 9. Post-init trust verification ──
-    let post_trust = TrustStore::load_three_tier(
-        None,
-        Some(opts.user_root.as_path()),
-        std::slice::from_ref(&opts.system_space_dir),
-    )
-    .context("load post-init trust store")?;
+    let post_trust = TrustStore::load(None, &operator_config_root)
+        .context("load post-init trust store")?;
     if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {
         bail!(
             "post-init self-check failed: official publisher key {} is \
@@ -435,7 +441,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     let next_steps = Vec::new();
 
     Ok(InitReport {
-        system_space_dir: opts.system_space_dir.clone(),
+        app_root: opts.app_root.clone(),
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
         official_publisher_pinned: OFFICIAL_PUBLISHER_FP.to_string(),
@@ -493,7 +499,7 @@ fn load_init_bundle_registration_grants(
 
 fn materialize_seed_command_registration_policy(
     source_dir: &Path,
-    system_space_dir: &Path,
+    app_root: &Path,
     trust_store: &TrustStore,
     node_key: &SigningKey,
 ) -> Result<()> {
@@ -510,7 +516,7 @@ fn materialize_seed_command_registration_policy(
             source.display()
         );
     }
-    let target = system_space_dir
+    let target = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("command_registration");
@@ -791,57 +797,57 @@ fn pin_trust_file(trust_file: &Path, trust_dir: &Path) -> Result<()> {
 
 /// Create the Model B directory layout.
 ///
-/// System space contains:
+/// The app root contains:
 /// - `node/` — mutable daemon state (identity, vault, config, bundle registrations)
 /// - `state/` — CAS and runtime state
 /// - `bundles/` — installed bundle content (populated by bundle installs)
-fn create_layout(system_space_dir: &Path, user_root: &Path) -> Result<()> {
+fn create_layout(app_root: &Path) -> Result<()> {
     let dirs = [
         // Node tier (daemon-owned)
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("identity"),
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("auth")
             .join("authorized_keys"),
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("vault"),
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("config"),
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("bundles"),
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("engine")
             .join("kinds"),
         // CAS state
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("state")
             .join("objects"),
-        system_space_dir
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("state")
             .join("refs"),
         // Installed bundles directory
-        system_space_dir.join(ryeos_engine::AI_DIR).join("bundles"),
-        // User tier (operator-edited)
-        user_root
+        app_root.join(ryeos_engine::AI_DIR).join("bundles"),
+        // Operator config (operator-edited)
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("config")
             .join("keys")
             .join("signing"),
-        user_root
+        app_root
             .join(ryeos_engine::AI_DIR)
             .join("config")
             .join("keys")
@@ -953,43 +959,38 @@ fn replace_bundle(source: &Path, target: &Path) -> Result<()> {
 ///
 /// Returns the canonical path of the installed bundle.
 fn install_bundle(
-    system_space_dir: &Path,
+    app_root: &Path,
     name: &str,
     source: &Path,
     command_registration_caps: &[String],
     node_key: &SigningKey,
-    system_space_dir_for_kinds: &Path,
-    user_root: &Path,
     skip_preflight: bool,
 ) -> Result<PathBuf> {
+    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     if !skip_preflight {
-        // Preflight: load trust store from operator state.
-        let trust_store = TrustStore::load_three_tier(
-            None,
-            Some(user_root),
-            &[system_space_dir_for_kinds.to_path_buf()],
-        )
-        .context("preflight: load trust store")?;
+        // Preflight: load trust store from operator config.
+        let trust_store = TrustStore::load(None, &operator_config_root)
+            .context("preflight: load trust store")?;
         if !trust_store.is_trusted(OFFICIAL_PUBLISHER_FP) {
             bail!(
                 "internal error: official publisher key {} not in trust store \
                  after `ryeos init` pinned it — trust dir at {}",
                 OFFICIAL_PUBLISHER_FP,
-                user_root.join(".ai/config/keys/trusted").display()
+                operator_config_root.join("keys").join("trusted").display()
             );
         }
 
         // Verify every signable item in the source bundle against the trust store.
         ryeos_bundle::preflight::preflight_verify_bundle_in_context(
             source,
-            &[system_space_dir_for_kinds.to_path_buf()],
-            Some(user_root),
+            &[app_root.to_path_buf()],
+            &operator_config_root,
         )
         .with_context(|| format!("preflight verification of {} bundle", name))?;
     }
 
-    // Copy bundle into <system_space_dir>/.ai/bundles/<name>/
-    let target = system_space_dir
+    // Copy bundle into <app_root>/.ai/bundles/<name>/
+    let target = app_root
         .join(ryeos_engine::AI_DIR)
         .join("bundles")
         .join(name);
@@ -1002,7 +1003,7 @@ fn install_bundle(
         .with_context(|| format!("canonicalize {} install path", name))?;
 
     // Write signed kind: node bundle registration record.
-    let node_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("node");
+    let node_dir = app_root.join(ryeos_engine::AI_DIR).join("node");
     write_node_bundle_registration(
         &node_dir,
         name,
@@ -1104,10 +1105,9 @@ mod tests {
         workspace_root().join(".dev-keys/PUBLISHER_DEV_TRUST.toml")
     }
 
-    fn make_opts(state: &Path, user: &Path) -> InitOptions {
+    fn make_opts(state: &Path, _user: &Path) -> InitOptions {
         InitOptions {
-            system_space_dir: state.to_path_buf(),
-            user_root: user.to_path_buf(),
+            app_root: state.to_path_buf(),
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
@@ -1170,7 +1170,7 @@ mod tests {
         );
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
-        assert!(user
+        assert!(state
             .join(".ai/config/keys/signing/private_key.pem")
             .exists());
     }
@@ -1190,10 +1190,8 @@ mod tests {
         copy_source_seed(&source);
 
         let state = tmp.path().join("state");
-        let user = tmp.path().join("home");
         let opts = InitOptions {
-            system_space_dir: state.to_path_buf(),
-            user_root: user.to_path_buf(),
+            app_root: state.to_path_buf(),
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
@@ -1223,10 +1221,10 @@ mod tests {
         assert_eq!(report.official_publisher_pinned, OFFICIAL_PUBLISHER_FP);
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
-        assert!(user
+        assert!(state
             .join(".ai/config/keys/signing/private_key.pem")
             .exists());
-        assert!(user
+        assert!(state
             .join(".ai/config/keys/trusted")
             .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
             .exists());
@@ -1326,10 +1324,8 @@ mod tests {
             .expect("remove command-registration seed");
 
         let state = tmp.path().join("state");
-        let user = tmp.path().join("home");
         let opts = InitOptions {
-            system_space_dir: state,
-            user_root: user,
+            app_root: state,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
@@ -1360,10 +1356,8 @@ mod tests {
 
         let tmp_state = tempfile::tempdir().unwrap();
         let state = tmp_state.path().join("state");
-        let user = tmp_state.path().join("home");
         let opts = InitOptions {
-            system_space_dir: state,
-            user_root: user,
+            app_root: state,
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,
@@ -1381,10 +1375,8 @@ mod tests {
     fn run_init_requires_explicit_trust_for_dev_signed_source() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
-        let user = tmp.path().join("home");
         let opts = InitOptions {
-            system_space_dir: state,
-            user_root: user,
+            app_root: state,
             source_dir: workspace_root().join("bundles"),
             trust_files: vec![],
             skip_preflight: true,
@@ -1709,7 +1701,6 @@ typo_field: oops
     fn run_init_aborts_before_install_on_unsatisfied_deps() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
-        let user = tmp.path().join("home");
 
         // Create a source dir with a bundle that requires an unsatisfied kind
         let source = tmp.path().join("source");
@@ -1728,8 +1719,7 @@ typo_field: oops
         .unwrap();
 
         let opts = InitOptions {
-            system_space_dir: state.clone(),
-            user_root: user,
+            app_root: state.clone(),
             source_dir: source,
             trust_files: vec![dev_trust_file()],
             skip_preflight: true,

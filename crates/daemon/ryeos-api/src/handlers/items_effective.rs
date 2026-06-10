@@ -63,7 +63,7 @@ pub struct Request {
     pub canonical_ref: String,
 
     /// Optional project path for project-space resolution.
-    /// When absent, only system and user spaces are searched.
+    /// When absent, only bundle roots are searched.
     #[serde(default)]
     pub project_path: Option<String>,
 

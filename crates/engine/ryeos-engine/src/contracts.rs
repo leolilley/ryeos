@@ -2799,21 +2799,19 @@ pub struct ResolvedSourceFormat {
 
 // ── Item spaces ──────────────────────────────────────────────────────
 
-/// The three-tier resolution space where an item was found.
+/// The resolution space where an item was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum ItemSpace {
     Project,
-    User,
-    System,
+    Bundle,
 }
 
 impl ItemSpace {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Project => "project",
-            Self::User => "user",
-            Self::System => "system",
+            Self::Bundle => "bundle",
         }
     }
 }

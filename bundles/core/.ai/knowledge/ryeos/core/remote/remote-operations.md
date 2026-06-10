@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-09T07:59:10Z:a5f45f8c825c72eb81b94350f5f256e3b26108351d3c92702ff30186cfba019d:WEU7inZ4RHNAUwJZDsDcV0ZRArpD9ThrY36dfb+yYKNopZuJTRBi7nLrNuobiOoNhoXQIEnAKBzpgMiILy3wDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-10T04:17:44Z:73ab652c68471e88e65e80b7b2f6d129cbf70bab7e1b08e27d9acfa748b5d064:Z5I7BhlGFjSziM9cmca41m7TD0rVAkqdeJcPdUL4DjhndHnUr7JLqyHIojcSAXSEKwgsr35TPLr9EQq2d1iRAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -8,7 +8,7 @@ description: >
   operator workflows, fail-closed semantics, and security requirements.
   Covers the per-request engine overlay, user-space sync, hybrid binary
   resolution, symmetric pull-back, single-flight cache builds, and
-  live system roots.
+  live bundle roots.
 ---
 
 # Remote Operations

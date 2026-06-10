@@ -32,9 +32,8 @@ fn default_remote() -> String {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
-    let report =
-        config::load_remotes_layered_report(&state.config.system_space_dir, Some(&req.project))
-            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))
+        .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote)
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
     let binding = config::resolve_loaded_project_binding(&loaded_remote, &req.project)

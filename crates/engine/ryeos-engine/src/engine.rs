@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ pub struct EffectiveItemSource {
     pub path: PathBuf,
     /// The installed bundle root (parent of `.ai/`) when the item
     /// came from an installed bundle space. `None` for project-space
-    /// or user-space items, or when the resolver cannot determine
+    /// items, or when the resolver cannot determine
     /// the bundle boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_root: Option<PathBuf>,
@@ -100,18 +101,15 @@ pub struct Engine {
     /// compatibility.
     pub host_env: crate::runtime::HostEnvBindings,
 
-    /// User-space root (parent of `AI_DIR`)
-    pub user_root: Option<PathBuf>,
     /// System bundle roots (parents of `AI_DIR`)
-    pub system_roots: Vec<PathBuf>,
+    pub bundle_roots: Vec<PathBuf>,
 }
 
 impl Engine {
     pub fn new(
         kinds: KindRegistry,
         parser_dispatcher: ParserDispatcher,
-        user_root: Option<PathBuf>,
-        system_roots: Vec<PathBuf>,
+        bundle_roots: Vec<PathBuf>,
     ) -> Self {
         Self {
             kinds,
@@ -121,14 +119,23 @@ impl Engine {
             runtimes: RuntimeRegistry::default(),
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
-            user_root,
-            system_roots,
+            bundle_roots,
         }
     }
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
         self
+    }
+
+    fn effective_trust_store(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Result<Cow<'_, TrustStore>, EngineError> {
+        match project_root {
+            Some(root) => Ok(Cow::Owned(self.trust_store.with_project_keys(root)?)),
+            None => Ok(Cow::Borrowed(&self.trust_store)),
+        }
     }
 
     /// Install the catalog of `kind: runtime` items, normally built
@@ -280,10 +287,15 @@ impl Engine {
     /// Trust store is system + user only — no project widening.
     pub fn verify(
         &self,
-        _ctx: &PlanContext,
+        ctx: &PlanContext,
         item: ResolvedItem,
     ) -> Result<VerifiedItem, EngineError> {
-        let result = crate::trust::verify_resolved_item(item, &self.trust_store);
+        let project_root = match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
+            _ => None,
+        };
+        let trust_store = self.effective_trust_store(project_root)?;
+        let result = crate::trust::verify_resolved_item(item, &trust_store);
         if let Ok(ref verified) = result {
             tracing::debug!(
                 item_ref = %verified.resolved.canonical_ref,
@@ -318,14 +330,15 @@ impl Engine {
         }
 
         let roots = self.resolution_roots(request.project_root.clone());
-        let effective_parsers =
-            self.effective_parser_dispatcher(request.project_root.as_deref())?;
+        let project_root = request.project_root.as_deref();
+        let trust_store = self.effective_trust_store(project_root)?;
+        let effective_parsers = self.effective_parser_dispatcher(project_root)?;
         let output = crate::resolution::run_effective_item_pipeline(
             &request.item_ref,
             &self.kinds,
             &effective_parsers,
             &roots,
-            &self.trust_store,
+            &trust_store,
             &self.composers,
         )
         .map_err(|e| {
@@ -386,16 +399,16 @@ impl Engine {
         let trust_class = output.effective_trust_class;
         let trusted = matches!(
             trust_class,
-            crate::resolution::TrustClass::TrustedSystem
-                | crate::resolution::TrustClass::TrustedUser
+            crate::resolution::TrustClass::TrustedBundle
+                | crate::resolution::TrustClass::TrustedProject
         );
         let provenance = output.provenance();
 
         // Determine bundle_root: check if the source path falls under
-        // one of the system roots (installed bundle spaces). The bundle
+        // one of the bundle roots (installed bundle spaces). The bundle
         // root is the parent of the `.ai/` directory.
         let bundle_root = self
-            .system_roots
+            .bundle_roots
             .iter()
             .find(|root| output.root.source_path.starts_with(root))
             .cloned();
@@ -463,6 +476,7 @@ impl Engine {
             _ => None,
         };
         let roots = self.resolution_roots(project_root.clone());
+        let trust_store = self.effective_trust_store(project_root.as_deref())?;
 
         // Per-request: parser tools may be overlaid by the project's
         // `.ai/parsers/`; the cache fingerprint must reflect that.
@@ -487,7 +501,7 @@ impl Engine {
             parsers: &effective_parsers,
             roots: &roots,
             registry_fingerprint: &effective_fp,
-            trust_store: &self.trust_store,
+            trust_store: &trust_store,
             host_env: &self.host_env,
         })
     }
@@ -517,12 +531,11 @@ impl Engine {
         crate::dispatch::spawn_plan(plan, ctx)
     }
 
-    /// Build resolution roots for a given project root (system-first order).
+    /// Build resolution roots for a given project root (project-first order).
     pub fn resolution_roots(&self, project_root: Option<PathBuf>) -> ResolutionRoots {
-        let system_ai: Vec<PathBuf> = self.system_roots.iter().map(|p| p.join(AI_DIR)).collect();
-        let user_ai = self.user_root.clone().map(|p| p.join(AI_DIR));
+        let system_ai: Vec<PathBuf> = self.bundle_roots.iter().map(|p| p.join(AI_DIR)).collect();
         let project_ai = project_root.map(|p| p.join(AI_DIR));
-        ResolutionRoots::from_flat(project_ai, user_ai, system_ai)
+        ResolutionRoots::from_flat(project_ai, system_ai)
     }
 
     /// Composite cache fingerprint over the kind registry and the
@@ -611,9 +624,10 @@ impl Engine {
                             .into(),
                     });
                 }
+                let trust_store = self.effective_trust_store(Some(path))?;
                 let overlaid = self.parser_dispatcher.parser_tools.with_project_overlay(
                     path,
-                    &self.trust_store,
+                    &trust_store,
                     &self.kinds,
                 )?;
                 Ok(self.parser_dispatcher.with_parser_tools(overlaid))
@@ -710,7 +724,6 @@ formats:
         Engine::new(
             KindRegistry::empty(),
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         )
     }
@@ -800,14 +813,13 @@ formats:
         fs::create_dir_all(&tool_dir).unwrap();
         fs::write(
             tool_dir.join("hello.py"),
-            "# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigdata:fp_test\nprint('hello')\n",
+            "# ryeos:signed:2026-04-10T00:00:00Z:abc123:sigdata:fp_test\n# ryeos-tool:\n#   note: hello\nprint('hello')\n",
         )
         .unwrap();
 
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         );
 
@@ -881,7 +893,7 @@ formats:
         let verifying_key = signing_key.verifying_key();
         let fp = crate::trust::compute_fingerprint(&verifying_key);
 
-        let body = "print('hello')\n";
+        let body = "# ryeos-tool:\n#   note: hello\nprint('hello')\n";
         let content = signed_tool_content(body, &signing_key, &fp);
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
@@ -896,7 +908,6 @@ formats:
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         )
         .with_trust_store(trust_store);
@@ -932,12 +943,15 @@ formats:
 
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
-        fs::write(tool_dir.join("hello.py"), "print('hello')\n").unwrap();
+        fs::write(
+            tool_dir.join("hello.py"),
+            "# ryeos-tool:\n#   note: hello\nprint('hello')\n",
+        )
+        .unwrap();
 
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         );
 
@@ -973,7 +987,7 @@ formats:
         let signing_key = lillux::crypto::SigningKey::from_bytes(&[42u8; 32]);
         let fp = crate::trust::compute_fingerprint(&signing_key.verifying_key());
 
-        let body = "print('hello')\n";
+        let body = "# ryeos-tool:\n#   note: hello\nprint('hello')\n";
         let content = signed_tool_content(body, &signing_key, &fp);
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
@@ -983,7 +997,6 @@ formats:
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         );
 
@@ -1040,12 +1053,15 @@ formats:
         // Write a .py tool file (should resolve because system schema has .py)
         let tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&tool_dir).unwrap();
-        fs::write(tool_dir.join("hello.py"), "print('hello')\n").unwrap();
+        fs::write(
+            tool_dir.join("hello.py"),
+            "# ryeos-tool:\n#   note: hello\nprint('hello')\n",
+        )
+        .unwrap();
 
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         )
         .with_trust_store(ts);
@@ -1075,7 +1091,7 @@ formats:
     }
 
     #[test]
-    fn resolve_system_first_with_clash() {
+    fn resolve_project_first_with_clash() {
         let project_dir = tempdir();
         let system_dir = tempdir();
         let kinds_dir = tempdir();
@@ -1087,16 +1103,23 @@ formats:
         // Write the same item in both system and project
         let sys_tool_dir = system_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&sys_tool_dir).unwrap();
-        fs::write(sys_tool_dir.join("hello.py"), "# system\nprint('sys')\n").unwrap();
+        fs::write(
+            sys_tool_dir.join("hello.py"),
+            "# ryeos-tool:\n#   note: system\nprint('sys')\n",
+        )
+        .unwrap();
 
         let proj_tool_dir = project_dir.join(AI_DIR).join("tools");
         fs::create_dir_all(&proj_tool_dir).unwrap();
-        fs::write(proj_tool_dir.join("hello.py"), "# project\nprint('proj')\n").unwrap();
+        fs::write(
+            proj_tool_dir.join("hello.py"),
+            "# ryeos-tool:\n#   note: project\nprint('proj')\n",
+        )
+        .unwrap();
 
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![system_dir],
         );
 
@@ -1115,13 +1138,13 @@ formats:
         let ref_ = CanonicalRef::parse("tool:hello").unwrap();
         let resolved = engine.resolve(&ctx, &ref_).unwrap();
 
-        // System wins
-        assert_eq!(resolved.source_space, ItemSpace::System);
-        assert_eq!(resolved.resolved_from, "system(node)");
+        // Project wins over bundles.
+        assert_eq!(resolved.source_space, ItemSpace::Project);
+        assert_eq!(resolved.resolved_from, "project");
 
-        // Project is shadowed
+        // Bundle copy is shadowed.
         assert_eq!(resolved.shadowed.len(), 1);
-        assert_eq!(resolved.shadowed[0].space, ItemSpace::Project);
+        assert_eq!(resolved.shadowed[0].space, ItemSpace::Bundle);
     }
 
     /// Without a project root, the effective dispatcher MUST be
@@ -1220,7 +1243,6 @@ formats:
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         )
         .with_trust_store(ts);
@@ -1320,7 +1342,6 @@ formats:
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         )
         .with_trust_store(ts);
@@ -1388,7 +1409,6 @@ formats:
         let engine = Engine::new(
             kinds,
             crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
-            None,
             vec![],
         )
         .with_trust_store(ts);

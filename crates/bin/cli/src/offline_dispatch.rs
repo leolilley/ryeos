@@ -42,12 +42,11 @@ pub enum OfflineDispatchOutcome {
 /// but something went wrong.
 pub fn try_offline_dispatch(
     argv: &[String],
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: &str,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // 1. Load verified node config from signed installed bundle registrations.
-    let snapshot =
-        crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(local_err)?;
+    let snapshot = crate::node_descriptors::load_verified_snapshot(app_root).map_err(local_err)?;
     let bundle_roots: Vec<PathBuf> = snapshot
         .bundles
         .iter()
@@ -83,7 +82,7 @@ pub fn try_offline_dispatch(
     })?;
 
     // 4. Boot engine (lazy — only reached when we know we have a match)
-    let engine = boot_engine(system_space_dir, project_path, &bundle_roots)?;
+    let engine = boot_engine(app_root, project_path, &bundle_roots)?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
@@ -99,7 +98,7 @@ pub fn try_offline_dispatch(
             item,
             &matched.command,
             tail,
-            system_space_dir,
+            app_root,
             project_path,
         )
         .map(|result| result.map(|outcome| outcome));
@@ -107,15 +106,8 @@ pub fn try_offline_dispatch(
 
     if has_tool_command(&item.composed_value) {
         let params = bind_params_minimal(tail, &matched.command, project_path)?;
-        return exec_tool(
-            &engine,
-            &item,
-            execute_ref,
-            params,
-            system_space_dir,
-            project_path,
-        )
-        .map(|result| result.map(OfflineDispatchOutcome::Json));
+        return exec_tool(&engine, &item, execute_ref, params, app_root, project_path)
+            .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
 
     Ok(None)
@@ -126,12 +118,12 @@ pub fn try_offline_dispatch(
 // ---------------------------------------------------------------------------
 
 fn boot_engine(
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: &str,
     bundle_roots: &[PathBuf],
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        system_space_dir: Some(system_space_dir.to_path_buf()),
+        app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })
     .map_err(local_err)?;
@@ -142,13 +134,10 @@ fn boot_engine(
         Some(PathBuf::from(project_path))
     };
 
-    let user_root = ryeos_engine::roots::user_root().ok();
-
     ryeos_app::engine_init::build_engine_for_roots(
         &config,
         bundle_roots,
         project_root.as_deref(),
-        user_root.as_deref(),
         None, // no trust overlay
     )
     .map_err(local_err)
@@ -273,7 +262,7 @@ fn exec_client(
                 .get(fp)
                 .map(|signer| signer.verifying_key)
         },
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
     .map_err(|e| CliError::Local {
         detail: format!("resolve client binary '{binary_ref}': {e}"),
@@ -370,7 +359,7 @@ fn exec_tool(
     item: &EffectiveItem,
     tool_ref_str: &str,
     params: Value,
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: &str,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
@@ -435,7 +424,7 @@ fn exec_tool(
                 .get(fp)
                 .map(|signer| signer.verifying_key)
         },
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
     .map_err(|e| CliError::Local {
         detail: format!("resolve offline binary `{cmd}`: {e}"),
@@ -497,10 +486,7 @@ fn exec_tool(
         .transpose()?
         .unwrap_or_default();
 
-    envs.push((
-        "RYEOS_SYSTEM_SPACE_DIR".to_string(),
-        system_space_dir.display().to_string(),
-    ));
+    envs.push(("RYEOS_APP_ROOT".to_string(), app_root.display().to_string()));
 
     if inherit_stdio {
         return exec_inherited(
@@ -546,7 +532,7 @@ fn dispatch_service(
     item: EffectiveItem,
     command: &CommandDef,
     tail: &[String],
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: &str,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
@@ -598,7 +584,7 @@ fn dispatch_service(
     }
 
     let Some(tool_ref) = offline_execute else {
-        return run_standalone_service(&item.canonical_ref, params, system_space_dir).map(Some);
+        return run_standalone_service(&item.canonical_ref, params, app_root).map(Some);
     };
 
     // Dispatch tool
@@ -611,7 +597,7 @@ fn dispatch_service(
         &tool_item,
         &tool_ref,
         params,
-        system_space_dir,
+        app_root,
         project_path,
     )
     .map(|result| result.map(OfflineDispatchOutcome::Json))
@@ -620,17 +606,17 @@ fn dispatch_service(
 fn run_standalone_service(
     service_ref: &str,
     params: Value,
-    system_space_dir: &Path,
+    app_root: &Path,
 ) -> Result<OfflineDispatchOutcome, CliError> {
-    ensure_daemon_stopped_for_standalone(system_space_dir)?;
+    ensure_daemon_stopped_for_standalone(app_root)?;
 
     let params_json = serde_json::to_string(&params).map_err(|error| CliError::Local {
         detail: format!("encode standalone service params: {error}"),
     })?;
     let ryeosd = resolve_ryeosd_binary();
     let output = std::process::Command::new(&ryeosd)
-        .arg("--system-space-dir")
-        .arg(system_space_dir)
+        .arg("--app-root")
+        .arg(app_root)
         .arg("run-service")
         .arg(service_ref)
         .arg("--params")
@@ -669,8 +655,8 @@ fn run_standalone_service(
     }
 }
 
-fn ensure_daemon_stopped_for_standalone(system_space_dir: &Path) -> Result<(), CliError> {
-    let lock_path = ryeos_app::state_lock::default_lock_path(system_space_dir);
+fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError> {
+    let lock_path = ryeos_app::state_lock::default_lock_path(app_root);
     match ryeos_app::state_lock::StateLock::acquire(&lock_path) {
         Ok(lock) => {
             drop(lock);
@@ -982,10 +968,9 @@ mod tests {
             let env_guard = crate::test_env::lock();
             let tmp = tempfile::tempdir().unwrap();
             let system = tmp.path().join("system");
-            let user = tmp.path().join("user");
             let project = tmp.path().join("project");
             std::fs::create_dir_all(project.join(ryeos_engine::AI_DIR)).unwrap();
-            let trust_dir = user
+            let trust_dir = system
                 .join(ryeos_engine::AI_DIR)
                 .join("config")
                 .join("keys")
@@ -1009,7 +994,7 @@ mod tests {
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();
             let dev_key = dev_trust.decode_verifying_key().unwrap();
             ryeos_engine::trust::pin_key(&dev_key, "ryeos-dev", &trust_dir, None).unwrap();
-            std::env::set_var("USER_SPACE", &user);
+            std::env::set_var("RYEOS_APP_ROOT", &system);
 
             let bundle = system
                 .join(ryeos_engine::AI_DIR)

@@ -25,7 +25,7 @@ integration. Browsers should not call RyeOS daemon/tool endpoints directly.
 
 ## State layout
 
-Each app uses a realm-scoped state root:
+Each app uses a realm-scoped runtime state dir:
 
 ```text
 <project_path>/.ai/state/central-auth/realms/<realm_id>/
@@ -57,7 +57,7 @@ Common fields:
 }
 ```
 
-`state_root` may be supplied instead of `project_path` for tests or custom
+`runtime_state_dir` may be supplied instead of `project_path` for tests or custom
 deployments.
 
 ### set-policy

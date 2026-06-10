@@ -8,7 +8,6 @@ use thiserror::Error;
 use ryeos_app::state::AppState;
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_engine::engine::Engine;
-use ryeos_engine::trust::TrustStore;
 
 /// Typed error for `resolve_project_context`. Replaces the prior
 /// anyhow-only return so the execute response mode can pattern-match the
@@ -51,7 +50,7 @@ impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
 fn load_live_bundle_roots(state: &AppState) -> Result<Vec<PathBuf>, ProjectSourceError> {
     let daemon_engine = &(*state).engine;
     let loader = ryeos_app::node_config::loader::BootstrapLoader {
-        system_space_dir: state.config.system_space_dir.as_path(),
+        app_root: state.config.app_root.as_path(),
         trust_store: &daemon_engine.trust_store,
     };
     let records = loader.load_bundle_section().map_err(|e| {
@@ -104,21 +103,9 @@ pub struct ResolvedProjectContext {
     /// runner's `ExecutionGuard`; the directory is removed when the
     /// last Arc holder drops.
     pub temp_dir: Option<Arc<TempDirGuard>>,
-    /// Materialised user-space root for `PushedHead` requests (diagnostic
-    /// only). The actual temp dir is owned by the cache entry.
-    /// `None` for `LiveFs` and for cache-hit requests (the overlay is
-    /// already baked into the cached engine).
-    pub user_root: Option<PathBuf>,
-    /// Always `None` now — the user overlay temp dir is owned by the
-    /// engine cache entry, not the request. Kept as a field for API
-    /// compatibility but never populated.
-    pub user_temp_dir: Option<PathBuf>,
-    /// Always `None` now — trust overlay is baked into the cached engine
-    /// at build time. Kept as a field for API compatibility.
-    pub trust_overlay: Option<TrustStore>,
     /// The **authoritative** engine for this request. For `LiveFs`, this
     /// is the daemon's startup engine. For `PushedHead`, this is a
-    /// per-snapshot overlay engine built from the daemon's system roots
+    /// per-snapshot overlay engine built from the daemon's bundle roots
     /// + the caller's materialised user root + trust pins.
     ///
     /// **No executor code should reach for the daemon engine after context
@@ -150,9 +137,6 @@ impl ResolvedProjectContext {
             source: ProjectSource::PushedHead,
             snapshot_hash: None,
             temp_dir: None,
-            user_root: None,
-            user_temp_dir: None,
-            trust_overlay: None,
             request_engine,
         })
     }
@@ -187,12 +171,9 @@ pub fn resolve_project_context(
             source: source.clone(),
             snapshot_hash: None,
             temp_dir: None,
-            user_root: None,
-            user_temp_dir: None,
-            trust_overlay: None,
             // LiveFs uses the daemon's startup engine directly — no
             // per-request overlay needed because the daemon's own
-            // user space is what resolves anyway.
+            // app root is what resolves anyway.
             request_engine: Arc::clone(&(*state).engine),
         },
         ProjectSource::PushedHead => {
@@ -225,21 +206,19 @@ pub fn resolve_project_context(
                 })?;
             let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
                 .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+            if snapshot.user_manifest_hash.is_some() {
+                return Err(ProjectSourceError::CheckoutFailed(
+                    "legacy snapshots with user_manifest_hash are not supported; re-push the project"
+                        .to_string(),
+                ));
+            }
 
             // ── 1. Always materialise the project checkout (request-owned) ──
             let manifest_hash = &snapshot.project_manifest_hash;
-            let exec_dir = state
-                .config
-                .system_space_dir
-                .join("executions")
-                .join(checkout_id);
-            let materialization_cache = crate::execution::cache::MaterializationCache::new(
-                state
-                    .config
-                    .system_space_dir
-                    .join("cache")
-                    .join("snapshots"),
-            );
+            let runtime_cache = state.config.runtime_root().cache();
+            let exec_dir = runtime_cache.join("executions").join(checkout_id);
+            let materialization_cache =
+                crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
             let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
             crate::execution::checkout_project(
                 &cas_root,
@@ -258,51 +237,6 @@ pub fn resolve_project_context(
             let request_engine = state.engine_cache.get_or_insert_with(
                 cache_key,
                 || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
-                    // Cache miss: materialise user overlay and build engine.
-                    let (user_root, user_guard, trust_overlay) =
-                        if let Some(user_mh) = snapshot.user_manifest_hash.as_ref() {
-                            let user_exec_dir = state
-                                .config
-                                .system_space_dir
-                                .join("executions")
-                                .join(format!("{}-user", checkout_id));
-                            let user_ai_dir = user_exec_dir.join(ryeos_engine::AI_DIR);
-                            let user_guard = Arc::new(TempDirGuard::new(user_exec_dir.clone()));
-                            crate::execution::checkout_project(
-                                &cas_root,
-                                user_mh,
-                                &user_ai_dir,
-                                Some(&materialization_cache),
-                            )
-                            .map_err(|e| {
-                                ProjectSourceError::CheckoutFailed(format!(
-                                    "user-manifest checkout failed: {e}"
-                                ))
-                            })?;
-
-                            let trust_dir = user_ai_dir.join("config").join("keys").join("trusted");
-                            let overlay = if trust_dir.is_dir() {
-                                match TrustStore::load_from_dir(&trust_dir) {
-                                    Ok(store) if !store.is_empty() => Some(store),
-                                    Ok(_) => None,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            "pushed user-space trust pins failed to load — \
-                                             proceeding with persistent trust store only"
-                                        );
-                                        None
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-
-                            (Some(user_exec_dir), Some(user_guard), overlay)
-                        } else {
-                            (None, None, None)
-                        };
-
                     // Re-read live bundle roots from the same signed
                     // registry used by daemon startup. Only runs on cache
                     // miss (generation bump invalidates the key), so the
@@ -312,8 +246,7 @@ pub fn resolve_project_context(
                         &state.config,
                         &bundle_roots,
                         Some(exec_dir.as_path()),
-                        user_root.as_deref(),
-                        trust_overlay.as_ref(),
+                        None,
                     )
                     .map_err(|e| {
                         ProjectSourceError::CheckoutFailed(format!(
@@ -321,7 +254,7 @@ pub fn resolve_project_context(
                         ))
                     })?;
 
-                    Ok((Arc::new(built), user_guard))
+                    Ok((Arc::new(built), None))
                 },
             )?;
 
@@ -334,11 +267,6 @@ pub fn resolve_project_context(
                 // runner and cache can both hold references. The project
                 // checkout is cleaned up when the last Arc drops.
                 temp_dir: Some(project_guard),
-                user_root: None,
-                // Cache-owned: the user overlay temp dir lives as long as
-                // the cache entry. The request does not clean this up.
-                user_temp_dir: None,
-                trust_overlay: None,
                 request_engine,
             }
         }
@@ -468,7 +396,6 @@ mod canonical_project_ref_tests {
                 ryeos_engine::parsers::registry::ParserRegistry::empty(),
                 Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
             ),
-            None,
             vec![],
         ))
     }

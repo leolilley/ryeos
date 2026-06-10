@@ -51,20 +51,19 @@ struct BundleRegistrationBody {
 }
 
 /// Load installed bundles from signed node bundle registrations.
-pub fn load_installed_bundle_records(
-    system_space_dir: &Path,
-    user_root: Option<&Path>,
-) -> Result<Vec<InstalledBundleRecord>> {
-    let trust_store = TrustStore::load_three_tier(None, user_root, &[])
+pub fn load_installed_bundle_records(app_root: &Path) -> Result<Vec<InstalledBundleRecord>> {
+    let operator_config_root =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
+    let trust_store = TrustStore::load(None, &operator_config_root)
         .context("installed bundles: load operator trust store")?;
-    load_installed_bundle_records_with_trust(system_space_dir, &trust_store)
+    load_installed_bundle_records_with_trust(app_root, &trust_store)
 }
 
 pub fn load_installed_bundle_records_with_trust(
-    system_space_dir: &Path,
+    app_root: &Path,
     trust_store: &TrustStore,
 ) -> Result<Vec<InstalledBundleRecord>> {
-    let bundles_dir = system_space_dir
+    let bundles_dir = app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("bundles");
@@ -171,11 +170,8 @@ pub fn load_installed_bundle_records_with_trust(
     Ok(records)
 }
 
-pub fn load_installed_plan_inputs(
-    system_space_dir: &Path,
-    user_root: Option<&Path>,
-) -> Result<Vec<PlanInput>> {
-    load_installed_bundle_records(system_space_dir, user_root).map(|records| {
+pub fn load_installed_plan_inputs(app_root: &Path) -> Result<Vec<PlanInput>> {
+    load_installed_bundle_records(app_root).map(|records| {
         records
             .into_iter()
             .map(InstalledBundleRecord::into_plan_input)
@@ -321,7 +317,7 @@ mod tests {
         }
 
         fn trust_store(&self) -> TrustStore {
-            TrustStore::load_three_tier(None, Some(&self.user), &[]).unwrap()
+            TrustStore::load(None, &self.user.join(".ai/config")).unwrap()
         }
 
         fn write_bundle(&self, name: &str) -> PathBuf {
