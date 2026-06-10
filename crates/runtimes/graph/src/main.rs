@@ -59,8 +59,7 @@ struct ResolvedLaunch {
     hard_limits: Value,
     callback: Option<EnvelopeCallback>,
     target_digest: Option<String>,
-    user_root: Option<std::path::PathBuf>,
-    system_roots: Vec<std::path::PathBuf>,
+    bundle_roots: Vec<std::path::PathBuf>,
     invocation_id: Option<String>,
 }
 
@@ -86,8 +85,7 @@ fn main() -> anyhow::Result<()> {
         graph_run_id = ?resolved.graph_run_id,
         target_digest = ?resolved.target_digest,
         invocation_id = ?resolved.invocation_id,
-        user_root = ?resolved.user_root,
-        system_roots = ?resolved.system_roots,
+        bundle_roots = ?resolved.bundle_roots,
         graph_id = %graph.graph_id,
         declared_permissions = ?graph.declared_permissions,
         "launch resolved"
@@ -280,8 +278,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         hard_limits: serde_json::to_value(&envelope.policy.hard_limits).unwrap_or(json!({})),
         callback: Some(envelope.callback),
         target_digest: Some(envelope.resolution.root.raw_content_digest.clone()),
-        user_root: envelope.roots.user_root.clone(),
-        system_roots: envelope.roots.system_roots.clone(),
+        bundle_roots: envelope.roots.bundle_roots.clone(),
         invocation_id: Some(envelope.invocation_id.clone()),
     })
 }

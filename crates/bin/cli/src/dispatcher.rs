@@ -40,8 +40,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned());
 
-    // 2. System space dir
-    let system_space_dir = discover_system_space_dir();
+    // 2. App root
+    let app_root = discover_app_root();
 
     // 3. Hardcoded LOCAL verbs (must work before daemon exists):
     //      ryeos init                       — bootstrap operator state
@@ -68,7 +68,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     if cli.rest.len() > 1 && cli.rest[0] == "help" {
         crate::help::print_verb_help(
             &cli.rest[1..],
-            &system_space_dir,
+            &app_root,
             body_project_path.as_deref().unwrap_or("."),
         )
         .await?;
@@ -85,7 +85,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         } else {
             crate::help::print_verb_help(
                 verb_tokens,
-                &system_space_dir,
+                &app_root,
                 body_project_path.as_deref().unwrap_or("."),
             )
             .await?;
@@ -98,7 +98,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    run the in-process handler. Returns None to fall through to daemon.
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
         &cli.rest,
-        &system_space_dir,
+        &app_root,
         body_project_path.as_deref().unwrap_or("."),
     )? {
         if let crate::offline_dispatch::OfflineDispatchOutcome::Json(result) = outcome {
@@ -117,8 +117,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    service-schema `project` field, while global `-p/--project` before
     //    the verb remains supported by clap above.
 
-    let resolved =
-        resolve_command_for_daemon(&cli.rest, &system_space_dir, cli.project.as_deref())?;
+    let resolved = resolve_command_for_daemon(&cli.rest, &app_root, cli.project.as_deref())?;
 
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
@@ -136,7 +135,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     } else {
         "/execute"
     };
-    let result = post_to_daemon(&system_space_dir, route_path, &body).await?;
+    let result = post_to_daemon(&app_root, route_path, &body).await?;
     print_result(result);
     Ok(())
 }
@@ -150,10 +149,10 @@ struct CliResolvedExecute {
 
 fn resolve_command_for_daemon(
     rest: &[String],
-    system_space_dir: &Path,
+    app_root: &Path,
     default_project: Option<&Path>,
 ) -> Result<CliResolvedExecute, CliError> {
-    let snapshot = load_verified_snapshot(system_space_dir)?;
+    let snapshot = load_verified_snapshot(app_root)?;
     resolve_command_for_daemon_with_commands(
         rest,
         &snapshot.commands,
@@ -473,24 +472,22 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
 }
 
 fn load_verified_snapshot(
-    system_space_dir: &std::path::Path,
+    app_root: &std::path::Path,
 ) -> Result<ryeos_app::node_config::NodeConfigSnapshot, CliError> {
-    crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(|error| {
-        CliError::Local {
-            detail: format!("load verified node commands: {error:#}"),
-        }
+    crate::node_descriptors::load_verified_snapshot(app_root).map_err(|error| CliError::Local {
+        detail: format!("load verified node commands: {error:#}"),
     })
 }
 
 /// POST a JSON body to a daemon execute route and return the response.
 async fn post_to_daemon(
-    system_space_dir: &std::path::Path,
+    app_root: &std::path::Path,
     route_path: &str,
     body: &Value,
 ) -> Result<Value, CliError> {
-    lifecycle_preflight(system_space_dir).await?;
-    let daemon_url = crate::transport::http::resolve_daemon_url(system_space_dir).await?;
-    let signer = crate::transport::signing::Signer::resolve(system_space_dir)?;
+    lifecycle_preflight(app_root).await?;
+    let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
 
     // Discover the daemon's principal_id for audience binding.
     let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
@@ -503,19 +500,18 @@ async fn post_to_daemon(
     Ok(payload)
 }
 
-async fn lifecycle_preflight(system_space_dir: &std::path::Path) -> Result<(), CliError> {
+async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError> {
     // A deliberate remote override is still valid for normal daemon-backed
     // dispatch. Lifecycle reads/mutations themselves ignore this env var.
     if std::env::var_os("RYEOSD_URL").is_some() {
         return Ok(());
     }
 
-    let env =
-        ryeos_node::LocalLifecycleEnv::load(Some(system_space_dir.to_path_buf())).map_err(|e| {
-            CliError::Local {
-                detail: format!("resolve local node lifecycle env: {e:#}"),
-            }
-        })?;
+    let env = ryeos_node::LocalLifecycleEnv::load(Some(app_root.to_path_buf())).map_err(|e| {
+        CliError::Local {
+            detail: format!("resolve local node lifecycle env: {e:#}"),
+        }
+    })?;
     match ryeos_node::LifecycleController::from_env(env)
         .status()
         .await
@@ -547,8 +543,8 @@ fn print_result(payload: serde_json::Value) {
     println!("{pretty}");
 }
 
-fn discover_system_space_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+fn discover_app_root() -> PathBuf {
+    if let Ok(p) = std::env::var("RYEOS_APP_ROOT") {
         return PathBuf::from(p);
     }
     dirs::data_dir()
@@ -560,17 +556,17 @@ fn discover_system_space_dir() -> PathBuf {
 mod tests {
     use super::*;
     use ryeos_runtime::CommandArgumentKind;
-    fn with_user_space<T>(f: impl FnOnce() -> T) -> T {
+    fn with_app_root<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::test_env::lock();
-        let saved = std::env::var_os("USER_SPACE");
+        let saved = std::env::var_os("RYEOS_APP_ROOT");
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();
-        std::env::set_var("USER_SPACE", tmp.path());
+        std::env::set_var("RYEOS_APP_ROOT", tmp.path());
         let result = f();
         if let Some(v) = saved {
-            std::env::set_var("USER_SPACE", v);
+            std::env::set_var("RYEOS_APP_ROOT", v);
         } else {
-            std::env::remove_var("USER_SPACE");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
         result
     }
@@ -838,7 +834,7 @@ mod tests {
 
     #[test]
     fn remote_doctor_accepts_optional_project_after_verb() {
-        with_user_space(|| {
+        with_app_root(|| {
             let tmp = tempfile::tempdir().unwrap();
             let commands = vec![command(
                 &["remote", "doctor"],
@@ -890,7 +886,7 @@ mod tests {
 
     #[test]
     fn remote_execute_remote_then_item_is_normalized() {
-        with_user_space(|| {
+        with_app_root(|| {
             let commands = vec![command(
                 &["remote", "execute"],
                 vec![
@@ -930,7 +926,7 @@ mod tests {
 
     #[test]
     fn remote_execute_item_only_is_left_for_default_remote() {
-        with_user_space(|| {
+        with_app_root(|| {
             let commands = vec![command(
                 &["remote", "execute"],
                 vec![

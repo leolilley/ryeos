@@ -2248,12 +2248,13 @@ fingerprint = "741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea"
 owner = "ryeos-dev"
 "#;
 
-    /// Build a VerifiedLoader rooted at the bundled standard, with an
-    /// empty temp project root so project-overlay attacks can't interfere.
-    /// Seeds the trust store with the dev publisher key.
+    /// Build a VerifiedLoader rooted at the bundled standard, with a temp
+    /// project root that holds only the dev-publisher trust entry (no
+    /// project config), so project-overlay attacks can't interfere while
+    /// the trust store still verifies the bundle's signed configs.
     fn loader_for_bundle() -> VerifiedLoader {
-        let user_root = tempfile::tempdir().expect("create temp user root");
-        let trust_dir = user_root.path().join(".ai/config/keys/trusted");
+        let project_root = tempfile::tempdir().expect("create temp project root");
+        let trust_dir = project_root.path().join(".ai/config/keys/trusted");
         let _ = std::fs::create_dir_all(&trust_dir);
         std::fs::write(
             trust_dir.join("dev-publisher.toml"),
@@ -2261,12 +2262,7 @@ owner = "ryeos-dev"
         )
         .expect("write trust entry");
 
-        let project_root = tempfile::tempdir().expect("create temp project root");
-        VerifiedLoader::new(
-            project_root.path().to_path_buf(),
-            Some(user_root.path().to_path_buf()),
-            vec![bundle_root()],
-        )
+        VerifiedLoader::new(project_root.path().to_path_buf(), vec![bundle_root()])
     }
 
     /// Resolve a provider+model through the real loader + preflight chain.

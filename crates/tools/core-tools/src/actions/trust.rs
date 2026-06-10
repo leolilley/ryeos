@@ -7,8 +7,7 @@
 //!     escape hatch for raw key files.
 //!
 //! Cap-gated on `ryeos.trust.pin` when invoked through the daemon. The CLI
-//! verb runs locally (no daemon required) because trust state is operator-
-//! tier (`<user>/.ai/config/keys/trusted/`).
+//! verb runs locally (no daemon required) because trust state is operator runtime zone (`<app_root>/.ai/config/keys/trusted/`).
 //!
 //! Pinning REQUIRES the public key bytes — the fingerprint alone is not
 //! enough to verify signatures. The fingerprint is recomputed from the bytes
@@ -29,8 +28,8 @@ use ryeos_engine::trust::{compute_fingerprint, pin_key, PublisherTrustDoc};
 
 #[derive(Debug)]
 pub struct PinFromOptions {
-    /// Operator user space root (parent of `.ai/`). Defaults to the canonical user root.
-    pub user_root: PathBuf,
+    /// App root containing operator config (`.ai/config`).
+    pub app_root: PathBuf,
     /// Path to a PUBLISHER_TRUST.toml file.
     pub trust_file: PathBuf,
 }
@@ -47,7 +46,7 @@ pub struct PinReport {
 /// Pin a publisher key from a `PUBLISHER_TRUST.toml` file.
 pub fn run_pin_from(opts: &PinFromOptions) -> Result<PinReport> {
     let trust_dir = opts
-        .user_root
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("config")
         .join("keys")
@@ -79,8 +78,8 @@ pub fn run_pin_from(opts: &PinFromOptions) -> Result<PinReport> {
 
 #[derive(Debug)]
 pub struct PinOptions {
-    /// Operator user space root (parent of `.ai/`). Defaults to the canonical user root.
-    pub user_root: PathBuf,
+    /// App root containing operator config (`.ai/config`).
+    pub app_root: PathBuf,
     /// Expected fingerprint — recomputed and matched against the supplied key.
     pub expected_fingerprint: String,
     /// Path to a file containing the public key. Accepted formats:
@@ -94,7 +93,7 @@ pub struct PinOptions {
 
 pub fn run_pin(opts: &PinOptions) -> Result<PinReport> {
     let trust_dir = opts
-        .user_root
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("config")
         .join("keys")
@@ -189,7 +188,7 @@ mod tests {
     #[test]
     fn run_pin_writes_trust_doc() {
         let tmp = tempfile::tempdir().unwrap();
-        let user_root = tmp.path().join("home");
+        let app_root = tmp.path().join("home");
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();
         let fp = compute_fingerprint(&vk);
@@ -198,7 +197,7 @@ mod tests {
         write_pubkey(&pubkey_file, &vk);
 
         let report = run_pin(&PinOptions {
-            user_root: user_root.clone(),
+            app_root: app_root.clone(),
             expected_fingerprint: fp.clone(),
             pubkey_file,
             owner: "third-party".to_string(),
@@ -212,7 +211,7 @@ mod tests {
     #[test]
     fn run_pin_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let user_root = tmp.path().join("home");
+        let app_root = tmp.path().join("home");
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();
         let fp = compute_fingerprint(&vk);
@@ -220,7 +219,7 @@ mod tests {
         write_pubkey(&pubkey_file, &vk);
 
         let opts = PinOptions {
-            user_root,
+            app_root,
             expected_fingerprint: fp.clone(),
             pubkey_file,
             owner: "third-party".to_string(),
@@ -235,7 +234,7 @@ mod tests {
     #[test]
     fn run_pin_from_accepts_publisher_trust_toml() {
         let tmp = tempfile::tempdir().unwrap();
-        let user_root = tmp.path().join("home");
+        let app_root = tmp.path().join("home");
         let sk = SigningKey::generate(&mut OsRng);
         let vk = sk.verifying_key();
         let fp = compute_fingerprint(&vk);
@@ -250,7 +249,7 @@ mod tests {
         fs::write(&trust_file, doc.to_toml()).unwrap();
 
         let report = run_pin_from(&PinFromOptions {
-            user_root,
+            app_root,
             trust_file,
         })
         .unwrap();
@@ -268,7 +267,7 @@ mod tests {
         write_pubkey(&pubkey_file, &vk);
 
         let err = run_pin(&PinOptions {
-            user_root: tmp.path().join("home"),
+            app_root: tmp.path().join("home"),
             expected_fingerprint: "deadbeef".repeat(8),
             pubkey_file,
             owner: "rogue".to_string(),

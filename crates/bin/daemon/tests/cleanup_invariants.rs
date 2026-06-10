@@ -62,14 +62,9 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(
-        kinds,
-        parser_dispatcher,
-        None,
-        vec![bundle_root, standard_root],
-    )
-    .with_trust_store(trust_store)
-    .with_composers(composers)
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, vec![bundle_root, standard_root])
+        .with_trust_store(trust_store)
+        .with_composers(composers)
 }
 
 fn local_plan_ctx() -> PlanContext {

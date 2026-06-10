@@ -34,7 +34,7 @@
 //!
 //! ## Production trust is unchanged
 //!
-//! `ryeos init` continues to copy bundles into `system_space_dir` as
+//! `ryeos init` continues to copy bundles into `app_root` as
 //! static, signed artifacts with no symlinks. The race that this
 //! fixture closes is dev-tree-only and has never reached an installed
 //! daemon.
@@ -42,11 +42,9 @@
 //! ## Signing key
 //!
 //! Re-signing requires the dev publisher signing key — the same key used
-//! by explicit bundle refresh workflows. The key path is
-//! taken from the `RYEOS_SIGNING_KEY` environment variable, falling back
-//! to the workspace's checked-in `.dev-keys/PUBLISHER_DEV.pem`, then to
-//! operator key locations for older local setups. This keeps tests from
-//! depending on the caller's `HOME` while still allowing explicit override.
+//! by explicit bundle refresh workflows. The key path is the workspace's
+//! checked-in `.dev-keys/PUBLISHER_DEV.pem`, falling back to the current
+//! app root operator key.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -67,17 +65,13 @@ fn workspace_root() -> PathBuf {
 /// Resolve the platform-author signing key path the test fixtures use
 /// when re-signing the isolated bundle's manifest.
 fn signing_key_path() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("RYEOS_SIGNING_KEY") {
-        return PathBuf::from(explicit);
-    }
-
     let dev_key = workspace_root().join(".dev-keys/PUBLISHER_DEV.pem");
     if dev_key.is_file() {
         return dev_key;
     }
 
-    if let Some(user_space) = std::env::var_os("USER_SPACE") {
-        let key = PathBuf::from(user_space).join(".ai/config/keys/signing/private_key.pem");
+    if let Some(app_root) = std::env::var_os("RYEOS_APP_ROOT") {
+        let key = PathBuf::from(app_root).join(".ai/config/keys/signing/private_key.pem");
         if key.is_file() {
             return key;
         }
@@ -85,12 +79,7 @@ fn signing_key_path() -> PathBuf {
 
     let home =
         std::env::var_os("HOME").expect("$HOME must be set to locate dev publisher signing key");
-    let home = PathBuf::from(home);
-    let ryeos_key = home.join(".ryeos/.ai/config/keys/signing/private_key.pem");
-    if ryeos_key.is_file() {
-        return ryeos_key;
-    }
-    home.join(".ai/config/keys/signing/private_key.pem")
+    PathBuf::from(home).join(".local/share/ryeos/.ai/config/keys/signing/private_key.pem")
 }
 
 /// Recursive copy that dereferences symlinks (so the destination tree
@@ -144,7 +133,7 @@ fn copy_dir_dereference(src: &Path, dst: &Path, src_root: &Path) -> Result<()> {
 /// resulting bundle manifest in-process with the platform-author key.
 ///
 /// Returns the absolute path to the isolated bundle root, suitable for
-/// passing as `RYEOS_SYSTEM_SPACE_DIR` to a `DaemonHarness` test.
+/// passing as `RYEOS_APP_ROOT` to a `DaemonHarness` test.
 ///
 /// The destination is wiped and recreated on every call. Consumers
 /// that share an isolated bundle across many tests in the same crate

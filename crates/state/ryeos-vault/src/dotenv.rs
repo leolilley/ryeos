@@ -88,8 +88,7 @@ mod tests {
             "PYTHONHOME",
             "RYEOS_PROJECT_SECRET",
             "RYEOSD_THREAD_AUTH_TOKEN",
-            "USER_SPACE",
-            "RYEOS_SYSTEM_SPACE_DIR",
+            "RYEOS_APP_ROOT",
             "HTTP_PROXY",
             "SSL_CERT_FILE",
         ] {

@@ -172,7 +172,7 @@ mod tests {
             kinds: &kinds,
             trust_store: &trust,
             project_root: None,
-            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
+            root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };
         NativeResumeHandler.apply(&block, &mut ctx)?;
@@ -267,7 +267,7 @@ mod tests {
             kinds: &kinds,
             trust_store: &trust,
             project_root: None,
-            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
+            root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };
         NativeResumeHandler.apply(&json!(true), &mut ctx).unwrap();

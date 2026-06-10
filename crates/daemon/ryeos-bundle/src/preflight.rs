@@ -113,31 +113,32 @@ fn format_preflight_issue(issue: &PreflightIssue) -> String {
     )
 }
 
-pub fn preflight_verify_bundle(
-    source_path: &Path,
-    system_space_dir: &Path,
-    user_root: Option<&Path>,
-) -> Result<()> {
+pub fn preflight_verify_bundle(source_path: &Path, app_root: &Path) -> Result<()> {
     // Runtime uses signed bundle registrations under `.ai/node/bundles/*.yaml`,
     // not raw `.ai/bundles/*` scans. Generic bundle install verifies against
     // the current verified installed set so new bundles can depend on already-
     // installed bundles without ambient unregistered state affecting preflight.
     let installed_bundle_roots: Vec<PathBuf> =
-        crate::installed::load_installed_bundle_records(system_space_dir, user_root)
+        crate::installed::load_installed_bundle_records(app_root)
             .context("preflight: load installed bundle registrations")?
             .into_iter()
             .map(|record| record.bundle_root)
             .collect();
-    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, user_root)
+    let operator_config_root =
+        ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
+    preflight_verify_bundle_in_context(source_path, &installed_bundle_roots, &operator_config_root)
 }
 
 pub fn preflight_verify_bundle_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    user_root: Option<&Path>,
+    operator_config_root: &Path,
 ) -> Result<()> {
-    let _report =
-        preflight_verify_bundle_report_in_context(source_path, dependency_bundle_roots, user_root)?;
+    let _report = preflight_verify_bundle_report_in_context(
+        source_path,
+        dependency_bundle_roots,
+        operator_config_root,
+    )?;
     Ok(())
 }
 
@@ -149,19 +150,23 @@ pub fn preflight_verify_bundle_in_context(
 pub fn preflight_verify_bundle_report_in_context(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    user_root: Option<&Path>,
+    operator_config_root: &Path,
 ) -> Result<PreflightReport> {
     // The core logic below populates `failures` (blocking) and
     // `warnings` (non-blocking). We lift the loop into this function
     // so both public APIs share a single implementation.
-    preflight_verify_bundle_in_context_inner(source_path, dependency_bundle_roots, user_root)
+    preflight_verify_bundle_in_context_inner(
+        source_path,
+        dependency_bundle_roots,
+        operator_config_root,
+    )
 }
 
 /// Core preflight logic shared by both public entry points.
 fn preflight_verify_bundle_in_context_inner(
     source_path: &Path,
     dependency_bundle_roots: &[PathBuf],
-    user_root: Option<&Path>,
+    operator_config_root: &Path,
 ) -> Result<PreflightReport> {
     let ai_dir = source_path.join(ryeos_engine::AI_DIR);
     if !ai_dir.is_dir() {
@@ -188,7 +193,7 @@ fn preflight_verify_bundle_in_context_inner(
         );
     }
 
-    let trust_store = TrustStore::load_three_tier(None, user_root, &[])
+    let trust_store = TrustStore::load(None, operator_config_root)
         .context("preflight: load operator trust store")?;
     if trust_store.is_empty() {
         bail!(
@@ -212,21 +217,13 @@ fn preflight_verify_bundle_in_context_inner(
             roots.push((path, trust));
         }
     };
-    // Dependency bundles are trusted system roots selected by the caller's
+    // Dependency bundles are trusted bundle roots selected by the caller's
     // verification plan. `init --source` passes source-bundle dependency
     // roots; generic install passes currently installed bundle roots.
     for root in dependency_bundle_roots {
         push_unique(
             root.clone(),
-            ryeos_engine::resolution::TrustClass::TrustedSystem,
-            &mut parser_search_roots,
-            &mut seen_roots,
-        );
-    }
-    if let Some(ur) = user_root {
-        push_unique(
-            ur.to_path_buf(),
-            ryeos_engine::resolution::TrustClass::TrustedUser,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
             &mut parser_search_roots,
             &mut seen_roots,
         );
@@ -234,7 +231,7 @@ fn preflight_verify_bundle_in_context_inner(
     // Candidate bundle being verified (last, so installed content takes precedence).
     push_unique(
         source_path.to_path_buf(),
-        ryeos_engine::resolution::TrustClass::TrustedUser,
+        ryeos_engine::resolution::TrustClass::TrustedProject,
         &mut parser_search_roots,
         &mut seen_roots,
     );
@@ -1403,7 +1400,7 @@ mod tests {
         source: PathBuf,
         ai_dir: PathBuf,
         signing_key: SigningKey,
-        user_root: PathBuf,
+        operator_config_root: PathBuf,
     }
 
     impl BundleLayout {
@@ -1414,8 +1411,9 @@ mod tests {
             fs::create_dir_all(&ai_dir).unwrap();
             let signing_key = SigningKey::generate(&mut OsRng);
 
-            let user_root = tmp.path().join("user");
-            let trust_dir = user_root.join(".ai/config/keys/trusted");
+            let app_root = tmp.path().join("app");
+            let operator_config_root = app_root.join(".ai/config");
+            let trust_dir = operator_config_root.join("keys/trusted");
             fs::create_dir_all(&trust_dir).unwrap();
 
             ryeos_engine::trust::pin_key(
@@ -1431,12 +1429,12 @@ mod tests {
                 source,
                 ai_dir,
                 signing_key,
-                user_root,
+                operator_config_root,
             }
         }
 
         fn trust_store(&self) -> TrustStore {
-            TrustStore::load_three_tier(None, Some(&self.user_root), &[]).unwrap()
+            TrustStore::load(None, &self.operator_config_root).unwrap()
         }
 
         fn add_kind_schema(&self, kind_name: &str) {
@@ -2066,9 +2064,12 @@ optional: {}
             serde_json::json!({ "mode": "web_server" }),
         );
 
-        let err =
-            preflight_verify_bundle_report_in_context(&layout.source, &[], Some(&layout.user_root))
-                .unwrap_err();
+        let err = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.operator_config_root,
+        )
+        .unwrap_err();
         let msg = err.to_string();
 
         assert!(
@@ -2095,9 +2096,12 @@ optional: {}
             serde_json::json!({ "other": "stuff" }),
         );
 
-        let report =
-            preflight_verify_bundle_report_in_context(&layout.source, &[], Some(&layout.user_root))
-                .expect("non-identity composer should skip pre-composition contract validation");
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.operator_config_root,
+        )
+        .expect("non-identity composer should skip pre-composition contract validation");
 
         assert!(report.is_clean(), "no warnings expected: {report:?}");
     }
@@ -2119,9 +2123,12 @@ strict_fields: warn
             serde_json::json!({ "body": "hello", "extra": "field" }),
         );
 
-        let report =
-            preflight_verify_bundle_report_in_context(&layout.source, &[], Some(&layout.user_root))
-                .expect("warnings should not fail preflight");
+        let report = preflight_verify_bundle_report_in_context(
+            &layout.source,
+            &[],
+            &layout.operator_config_root,
+        )
+        .expect("warnings should not fail preflight");
 
         assert_eq!(report.warnings.len(), 1);
         assert_eq!(report.warnings[0].severity, PreflightIssueSeverity::Warning);

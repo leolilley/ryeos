@@ -49,8 +49,8 @@ pub fn thread_knowledge_path(project_root: &Path, thread_id: &str) -> anyhow::Re
     Ok(path)
 }
 
-pub fn user_hooks_path(user_space: &Path) -> PathBuf {
-    user_space.join(AI_DIR).join("config/agent/hooks.yaml")
+pub fn operator_hooks_path(app_root: &Path) -> PathBuf {
+    app_root.join(AI_DIR).join("config/agent/hooks.yaml")
 }
 
 pub fn project_hooks_path(project_root: &Path) -> PathBuf {

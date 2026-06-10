@@ -41,7 +41,7 @@ enum Cmd {
         #[arg(long)]
         project: Option<PathBuf>,
 
-        /// Where to look for the item: `project` or `user`.
+        /// Where to look for the item: `project`.
         #[arg(long, default_value = "project")]
         source: String,
     },
@@ -136,16 +136,16 @@ enum Cmd {
 
     /// Return the node's public identity document.
     Identity {
-        /// System space directory.
+        /// App root directory.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
     },
 
     /// Authorize an HTTP client to call the daemon's authenticated endpoints.
     AuthorizeClient {
-        /// System space directory (contains `.ai/node/identity/`).
+        /// App root directory (contains `.ai/node/identity/`).
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
 
         /// Client public key as ed25519 base64.
         #[arg(long)]
@@ -162,9 +162,9 @@ enum Cmd {
 
     /// Mint a one-time node-local admission token for remote bootstrap.
     AdmissionToken {
-        /// System space directory for the target node.
+        /// App root directory for the target node.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
 
         /// Comma-separated scopes this token may grant.
         #[arg(long)]
@@ -181,9 +181,9 @@ enum Cmd {
 
     /// Export a remote descriptor trust pin for this node.
     RemoteDescriptor {
-        /// System space directory for the node being described.
+        /// App root directory for the node being described.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
 
         /// Name callers should use for the remote.
         #[arg(long)]
@@ -240,16 +240,16 @@ enum VaultCmd {
         #[arg(long, conflicts_with = "value_stdin")]
         value_string: Option<String>,
 
-        /// System space directory.
+        /// App root directory.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
     },
 
     /// List key names in the sealed vault store (values are not printed).
     List {
-        /// System space directory.
+        /// App root directory.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
     },
 
     /// Remove keys from the sealed vault store.
@@ -258,17 +258,17 @@ enum VaultCmd {
         #[arg(required = true)]
         keys: Vec<String>,
 
-        /// System space directory.
+        /// App root directory.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
     },
 
     /// Re-encrypt every entry in the sealed vault store under a
     /// freshly-generated vault keypair.
     Rewrap {
-        /// System space directory.
+        /// App root directory.
         #[arg(long)]
-        system_space_dir: Option<String>,
+        app_root: Option<String>,
     },
 }
 
@@ -487,13 +487,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Cmd::Snapshot { cmd } => run_snapshot(cmd, cli.stdin_json),
         Cmd::BundleEvents { cmd } => run_bundle_events(cmd, cli.stdin_json),
-        Cmd::Identity { system_space_dir } => {
+        Cmd::Identity { app_root } => {
             let params = if cli.stdin_json {
                 read_stdin_json()?
             } else {
                 let mut obj = serde_json::json!({});
-                if let Some(s) = system_space_dir {
-                    obj["system_space_dir"] = serde_json::json!(s);
+                if let Some(s) = app_root {
+                    obj["app_root"] = serde_json::json!(s);
                 }
                 obj
             };
@@ -504,7 +504,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::AuthorizeClient {
-            system_space_dir,
+            app_root,
             public_key,
             scopes,
             label,
@@ -513,16 +513,16 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 "--scopes required, comma-separated, in canonical form. \
                  Example: --scopes ryeos.execute.service.remote.admin,ryeos.execute.service.bundle.install"
             ))?;
-            run_authorize_client(system_space_dir, public_key, scopes, label, cli.stdin_json)
+            run_authorize_client(app_root, public_key, scopes, label, cli.stdin_json)
         }
         Cmd::AdmissionToken {
-            system_space_dir,
+            app_root,
             scopes,
             label,
             ttl_secs,
-        } => run_admission_token(system_space_dir, scopes, label, ttl_secs, cli.stdin_json),
+        } => run_admission_token(app_root, scopes, label, ttl_secs, cli.stdin_json),
         Cmd::RemoteDescriptor {
-            system_space_dir,
+            app_root,
             name,
             url,
             capabilities,
@@ -530,7 +530,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             provider_name,
             output,
         } => run_remote_descriptor(
-            system_space_dir,
+            app_root,
             name,
             url,
             capabilities,
@@ -650,17 +650,13 @@ fn run_build(
         (source, registry_roots, owner, no_trust_doc)
     };
 
-    let user_root = roots::user_root().map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
-    let key_path = user_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+    let key_path = roots::runtime_root()
+        .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
+        .operator_signing_key_path();
 
     if !key_path.exists() {
         anyhow::bail!(
-            "user signing key not found at {} — run `ryeos init` first",
+            "operator signing key not found at {} — run `ryeos init` first",
             key_path.display()
         );
     }
@@ -669,22 +665,17 @@ fn run_build(
         .with_context(|| format!("load signing key from {}", key_path.display()))?;
 
     let source_path = canonical_bundle_source(&bundle_source)?;
-    let system_space_dir = std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+    let app_root = std::env::var("RYEOS_APP_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             dirs::data_dir()
                 .map(|d| d.join("ryeos"))
                 .expect("could not determine XDG data directory")
         });
-    let registry_roots = bundle_publish_dependency_roots(
-        &source_path,
-        registry_roots,
-        &system_space_dir,
-        Some(&user_root),
-    )?;
-    let base_trust_store =
-        ryeos_engine::trust::TrustStore::load_three_tier(None, Some(&user_root), &registry_roots)
-            .context("load trust store for registry roots")?;
+    let registry_roots = bundle_publish_dependency_roots(&source_path, registry_roots, &app_root)?;
+    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
+    let base_trust_store = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)
+        .context("load trust store for registry roots")?;
 
     let report = run_publish(&PublishOptions {
         bundle_source: source_path,
@@ -725,24 +716,18 @@ impl BundlePublishParams {
 fn bundle_publish_dependency_roots(
     source_path: &Path,
     registry_roots: Vec<PathBuf>,
-    system_space_dir: &Path,
-    user_root: Option<&Path>,
+    app_root: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     if !registry_roots.is_empty() {
         reject_unpublished_source_registry_roots(source_path, &registry_roots)?;
-        return bundle_verify_dependency_roots(
-            source_path,
-            registry_roots,
-            system_space_dir,
-            user_root,
-        );
+        return bundle_verify_dependency_roots(source_path, registry_roots, app_root);
     }
 
     if source_bundle_name(source_path)?.as_deref() == Some("core") {
         return Ok(vec![source_path.to_path_buf()]);
     }
 
-    bundle_verify_dependency_roots(source_path, registry_roots, system_space_dir, user_root)
+    bundle_verify_dependency_roots(source_path, registry_roots, app_root)
 }
 
 fn reject_unpublished_source_registry_roots(
@@ -811,25 +796,19 @@ fn run_bundle_verify(
         anyhow::bail!("--source is not a directory: {}", source_path.display());
     }
 
-    let system_space_dir = std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+    let app_root = std::env::var("RYEOS_APP_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             dirs::data_dir()
                 .map(|d| d.join("ryeos"))
                 .expect("could not determine XDG data directory")
         });
-    let user_root = ryeos_engine::roots::user_root().ok();
-    let dependency_roots = bundle_verify_dependency_roots(
-        &source_path,
-        registry_roots,
-        &system_space_dir,
-        user_root.as_deref(),
-    )?;
+    let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
 
     let preflight_report = ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         &source_path,
         &dependency_roots,
-        user_root.as_deref(),
+        &ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config(),
     )
     .context("bundle verify failed")?;
 
@@ -863,8 +842,7 @@ fn run_bundle_verify(
 fn bundle_verify_dependency_roots(
     source_path: &Path,
     registry_roots: Vec<PathBuf>,
-    system_space_dir: &Path,
-    user_root: Option<&Path>,
+    app_root: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut dependency_roots: Vec<PathBuf> = Vec::new();
     let source_name = source_bundle_name(source_path)?;
@@ -877,12 +855,11 @@ fn bundle_verify_dependency_roots(
             }
         }
     } else {
-        let installed_roots =
-            ryeos_bundle::installed::load_installed_bundle_records(system_space_dir, user_root)
-                .context("bundle verify: load installed bundle registrations")?
-                .into_iter()
-                .filter(|r| r.bundle_root != source_path && Some(&r.name) != source_name.as_ref())
-                .map(|r| r.bundle_root);
+        let installed_roots = ryeos_bundle::installed::load_installed_bundle_records(app_root)
+            .context("bundle verify: load installed bundle registrations")?
+            .into_iter()
+            .filter(|r| r.bundle_root != source_path && Some(&r.name) != source_name.as_ref())
+            .map(|r| r.bundle_root);
         dependency_roots.extend(installed_roots);
     }
     Ok(dependency_roots)
@@ -926,25 +903,18 @@ fn run_bundle_sign(
     };
 
     let source_path = canonical_bundle_source(&source)?;
-    let system_space_dir = std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+    let app_root = std::env::var("RYEOS_APP_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             dirs::data_dir()
                 .map(|d| d.join("ryeos"))
                 .expect("could not determine XDG data directory")
         });
-    let user_root = ryeos_engine::roots::user_root()
-        .map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
-    let dependency_roots = bundle_verify_dependency_roots(
-        &source_path,
-        registry_roots,
-        &system_space_dir,
-        Some(&user_root),
-    )?;
-    let signing_key = load_user_signing_key(&user_root)?;
-    let trust_store =
-        ryeos_engine::trust::TrustStore::load_three_tier(None, Some(&user_root), &dependency_roots)
-            .context("load trust store for registry roots")?;
+    let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
+    let signing_key = load_operator_signing_key()?;
+    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
+    let trust_store = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)
+        .context("load trust store for registry roots")?;
 
     if source_path.join(ryeos_engine::AI_DIR).join("bin").is_dir() {
         ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&source_path, &signing_key)
@@ -1003,17 +973,14 @@ fn canonical_bundle_source(root: &Path) -> anyhow::Result<PathBuf> {
     Ok(canonical)
 }
 
-fn load_user_signing_key(user_root: &Path) -> anyhow::Result<lillux::crypto::SigningKey> {
-    let key_path = user_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+fn load_operator_signing_key() -> anyhow::Result<lillux::crypto::SigningKey> {
+    let key_path = ryeos_engine::roots::runtime_root()
+        .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
+        .operator_signing_key_path();
 
     if !key_path.exists() {
         anyhow::bail!(
-            "user signing key not found at {} — run `ryeos init` first",
+            "operator signing key not found at {} — run `ryeos init` first",
             key_path.display()
         );
     }
@@ -1133,9 +1100,7 @@ fn run_bundle_events(cmd: BundleEventsCmd, stdin_json: bool) -> anyhow::Result<(
                 }
             };
             let db = open_bundle_event_state(params.project_path.as_deref())?;
-            let user_root = ryeos_engine::roots::user_root()
-                .map_err(|_| anyhow::anyhow!("cannot resolve user root"))?;
-            let signer = CoreToolsStateSigner::new(load_user_signing_key(&user_root)?);
+            let signer = CoreToolsStateSigner::new(load_operator_signing_key()?);
             let result = db.append_bundle_event(
                 ryeos_state::BundleEventAppendRequest {
                     effective_bundle_id: params.effective_bundle_id,
@@ -1289,14 +1254,14 @@ fn default_source() -> String {
     "project".to_string()
 }
 
-fn resolve_system_space_dir(opt: Option<String>) -> anyhow::Result<std::path::PathBuf> {
+fn resolve_app_root(opt: Option<String>) -> anyhow::Result<std::path::PathBuf> {
     opt.map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var("RYEOS_SYSTEM_SPACE_DIR")
+            std::env::var("RYEOS_APP_ROOT")
                 .ok()
                 .map(std::path::PathBuf::from)
         })
-        .ok_or_else(|| anyhow::anyhow!("--system-space-dir or RYEOS_SYSTEM_SPACE_DIR required"))
+        .ok_or_else(|| anyhow::anyhow!("--app-root or RYEOS_APP_ROOT required"))
 }
 
 fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
@@ -1305,9 +1270,9 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
             name,
             value_stdin,
             value_string,
-            system_space_dir,
+            app_root,
         } => {
-            let ssd = resolve_system_space_dir(system_space_dir)?;
+            let ssd = resolve_app_root(app_root)?;
             let _ = value_stdin;
 
             let value: String = if let Some(v) = value_string {
@@ -1329,41 +1294,36 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
 
             let report =
                 ryeos_tools::actions::vault::run_put(&ryeos_tools::actions::vault::PutOptions {
-                    system_space_dir: ssd,
+                    app_root: ssd,
                     entries: vec![(name, value)],
                 })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        VaultCmd::List { system_space_dir } => {
-            let ssd = resolve_system_space_dir(system_space_dir)?;
+        VaultCmd::List { app_root } => {
+            let ssd = resolve_app_root(app_root)?;
             let report =
                 ryeos_tools::actions::vault::run_list(&ryeos_tools::actions::vault::ListOptions {
-                    system_space_dir: ssd,
+                    app_root: ssd,
                 })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        VaultCmd::Rm {
-            keys,
-            system_space_dir,
-        } => {
-            let ssd = resolve_system_space_dir(system_space_dir)?;
+        VaultCmd::Rm { keys, app_root } => {
+            let ssd = resolve_app_root(app_root)?;
             let report = ryeos_tools::actions::vault::run_remove(
                 &ryeos_tools::actions::vault::RemoveOptions {
-                    system_space_dir: ssd,
+                    app_root: ssd,
                     keys,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        VaultCmd::Rewrap { system_space_dir } => {
-            let ssd = resolve_system_space_dir(system_space_dir)?;
+        VaultCmd::Rewrap { app_root } => {
+            let ssd = resolve_app_root(app_root)?;
             let report = ryeos_tools::actions::vault::run_rewrap(
-                &ryeos_tools::actions::vault::RewrapOptions {
-                    system_space_dir: ssd,
-                },
+                &ryeos_tools::actions::vault::RewrapOptions { app_root: ssd },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
@@ -1372,7 +1332,7 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
 }
 
 fn run_authorize_client(
-    system_space_dir: Option<String>,
+    app_root: Option<String>,
     public_key: Option<String>,
     scopes: String,
     label: String,
@@ -1383,7 +1343,7 @@ fn run_authorize_client(
 
     let params = if stdin_json {
         let val = read_stdin_json()?;
-        let ssd = val["system_space_dir"].as_str().map(String::from);
+        let ssd = val["app_root"].as_str().map(String::from);
         let pk = val["public_key"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("public_key required"))?
@@ -1399,12 +1359,12 @@ fn run_authorize_client(
         (ssd, pk, sc, lb)
     } else {
         let pk = public_key.ok_or_else(|| anyhow::anyhow!("--public-key required"))?;
-        (system_space_dir, pk, scopes, label)
+        (app_root, pk, scopes, label)
     };
 
     let (ssd, pk_b64, scopes_str, label) = params;
 
-    let system_space_dir = resolve_system_space_dir(ssd)?;
+    let app_root = resolve_app_root(ssd)?;
 
     let pk_bytes = base64::engine::general_purpose::STANDARD
         .decode(&pk_b64)
@@ -1435,7 +1395,7 @@ fn run_authorize_client(
     }
 
     let result = run(AuthorizeClientParams {
-        system_space_dir,
+        app_root,
         public_key: verifying_key,
         scopes,
         label,
@@ -1454,7 +1414,7 @@ fn run_authorize_client(
 }
 
 fn run_admission_token(
-    system_space_dir: Option<String>,
+    app_root: Option<String>,
     scopes: Option<String>,
     label: Option<String>,
     ttl_secs: u64,
@@ -1462,9 +1422,9 @@ fn run_admission_token(
 ) -> anyhow::Result<()> {
     use ryeos_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
 
-    let (system_space_dir, scopes, label, ttl_secs) = if stdin_json {
+    let (app_root, scopes, label, ttl_secs) = if stdin_json {
         let val = read_stdin_json()?;
-        let ssd = val["system_space_dir"].as_str().map(String::from);
+        let ssd = val["app_root"].as_str().map(String::from);
         let scopes = val["scopes"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("scopes required in stdin JSON"))?
@@ -1474,10 +1434,10 @@ fn run_admission_token(
         (ssd, scopes, label, ttl_secs)
     } else {
         let scopes = scopes.ok_or_else(|| anyhow::anyhow!("--scopes required"))?;
-        (system_space_dir, scopes, label, ttl_secs)
+        (app_root, scopes, label, ttl_secs)
     };
 
-    let system_space_dir = resolve_system_space_dir(system_space_dir)?;
+    let app_root = resolve_app_root(app_root)?;
     let scopes: Vec<String> = scopes
         .split(',')
         .map(|s| s.trim().to_string())
@@ -1485,7 +1445,7 @@ fn run_admission_token(
         .collect();
 
     let report = run_mint_admission_token(MintAdmissionTokenParams {
-        system_space_dir,
+        app_root,
         scopes,
         label,
         ttl_secs,
@@ -1497,7 +1457,7 @@ fn run_admission_token(
 
 #[allow(clippy::too_many_arguments)]
 fn run_remote_descriptor(
-    system_space_dir: Option<String>,
+    app_root: Option<String>,
     name: Option<String>,
     url: Option<String>,
     capabilities: Option<String>,
@@ -1522,7 +1482,7 @@ fn run_remote_descriptor(
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         ExportRemoteDescriptorParams {
-            system_space_dir,
+            app_root,
             name,
             url,
             capabilities,
@@ -1555,7 +1515,7 @@ mod tests {
     struct InstalledFixture {
         _tmp: tempfile::TempDir,
         system: PathBuf,
-        user: PathBuf,
+        _user: PathBuf,
         key: SigningKey,
     }
 
@@ -1575,7 +1535,7 @@ mod tests {
             Self {
                 _tmp: tmp,
                 system,
-                user,
+                _user: user,
                 key,
             }
         }
@@ -1623,7 +1583,6 @@ mod tests {
             &source.canonicalize().unwrap(),
             vec![registry.clone()],
             &fixture.system,
-            Some(&fixture.user),
         )
         .unwrap();
 
@@ -1641,7 +1600,6 @@ mod tests {
             &source.canonicalize().unwrap(),
             Vec::new(),
             &fixture.system,
-            Some(&fixture.user),
         )
         .unwrap_err();
 
@@ -1672,7 +1630,6 @@ mod tests {
             &source.canonicalize().unwrap(),
             vec![registry.clone()],
             &fixture.system,
-            Some(&fixture.user),
         )
         .unwrap_err();
 
@@ -1697,7 +1654,6 @@ mod tests {
             &source.canonicalize().unwrap(),
             Vec::new(),
             &fixture.system,
-            Some(&fixture.user),
         )
         .unwrap();
 
@@ -1707,7 +1663,7 @@ mod tests {
     #[test]
     fn bundle_events_append_and_read_chain_via_handler() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        let previous_user_space = std::env::var_os("USER_SPACE");
+        let previous_app_root = std::env::var_os("RYEOS_APP_ROOT");
         let tmp = tempfile::tempdir().unwrap();
         let user = tmp.path().join("user");
         let project = tmp.path().join("project");
@@ -1724,7 +1680,7 @@ mod tests {
             key.to_pkcs8_pem(Default::default()).unwrap().as_bytes(),
         )
         .unwrap();
-        std::env::set_var("USER_SPACE", &user);
+        std::env::set_var("RYEOS_APP_ROOT", &user);
 
         let append = BundleEventsCmd::Append {
             project_path: Some(project.clone()),
@@ -1750,10 +1706,10 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].event.event_type, "email_planned");
 
-        if let Some(value) = previous_user_space {
-            std::env::set_var("USER_SPACE", value);
+        if let Some(value) = previous_app_root {
+            std::env::set_var("RYEOS_APP_ROOT", value);
         } else {
-            std::env::remove_var("USER_SPACE");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 }

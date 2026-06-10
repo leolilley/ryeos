@@ -96,7 +96,7 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
     let (url, _claims) = start_mock_remote(live_public_key).await.unwrap();
     let descriptor_path = write_descriptor(&local_state, "prod", &url, &pinned_public_key);
 
-    let system_space_dir = local_state.config.system_space_dir.clone();
+    let app_root = local_state.config.app_root.clone();
     let result = remote_configure::handle(
         remote_configure::Request {
             remote: None,
@@ -108,7 +108,7 @@ async fn remote_configure_descriptor_mismatch_does_not_write_config() {
     .await;
 
     assert!(result.is_err());
-    let remotes = config::load_remotes(&system_space_dir).unwrap();
+    let remotes = config::load_remotes(&app_root).unwrap();
     assert!(remotes.is_empty());
 }
 
@@ -126,7 +126,7 @@ async fn remote_admit_refuses_to_send_token_on_live_identity_mismatch() {
         "prod".to_string(),
         remote_config("prod", &url, &pinned_public_key),
     );
-    config::save_remotes(&local_state.config.system_space_dir, &remotes).unwrap();
+    config::save_remotes(&local_state.config.app_root, &remotes).unwrap();
 
     let result = remote_admit::handle(
         remote_admit::Request {
@@ -172,15 +172,15 @@ async fn remote_bind_project_copies_project_only_remote_to_user_config() {
     .await
     .unwrap();
 
-    assert_eq!(result["scope"], "user");
+    assert_eq!(result["scope"], "operator");
     assert_eq!(result["remote_project_path"], "/srv/project");
 
-    let user_remotes = config::load_remotes(&local_state.config.system_space_dir).unwrap();
-    let user_remote = user_remotes.get("prod").unwrap();
-    assert_eq!(user_remote.url, "https://project.example.com");
+    let operator_remotes = config::load_remotes(&local_state.config.app_root).unwrap();
+    let operator_remote = operator_remotes.get("prod").unwrap();
+    assert_eq!(operator_remote.url, "https://project.example.com");
     let local_key = project_root.to_string_lossy().to_string();
     assert_eq!(
-        user_remote
+        operator_remote
             .project_bindings
             .get(&local_key)
             .unwrap()
@@ -212,10 +212,7 @@ fn write_descriptor(
     url: &str,
     public_key: &Value,
 ) -> std::path::PathBuf {
-    let path = state
-        .config
-        .system_space_dir
-        .join(format!("{name}.remote.yaml"));
+    let path = state.config.app_root.join(format!("{name}.remote.yaml"));
     let body = serde_yaml::to_string(&json!({
         "version": 1,
         "name": name,

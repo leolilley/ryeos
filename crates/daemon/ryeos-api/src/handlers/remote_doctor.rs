@@ -37,10 +37,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> anyhow::Result<Value>
 
     let mut checks = Vec::new();
     let mut next_steps = Vec::new();
-    let report = config::load_remotes_layered_report(
-        &state.config.system_space_dir,
-        req.project.as_deref(),
-    )?;
+    let report =
+        config::load_remotes_layered_report(&state.config.app_root, req.project.as_deref())?;
     let Some(loaded_remote) = report.remotes.get(&req.remote).cloned() else {
         checks.push(serde_json::json!({
             "name": "remote_configured",
@@ -298,7 +296,7 @@ fn authorize_command(local_public_key: &str, local_fingerprint: &str) -> String 
         "ryeos.execute.service.threads.get",
     ];
     format!(
-        "ryeos-core-tools authorize-client --system-space-dir <remote-system-space> --public-key '{}' --scopes '{}' --label local-operator-{}",
+        "ryeos-core-tools authorize-client --app-root <remote-app-root> --public-key '{}' --scopes '{}' --label local-operator-{}",
         local_public_key.trim_start_matches("ed25519:"),
         scopes.join(","),
         local_fingerprint.chars().take(12).collect::<String>(),

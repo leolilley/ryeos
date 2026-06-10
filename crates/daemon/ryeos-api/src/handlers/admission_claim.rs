@@ -73,7 +73,7 @@ pub struct Response {
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
     let token_hash = token_hash(&req.token);
-    let token_path = admission_token_path(&state.config.system_space_dir, &token_hash);
+    let token_path = admission_token_path(&state.config.app_root, &token_hash);
     let token = read_token_file(&token_path)?;
 
     if token.version != 1 {
@@ -158,8 +158,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
     serde_json::to_value(response).map_err(|e| HandlerError::Internal(e.to_string()))
 }
 
-fn admission_token_path(system_space_dir: &Path, token_hash: &str) -> PathBuf {
-    system_space_dir
+fn admission_token_path(app_root: &Path, token_hash: &str) -> PathBuf {
+    app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("admission")

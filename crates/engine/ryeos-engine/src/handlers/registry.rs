@@ -344,7 +344,9 @@ fn load_and_verify_handler(
             descriptor_path: yaml_path.to_owned(),
             resolved_binary_path: res.absolute_path,
         }),
-        Err(e) if trust_class == TrustClass::TrustedUser && is_unresolved_handler_absence(&e) => {
+        Err(e)
+            if trust_class == TrustClass::TrustedProject && is_unresolved_handler_absence(&e) =>
+        {
             let reason = format!("{e}");
             tracing::warn!(
                 handler = %canonical_ref,
@@ -469,7 +471,7 @@ mod tests {
                 required_caps: vec![],
                 description: String::new(),
             },
-            trust_class: TrustClass::TrustedSystem,
+            trust_class: TrustClass::TrustedBundle,
             bundle_root: PathBuf::from("/tmp/bundle"),
             descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/my_handler.yaml"),
             resolved_binary_path: PathBuf::from(
@@ -479,7 +481,7 @@ mod tests {
 
         assert_eq!(handler.canonical_ref(), "handler:test/my_handler");
         assert_eq!(handler.descriptor().name, "my_handler");
-        assert_eq!(handler.trust_class(), TrustClass::TrustedSystem);
+        assert_eq!(handler.trust_class(), TrustClass::TrustedBundle);
         assert!(handler.descriptor_path().ends_with("my_handler.yaml"));
     }
 
@@ -497,7 +499,7 @@ mod tests {
                 required_caps: vec![],
                 description: String::new(),
             },
-            trust_class: TrustClass::TrustedUser,
+            trust_class: TrustClass::TrustedProject,
             bundle_root: PathBuf::from("/tmp/bundle"),
             descriptor_path: PathBuf::from("/tmp/bundle/.ai/handlers/test/missing.yaml"),
             reason: "binary not found".to_owned(),
@@ -505,7 +507,7 @@ mod tests {
 
         assert_eq!(handler.canonical_ref(), "handler:test/missing");
         assert_eq!(handler.descriptor().name, "missing");
-        assert_eq!(handler.trust_class(), TrustClass::TrustedUser);
+        assert_eq!(handler.trust_class(), TrustClass::TrustedProject);
         assert!(handler.descriptor_path().ends_with("missing.yaml"));
     }
 }

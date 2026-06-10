@@ -1,8 +1,12 @@
-# ryeos:signed:2026-06-07T05:18:56Z:42498953542806cda92a080776bd040ee59197fceeb4cbb4bee6e9ea6b8c5f28:PDZXaM0/F4ZPoVYCyp5nQPrl1jxKYpCzTCc7rcqLNG6MMXPV53vfM8apGbpNRlpDueRnQGqyyfHNJO3HSTacDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-10T11:46:35Z:4121177d393f8db06a2ef2a82a0636d172f8b852ce1f2620dc274e31a7638cbd:w6fEHhsyyiRTkQhbN6Evvo+rRdHNs6uKM6hGTT+vwjLROl0gG3rDZIVNo3DWeU0E3fCdwb8vD9iQ1nbio3qNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: maintenance.gc
 required_caps: ["ryeos.execute.service.maintenance.gc"]
 schema:
   dry_run: boolean?
   compact: boolean?
+  deep: boolean?
+  purge_cache: boolean?
+  truncate_trace: boolean?
+  prune_runtime_history: boolean?
 description: "Run maintenance garbage collection with write barrier quiesce"

@@ -244,7 +244,7 @@ fn remote_config(name: &str, url: &str, remote: &AppState) -> RemoteConfig {
 fn install_remote(local: &AppState, cfg: RemoteConfig) {
     let mut remotes = HashMap::new();
     remotes.insert(cfg.name.clone(), cfg);
-    config::save_remotes(&local.config.system_space_dir, &remotes).unwrap();
+    config::save_remotes(&local.config.app_root, &remotes).unwrap();
 }
 
 async fn admit_subject(state: Arc<AppState>, subject_hash: String) -> String {

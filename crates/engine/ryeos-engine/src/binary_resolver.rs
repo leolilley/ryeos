@@ -430,17 +430,17 @@ fn validate_bin_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
 /// Decide whether the trust class returned by
 /// [`verify_executor_trust`] is high enough to dispatch the binary.
 ///
-/// Both `TrustedSystem` and `TrustedUser` are dispatchable. The
+/// Both `TrustedBundle` and `TrustedProject` are dispatchable. The
 /// effective tier is already the `min` of the raw binary signature
 /// trust (which `verify_executor_trust` produces only as
-/// `TrustedSystem` / `UntrustedUserSpace` / `Unsigned`) and the
-/// descriptor's `root_trust_class` (widened to `TrustedSystem` or
-/// `TrustedUser` by `plan_builder::widen_root_trust_class`).
-/// A `TrustedUser` here therefore means a system-signed binary
+/// `TrustedBundle` / `UntrustedProject` / `Unsigned`) and the
+/// descriptor's `root_trust_class` (widened to `TrustedBundle` or
+/// `TrustedProject` by `plan_builder::widen_root_trust_class`).
+/// A `TrustedProject` here therefore means a system-signed binary
 /// reached through a user/project-tier descriptor — safe to run.
-/// Anything weaker (`UntrustedUserSpace`, `Unsigned`) must be refused.
+/// Anything weaker (`UntrustedProject`, `Unsigned`) must be refused.
 fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
-    matches!(tc, TrustClass::TrustedSystem | TrustClass::TrustedUser)
+    matches!(tc, TrustClass::TrustedBundle | TrustClass::TrustedProject)
 }
 
 #[cfg(test)]
@@ -451,26 +451,26 @@ mod tests {
     use serde_json::json;
 
     /// Descriptor=System, binary signed by a system-trusted key.
-    /// Effective tier = TrustedSystem; gate accepts.
+    /// Effective tier = TrustedBundle; gate accepts.
     #[test]
     fn descriptor_system_binary_system_dispatches_as_system() {
         let item_source = json!({
             "signature_info": { "fingerprint": "sys-fp" }
         });
         let (tc, fp) =
-            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedSystem);
-        assert_eq!(tc, TrustClass::TrustedSystem);
+            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedBundle);
+        assert_eq!(tc, TrustClass::TrustedBundle);
         assert_eq!(fp.as_deref(), Some("sys-fp"));
         assert!(is_dispatchable_trust_class(tc));
     }
 
     /// Descriptor=System, binary signed by a key absent from the trust
-    /// store (modeling an untrusted signer under a system root). The
-    /// effective tier collapses to UntrustedUserSpace and the gate refuses.
+    /// store (modeling an untrusted signer under a bundle root). The
+    /// effective tier collapses to UntrustedProject and the gate refuses.
     ///
     /// Note: `verify_executor_trust` does not currently model a raw
-    /// `TrustedUser` signer tier — its `raw_trust` is only TrustedSystem,
-    /// UntrustedUserSpace, or Unsigned. So a "binary signed by a user-tier
+    /// `TrustedProject` signer tier — its `raw_trust` is only TrustedBundle,
+    /// UntrustedProject, or Unsigned. So a "binary signed by a user-tier
     /// signer" is equivalent to "binary signed by a key not in the trust
     /// store" today; this test covers that.
     #[test]
@@ -478,17 +478,17 @@ mod tests {
         let item_source = json!({
             "signature_info": { "fingerprint": "user-fp" }
         });
-        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedSystem);
-        assert_eq!(tc, TrustClass::UntrustedUserSpace);
+        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedBundle);
+        assert_eq!(tc, TrustClass::UntrustedProject);
         assert_eq!(fp.as_deref(), Some("user-fp"));
         assert!(!is_dispatchable_trust_class(tc));
     }
 
     /// Descriptor=User, binary signed by a system-trusted key.
-    /// Effective tier = TrustedUser (capped by descriptor); gate accepts.
+    /// Effective tier = TrustedProject (capped by descriptor); gate accepts.
     ///
     /// This is the case the wave-5 oracle audit flagged: previously the
-    /// gate hardcoded acceptance to `TrustedSystem` only, so this case
+    /// gate hardcoded acceptance to `TrustedBundle` only, so this case
     /// — which is the *normal* dispatch path for any user-tier descriptor
     /// invoking a system-shipped runtime/handler binary — was rejected.
     #[test]
@@ -497,29 +497,29 @@ mod tests {
             "signature_info": { "fingerprint": "sys-fp" }
         });
         let (tc, fp) =
-            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedUser);
-        assert_eq!(tc, TrustClass::TrustedUser);
+            verify_executor_trust(&item_source, |f| f == "sys-fp", TrustClass::TrustedProject);
+        assert_eq!(tc, TrustClass::TrustedProject);
         assert_eq!(fp.as_deref(), Some("sys-fp"));
         assert!(is_dispatchable_trust_class(tc));
     }
 
     /// Descriptor=User, binary signed by an unknown signer.
-    /// Effective tier = UntrustedUserSpace; gate refuses.
+    /// Effective tier = UntrustedProject; gate refuses.
     #[test]
     fn descriptor_user_unknown_signer_refused() {
         let item_source = json!({
             "signature_info": { "fingerprint": "stranger-fp" }
         });
-        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedUser);
-        assert_eq!(tc, TrustClass::UntrustedUserSpace);
+        let (tc, fp) = verify_executor_trust(&item_source, |_| false, TrustClass::TrustedProject);
+        assert_eq!(tc, TrustClass::UntrustedProject);
         assert_eq!(fp.as_deref(), Some("stranger-fp"));
         assert!(!is_dispatchable_trust_class(tc));
     }
 
-    /// Sanity floor: anything below TrustedUser must never dispatch.
+    /// Sanity floor: anything below TrustedProject must never dispatch.
     #[test]
     fn untrusted_and_unsigned_are_never_dispatchable() {
-        assert!(!is_dispatchable_trust_class(TrustClass::UntrustedUserSpace));
+        assert!(!is_dispatchable_trust_class(TrustClass::UntrustedProject));
         assert!(!is_dispatchable_trust_class(TrustClass::Unsigned));
     }
 
@@ -590,7 +590,7 @@ mod tests {
             "bin/{triple}/demo",
             &bundle,
             trusted_key_for(&fp, &key),
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .expect("placeholder triple ref must resolve");
 
@@ -614,14 +614,14 @@ mod tests {
             "bin:demo",
             &bundle,
             trusted_key_for(&fp, &key),
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .expect("short form must resolve");
         let placeholder = resolve_bundle_binary_ref(
             "bin/{triple}/demo",
             &bundle,
             trusted_key_for(&fp, &key),
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .expect("placeholder form must resolve");
 
@@ -666,7 +666,7 @@ mod tests {
             "bin:demo",
             &bundle,
             trusted_key_for(&fp, &key),
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .unwrap_err();
 
@@ -685,7 +685,7 @@ mod tests {
             "bin:../demo",
             Path::new("/tmp/bundle"),
             |_| None,
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .unwrap_err();
         // `..` contains no `/` in the `bin:../demo` name (`../demo` does
@@ -704,7 +704,7 @@ mod tests {
             "bin:subdir/demo",
             Path::new("/tmp/bundle"),
             |_| None,
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .unwrap_err();
         assert!(
@@ -720,7 +720,7 @@ mod tests {
             &format!("bin/{triple}/"),
             Path::new("/tmp/bundle"),
             |_| None,
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .unwrap_err();
         // splitn(4, '/') on "bin/x86_64-unknown-linux-gnu/" gives
@@ -774,7 +774,7 @@ mod tests {
         std::fs::write(&ref_path, manifest_hash).unwrap();
 
         let err =
-            resolve_bundle_binary_ref("bin:escaped", &bundle, |_| None, TrustClass::TrustedSystem)
+            resolve_bundle_binary_ref("bin:escaped", &bundle, |_| None, TrustClass::TrustedBundle)
                 .unwrap_err();
 
         // The symlink resolves outside the bundle bin dir.
@@ -804,7 +804,7 @@ mod tests {
             "bin:not-a-file",
             &bundle,
             |_| None,
-            TrustClass::TrustedSystem,
+            TrustClass::TrustedBundle,
         )
         .unwrap_err();
 

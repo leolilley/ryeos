@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use directories::BaseDirs;
+use ryeos_engine::roots::{InstallRoot, RuntimeRoot};
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
@@ -31,17 +32,16 @@ pub struct Config {
     pub bind: SocketAddr,
     pub db_path: PathBuf,
     pub uds_path: PathBuf,
-    /// System space root — the single directory containing the `.ai/` tree.
-    /// Holds node identity, vault, runtime DB, bundles, node-config, and
-    /// all bundle content. Defaults to `~/.local/share/ryeos/`.
-    /// Override with `--system-space-dir` or `RYEOS_SYSTEM_SPACE_DIR` env var.
-    pub system_space_dir: PathBuf,
+    /// App root — the single directory containing the `.ai/` tree.
+    /// Defaults to `<data_dir>/ryeos`; override with `--app-root` or
+    /// `RYEOS_APP_ROOT`.
+    pub app_root: PathBuf,
     /// Daemon-internal signing key.
-    /// Defaults to `<system_space_dir>/.ai/node/identity/private_key.pem`.
+    /// Defaults to `<app_root>/.ai/node/identity/private_key.pem`.
     pub node_signing_key_path: PathBuf,
-    /// Operator signing key — used for operator edits in project + user space.
-    /// Defaults to `<user_root>/.ai/config/keys/signing/private_key.pem`.
-    pub user_signing_key_path: PathBuf,
+    /// Operator signing key — used for operator edits in project/config space.
+    /// Defaults to `<app_root>/.ai/config/keys/signing/private_key.pem`.
+    pub operator_signing_key_path: PathBuf,
     pub require_auth: bool,
     pub authorized_keys_dir: PathBuf,
     /// Comma-separated list of host-env var names that tool subprocesses
@@ -60,7 +60,7 @@ pub struct Config {
 #[derive(Debug, Clone, Default)]
 pub struct ConfigSources {
     pub config_file: Option<PathBuf>,
-    pub system_space_dir: Option<PathBuf>,
+    pub app_root: Option<PathBuf>,
     pub bind: Option<SocketAddr>,
     pub db_path: Option<PathBuf>,
     pub uds_path: Option<PathBuf>,
@@ -75,37 +75,55 @@ struct PartialConfig {
     bind: Option<SocketAddr>,
     db_path: Option<PathBuf>,
     uds_path: Option<PathBuf>,
-    system_space_dir: Option<PathBuf>,
+    app_root: Option<PathBuf>,
     node_signing_key_path: Option<PathBuf>,
-    user_signing_key_path: Option<PathBuf>,
+    operator_signing_key_path: Option<PathBuf>,
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
     tool_env_passthrough: Option<Vec<String>>,
 }
 
 impl Config {
+    pub fn runtime_root(&self) -> RuntimeRoot {
+        RuntimeRoot::new(self.app_root.clone())
+    }
+
+    pub fn install_root(&self) -> InstallRoot {
+        InstallRoot::new(self.app_root.clone())
+    }
+
+    pub fn runtime_config_dir(&self) -> PathBuf {
+        self.runtime_root().config()
+    }
+
+    pub fn runtime_state_dir(&self) -> PathBuf {
+        self.runtime_root().state()
+    }
+
+    pub fn runtime_node_dir(&self) -> PathBuf {
+        self.runtime_root().node()
+    }
+
     pub fn load(sources: &ConfigSources) -> Result<Self> {
         let compiled_default: SocketAddr = "127.0.0.1:7400".parse().unwrap();
         let defaults = Self::default_paths(compiled_default)?;
 
-        // Resolve system_space_dir from CLI/env BEFORE looking up
-        // `<system_space_dir>/.ai/node/config.yaml` so an explicit
-        // `--system-space-dir` (or `RYEOS_SYSTEM_SPACE_DIR`) is honored
+        // Resolve app_root from CLI/env BEFORE looking up
+        // `<app_root>/.ai/node/config.yaml` so an explicit
+        // `--app-root` (or `RYEOS_APP_ROOT`) is honored
         // when locating the stored config. Without this, the loader
         // would always read `<XDG default>/.ai/node/config.yaml` —
         // which causes test fixtures to surprise-load a developer's
         // real install config.
         let ssd_explicit = sources
-            .system_space_dir
+            .app_root
             .clone()
-            .or_else(|| env::var_os("RYEOS_SYSTEM_SPACE_DIR").map(PathBuf::from));
+            .or_else(|| env::var_os("RYEOS_APP_ROOT").map(PathBuf::from));
 
         let file_cfg = if let Some(path) = &sources.config_file {
             Some(Self::load_file(path)?)
         } else {
-            let lookup_dir = ssd_explicit
-                .as_deref()
-                .unwrap_or(&defaults.system_space_dir);
+            let lookup_dir = ssd_explicit.as_deref().unwrap_or(&defaults.app_root);
             let default_config = lookup_dir.join(".ai").join("node").join("config.yaml");
             if default_config.exists() {
                 Some(Self::load_file(&default_config).with_context(|| {
@@ -145,14 +163,24 @@ impl Config {
             }
         };
 
-        // Final system_space_dir: explicit CLI/env > config file > default
-        let system_space_dir = ssd_explicit
-            .or_else(|| {
-                file_cfg
-                    .as_ref()
-                    .and_then(|cfg| cfg.system_space_dir.clone())
-            })
-            .unwrap_or_else(|| defaults.system_space_dir.clone());
+        // Final app root: explicit CLI/env > config file > default.
+        let app_root = ssd_explicit
+            .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.app_root.clone()))
+            .unwrap_or_else(|| defaults.app_root.clone());
+        let resolved_runtime_root = RuntimeRoot::new(app_root.clone());
+        let canonical_operator_key_path = resolved_runtime_root.operator_signing_key_path();
+        if let Some(path) = file_cfg
+            .as_ref()
+            .and_then(|cfg| cfg.operator_signing_key_path.as_ref())
+        {
+            if path != &canonical_operator_key_path {
+                bail!(
+                    "operator_signing_key_path must be {}; got {}",
+                    canonical_operator_key_path.display(),
+                    path.display()
+                );
+            }
+        }
 
         let cfg = Self {
             bind: resolved_bind,
@@ -160,33 +188,21 @@ impl Config {
                 .db_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.db_path.clone()))
-                .unwrap_or_else(|| {
-                    system_space_dir
-                        .join(".ai")
-                        .join("state")
-                        .join("runtime.sqlite3")
-                }),
+                .unwrap_or_else(|| app_root.join(".ai").join("state").join("runtime.sqlite3")),
             uds_path: sources
                 .uds_path
                 .clone()
                 .or_else(|| file_cfg.as_ref().and_then(|cfg| cfg.uds_path.clone()))
                 .unwrap_or_else(|| defaults.uds_path.clone()),
-            system_space_dir: system_space_dir.clone(),
+            app_root: app_root.clone(),
             node_signing_key_path: file_cfg
                 .as_ref()
                 .and_then(|cfg| cfg.node_signing_key_path.clone())
-                .unwrap_or_else(|| {
-                    system_space_dir
-                        .join(".ai")
-                        .join("node")
-                        .join("identity")
-                        .join("private_key.pem")
-                }),
-            user_signing_key_path: file_cfg
+                .unwrap_or_else(|| resolved_runtime_root.node_signing_key_path()),
+            operator_signing_key_path: file_cfg
                 .as_ref()
-                .and_then(|cfg| cfg.user_signing_key_path.clone())
-                .or_else(|| env::var_os("RYEOS_SIGNING_KEY_PATH").map(PathBuf::from))
-                .unwrap_or_else(|| defaults.user_signing_key_path.clone()),
+                .map(|_| canonical_operator_key_path.clone())
+                .unwrap_or(canonical_operator_key_path),
             require_auth: sources.require_auth
                 || file_cfg
                     .as_ref()
@@ -200,13 +216,7 @@ impl Config {
                         .as_ref()
                         .and_then(|cfg| cfg.authorized_keys_dir.clone())
                 })
-                .unwrap_or_else(|| {
-                    system_space_dir
-                        .join(".ai")
-                        .join("node")
-                        .join("auth")
-                        .join("authorized_keys")
-                }),
+                .unwrap_or_else(|| resolved_runtime_root.authorized_keys_dir()),
             // tool_env_passthrough: config file list is the base.
             // RYEOS_TOOL_ENV_PASSTHROUGH env var (comma-separated)
             // overrides if set — mirrors Docker usage where the env
@@ -237,43 +247,22 @@ impl Config {
 
     fn default_paths(bind: SocketAddr) -> Result<Self> {
         let base_dirs = BaseDirs::new().context("could not determine base directories")?;
-        let system_space_dir = base_dirs.data_dir().join("ryeos");
+        let app_root = base_dirs.data_dir().join("ryeos");
+        let runtime_root = RuntimeRoot::new(app_root.clone());
 
-        let runtime_root = env::var_os("XDG_RUNTIME_DIR")
+        let socket_runtime_root = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| env::temp_dir().join(format!("ryeosd-{}", current_uid())));
 
-        // User-space root: canonical `<home>/.ryeos/`. Resolved via
-        // `ryeos_engine::roots::user_root()` so the daemon and CLI agree
-        // on a single resolver. Honours `USER_SPACE` env override.
-        let user_root = ryeos_engine::roots::user_root()
-            .context("could not resolve user root for default user_signing_key_path")?;
-
         Ok(Self {
             bind,
-            db_path: system_space_dir
-                .join(".ai")
-                .join("state")
-                .join("runtime.sqlite3"),
-            uds_path: runtime_root.join("ryeosd.sock"),
-            system_space_dir: system_space_dir.clone(),
-            node_signing_key_path: system_space_dir
-                .join(".ai")
-                .join("node")
-                .join("identity")
-                .join("private_key.pem"),
-            user_signing_key_path: user_root
-                .join(".ai")
-                .join("config")
-                .join("keys")
-                .join("signing")
-                .join("private_key.pem"),
+            db_path: runtime_root.state().join("runtime.sqlite3"),
+            uds_path: socket_runtime_root.join("ryeosd.sock"),
+            app_root: app_root.clone(),
+            node_signing_key_path: runtime_root.node_signing_key_path(),
+            operator_signing_key_path: runtime_root.operator_signing_key_path(),
             require_auth: false,
-            authorized_keys_dir: system_space_dir
-                .join(".ai")
-                .join("node")
-                .join("auth")
-                .join("authorized_keys"),
+            authorized_keys_dir: runtime_root.authorized_keys_dir(),
             tool_env_passthrough: Vec::new(),
         })
     }
@@ -290,26 +279,23 @@ mod tests {
     fn load_is_side_effect_free_for_runtime_paths() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let user = tmp.path().join("user");
-        std::env::set_var("USER_SPACE", &user);
-        let system_space_dir = tmp.path().join("state");
+        let app_root = tmp.path().join("state");
         let db_path = tmp.path().join("runtime/state/runtime.sqlite3");
         let uds_path = tmp.path().join("runtime/sock/ryeosd.sock");
 
         let cfg = Config::load(&ConfigSources {
-            system_space_dir: Some(system_space_dir.clone()),
+            app_root: Some(app_root.clone()),
             db_path: Some(db_path.clone()),
             uds_path: Some(uds_path.clone()),
             ..ConfigSources::default()
         })
         .unwrap();
 
-        assert_eq!(cfg.system_space_dir, system_space_dir);
+        assert_eq!(cfg.app_root, app_root);
         assert_eq!(cfg.db_path, db_path);
         assert_eq!(cfg.uds_path, uds_path);
-        assert!(!cfg.system_space_dir.exists());
+        assert!(!cfg.app_root.exists());
         assert!(!cfg.db_path.parent().unwrap().exists());
         assert!(!cfg.uds_path.parent().unwrap().exists());
-        std::env::remove_var("USER_SPACE");
     }
 }

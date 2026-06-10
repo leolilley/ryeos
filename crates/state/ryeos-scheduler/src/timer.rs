@@ -141,7 +141,7 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                             "signer_fingerprint": fire.signer_fingerprint,
                         });
                         let fires_path = ctx
-                            .system_space_dir()
+                            .app_root()
                             .join(ryeos_engine::AI_DIR)
                             .join("state")
                             .join("schedules")
@@ -196,7 +196,7 @@ async fn repair_stale_fires<Ctx: SchedulerContext>(ctx: &Ctx) {
                         "signer_fingerprint": fire.signer_fingerprint,
                     });
                     let fires_path = ctx
-                        .system_space_dir()
+                        .app_root()
                         .join(ryeos_engine::AI_DIR)
                         .join("state")
                         .join("schedules")
@@ -417,7 +417,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
         };
         let db = ctx.scheduler_db();
         let fires_path = ctx
-            .system_space_dir()
+            .app_root()
             .join(ryeos_engine::AI_DIR)
             .join("state")
             .join("schedules")
@@ -455,7 +455,7 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
         "signer_fingerprint": spec.signer_fingerprint,
     });
     let fires_path = ctx
-        .system_space_dir()
+        .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules")
@@ -669,7 +669,7 @@ async fn record_skip<Ctx: SchedulerContext>(
         "signer_fingerprint": spec.signer_fingerprint,
     });
     let fires_path = ctx
-        .system_space_dir()
+        .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules")
@@ -714,7 +714,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     struct MockContext {
-        system_space: TempDir,
+        app_root: TempDir,
         db: Arc<crate::db::SchedulerDb>,
         gate: Arc<RwLock<()>>,
         trust: TrustStore,
@@ -725,7 +725,7 @@ mod tests {
     impl MockContext {
         fn new() -> Self {
             Self {
-                system_space: tempfile::tempdir().unwrap(),
+                app_root: tempfile::tempdir().unwrap(),
                 db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
                 gate: Arc::new(RwLock::new(())),
                 trust: TrustStore::empty(),
@@ -736,8 +736,8 @@ mod tests {
     }
 
     impl SchedulerContext for MockContext {
-        fn system_space_dir(&self) -> &std::path::Path {
-            self.system_space.path()
+        fn app_root(&self) -> &std::path::Path {
+            self.app_root.path()
         }
 
         fn scheduler_db(&self) -> Arc<crate::db::SchedulerDb> {
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(updated.outcome.as_deref(), Some("result_failed"));
 
         let jsonl = std::fs::read_to_string(
-            ctx.system_space
+            ctx.app_root
                 .path()
                 .join(ryeos_engine::AI_DIR)
                 .join("state")

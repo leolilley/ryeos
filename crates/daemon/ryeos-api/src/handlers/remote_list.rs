@@ -33,7 +33,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     } else {
         req.project_path.as_deref()
     };
-    let report = config::load_remotes_layered_report(&state.config.system_space_dir, project)?;
+    let report = config::load_remotes_layered_report(&state.config.app_root, project)?;
 
     let mut entries: Vec<Value> = report
         .remotes

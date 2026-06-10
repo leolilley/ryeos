@@ -38,9 +38,8 @@ COPY bundles/hosted-node /opt/ryeos/hosted-node
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENV HOME=/data/user
-ENV USER_SPACE=/data/user
-ENV RYEOS_SYSTEM_SPACE_DIR=/data/core
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
 EXPOSE 8000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

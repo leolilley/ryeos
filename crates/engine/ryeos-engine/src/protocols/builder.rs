@@ -100,7 +100,7 @@ pub struct BuildRequest<'a> {
     pub cas_root: &'a Path,
 
     /// Path to the daemon's state directory.
-    pub system_space_dir: &'a Path,
+    pub app_root: &'a Path,
 
     /// Per-thread auth token injected into env for callback identity.
     /// Required — no `Option` fallback.
@@ -212,9 +212,7 @@ pub fn build_subprocess_spec(
             EnvInjectionSource::ProjectPath => request.project_path.to_string_lossy().to_string(),
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
             EnvInjectionSource::CasRoot => request.cas_root.to_string_lossy().to_string(),
-            EnvInjectionSource::SystemSpaceDir => {
-                request.system_space_dir.to_string_lossy().to_string()
-            }
+            EnvInjectionSource::AppRoot => request.app_root.to_string_lossy().to_string(),
             EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.to_string(),
             EnvInjectionSource::VaultHandle => {
                 // Look up the vault handle from vault_bindings.
@@ -378,7 +376,7 @@ mod tests {
             timeout: Duration::from_secs(120),
             acting_principal: "fp:abc123",
             cas_root: Path::new("/cas/root"),
-            system_space_dir: Path::new("/var/lib/ryeos"),
+            app_root: Path::new("/var/lib/ryeos"),
             thread_auth_token: "tat-test-123",
         }
     }
@@ -395,8 +393,7 @@ mod tests {
             thread_id: "T-test-thread".to_string(),
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
-                user_root: None,
-                system_roots: vec![],
+                bundle_roots: vec![],
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),

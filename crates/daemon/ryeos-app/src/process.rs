@@ -181,12 +181,8 @@ fn host_env_snapshot_lossy() -> Vec<(String, String)> {
 }
 
 fn compatibility_daemon_roots() -> anyhow::Result<DaemonRootEnv> {
-    let user_root =
-        ryeos_engine::roots::user_root().context("resolve user root for subprocess env")?;
     Ok(DaemonRootEnv {
-        user_space: Some(user_root.display().to_string()),
-        system_space_dir: std::env::var_os("RYEOS_SYSTEM_SPACE_DIR")
-            .map(|p| p.to_string_lossy().into_owned()),
+        app_root: std::env::var_os("RYEOS_APP_ROOT").map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -328,8 +324,7 @@ mod tests {
     #[test]
     fn spawn_secret_policy_rejects_protected_names() {
         for name in [
-            "USER_SPACE",
-            "RYEOS_SYSTEM_SPACE_DIR",
+            "RYEOS_APP_ROOT",
             "RYEOSD_THREAD_AUTH_TOKEN",
             "RYEOS_PROJECT_SECRET",
             "HTTP_PROXY",
@@ -348,12 +343,12 @@ mod tests {
     #[test]
     fn build_spawn_env_rejects_protected_secret_collision() {
         let mut secrets = std::collections::BTreeMap::new();
-        secrets.insert("USER_SPACE".to_string(), "/tmp/evil".to_string());
+        secrets.insert("RYEOS_APP_ROOT".to_string(), "/tmp/evil".to_string());
 
         let err = build_spawn_env(&secrets).unwrap_err();
         let msg = format!("{err:#}");
 
-        assert!(msg.contains("USER_SPACE"), "got: {msg}");
+        assert!(msg.contains("RYEOS_APP_ROOT"), "got: {msg}");
         assert!(
             msg.contains("protected") || msg.contains("blocked") || msg.contains("invalid"),
             "got: {msg}"

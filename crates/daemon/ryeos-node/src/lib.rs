@@ -24,8 +24,7 @@ pub use stop::{StopOptions, StopReport};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
-    pub system_space_dir: PathBuf,
-    pub user_root: PathBuf,
+    pub app_root: PathBuf,
     pub bind: SocketAddr,
     pub uds_path: PathBuf,
 }
@@ -33,42 +32,31 @@ pub struct NodeConfig {
 impl NodeConfig {
     pub fn default_local() -> Result<Self> {
         let bind: SocketAddr = "127.0.0.1:7400".parse().expect("compiled bind parses");
-        let system_space_dir = std::env::var_os("RYEOS_SYSTEM_SPACE_DIR")
+        let app_root = std::env::var_os("RYEOS_APP_ROOT")
             .map(PathBuf::from)
             .or_else(|| dirs::data_dir().map(|d| d.join("ryeos")))
             .ok_or_else(|| anyhow::anyhow!("could not determine XDG data directory"))?;
-        let user_root = ryeos_engine::roots::user_root().unwrap_or_else(|_| PathBuf::from("."));
         let runtime_root = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join(format!("ryeosd-{}", current_uid())));
         Ok(Self {
-            system_space_dir,
-            user_root,
+            app_root,
             bind,
             uds_path: runtime_root.join("ryeosd.sock"),
         })
     }
 
-    pub fn load_local(system_space_dir: Option<PathBuf>) -> Result<Self> {
+    pub fn load_local(app_root: Option<PathBuf>) -> Result<Self> {
         let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-            system_space_dir,
+            app_root,
             ..Default::default()
         })?;
         Ok(Self::from_app_config(&config))
     }
 
     pub fn from_app_config(config: &ryeos_app::config::Config) -> Self {
-        let user_root = config
-            .user_signing_key_path
-            .ancestors()
-            .nth(5)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                ryeos_engine::roots::user_root().unwrap_or_else(|_| PathBuf::from("."))
-            });
         Self {
-            system_space_dir: config.system_space_dir.clone(),
-            user_root,
+            app_root: config.app_root.clone(),
             bind: config.bind,
             uds_path: config.uds_path.clone(),
         }
@@ -107,9 +95,9 @@ impl LocalLifecycleEnv {
     pub const RPC_TIMEOUT: Duration = Duration::from_millis(750);
 
     /// Build the env from a side-effect-free `Config::load`.
-    pub fn load(system_space_dir: Option<PathBuf>) -> Result<Self> {
+    pub fn load(app_root: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
-            config: NodeConfig::load_local(system_space_dir)?,
+            config: NodeConfig::load_local(app_root)?,
         })
     }
 
@@ -125,7 +113,7 @@ impl LocalLifecycleEnv {
     /// is missing, unreadable, or malformed — callers treat it as a
     /// hint, never as truth.
     pub fn read_metadata_hint(&self) -> Option<DaemonMetadata> {
-        match DaemonMetadata::read(&self.config.system_space_dir) {
+        match DaemonMetadata::read(&self.config.app_root) {
             Ok(Some(meta)) => Some(meta),
             Ok(None) => None,
             Err(err) => {
@@ -170,7 +158,7 @@ impl LocalLifecycleEnv {
     /// Acquire the (flock-based) start lock guarding concurrent
     /// `ryeos start` invocations. Self-clearing on process death.
     pub fn try_acquire_start_lock(&self) -> std::io::Result<LifecycleStartLock> {
-        LifecycleStartLock::try_acquire(&self.config.system_space_dir)
+        LifecycleStartLock::try_acquire(&self.config.app_root)
     }
 }
 
@@ -203,11 +191,11 @@ impl LifecycleController {
     }
 
     pub fn init_state(&self) -> Result<InitState> {
-        init_check::init_state(&self.env.config().system_space_dir)
+        init_check::init_state(&self.env.config().app_root)
     }
 
     pub fn require_initialized(&self) -> Result<()> {
-        init_check::require_initialized(&self.env.config().system_space_dir)
+        init_check::require_initialized(&self.env.config().app_root)
     }
 
     pub async fn status(&self) -> Result<LifecycleStatus> {

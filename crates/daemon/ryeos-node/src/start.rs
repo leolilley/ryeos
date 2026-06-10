@@ -58,8 +58,8 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
     let ryeosd = resolve_ryeosd();
     let (stderr_log_path, stderr_log_start, stderr_log) = open_startup_stderr_log(env)?;
     let mut child = Command::new(&ryeosd)
-        .arg("--system-space-dir")
-        .arg(&config.system_space_dir)
+        .arg("--app-root")
+        .arg(&config.app_root)
         .arg("--bind")
         .arg(config.bind.to_string())
         .arg("--uds-path")
@@ -123,7 +123,7 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
 
 fn startup_stderr_log_path(env: &LocalLifecycleEnv) -> PathBuf {
     env.config()
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("ryeosd-start.stderr.log")
@@ -180,8 +180,8 @@ impl std::fmt::Debug for LifecycleStartLock {
 }
 
 impl LifecycleStartLock {
-    pub fn try_acquire(system_space_dir: &Path) -> io::Result<Self> {
-        let dir = system_space_dir.join(ryeos_engine::AI_DIR).join("state");
+    pub fn try_acquire(app_root: &Path) -> io::Result<Self> {
+        let dir = app_root.join(ryeos_engine::AI_DIR).join("state");
         fs::create_dir_all(&dir)?;
         let path = dir.join("lifecycle-start.lock");
         let file = fs::OpenOptions::new()

@@ -286,7 +286,7 @@ mod tests {
                 raw_content: content.to_string(),
                 raw_content_digest: format!("sha256:{ref_id}"),
                 metadata: serde_json::json!({}),
-                trust_class: TrustClass::TrustedSystem,
+                trust_class: TrustClass::TrustedBundle,
             },
         )
     }

@@ -56,8 +56,7 @@ impl RemoteClient {
         remote_name: &str,
         project_path: Option<&std::path::Path>,
     ) -> Result<Self> {
-        let remotes =
-            super::config::load_remotes_layered(&state.config.system_space_dir, project_path)?;
+        let remotes = super::config::load_remotes_layered(&state.config.app_root, project_path)?;
         let remote = super::config::get_remote(&remotes, remote_name)?;
         Ok(Self::from_remote_cfg(state, &remote))
     }

@@ -31,9 +31,9 @@ pub struct EffectiveSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrustClass {
-    TrustedSystem,
-    TrustedUser,
-    UntrustedUserSpace,
+    TrustedBundle,
+    TrustedProject,
+    UntrustedProject,
     Unsigned,
 }
 
@@ -136,8 +136,8 @@ mod tests {
             "canonical_ref": "surface:ryeos/studio/base",
             "kind": "surface",
             "trusted": true,
-            "trust_class": "trusted_system",
-            "root_trust_class": "trusted_system",
+            "trust_class": "trusted_bundle",
+            "root_trust_class": "trusted_bundle",
             "source": { "path": "/test/base.yaml" },
             "provenance": {},
             "composed_value": {

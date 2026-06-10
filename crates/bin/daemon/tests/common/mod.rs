@@ -104,10 +104,10 @@ pub fn workspace_root() -> PathBuf {
 /// Returns the workspace's core bundle directory (`bundles/core`).
 ///
 /// **Read-only source for test copies** — do NOT pass this directly to
-/// the daemon as `--system-space-dir` (the daemon mutates that dir).
+/// the daemon as `--app-root` (the daemon mutates that dir).
 /// Use [`copy_core_to_temp`] for an isolated writable copy.
 ///
-/// This IS safe to pass for `RYEOS_SYSTEM_SPACE_DIR` (read-only bundle
+/// This IS safe to pass for `RYEOS_APP_ROOT` (read-only bundle
 /// discovery) and as a source for `copy_dir_recursive`.
 pub fn workspace_core_dir() -> PathBuf {
     workspace_root().join("bundles/core")
@@ -303,12 +303,12 @@ fn fixture_trusted_signer_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trusted_signers")
 }
 
-/// Configure a tempdir as a USER_SPACE: pre-populate
-/// `<user>/.ai/config/keys/trusted/` with the fixture trusted signers
+/// Configure a tempdir as an app root: pre-populate
+/// `<app-root>/.ai/config/keys/trusted/` with the fixture trusted signers
 /// so the core bundle's items verify under the daemon's trust store.
-pub fn populate_user_space(user_space: &Path) {
-    let trusted_dst = user_space.join(".ai/config/keys/trusted");
-    std::fs::create_dir_all(&trusted_dst).expect("create user trusted keys dir");
+pub fn populate_trusted_keys(app_root: &Path) {
+    let trusted_dst = app_root.join(".ai/config/keys/trusted");
+    std::fs::create_dir_all(&trusted_dst).expect("create app-root trusted keys dir");
     for entry in
         std::fs::read_dir(fixture_trusted_signer_dir()).expect("read fixture trusted_signers")
     {
@@ -319,14 +319,14 @@ pub fn populate_user_space(user_space: &Path) {
 }
 
 /// A live ryeosd daemon child process bound to `bind`, with state under
-/// `system_space_dir`. Drop kills the child and best-effort cleans up the UDS.
+/// `app_root`. Drop kills the child and best-effort cleans up the UDS.
 pub struct DaemonHarness {
     /// Outer tempdir for UDS socket (RAII cleanup).
     _state_dir_outer: TempDir,
     /// Tempdir holding the copied core bundle. The daemon writes into this copy,
     /// not the workspace tree.
     _core_bundle_tmp: TempDir,
-    /// Path the daemon was launched with as `--system-space-dir`. Use this for
+    /// Path the daemon was launched with as `--app-root`. Use this for
     /// reading `daemon.json`, audit files, etc.
     pub state_path: PathBuf,
     pub user_space: TempDir,
@@ -335,7 +335,7 @@ pub struct DaemonHarness {
     pub child: Child,
     /// Captured stderr (joined async) — populated on drop for diagnostics.
     pub stderr_buf: Option<String>,
-    /// User signing key from the fast fixture. Used by `post_execute` to
+    /// Operator signing key from the fast fixture. Used by `post_execute` to
     /// sign requests. `None` when the daemon was started via `start()`
     /// instead of `start_fast()`.
     pub user_key: Option<SigningKey>,
@@ -376,21 +376,20 @@ impl DaemonHarness {
     {
         let state_dir_outer = tempfile::tempdir()?;
         let user_space = tempfile::tempdir()?;
-        populate_user_space(user_space.path());
 
         // Copy core bundle to an isolated temp dir so the daemon writes
         // state (identity, vault, DB, daemon.json) into the copy, not
         // the workspace tree.
-        let (core_bundle_tmp, system_space_dir) = copy_core_to_temp();
+        let (core_bundle_tmp, app_root) = copy_core_to_temp();
 
-        // Plant user-space identity + trust docs and daemon-local node
+        // Plant app-root operator identity + trust docs and daemon-local node
         // key / vault / public identity so the daemon's startup
         // `repair_daemon_local` invariants pass. The fixture is
         // intentionally pre-applied rather than relying on (now-gone)
-        // daemon auto-init for user-space artifacts.
-        let _ = fast_fixture::populate_initialized_state(&system_space_dir, user_space.path())?;
+        // daemon auto-init for operator artifacts.
+        let _ = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
 
-        pre_init(&system_space_dir, user_space.path())?;
+        pre_init(&app_root, user_space.path())?;
 
         // Bind `:0` and let the kernel assign an ephemeral port. The
         // daemon writes the real address back to daemon.json — no
@@ -401,14 +400,14 @@ impl DaemonHarness {
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
 
         let mut cmd = Command::new(ryeosd_binary());
-        cmd.arg("--system-space-dir")
-            .arg(&system_space_dir)
+        cmd.arg("--app-root")
+            .arg(&app_root)
             .arg("--bind")
             .arg(bind.to_string())
             .arg("--uds-path")
             .arg(&uds_path)
             .env("HOSTNAME", "testhost")
-            .env("USER_SPACE", user_space.path())
+            .env("RYEOS_APP_ROOT", &app_root)
             .env("HOME", user_space.path())
             // When RYEOSD_TEST_STDERR_DIR is set, mirror daemon stderr
             // to a stable on-disk file (named per-harness-id) so test
@@ -430,7 +429,7 @@ impl DaemonHarness {
 
         let child = cmd.spawn()?;
 
-        let daemon_json = system_space_dir.join("daemon.json");
+        let daemon_json = app_root.join("daemon.json");
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if daemon_json.exists() {
@@ -486,7 +485,7 @@ impl DaemonHarness {
         Ok(Self {
             _state_dir_outer: state_dir_outer,
             _core_bundle_tmp: core_bundle_tmp,
-            state_path: system_space_dir.to_path_buf(),
+            state_path: app_root.to_path_buf(),
             user_space,
             bind: actual_bind,
             uds_path,
@@ -562,14 +561,14 @@ impl DaemonHarness {
 
         let mut cmd = Command::new(ryeosd_binary());
         // NOTE: NO . The fast fixture is the init.
-        cmd.arg("--system-space-dir")
+        cmd.arg("--app-root")
             .arg(&state_path)
             .arg("--bind")
             .arg(bind.to_string())
             .arg("--uds-path")
             .arg(&uds_path)
             .env("HOSTNAME", "testhost")
-            .env("USER_SPACE", user_space.path())
+            .env("RYEOS_APP_ROOT", &state_path)
             .env("HOME", user_space.path())
             .stdout(Stdio::null())
             .stderr(
@@ -763,14 +762,14 @@ impl DaemonHarness {
         let _ = std::fs::remove_file(&daemon_json);
 
         let mut cmd = Command::new(ryeosd_binary());
-        cmd.arg("--system-space-dir")
+        cmd.arg("--app-root")
             .arg(&self.state_path)
             .arg("--bind")
             .arg(bind.to_string())
             .arg("--uds-path")
             .arg(&self.uds_path)
             .env("HOSTNAME", "testhost")
-            .env("USER_SPACE", self.user_space.path())
+            .env("RYEOS_APP_ROOT", &self.state_path)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
             .stderr(
@@ -887,14 +886,14 @@ impl DaemonHarness {
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
         let mut cmd = Command::new(ryeosd_binary());
-        cmd.arg("--system-space-dir")
+        cmd.arg("--app-root")
             .arg(&self.state_path)
             .arg("--bind")
             .arg(bind.to_string())
             .arg("--uds-path")
             .arg(&self.uds_path)
             .env("HOSTNAME", "testhost")
-            .env("USER_SPACE", self.user_space.path())
+            .env("RYEOS_APP_ROOT", &self.state_path)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::null())
             .stderr(
@@ -1031,9 +1030,9 @@ impl Drop for DaemonHarness {
 pub struct StandaloneHarness {
     /// Keeps the core-bundle temp copy alive for the harness lifetime.
     _core_tmp: TempDir,
-    /// Persistent system space dir (the temp copy of core).
-    pub system_space_dir: PathBuf,
-    /// Persistent user space dir.
+    /// Persistent app root (the temp copy of core).
+    pub app_root: PathBuf,
+    /// Persistent app root dir.
     pub user_space: TempDir,
     /// UDS path (unused for standalone but required by CLI).
     uds_path: PathBuf,
@@ -1052,26 +1051,25 @@ impl StandaloneHarness {
     /// and preflight will find installed bundles for dependency discovery.
     pub fn new_initialized() -> anyhow::Result<Self> {
         let user_space = tempfile::tempdir()?;
-        let (core_tmp, system_space_dir) = copy_core_to_temp();
-        let fixture =
-            fast_fixture::populate_initialized_state(&system_space_dir, user_space.path())?;
-        fast_fixture::register_core_bundle_at_state(&system_space_dir, &fixture)?;
-        fast_fixture::register_standard_bundle(&system_space_dir, &fixture)?;
+        let (core_tmp, app_root) = copy_core_to_temp();
+        let fixture = fast_fixture::populate_initialized_state(&app_root, user_space.path())?;
+        fast_fixture::register_core_bundle_at_state(&app_root, &fixture)?;
+        fast_fixture::register_standard_bundle(&app_root, &fixture)?;
 
         // Install core under .ai/bundles/core/ so preflight's
         // discover_installed_bundle_roots finds it. Copy from the
-        // workspace source (not system_space_dir itself — that would
+        // workspace source (not app_root itself — that would
         // recurse into the .ai/bundles/ subtree we're creating).
-        let bundles_root = system_space_dir.join(".ai/bundles");
+        let bundles_root = app_root.join(".ai/bundles");
         let core_install = bundles_root.join("core");
         let core_src = workspace_core_dir();
         copy_dir_recursive(&core_src, &core_install)
             .with_context(|| format!("install core into {}", core_install.display()))?;
 
-        let uds_path = system_space_dir.join("ryeosd.sock");
+        let uds_path = app_root.join("ryeosd.sock");
         Ok(Self {
             _core_tmp: core_tmp,
-            system_space_dir,
+            app_root,
             user_space,
             uds_path,
             fixture,
@@ -1086,8 +1084,8 @@ impl StandaloneHarness {
         params_json: Option<&str>,
     ) -> anyhow::Result<std::process::Output> {
         let mut cmd = tokio::process::Command::new(ryeosd_binary());
-        cmd.arg("--system-space-dir")
-            .arg(&self.system_space_dir)
+        cmd.arg("--app-root")
+            .arg(&self.app_root)
             .arg("--uds-path")
             .arg(&self.uds_path)
             .arg("run-service")
@@ -1096,7 +1094,7 @@ impl StandaloneHarness {
             cmd.arg("--params").arg(p);
         }
         cmd.env("HOSTNAME", "testhost")
-            .env("USER_SPACE", self.user_space.path())
+            .env("RYEOS_APP_ROOT", &self.app_root)
             .env("HOME", self.user_space.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1137,7 +1135,7 @@ pub async fn run_service_standalone(
     fast_fixture::register_standard_bundle(&state_path, &fixture)?;
 
     let mut cmd = Command::new(ryeosd_binary());
-    cmd.arg("--system-space-dir")
+    cmd.arg("--app-root")
         .arg(&state_path)
         .arg("--uds-path")
         .arg(state_dir.path().join("ryeosd.sock"))
@@ -1147,7 +1145,7 @@ pub async fn run_service_standalone(
         cmd.arg("--params").arg(p);
     }
     cmd.env("HOSTNAME", "testhost")
-        .env("USER_SPACE", user_space.path())
+        .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

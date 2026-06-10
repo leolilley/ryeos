@@ -23,8 +23,12 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     required_caps: &["ryeos.execute.service.maintenance.gc"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
-            let req: Request = serde_json::from_value(params)
-                .map_err(|e| anyhow::anyhow!("invalid gc params: {e}"))?;
+            let req: Request = if params.is_null() {
+                Request::default()
+            } else {
+                serde_json::from_value(params)
+                    .map_err(|e| anyhow::anyhow!("invalid gc params: {e}"))?
+            };
             handle(req, state).await
         })
     },

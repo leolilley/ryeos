@@ -159,11 +159,11 @@ def validate_capability(capability: str) -> str:
 
 def resolve_realm_dir(data: dict[str, Any]) -> Path:
     realm_id = validate_realm(require_str(data, "realm_id"))
-    state_root = optional_str(data, "state_root")
-    if state_root:
-        root = Path(state_root)
+    runtime_state_dir = optional_str(data, "runtime_state_dir")
+    if runtime_state_dir:
+        root = Path(runtime_state_dir)
         if not root.is_absolute():
-            raise AuthError("invalid_request", "state_root must be absolute")
+            raise AuthError("invalid_request", "runtime_state_dir must be absolute")
     else:
         project_path = Path(require_str(data, "project_path"))
         if not project_path.is_absolute():

@@ -92,7 +92,7 @@ pub(crate) async fn dispatch(request: RpcRequest, state: &AppState) -> RpcRespon
                 "started_at": &state.started_at_iso,
                 "bind": state.config.bind.to_string(),
                 "uds_path": state.config.uds_path.display().to_string(),
-                "system_space_dir": state.config.system_space_dir.display().to_string(),
+                "app_root": state.config.app_root.display().to_string(),
             }),
         ),
         "lifecycle.shutdown" => {
@@ -547,16 +547,16 @@ mod tests {
     fn setup_app_state() -> (TempDir, AppState) {
         std::env::set_var("HOSTNAME", "testhost");
         let tmpdir = TempDir::new().unwrap();
-        let state_root = tmpdir.path().join(".ai").join("state");
+        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
         let key_path = tmpdir.path().join("identity").join("node-key.pem");
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
             db_path: runtime_db_path.clone(),
             uds_path: tmpdir.path().join("test.sock"),
-            system_space_dir: tmpdir.path().to_path_buf(),
+            app_root: tmpdir.path().to_path_buf(),
             node_signing_key_path: key_path.clone(),
-            user_signing_key_path: tmpdir.path().join("user-key.pem"),
+            operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
             tool_env_passthrough: Vec::new(),
@@ -571,8 +571,9 @@ mod tests {
             &identity,
         ));
         let write_barrier = WriteBarrier::new();
-        let state_store =
-            Arc::new(StateStore::new(state_root, runtime_db_path, signer, write_barrier).unwrap());
+        let state_store = Arc::new(
+            StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier).unwrap(),
+        );
         let kind_profiles = Arc::new(KindProfileRegistry::build(None));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let threads = Arc::new(
@@ -591,7 +592,6 @@ mod tests {
                 ryeos_engine::parsers::ParserRegistry::empty(),
                 std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
             ),
-            None,
             Vec::new(),
         );
         let test_command_registry = Arc::new(

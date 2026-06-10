@@ -101,11 +101,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
         .map_err(|e| HandlerError::BadRequest(format!("remote '{}': {e:#}", req.remote)))?;
 
     // Load remote config for project binding and ignore rules.
-    let report = config::load_remotes_layered_report(
-        &state.config.system_space_dir,
-        abs_project_path.as_deref(),
-    )
-    .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
+    let report =
+        config::load_remotes_layered_report(&state.config.app_root, abs_project_path.as_deref())
+            .map_err(|e| HandlerError::Internal(format!("load remotes: {e:#}")))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
 

@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long = "no-open")]
     no_open: bool,
 
-    /// Bind Studio user-space storage to this launcher's signing-key principal.
+    /// Bind Studio principal storage to this launcher's signing-key principal.
     #[arg(long = "hosted-principal")]
     hosted_principal: bool,
 }
@@ -87,8 +87,8 @@ async fn main() -> Result<()> {
     let daemon_url = resolve_daemon_url()?;
 
     // Resolve signing key.
-    let system_space_dir = discover_system_space_dir()?;
-    let signer = WebSigner::resolve(&system_space_dir)?;
+    let app_root = discover_app_root()?;
+    let signer = WebSigner::resolve(&app_root)?;
 
     // Discover daemon audience (public key fingerprint).
     let audience = discover_audience(&daemon_url).await?;
@@ -158,8 +158,8 @@ fn resolve_daemon_url() -> Result<String> {
     }
 
     // Try daemon.json discovery.
-    let system_space_dir = discover_system_space_dir()?;
-    let daemon_json = system_space_dir.join("daemon.json");
+    let app_root = discover_app_root()?;
+    let daemon_json = app_root.join("daemon.json");
     if daemon_json.exists() {
         let raw = std::fs::read_to_string(&daemon_json).context("read daemon.json")?;
         let v: serde_json::Value = serde_json::from_str(&raw).context("parse daemon.json")?;
@@ -171,11 +171,8 @@ fn resolve_daemon_url() -> Result<String> {
     bail!("cannot resolve daemon URL: set RYEOSD_URL or ensure daemon is running")
 }
 
-fn discover_system_space_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RYEOS_SYSTEM_SPACE") {
-        return Ok(PathBuf::from(dir));
-    }
-    if let Ok(dir) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+fn discover_app_root() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("RYEOS_APP_ROOT") {
         return Ok(PathBuf::from(dir));
     }
     let base = dirs::data_local_dir()
@@ -199,40 +196,20 @@ struct SignedHeaders {
 }
 
 impl WebSigner {
-    fn resolve(system_space_dir: &std::path::Path) -> Result<Self> {
-        // Same resolution as CLI: env override → user key → system key.
-        if let Ok(p) = std::env::var("RYEOS_CLI_KEY_PATH") {
-            return Self::load_from(PathBuf::from(p));
-        }
-
-        let user_root =
-            ryeos_engine::roots::user_root().context("discover user root for signing key")?;
-        let user_key = user_root
+    fn resolve(app_root: &std::path::Path) -> Result<Self> {
+        let operator_key = app_root
             .join(ryeos_engine::AI_DIR)
             .join("config")
             .join("keys")
             .join("signing")
             .join("private_key.pem");
 
-        if user_key.exists() {
-            return Self::load_from(user_key);
-        }
-
-        // Fallback: try the system space signing key (daemon key).
-        let system_key = system_space_dir
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem");
-
-        if system_key.exists() {
-            return Self::load_from(system_key);
+        if operator_key.exists() {
+            return Self::load_from(operator_key);
         }
 
         bail!(
-            "no signing key found; set RYEOS_CLI_KEY_PATH or ensure a signing key exists \
-             at <user_root>/{}/config/keys/signing/private_key.pem",
+            "no signing key found at <app_root>/{}/config/keys/signing/private_key.pem",
             ryeos_engine::AI_DIR
         )
     }

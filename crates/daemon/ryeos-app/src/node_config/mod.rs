@@ -14,7 +14,7 @@
 //!
 //! The daemon loads node-config at startup in two phases:
 //! - **Phase 1 (bootstrap):** load only the `bundles` section from
-//!   `system_space_dir` to determine effective bundle roots.
+//!   `app_root` to determine effective bundle roots.
 //! - **Phase 2 (full pass):** build the engine with effective roots, then
 //!   scan all sections from all sources (recursive for routes/commands).
 //!
@@ -38,10 +38,10 @@ use crate::route_raw::RawRouteSpec;
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionSourcePolicy {
-    /// Only `system_space_dir`.
+    /// Only `app_root`.
     /// Used by the `bundles` section so bundles can't self-register.
     SystemAndState,
-    /// `system_space_dir` + all effective bundle roots.
+    /// `app_root` + all effective bundle roots.
     /// Used by sections like `routes` and `commands` that bundles can contribute to.
     EffectiveBundleRootsAndState,
 }
@@ -70,7 +70,7 @@ pub struct NodeConfigSnapshot {
     pub routes: Vec<RawRouteSpec>,
     /// All loaded command definitions.
     pub commands: Vec<CommandRecord>,
-    /// Hosted node operator policies loaded from installed bundle/state roots.
+    /// Hosted node operator policies loaded from installed bundle/runtime state dirs.
     pub hosted_node_policies: Vec<HostedNodePolicyRecord>,
     /// Effective command registration admission policy.
     pub command_registration_policy: CommandRegistrationPolicyRecord,

@@ -277,7 +277,7 @@ async fn record_skip<Ctx: SchedulerContext>(
         "signer_fingerprint": spec.signer_fingerprint,
     });
     let fires_path = ctx
-        .system_space_dir()
+        .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules")

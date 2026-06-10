@@ -52,7 +52,7 @@ pub enum PullResultsError {
 ///
 /// # Arguments
 /// * `client` — RemoteClient connected to the remote node
-/// * `system_space_dir` — Local system space dir (contains `.ai/state/objects` CAS)
+/// * `app_root` — Local app root (contains `.ai/state/objects` CAS)
 /// * `pushed_snapshot_hash` — The snapshot we pushed (lineage anchor). The
 ///   result snapshot must equal this OR list it in `parent_hashes` (direct
 ///   parent only, per resolved design decision).
@@ -60,22 +60,20 @@ pub enum PullResultsError {
 /// * `local_project_root` — The local project directory to apply changes
 ///   to. `None` for `--no-project` mode: the project diff/apply is
 ///   skipped entirely (no local workspace exists), but lineage check
-///   + user-space pull-back still run.
+///   skipped entirely (no local workspace exists).
 /// * `base_manifest` — The exact manifest that was pushed (from PushResult.manifest)
-/// * `base_user_manifest` — The exact user manifest that was pushed
-///   (from `PushResult.user_manifest`). When `None`, the user pull-back
-///   step is skipped — the caller didn't push a user manifest, so
-///   there's no symmetric base to diff against.
+/// * `_base_user_manifest` — retained in the wire contract, ignored by the
+///   single-app-root implementation.
 pub async fn pull_results(
     client: &RemoteClient,
-    system_space_dir: &Path,
+    app_root: &Path,
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
     local_project_root: Option<&Path>,
     base_manifest: &SourceManifest,
-    base_user_manifest: Option<&SourceManifest>,
+    _base_user_manifest: Option<&SourceManifest>,
 ) -> Result<PullResult, PullResultsError> {
-    let local_cas_root = system_space_dir
+    let local_cas_root = app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("objects");
@@ -199,112 +197,9 @@ pub async fn pull_results(
         (0, 0)
     };
 
-    // 6. Symmetric user-space pull-back. Only runs when we pushed a
-    //    user manifest AND the remote result snapshot carries one.
-    //    Defense-in-depth: every remote-supplied user path is
-    //    re-validated against the sync allow-list before being
-    //    applied, in case a buggy/hostile remote returns paths
-    //    outside the agreed set.
-    let mut user_fetched = 0usize;
-    let (user_files_updated, user_files_deleted) = match (
-        base_user_manifest,
-        snapshot_val
-            .get("user_manifest_hash")
-            .and_then(|v| v.as_str()),
-    ) {
-        (Some(base_um), Some(remote_user_mh)) => {
-            // Fetch remote user manifest.
-            let user_manifest_objs = client
-                .objects_get(&[remote_user_mh.to_string()])
-                .await
-                .map_err(PullResultsError::Other)?;
-            let user_manifest_val =
-                user_manifest_objs
-                    .find_object(remote_user_mh)
-                    .ok_or_else(|| {
-                        PullResultsError::InvalidRemoteSnapshot(format!(
-                            "user manifest {} not found in objects_get response",
-                            remote_user_mh
-                        ))
-                    })?;
-            let remote_user_manifest: SourceManifest = parse_manifest(&user_manifest_val)?;
-
-            // Reject any path that escapes the allow-list. Same
-            // component-wise check the push side validates against.
-            ryeos_state::user_sync::validate_user_manifest_paths(&remote_user_manifest).map_err(
-                |e| {
-                    PullResultsError::InvalidRemoteSnapshot(format!(
-                        "remote user manifest violates sync allow-list: {e}"
-                    ))
-                },
-            )?;
-
-            // Fetch any items/blobs the local CAS doesn't already have.
-            let mut user_needed: Vec<String> = Vec::new();
-            for (path, hash) in &remote_user_manifest.item_source_hashes {
-                if base_um.item_source_hashes.get(path) != Some(hash) {
-                    user_needed.push(hash.clone());
-                }
-            }
-            if !user_needed.is_empty() {
-                let fetched = client
-                    .objects_get(&user_needed)
-                    .await
-                    .map_err(PullResultsError::Other)?;
-                for entry in &fetched.entries {
-                    if entry.kind == "object" {
-                        if let Some(ref val) = entry.value {
-                            local_cas.store_object(val)?;
-                            user_fetched += 1;
-                            if let Some(blob_hash) =
-                                val.get("content_blob_hash").and_then(|v| v.as_str())
-                            {
-                                let blob_fetched = client
-                                    .objects_get(&[blob_hash.to_string()])
-                                    .await
-                                    .map_err(PullResultsError::Other)?;
-                                if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
-                                    local_cas.store_blob(&blob_data)?;
-                                    user_fetched += 1;
-                                }
-                            }
-                        }
-                    } else if entry.kind == "blob" {
-                        if let Some(ref blob_data) = entry.data {
-                            use base64::Engine;
-                            let bytes = base64::engine::general_purpose::STANDARD
-                                .decode(blob_data)
-                                .map_err(|e| {
-                                    PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}"))
-                                })?;
-                            local_cas.store_blob(&bytes)?;
-                            user_fetched += 1;
-                        }
-                    }
-                }
-            }
-
-            // Apply to the local user-space `.ai/` root. user_root()
-            // returns ~/.ryeos/; we apply under <user_root>/.ai/ so
-            // the relative paths in the manifest land correctly.
-            let local_user_root = ryeos_engine::roots::user_root().map_err(|e| {
-                PullResultsError::Other(anyhow::anyhow!(
-                    "user-space pull-back: cannot resolve user_root: {e}"
-                ))
-            })?;
-            let local_user_ai = local_user_root.join(ryeos_engine::AI_DIR);
-            // Ensure the user .ai/ directory exists — on a fresh node it
-            // won't and the apply would fail with ENOENT.
-            std::fs::create_dir_all(&local_user_ai).with_context(|| {
-                format!(
-                    "user-space pull-back: failed to create {}",
-                    local_user_ai.display()
-                )
-            })?;
-            apply_manifest_diff(&local_cas, &local_user_ai, base_um, &remote_user_manifest)?
-        }
-        _ => (0, 0),
-    };
+    // 6. No global user-space pull-back exists in the single-app-root model.
+    let user_fetched = 0usize;
+    let (user_files_updated, user_files_deleted) = (0usize, 0usize);
 
     Ok(PullResult {
         snapshot_hash: remote_snapshot_hash.to_string(),

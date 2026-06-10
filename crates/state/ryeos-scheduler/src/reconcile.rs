@@ -37,12 +37,12 @@ pub async fn reconcile<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<ResumeInt
 
     // Step 1: Rebuild projection from CAS
     let schedules_dir = ctx
-        .system_space_dir()
+        .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("schedules");
     let fires_dir = ctx
-        .system_space_dir()
+        .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules");
@@ -281,7 +281,7 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
         "signer_fingerprint": fire.signer_fingerprint,
     });
     let fires_path = ctx
-        .system_space_dir()
+        .app_root()
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules")
@@ -311,7 +311,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     struct MockContext {
-        system_space: TempDir,
+        app_root: TempDir,
         db: Arc<crate::db::SchedulerDb>,
         gate: Arc<RwLock<()>>,
         trust: TrustStore,
@@ -322,7 +322,7 @@ mod tests {
     impl MockContext {
         fn new() -> Self {
             Self {
-                system_space: tempfile::tempdir().unwrap(),
+                app_root: tempfile::tempdir().unwrap(),
                 db: Arc::new(crate::db::SchedulerDb::new_in_memory().unwrap()),
                 gate: Arc::new(RwLock::new(())),
                 trust: TrustStore::empty(),
@@ -333,8 +333,8 @@ mod tests {
     }
 
     impl SchedulerContext for MockContext {
-        fn system_space_dir(&self) -> &std::path::Path {
-            self.system_space.path()
+        fn app_root(&self) -> &std::path::Path {
+            self.app_root.path()
         }
 
         fn scheduler_db(&self) -> Arc<crate::db::SchedulerDb> {

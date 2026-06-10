@@ -109,7 +109,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
     let node_dir = ctx
         .state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let schedules_dir = node_dir.join("schedules");
@@ -260,7 +260,7 @@ pub fn prepare_commit(
     let node_dir = ctx
         .state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let schedules_dir = node_dir.join("schedules");
@@ -776,7 +776,7 @@ fn reject_schedule_history_reuse(ctx: &ProjectDeployContext<'_>, schedule_id: &s
     let fires_dir = ctx
         .state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules")

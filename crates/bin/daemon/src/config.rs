@@ -19,9 +19,9 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Override the system space directory (default: XDG data dir / ryeos)
+    /// Override the app rootectory (default: XDG data dir / ryeos)
     #[arg(long)]
-    pub system_space_dir: Option<PathBuf>,
+    pub app_root: Option<PathBuf>,
 
     #[arg(long)]
     pub bind: Option<SocketAddr>,
@@ -49,7 +49,7 @@ impl Cli {
     pub fn to_sources(&self) -> ConfigSources {
         ConfigSources {
             config_file: self.config.clone(),
-            system_space_dir: self.system_space_dir.clone(),
+            app_root: self.app_root.clone(),
             bind: self.bind,
             db_path: self.db_path.clone(),
             uds_path: self.uds_path.clone(),

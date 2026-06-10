@@ -26,7 +26,7 @@ pub use ryeos_vault::sealed::{read_sealed_secrets, write_sealed_secrets};
 
 #[derive(Debug)]
 pub struct PutOptions {
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
     pub entries: Vec<(String, String)>,
 }
 
@@ -39,7 +39,7 @@ pub struct PutReport {
 
 #[derive(Debug)]
 pub struct ListOptions {
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -50,7 +50,7 @@ pub struct ListReport {
 
 #[derive(Debug)]
 pub struct RemoveOptions {
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
     pub keys: Vec<String>,
 }
 
@@ -64,7 +64,7 @@ pub struct RemoveReport {
 
 #[derive(Debug)]
 pub struct RewrapOptions {
-    pub system_space_dir: PathBuf,
+    pub app_root: PathBuf,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -87,7 +87,7 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
             bail!("refusing to store empty value for vault key '{k}'");
         }
     }
-    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
+    let key_path = default_vault_secret_key_path(&opts.app_root);
     let sk = lillux::vault::read_secret_key(&key_path).with_context(|| {
         format!(
             "read vault secret key {} — has `ryeos init` (or daemon) ever run \
@@ -96,7 +96,7 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
         )
     })?;
     let pk = sk.public_key();
-    let store_path = default_sealed_store_path(&opts.system_space_dir);
+    let store_path = default_sealed_store_path(&opts.app_root);
 
     let mut current = read_sealed_secrets(&store_path, &sk)?;
     let mut keys_written = Vec::with_capacity(opts.entries.len());
@@ -115,10 +115,10 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
 }
 
 pub fn run_list(opts: &ListOptions) -> Result<ListReport> {
-    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
+    let key_path = default_vault_secret_key_path(&opts.app_root);
     let sk = lillux::vault::read_secret_key(&key_path)
         .with_context(|| format!("read vault secret key {}", key_path.display()))?;
-    let store_path = default_sealed_store_path(&opts.system_space_dir);
+    let store_path = default_sealed_store_path(&opts.app_root);
     let current = read_sealed_secrets(&store_path, &sk)?;
     let mut keys: Vec<String> = current.keys().cloned().collect();
     keys.sort();
@@ -129,11 +129,11 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
     if opts.keys.is_empty() {
         bail!("ryeos vault remove: at least one KEY required");
     }
-    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
+    let key_path = default_vault_secret_key_path(&opts.app_root);
     let sk = lillux::vault::read_secret_key(&key_path)
         .with_context(|| format!("read vault secret key {}", key_path.display()))?;
     let pk = sk.public_key();
-    let store_path = default_sealed_store_path(&opts.system_space_dir);
+    let store_path = default_sealed_store_path(&opts.app_root);
 
     let mut current = read_sealed_secrets(&store_path, &sk)?;
     let mut removed = Vec::new();
@@ -157,9 +157,9 @@ pub fn run_remove(opts: &RemoveOptions) -> Result<RemoveReport> {
 }
 
 pub fn run_rewrap(opts: &RewrapOptions) -> Result<RewrapReport> {
-    let key_path = default_vault_secret_key_path(&opts.system_space_dir);
-    let pub_path = default_vault_public_key_path(&opts.system_space_dir);
-    let store_path = default_sealed_store_path(&opts.system_space_dir);
+    let key_path = default_vault_secret_key_path(&opts.app_root);
+    let pub_path = default_vault_public_key_path(&opts.app_root);
+    let store_path = default_sealed_store_path(&opts.app_root);
 
     let old_sk = lillux::vault::read_secret_key(&key_path)
         .with_context(|| format!("read vault secret key {}", key_path.display()))?;
@@ -257,7 +257,7 @@ mod tests {
     fn put_creates_store_and_writes_keys() {
         let (state, _sk) = fresh_state_with_keypair();
         let report = run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![
                 ("OPENAI_API_KEY".into(), "sk-1".into()),
                 ("DATABASE_URL".into(), "postgres://h/db".into()),
@@ -268,7 +268,7 @@ mod tests {
         assert!(report.store_path.exists());
 
         let listed = run_list(&ListOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(listed.keys, vec!["DATABASE_URL", "OPENAI_API_KEY"]);
@@ -278,12 +278,12 @@ mod tests {
     fn put_merges_with_existing() {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("A".into(), "1".into())],
         })
         .unwrap();
         let report = run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("B".into(), "2".into())],
         })
         .unwrap();
@@ -294,12 +294,12 @@ mod tests {
     fn put_overwrites_existing_key() {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("FOO".into(), "old".into())],
         })
         .unwrap();
         run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("FOO".into(), "new".into())],
         })
         .unwrap();
@@ -315,7 +315,7 @@ mod tests {
     fn put_rejects_blocked_key() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("PATH".into(), "/evil".into())],
         })
         .unwrap_err();
@@ -326,7 +326,7 @@ mod tests {
     fn put_rejects_invalid_key_chars() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("FOO-BAR".into(), "baz".into())],
         })
         .unwrap_err();
@@ -337,7 +337,7 @@ mod tests {
     fn put_requires_at_least_one_entry() {
         let (state, _sk) = fresh_state_with_keypair();
         let err = run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![],
         })
         .unwrap_err();
@@ -348,7 +348,7 @@ mod tests {
     fn list_on_missing_store_returns_empty() {
         let (state, _sk) = fresh_state_with_keypair();
         let report = run_list(&ListOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
         })
         .unwrap();
         assert!(report.keys.is_empty());
@@ -358,13 +358,13 @@ mod tests {
     fn remove_drops_keys_idempotently() {
         let (state, _sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("A".into(), "1".into()), ("B".into(), "2".into())],
         })
         .unwrap();
 
         let report = run_remove(&RemoveOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             keys: vec!["A".into(), "C".into()],
         })
         .unwrap();
@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(report.total_keys_after_remove, 1);
 
         let listed = run_list(&ListOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(listed.keys, vec!["B"]);
@@ -383,14 +383,14 @@ mod tests {
     fn rewrap_rotates_keypair_and_re_seals_store() {
         let (state, old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("FOO".into(), "bar".into()), ("BAZ".into(), "qux".into())],
         })
         .unwrap();
         let old_fingerprint = old_sk.public_key().fingerprint();
 
         let report = run_rewrap(&RewrapOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(report.old_fingerprint, old_fingerprint);
@@ -435,7 +435,7 @@ mod tests {
     fn rewrap_with_empty_store_only_rotates_keys() {
         let (state, old_sk) = fresh_state_with_keypair();
         let report = run_rewrap(&RewrapOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
         })
         .unwrap();
         assert_eq!(report.keys_rewrapped, 0);
@@ -446,12 +446,12 @@ mod tests {
     fn rewrap_after_removing_all_keys_re_seals_empty_store() {
         let (state, _old_sk) = fresh_state_with_keypair();
         run_put(&PutOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             entries: vec![("ONLY".into(), "value".into())],
         })
         .unwrap();
         run_remove(&RemoveOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
             keys: vec![("ONLY".into())],
         })
         .unwrap();
@@ -462,7 +462,7 @@ mod tests {
         );
 
         run_rewrap(&RewrapOptions {
-            system_space_dir: state.path().to_path_buf(),
+            app_root: state.path().to_path_buf(),
         })
         .unwrap();
 

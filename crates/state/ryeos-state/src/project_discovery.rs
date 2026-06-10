@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 ///                         at the real gitdir)
 ///
 /// Returns `Ok(Some(root))` on first match, `Ok(None)` if none found
-/// before the filesystem root, or `Err` on IO.
+/// before the filebundle root, or `Err` on IO.
 pub fn discover_project_root(start: &Path) -> io::Result<Option<PathBuf>> {
     let mut current = if start.is_absolute() {
         start.to_path_buf()
@@ -51,7 +51,7 @@ pub fn discover_project_root(start: &Path) -> io::Result<Option<PathBuf>> {
         // Walk up
         match current.parent() {
             Some(parent) => current = parent.to_path_buf(),
-            None => return Ok(None), // reached filesystem root
+            None => return Ok(None), // reached filebundle root
         }
     }
 }

@@ -72,18 +72,16 @@ fn map_local_err(e: anyhow::Error) -> CliError {
     no_binary_name = true
 )]
 struct IdentityArgs {
-    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    system_space_dir: Option<PathBuf>,
+    app_root: Option<PathBuf>,
 }
 
 fn run_identity_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<IdentityArgs>(argv)?;
     let report = ryeos_tools::actions::inspect::identity::run_identity(
         ryeos_tools::actions::inspect::identity::IdentityParams {
-            system_space_dir: args
-                .system_space_dir
-                .map(|p| p.to_string_lossy().into_owned()),
+            app_root: args.app_root.map(|p| p.to_string_lossy().into_owned()),
             project_path: None,
         },
     )
@@ -101,13 +99,9 @@ fn run_identity_verb(argv: &[String]) -> Result<()> {
     no_binary_name = true
 )]
 struct InitArgs {
-    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    system_space_dir: Option<PathBuf>,
-
-    /// User space root (parent of `.ai/`). Defaults to the canonical user root.
-    #[arg(long)]
-    user_root: Option<PathBuf>,
+    app_root: Option<PathBuf>,
 
     /// Source directory containing bundle subdirectories.
     /// Each immediate child with a `.ai/` subdirectory is installed as a bundle.
@@ -126,14 +120,10 @@ struct InitArgs {
 
 fn run_init_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<InitArgs>(argv)?;
-    let system_space_dir = args
-        .system_space_dir
-        .unwrap_or_else(default_system_space_dir);
-    let user_root = args.user_root.unwrap_or_else(default_user_root);
+    let app_root = args.app_root.unwrap_or_else(default_app_root);
 
     let opts = ryeos_node::InitOptions {
-        system_space_dir,
-        user_root,
+        app_root,
         source_dir: args.source,
         trust_files: args.trust_files,
         skip_preflight: false,
@@ -152,9 +142,9 @@ fn run_init_verb(argv: &[String]) -> Result<()> {
     no_binary_name = true
 )]
 struct StatusArgs {
-    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    system_space_dir: Option<PathBuf>,
+    app_root: Option<PathBuf>,
 
     /// Emit structured JSON instead of human-readable text.
     #[arg(long)]
@@ -163,7 +153,7 @@ struct StatusArgs {
 
 async fn run_status_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StatusArgs>(argv)?;
-    let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let status = controller
         .status()
         .await
@@ -183,14 +173,14 @@ async fn run_status_verb(argv: &[String]) -> Result<()> {
     no_binary_name = true
 )]
 struct StartArgs {
-    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    system_space_dir: Option<PathBuf>,
+    app_root: Option<PathBuf>,
 }
 
 async fn run_start_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StartArgs>(argv)?;
-    let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let report = controller.start().await.context("ryeos start failed")?;
     if report.already_running {
         println!("running");
@@ -210,9 +200,9 @@ async fn run_start_verb(argv: &[String]) -> Result<()> {
     no_binary_name = true
 )]
 struct StopArgs {
-    /// System space root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
-    system_space_dir: Option<PathBuf>,
+    app_root: Option<PathBuf>,
 
     /// Fall back to signaling the confirmed live ryeosd process if graceful shutdown times out.
     #[arg(long)]
@@ -221,7 +211,7 @@ struct StopArgs {
 
 async fn run_stop_verb(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StopArgs>(argv)?;
-    let controller = LifecycleController::from_env(local_env(args.system_space_dir)?);
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let report = controller
         .stop(StopOptions {
             force: args.force,
@@ -238,8 +228,8 @@ async fn run_stop_verb(argv: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn local_env(system_space_dir: Option<PathBuf>) -> Result<LocalLifecycleEnv> {
-    LocalLifecycleEnv::load(system_space_dir)
+fn local_env(app_root: Option<PathBuf>) -> Result<LocalLifecycleEnv> {
+    LocalLifecycleEnv::load(app_root)
 }
 
 fn print_lifecycle_status(status: &LifecycleStatus) {
@@ -248,9 +238,9 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
             println!("not initialized — run: ryeos init");
             println!("detail: {}", diagnostics.message);
         }
-        LifecycleStatus::Stopped { system_space_dir } => {
+        LifecycleStatus::Stopped { app_root } => {
             println!("initialized, stopped — run: ryeos start");
-            println!("system space: {}", system_space_dir.display());
+            println!("app root: {}", app_root.display());
         }
         LifecycleStatus::Running { metadata } => {
             println!("running");
@@ -290,17 +280,11 @@ fn parse_or_handle_help<P: Parser>(argv: &[String]) -> Result<P> {
     }
 }
 
-fn default_system_space_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+fn default_app_root() -> PathBuf {
+    if let Ok(p) = std::env::var("RYEOS_APP_ROOT") {
         return PathBuf::from(p);
     }
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
         .expect("could not determine XDG data directory")
-}
-
-fn default_user_root() -> PathBuf {
-    ryeos_engine::roots::user_root()
-        .ok()
-        .unwrap_or_else(|| PathBuf::from("."))
 }

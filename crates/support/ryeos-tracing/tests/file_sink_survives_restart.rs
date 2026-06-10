@@ -7,11 +7,11 @@
 use std::fs;
 use std::process::Command;
 
-/// Build the ryeosd binary if needed, then initialize a temp state dir.
-/// Returns (state_dir, user_root, trace_path).
+/// Build the ryeosd binary if needed, then initialize a temp app root.
+/// Returns (app_root, trace_path).
 fn init_node_once(
     tmp: &tempfile::TempDir,
-) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let state_dir = tmp.path().to_path_buf();
     let trace_path = state_dir
         .join(".ai")
@@ -19,17 +19,15 @@ fn init_node_once(
         .join("trace-events.ndjson");
 
     let root = workspace_root();
-    let user_root = tmp.path().join("user");
     ryeos_node::run_init(&ryeos_node::InitOptions {
-        system_space_dir: state_dir.clone(),
-        user_root: user_root.clone(),
+        app_root: state_dir.clone(),
         source_dir: root.join("bundles"),
         trust_files: vec![root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml")],
         skip_preflight: true,
     })
     .expect("ryeos init state for tracing test");
 
-    (state_dir, user_root, trace_path)
+    (state_dir, trace_path)
 }
 
 fn workspace_root() -> std::path::PathBuf {
@@ -64,15 +62,15 @@ fn file_sink_survives_daemon_restart() {
     let tmp = tempfile::tempdir().unwrap();
 
     // Run #1: init and quickly start/stop
-    let (state_dir, user_root, trace_path) = init_node_once(&tmp);
-    let state_str = state_dir.to_str().unwrap();
+    let (app_root, trace_path) = init_node_once(&tmp);
+    let app_root_str = app_root.to_str().unwrap();
 
     // Start daemon #1, let it write some startup spans, then kill it
     let mut child1 = Command::new(&exe)
-        .args(["--system-space-dir", state_str])
+        .args(["--app-root", app_root_str])
         .env("RUST_LOG", "ryeosd=info")
-        .env("USER_SPACE", &user_root)
-        .env("HOME", &user_root)
+        .env("RYEOS_APP_ROOT", &app_root)
+        .env("HOME", &app_root)
         .spawn()
         .expect("failed to spawn ryeosd #1");
 
@@ -91,10 +89,10 @@ fn file_sink_survives_daemon_restart() {
 
     // Run #2: restart against same state
     let mut child2 = Command::new(&exe)
-        .args(["--system-space-dir", state_str])
+        .args(["--app-root", app_root_str])
         .env("RUST_LOG", "ryeosd=info")
-        .env("USER_SPACE", &user_root)
-        .env("HOME", &user_root)
+        .env("RYEOS_APP_ROOT", &app_root)
+        .env("HOME", &app_root)
         .spawn()
         .expect("failed to spawn ryeosd #2");
 

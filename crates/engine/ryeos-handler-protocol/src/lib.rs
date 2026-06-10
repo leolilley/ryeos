@@ -111,9 +111,9 @@ pub struct ComposeItemContext {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum TrustClassWire {
-    TrustedSystem,
-    TrustedUser,
-    UntrustedUserSpace,
+    TrustedBundle,
+    TrustedProject,
+    UntrustedProject,
     Unsigned,
 }
 
@@ -165,7 +165,7 @@ mod tests {
                 item: ComposeItemContext {
                     requested_id: "@alias".into(),
                     resolved_ref: "directive:foo".into(),
-                    trust_class: TrustClassWire::TrustedSystem,
+                    trust_class: TrustClassWire::TrustedBundle,
                 },
                 parsed: serde_json::json!({"body": "hi"}),
             },

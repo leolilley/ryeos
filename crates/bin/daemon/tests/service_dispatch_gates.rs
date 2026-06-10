@@ -75,7 +75,7 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("derive composers");
 
-    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, None, bundle_roots)
+    ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_trust_store(trust_store)
         .with_composers(composers)
 }

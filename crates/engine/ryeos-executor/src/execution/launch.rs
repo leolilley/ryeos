@@ -137,12 +137,12 @@ fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> Path
 ///
 /// Content-addressed: a given blob hash always lands at the same path.
 /// Extract once per (binary version, host), re-exec from cache forever
-/// after. Cache lives under daemon-owned system space, not under the
+/// after. Cache lives under daemon-owned app-root state, not under the
 /// project tree — read-only project mounts work.
 ///
 /// Returns the path to the materialized binary.
 pub fn resolve_native_executor_path(
-    system_roots: &[PathBuf],
+    bundle_roots: &[PathBuf],
     executor_ref: &str,
     cache_root: &Path,
     trust_store: &ryeos_engine::trust::TrustStore,
@@ -157,7 +157,7 @@ pub fn resolve_native_executor_path(
 
     let triple = host_triple();
 
-    // Iterate every system root that ships a manifest, and use the
+    // Iterate every bundle root that ships a manifest, and use the
     // first one whose manifest contains the requested executor. This
     // matches the kind/parser-discovery model: each bundle owns a
     // disjoint slice of the executor namespace (core ships utility
@@ -172,7 +172,7 @@ pub fn resolve_native_executor_path(
         ryeos_engine::executor_resolution::ResolvedExecutor,
     )> = None;
 
-    for system_root in system_roots {
+    for system_root in bundle_roots {
         let ai_dir = system_root.join(ryeos_engine::AI_DIR);
         let objects_dir = ai_dir.join("objects");
 
@@ -266,8 +266,8 @@ pub fn resolve_native_executor_path(
     );
 
     match trust_class {
-        ryeos_engine::resolution::TrustClass::TrustedSystem
-        | ryeos_engine::resolution::TrustClass::TrustedUser => {
+        ryeos_engine::resolution::TrustClass::TrustedBundle
+        | ryeos_engine::resolution::TrustClass::TrustedProject => {
             tracing::info!(
                 executor_ref,
                 host_triple = %triple,
@@ -277,7 +277,7 @@ pub fn resolve_native_executor_path(
                 "native executor resolved and trust-verified"
             );
         }
-        ryeos_engine::resolution::TrustClass::UntrustedUserSpace
+        ryeos_engine::resolution::TrustClass::UntrustedProject
         | ryeos_engine::resolution::TrustClass::Unsigned => {
             return Err(MaterializationError::ExecutorUntrusted {
                 executor_ref: bare.to_string(),
@@ -429,21 +429,10 @@ fn build_verified_loader_for_thread(
         })
         .ok_or_else(|| anyhow::anyhow!("no project root in engine resolution roots"))?;
 
-    let user_root = engine_roots
+    let bundle_roots: Vec<PathBuf> = engine_roots
         .ordered
         .iter()
-        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        });
-
-    let system_roots: Vec<PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .map(|r| {
             r.ai_root
                 .parent()
@@ -454,8 +443,7 @@ fn build_verified_loader_for_thread(
 
     Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
         project_root,
-        user_root,
-        system_roots,
+        bundle_roots,
     ))
 }
 
@@ -699,21 +687,10 @@ pub async fn build_and_launch(
     //    the token instead of trusting the runtime to self-police.
 
     // 4. Build envelope
-    let user_root = engine_roots
+    let bundle_roots: Vec<PathBuf> = engine_roots
         .ordered
         .iter()
-        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::User)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        });
-
-    let system_roots: Vec<PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .map(|r| {
             r.ai_root
                 .parent()
@@ -903,19 +880,19 @@ pub async fn build_and_launch(
     )?;
 
     // 7. Resolve the native executor from the system bundle's CAS.
-    //    Materialized to content-addressed cache under system space,
+    //    Materialized to content-addressed cache under app-root state,
     //    not the project tree (works with read-only mounts).
     let cache_root = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
     let materialized_binary = resolve_native_executor_path(
-        &system_roots,
+        &bundle_roots,
         executor_ref,
         &cache_root,
         &engine.trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedSystem, // executor binaries ship in system bundles
+        ryeos_engine::resolution::TrustClass::TrustedBundle, // executor binaries ship in system bundles
     )?;
 
     // 8. Build envelope
@@ -927,8 +904,7 @@ pub async fn build_and_launch(
         thread_id.clone(),
         EnvelopeRoots {
             project_root: project_path.to_path_buf(),
-            user_root,
-            system_roots,
+            bundle_roots,
         },
         EnvelopeRequest {
             inputs: parameters.clone(),
@@ -1009,11 +985,11 @@ pub async fn build_and_launch(
     let tat_owned = thread_auth.token.clone();
     let runtime_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
-        &state.config.system_space_dir,
+        &state.config.app_root,
     );
     let provider_secret_name = provider_snapshot.provider.auth.env_var.clone();
-    let system_space_dir_owned = state.config.system_space_dir.clone();
-    let cas_root_owned = state.config.system_space_dir.join("cas");
+    let app_root_owned = state.config.app_root.clone();
+    let cas_root_owned = state.config.app_root.join("cas");
 
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(SpawnRuntimeParams {
@@ -1028,7 +1004,7 @@ pub async fn build_and_launch(
             provider_secret_name: provider_secret_name.as_deref(),
             thread_auth_token: &tat_owned,
             roots: runtime_roots,
-            system_space_dir: &system_space_dir_owned,
+            app_root: &app_root_owned,
             cas_root: &cas_root_owned,
         })
     })
@@ -1156,7 +1132,7 @@ struct SpawnRuntimeParams<'a> {
     provider_secret_name: Option<&'a str>,
     thread_auth_token: &'a str,
     roots: ryeos_app::env_contract::DaemonRootEnv,
-    system_space_dir: &'a Path,
+    app_root: &'a Path,
     cas_root: &'a Path,
 }
 
@@ -1173,7 +1149,7 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         provider_secret_name,
         thread_auth_token,
         roots,
-        system_space_dir,
+        app_root,
         cas_root,
     } = params;
     let secret_map: std::collections::BTreeMap<String, String> =
@@ -1202,7 +1178,7 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         timeout: std::time::Duration::from_secs(timeout_secs),
         acting_principal: "", // not needed for env injection in runtime path
         cas_root,
-        system_space_dir,
+        app_root,
         thread_auth_token,
     };
 
@@ -1371,9 +1347,9 @@ mod tests {
     #[test]
     fn enforce_trust_allows_trusted_classes() {
         for cls in [
-            TrustClass::TrustedSystem,
-            TrustClass::TrustedUser,
-            TrustClass::UntrustedUserSpace,
+            TrustClass::TrustedBundle,
+            TrustClass::TrustedProject,
+            TrustClass::UntrustedProject,
         ] {
             enforce_effective_trust(cls, "directive:x", "directive")
                 .unwrap_or_else(|e| panic!("{cls:?} should pass, got: {e}"));

@@ -17,13 +17,9 @@ use lillux::crypto::load_signing_key;
 use lillux::signature::{sign_content, strip_signature_lines};
 
 fn main() {
-    let user_root = ryeos_engine::roots::user_root().expect("resolve user root");
-    let key_path = user_root
-        .join(ryeos_engine::AI_DIR)
-        .join("config")
-        .join("keys")
-        .join("signing")
-        .join("private_key.pem");
+    let key_path = ryeos_engine::roots::runtime_root()
+        .expect("resolve app root")
+        .operator_signing_key_path();
     let sk = load_signing_key(&key_path).expect("load signing key");
 
     let kinds_dir = PathBuf::from("bundles/core/.ai/node/engine/kinds");

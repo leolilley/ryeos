@@ -54,15 +54,12 @@ COPY --from=builder /build/bundles/studio   /opt/ryeos/studio
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 
 # Entrypoint runs ryeos init every boot (idempotent) then starts daemon.
-# Both /data/core (system) and /data/user (operator) persist across redeploys.
+# /data/app persists across redeploys.
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# User space lives on the persistent /data volume so operator trust,
-# signing keys, and secrets survive container redeploys.
-ENV HOME=/data/user
-ENV USER_SPACE=/data/user
-ENV RYEOS_SYSTEM_SPACE_DIR=/data/core
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
 EXPOSE 8000
 
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"

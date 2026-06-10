@@ -18,7 +18,7 @@ use tempfile::TempDir;
 
 fn setup_state_store() -> (TempDir, Arc<StateStore>) {
     let tmpdir = TempDir::new().unwrap();
-    let state_root = tmpdir.path().join(".ai").join("state");
+    let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
 
     let test_key_path = tmpdir.path().join("test_key.pem");
@@ -30,7 +30,7 @@ fn setup_state_store() -> (TempDir, Arc<StateStore>) {
 
     let write_barrier = WriteBarrier::new();
 
-    let store = StateStore::new(state_root, runtime_db_path, signer, write_barrier)
+    let store = StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier)
         .expect("StateStore creation should succeed");
 
     (tmpdir, Arc::new(store))

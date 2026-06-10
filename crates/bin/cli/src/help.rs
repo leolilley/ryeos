@@ -63,8 +63,8 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out)?;
 
     // ── Dynamic command discovery from installed bundles ──
-    let system_space_dir = discover_system_space_dir();
-    let snapshot = match crate::node_descriptors::load_verified_snapshot(&system_space_dir) {
+    let app_root = discover_app_root();
+    let snapshot = match crate::node_descriptors::load_verified_snapshot(&app_root) {
         Ok(snapshot) => Some(snapshot),
         Err(err) => {
             eprintln!("warning: installed node config failed verification: {err:#}");
@@ -76,7 +76,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
         .map(snapshot_bundle_roots)
         .unwrap_or_default();
     let engine = (!bundle_roots.is_empty())
-        .then(|| build_help_engine(&system_space_dir, ".", &bundle_roots).ok())
+        .then(|| build_help_engine(&app_root, ".", &bundle_roots).ok())
         .flatten();
     let discovered = snapshot
         .as_ref()
@@ -150,13 +150,13 @@ fn discover_commands_from_snapshot(
 /// Print command-specific help from installed descriptors or local bootstrap help.
 pub async fn print_verb_help(
     verb_tokens: &[String],
-    system_space_dir: &std::path::Path,
+    app_root: &std::path::Path,
     project_path: &str,
 ) -> Result<(), CliError> {
     // Prefer installed descriptor help. This keeps help kind-agnostic in the
     // CLI: command descriptors are node config, and the help renderer does not
     // need to classify the execute ref before deciding whether it can print usage.
-    if print_installed_verb_help(verb_tokens, system_space_dir, project_path)? {
+    if print_installed_verb_help(verb_tokens, app_root, project_path)? {
         return Ok(());
     }
 
@@ -249,22 +249,21 @@ impl ItemHelpMetadata {
 
 fn print_installed_verb_help(
     verb_tokens: &[String],
-    system_space_dir: &std::path::Path,
+    app_root: &std::path::Path,
     project_path: &str,
 ) -> std::io::Result<bool> {
-    let snapshot =
-        crate::node_descriptors::load_verified_snapshot(system_space_dir).map_err(|err| {
-            std::io::Error::other(format!(
-                "installed node config failed verification: {err:#}"
-            ))
-        })?;
+    let snapshot = crate::node_descriptors::load_verified_snapshot(app_root).map_err(|err| {
+        std::io::Error::other(format!(
+            "installed node config failed verification: {err:#}"
+        ))
+    })?;
     let bundle_roots = snapshot_bundle_roots(&snapshot);
     let Some(command_descriptor) = crate::node_descriptors::find_command(&snapshot, verb_tokens)
     else {
         return Ok(false);
     };
     let execute_ref = command_descriptor.execute_ref();
-    let engine = build_help_engine(system_space_dir, project_path, &bundle_roots).ok();
+    let engine = build_help_engine(app_root, project_path, &bundle_roots).ok();
     let item = execute_ref.and_then(|execute| {
         engine
             .as_ref()
@@ -326,7 +325,7 @@ fn print_installed_verb_help(
         if project_resolution == ryeos_runtime::CommandProjectResolution::Optional {
             writeln!(
                 out,
-                "  --no-project          Resolve against user/system space only"
+                "  --no-project          Resolve against bundles only"
             )?;
         }
     }
@@ -431,22 +430,20 @@ fn snapshot_bundle_roots(snapshot: &NodeConfigSnapshot) -> Vec<PathBuf> {
 }
 
 fn build_help_engine(
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: &str,
     bundle_roots: &[PathBuf],
 ) -> anyhow::Result<Engine> {
     let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        system_space_dir: Some(system_space_dir.to_path_buf()),
+        app_root: Some(app_root.to_path_buf()),
         ..Default::default()
     })?;
     let project_root = (project_path != ".").then(|| PathBuf::from(project_path));
-    let user_root = ryeos_engine::roots::user_root().ok();
 
     ryeos_app::engine_init::build_engine_for_roots(
         &config,
         bundle_roots,
         project_root.as_deref(),
-        user_root.as_deref(),
         None,
     )
     .context("build help effective-item engine")
@@ -488,16 +485,12 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
                 out,
                 "  --trust-file <FILE>      Additional publisher trust doc (repeatable)"
             )?;
-            writeln!(out, "  --system-space-dir <DIR> System space root")?;
-            writeln!(out, "  --user-root <DIR>        User space root")?;
+            writeln!(out, "  --app-root <DIR>        App root")?;
         }
         Some("node") if verb_tokens.get(1).map(String::as_str) == Some("status") => {
             writeln!(out, "ryeos node status — Show local node lifecycle status")?;
             writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos node status [--json] [--system-space-dir <DIR>]"
-            )?;
+            writeln!(out, "USAGE: ryeos node status [--json] [--app-root <DIR>]")?;
         }
         Some("system") if verb_tokens.get(1).map(String::as_str) == Some("status") => {
             writeln!(
@@ -507,21 +500,18 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             writeln!(out)?;
             writeln!(
                 out,
-                "USAGE: ryeos system status [--json] [--system-space-dir <DIR>]"
+                "USAGE: ryeos system status [--json] [--app-root <DIR>]"
             )?;
         }
         Some("start") => {
             writeln!(out, "ryeos start — Bring the local node runtime online")?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos start [--system-space-dir <DIR>]")?;
+            writeln!(out, "USAGE: ryeos start [--app-root <DIR>]")?;
         }
         Some("stop") => {
             writeln!(out, "ryeos stop — Gracefully stop the local node runtime")?;
             writeln!(out)?;
-            writeln!(
-                out,
-                "USAGE: ryeos stop [--force] [--system-space-dir <DIR>]"
-            )?;
+            writeln!(out, "USAGE: ryeos stop [--force] [--app-root <DIR>]")?;
         }
         Some("execute") => {
             writeln!(out, "ryeos execute — Universal escape hatch")?;
@@ -562,13 +552,13 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             )?;
             writeln!(
                 out,
-                "  --source <SOURCE>     Where to look: project (default) or user"
+                "  --source <SOURCE>     Where to look: project (default)"
             )?;
         }
         Some("identity") => {
             writeln!(out, "ryeos identity — Print the local node public identity")?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos identity [--system-space-dir <DIR>]")?;
+            writeln!(out, "USAGE: ryeos identity [--app-root <DIR>]")?;
         }
         Some(other) => {
             writeln!(out, "no local help available for '{}'", other)?;
@@ -579,8 +569,8 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn discover_system_space_dir() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+fn discover_app_root() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("RYEOS_APP_ROOT") {
         return std::path::PathBuf::from(p);
     }
     dirs::data_dir()

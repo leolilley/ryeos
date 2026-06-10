@@ -49,7 +49,7 @@ pub enum ClientError {
 
 pub struct DaemonClient {
     #[allow(dead_code)]
-    system_space_dir: PathBuf,
+    app_root: PathBuf,
     base_url: String,
     audience: String,
     signer: Option<Signer>,
@@ -59,14 +59,14 @@ pub struct DaemonClient {
 impl DaemonClient {
     /// Try to connect to the daemon.
     pub async fn try_connect() -> Result<Self, ClientError> {
-        let system_space_dir = std::env::var_os("RYEOS_SYSTEM_SPACE_DIR")
+        let app_root = std::env::var_os("RYEOS_APP_ROOT")
             .map(PathBuf::from)
             .or_else(|| dirs::data_dir().map(|d| d.join("ryeos")))
             .ok_or(ClientError::NoSystemDir)?;
 
-        let base_url = resolve_daemon_url(&system_space_dir).await?;
+        let base_url = resolve_daemon_url(&app_root).await?;
 
-        let signer = Signer::resolve(&system_space_dir).ok();
+        let signer = Signer::resolve(&app_root).ok();
 
         let audience = if signer.is_some() {
             discover_audience(&base_url).await?
@@ -75,7 +75,7 @@ impl DaemonClient {
         };
 
         Ok(Self {
-            system_space_dir,
+            app_root,
             base_url,
             audience,
             signer,

@@ -80,7 +80,7 @@ pub struct ChainLock {
 impl ChainLock {
     /// Acquire exclusive lock for a chain using flock.
     ///
-    /// Creates a lock file under `state_root/objects/refs/generic/chains/<chain_root_id>/lock`
+    /// Creates a lock file under `runtime_state_dir/objects/refs/generic/chains/<chain_root_id>/lock`
     /// and acquires an exclusive file lock via flock(2).
     pub fn acquire(refs_root: &Path, chain_root_id: &str) -> anyhow::Result<Self> {
         let lock_path = refs_root

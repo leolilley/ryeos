@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn empty_roots() -> ResolutionRoots {
-        ResolutionRoots::from_flat(None, None, vec![])
+        ResolutionRoots::from_flat(None, vec![])
     }
 
     fn make_intermediate(parsed: Value, source: PathBuf) -> ChainIntermediate {
@@ -426,7 +426,7 @@ mod tests {
             kinds,
             trust_store: trust,
             project_root: None,
-            root_trust_class: crate::resolution::TrustClass::TrustedSystem,
+            root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         }
     }

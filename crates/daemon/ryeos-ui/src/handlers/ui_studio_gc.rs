@@ -48,11 +48,11 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
         .get_session(&session_id)
         .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
 
-    let state_root = state.config.system_space_dir.join(".ai").join("state");
+    let runtime_state_dir = state.config.runtime_state_dir();
 
     // Check if GC is currently running (lock file + state sidecar both exist).
-    let lock_path = state_root.join("gc.lock");
-    let state_sidecar = state_root.join("gc.state.json");
+    let lock_path = runtime_state_dir.join("gc.lock");
+    let state_sidecar = runtime_state_dir.join("gc.state.json");
     let running = lock_path.exists() && state_sidecar.exists();
 
     // Read GC state sidecar if present (shows current phase, PID).
@@ -65,7 +65,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
     };
 
     // Read recent GC events from the JSONL log.
-    let log_path = state_root.join("logs").join("gc.jsonl");
+    let log_path = runtime_state_dir.join("logs").join("gc.jsonl");
     let recent_events = read_recent_gc_events(&log_path, MAX_RECENT_EVENTS);
 
     let response = GcStatusResponse {
