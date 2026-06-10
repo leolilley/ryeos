@@ -36,10 +36,13 @@ pub use lock::GcLock;
 #[serde(deny_unknown_fields)]
 pub struct GcParams {
     /// Don't delete anything, just report.
+    #[serde(default)]
     pub dry_run: bool,
     /// Compact project snapshot history before sweep.
+    #[serde(default)]
     pub compact: bool,
     /// Retention policy for compaction (uses default if None).
+    #[serde(default)]
     pub policy: Option<RetentionPolicy>,
 }
 
@@ -556,5 +559,24 @@ mod tests {
         assert!(!path.exists(), "file should be gone");
         assert!(!shard2.exists(), "shard2 dir should be cleaned up");
         assert!(!shard1.exists(), "shard1 dir should be cleaned up");
+    }
+
+    #[test]
+    fn gc_params_fields_default_when_omitted() {
+        // The service schema advertises dry_run/compact as optional (boolean?);
+        // omitting them must deserialize to false rather than erroring, so the
+        // bare `ryeos maintenance gc` command works.
+        let p: GcParams = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!p.dry_run);
+        assert!(!p.compact);
+        assert!(p.policy.is_none());
+
+        let p: GcParams = serde_json::from_value(serde_json::json!({"dry_run": true})).unwrap();
+        assert!(p.dry_run);
+        assert!(!p.compact);
+
+        let p: GcParams = serde_json::from_value(serde_json::json!({"compact": true})).unwrap();
+        assert!(!p.dry_run);
+        assert!(p.compact);
     }
 }

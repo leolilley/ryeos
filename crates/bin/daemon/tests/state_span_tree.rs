@@ -48,6 +48,8 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,
         requested_by: Some("user:test".to_string()),
+        usage_subject: None,
+        usage_subject_asserted_by: None,
     }
 }
 

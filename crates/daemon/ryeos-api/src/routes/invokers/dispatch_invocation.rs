@@ -40,9 +40,20 @@ pub(crate) struct DispatchSourceConfig {
 /// a typed `DispatchSourceConfig` from `ctx.input`, constructs a
 /// `DispatchRequest` and `ExecutionContext`, and calls `dispatch::dispatch`
 /// inline, blocking until execution completes.
+#[derive(Debug, Clone)]
+pub enum DispatchAuthority {
+    CallerPrincipal,
+    FixedPrincipal {
+        fingerprint: String,
+        scopes: Vec<String>,
+    },
+}
+
 pub struct CompiledDispatchInvoker {
     /// The canonical ref to dispatch (e.g., `"directive:webhooks/ingest"`).
     pub item_ref: String,
+    /// Authority used for engine plan/build and execution checks.
+    pub authority: DispatchAuthority,
 }
 
 static DISPATCH_CONTRACT: RouteInvocationContract = RouteInvocationContract {
@@ -81,17 +92,27 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
 
         let project_path = std::path::PathBuf::from(&config.project_path);
 
-        let principal_id = ctx
-            .principal
-            .as_ref()
-            .map(|p| p.id.clone())
-            .unwrap_or_default();
+        let (principal_id, principal_scopes) = match &self.authority {
+            DispatchAuthority::CallerPrincipal => {
+                let principal_id = ctx
+                    .principal
+                    .as_ref()
+                    .map(|p| p.id.clone())
+                    .unwrap_or_default();
 
-        let principal_scopes = ctx
-            .principal
-            .as_ref()
-            .map(|p| p.scopes.clone())
-            .unwrap_or_default();
+                let principal_scopes = ctx
+                    .principal
+                    .as_ref()
+                    .map(|p| p.scopes.clone())
+                    .unwrap_or_default();
+
+                (principal_id, principal_scopes)
+            }
+            DispatchAuthority::FixedPrincipal {
+                fingerprint,
+                scopes,
+            } => (fingerprint.clone(), scopes.clone()),
+        };
 
         let site_id = ctx.state.threads.site_id().to_string();
 

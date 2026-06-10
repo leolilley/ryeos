@@ -165,6 +165,7 @@ pub fn compile_canonical_ref_invoker(
         "tool" | "directive" | "graph" => {
             Ok(Arc::new(dispatch_invocation::CompiledDispatchInvoker {
                 item_ref: source_ref.to_string(),
+                authority: dispatch_invocation::DispatchAuthority::CallerPrincipal,
             }))
         }
         other => Err(RouteConfigError::InvalidSourceConfig {
@@ -258,6 +259,7 @@ pub fn compile_canonical_ref_invoker_with_descriptors(
         "tool" | "directive" | "graph" => {
             Ok(Arc::new(dispatch_invocation::CompiledDispatchInvoker {
                 item_ref: source_ref.to_string(),
+                authority: dispatch_invocation::DispatchAuthority::CallerPrincipal,
             }))
         }
         other => Err(RouteConfigError::InvalidSourceConfig {
