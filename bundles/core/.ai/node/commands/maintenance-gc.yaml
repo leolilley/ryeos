@@ -1,11 +1,11 @@
-# ryeos:signed:2026-06-07T05:18:54Z:e8cc980af38a3598084ec8e79a0dfec7560b246d5cc907415b756535f84ab1a4:puitHE9Lyifn2V/f9d/42x6qvXyp5gP+zfElHWzsIU1FthCKGbI+ZvV1zswy4s751+o5/YIo1ayt5Z4uLFc6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-10T11:46:34Z:940c17beb1e7d294e91de0d89cd20aa23b53b6e2ce67421dd20f1b8be7d7a3a4:vJcAxLkxLSDowNtO8KfkOwnnjU6cQCW8fUnDL/0ips2dRt/LTLPVdDZJM12tb+0Vjuf1D4pBJvj370nQRcqZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: commands
 section: commands
 name: maintenance-gc
 tokens:
 - maintenance
 - gc
-description: 'Run GC: prune unreachable CAS objects, optionally compact'
+description: 'Run GC: prune unreachable CAS objects; use --deep to purge disposable runtime state'
 dispatch:
   kind: execute_ref
   execute: service:maintenance/gc
