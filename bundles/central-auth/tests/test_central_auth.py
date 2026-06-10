@@ -22,8 +22,8 @@ auth = load_module()
 class CentralAuthTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.state_root = str(Path(self.tmp.name) / "state")
-        self.base = {"state_root": self.state_root, "realm_id": "tv"}
+        self.runtime_state_dir = str(Path(self.tmp.name) / "state")
+        self.base = {"runtime_state_dir": self.runtime_state_dir, "realm_id": "tv"}
         self.policy = {
             "roles": {
                 "viewer": {"capabilities": ["tv.read"]},

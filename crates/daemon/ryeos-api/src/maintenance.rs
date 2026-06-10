@@ -42,12 +42,12 @@ const DEFAULT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
     )
 )]
 pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<GcResult> {
-    let state_root = state.config.system_space_dir.join(".ai").join("state");
-    let cas_root = state_root.join("objects");
-    let refs_root = state_root.join("refs");
+    let runtime_state_dir = state.config.runtime_state_dir();
+    let cas_root = runtime_state_dir.join("objects");
+    let refs_root = runtime_state_dir.join("refs");
 
     // Step 1: Acquire GC lock
-    let _gc_lock = gc::GcLock::acquire(&state_root, state.identity.fingerprint())
+    let _gc_lock = gc::GcLock::acquire(&runtime_state_dir, state.identity.fingerprint())
         .context("failed to acquire GC lock (another GC may be running)")?;
 
     tracing::info!(
@@ -88,7 +88,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     // must be 'static + Send.
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let params_clone = params.clone();
-    let state_root_for_log = state_root.clone();
+    let runtime_state_dir_for_log = runtime_state_dir.clone();
 
     let gc_result = tokio::task::spawn_blocking(move || {
         run_gc_and_log(
@@ -96,7 +96,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
             &refs_root,
             &signer,
             &params_clone,
-            &state_root_for_log,
+            &runtime_state_dir_for_log,
         )
     })
     .await;
@@ -116,14 +116,14 @@ fn run_gc_and_log(
     refs_root: &std::path::Path,
     signer: &NodeIdentitySigner,
     params: &GcParams,
-    state_root: &std::path::Path,
+    runtime_state_dir: &std::path::Path,
 ) -> Result<GcResult> {
     let result =
         gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
 
     // Log the event (best-effort)
     if let Err(err) = gc::event_log::append_event(
-        state_root,
+        runtime_state_dir,
         &gc::event_log::GcEvent {
             timestamp: lillux::time::iso8601_now(),
             dry_run: params.dry_run,

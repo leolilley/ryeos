@@ -25,33 +25,36 @@ use ryeos_engine::trust::TrustStore;
 
 /// Boot the engine from the same sources the daemon uses.
 pub fn boot(project_path: Option<&Path>) -> Result<Engine> {
-    let user_root = roots::user_root().ok();
+    let operator_config_root = roots::runtime_root().ok().map(|root| root.config());
     let bundle_roots = discover_bundle_roots();
     // Match daemon boot semantics: content roots are the installed bundle
-    // roots only. `RYEOS_SYSTEM_SPACE_DIR` is the daemon state root that
+    // roots only. `RYEOS_APP_ROOT` is the daemon runtime state dir that
     // contains registrations and runtime state; treating it as a content
     // root makes effective items report the state dir as their bundle_root,
     // which breaks bundle-local binary resolution for client launchers.
-    let system_roots = bundle_roots;
+    let bundle_roots = bundle_roots;
 
-    let trust_store =
-        TrustStore::load_three_tier(project_path, user_root.as_deref(), &system_roots)
-            .with_context(|| "load trust store")?;
+    let trust_store = TrustStore::load(
+        project_path,
+        operator_config_root
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve app root"))?,
+    )
+    .with_context(|| "load trust store")?;
 
-    let kinds = build_kind_registry(&system_roots, &trust_store)?;
-    let (parsers, handlers) =
-        build_parser_dispatcher(&system_roots, user_root.as_deref(), &kinds, &trust_store)?;
+    let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
+    let (parsers, handlers) = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store)?;
     let composers = ComposerRegistry::from_kinds(&kinds, &handlers)
         .with_context(|| "load composer registry")?;
 
-    Ok(Engine::new(kinds, parsers, user_root, system_roots)
+    Ok(Engine::new(kinds, parsers, bundle_roots)
         .with_trust_store(trust_store)
         .with_composers(composers))
 }
 
-fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
+fn build_kind_registry(bundle_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
     let mut search = Vec::new();
-    for r in system_roots {
+    for r in bundle_roots {
         let p = r.join(".ai").join("node").join("engine").join("kinds");
         if p.exists() {
             search.push(p);
@@ -61,28 +64,20 @@ fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Re
 }
 
 fn build_parser_dispatcher(
-    system_roots: &[PathBuf],
-    user_root: Option<&Path>,
+    bundle_roots: &[PathBuf],
     kinds: &KindRegistry,
     trust_store: &TrustStore,
 ) -> Result<(ParserDispatcher, Arc<HandlerRegistry>)> {
-    let mut search: Vec<PathBuf> = system_roots.to_vec();
-    let mut tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = system_roots
+    let search: Vec<PathBuf> = bundle_roots.to_vec();
+    let tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = bundle_roots
         .iter()
         .map(|r| {
             (
                 r.clone(),
-                ryeos_engine::resolution::TrustClass::TrustedSystem,
+                ryeos_engine::resolution::TrustClass::TrustedBundle,
             )
         })
         .collect();
-    if let Some(u) = user_root {
-        search.push(u.to_path_buf());
-        tagged_search.push((
-            u.to_path_buf(),
-            ryeos_engine::resolution::TrustClass::TrustedUser,
-        ));
-    }
     let (parser_tools, _) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
     let handlers = HandlerRegistry::load_base(&tagged_search, trust_store)
@@ -96,13 +91,13 @@ fn build_parser_dispatcher(
 
 /// Discover installed bundle roots from the daemon state directory.
 fn discover_bundle_roots() -> Vec<PathBuf> {
-    let system_space_dir = match std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+    let app_root = match std::env::var("RYEOS_APP_ROOT") {
         Ok(p) => PathBuf::from(p),
         Err(_) => dirs::data_dir()
             .map(|d| d.join("ryeos"))
             .expect("could not determine XDG data directory"),
     };
-    let bundles_dir = system_space_dir.join(".ai").join("bundles");
+    let bundles_dir = app_root.join(".ai").join("bundles");
     let mut roots = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
         for entry in entries.flatten() {

@@ -33,7 +33,7 @@ pub struct CompiledGatewayStreamInvocation {
 pub(crate) struct LaunchRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
     pub(crate) item_ref: String,
-    /// Project root path for three-tier resolution.
+    /// Project root path for resolution.
     pub(crate) project_path: String,
     #[serde(default)]
     pub(crate) parameters: Value,

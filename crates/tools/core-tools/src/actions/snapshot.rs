@@ -132,8 +132,6 @@ pub struct SnapshotShowReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     pub project_manifest_hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_manifest_hash: Option<String>,
     pub project_sync_scope: ProjectSyncScope,
     pub parent_hashes: Vec<String>,
     pub manifest_entries: usize,
@@ -286,9 +284,7 @@ pub fn run_create(params: SnapshotCreateParams) -> Result<SnapshotCreateReport> 
     let parent_hashes = initial_head.iter().cloned().collect::<Vec<_>>();
     let snapshot = ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: current_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.user_manifest_hash.clone()),
+        user_manifest_hash: None,
         message: params.message.clone(),
         project_sync_scope: current_snapshot
             .as_ref()
@@ -300,7 +296,7 @@ pub fn run_create(params: SnapshotCreateParams) -> Result<SnapshotCreateReport> 
     };
     let snapshot_hash = ctx.cas.store_object(&snapshot.to_value())?;
 
-    let node_signer = NodeFileSigner::load(&ctx.system_space_dir)?;
+    let node_signer = NodeFileSigner::load(&ctx.app_root)?;
     let _lock = ProjectHeadLock::acquire(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
     let locked_head =
         refs::read_project_head_ref(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
@@ -346,9 +342,9 @@ pub fn run_create(params: SnapshotCreateParams) -> Result<SnapshotCreateReport> 
 }
 
 pub fn run_show(params: SnapshotShowParams) -> Result<SnapshotShowReport> {
-    let system_space_dir = system_space_dir()?;
-    let cas = CasStore::new(state_root(&system_space_dir).join("objects"));
-    let refs_root = state_root(&system_space_dir).join("refs");
+    let app_root = app_root()?;
+    let cas = CasStore::new(runtime_state_dir(&app_root).join("objects"));
+    let refs_root = runtime_state_dir(&app_root).join("refs");
     let snapshot = load_snapshot(&cas, &params.snapshot_hash)?;
     let manifest = load_manifest(&cas, &snapshot.project_manifest_hash)?;
 
@@ -378,7 +374,6 @@ pub fn run_show(params: SnapshotShowParams) -> Result<SnapshotShowReport> {
         source: snapshot.source,
         message: snapshot.message,
         project_manifest_hash: snapshot.project_manifest_hash,
-        user_manifest_hash: snapshot.user_manifest_hash,
         project_sync_scope: snapshot.project_sync_scope,
         parent_hashes: snapshot.parent_hashes,
         manifest_entries: manifest.item_source_hashes.len(),
@@ -417,7 +412,7 @@ struct FileState {
 }
 
 struct SnapshotContext {
-    system_space_dir: PathBuf,
+    app_root: PathBuf,
     project_path: PathBuf,
     project_hash: String,
     principal_key: String,
@@ -428,18 +423,18 @@ struct SnapshotContext {
 
 impl SnapshotContext {
     fn for_project(project_path: &Path) -> Result<Self> {
-        let system_space_dir = system_space_dir()?;
+        let app_root = app_root()?;
         let project_path = canonical_project_path(project_path)?;
         let project_hash = refs::deployed_project_key(&project_path.display().to_string());
         let principal_key = operator_principal_key()?;
-        let state_root = state_root(&system_space_dir);
-        let cas = CasStore::new(state_root.join("objects"));
-        let refs_root = state_root.join("refs");
+        let runtime_state_dir = runtime_state_dir(&app_root);
+        let cas = CasStore::new(runtime_state_dir.join("objects"));
+        let refs_root = runtime_state_dir.join("refs");
         fs::create_dir_all(cas.root()).context("create CAS root")?;
         fs::create_dir_all(&refs_root).context("create refs root")?;
-        let ignore = load_ignore(&system_space_dir);
+        let ignore = load_ignore(&app_root);
         Ok(Self {
-            system_space_dir,
+            app_root,
             project_path,
             project_hash,
             principal_key,
@@ -456,8 +451,8 @@ struct NodeFileSigner {
 }
 
 impl NodeFileSigner {
-    fn load(system_space_dir: &Path) -> Result<Self> {
-        let key_path = system_space_dir
+    fn load(app_root: &Path) -> Result<Self> {
+        let key_path = app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("identity")
@@ -483,17 +478,17 @@ impl Signer for NodeFileSigner {
     }
 }
 
-fn system_space_dir() -> Result<PathBuf> {
-    if let Ok(p) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+fn app_root() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("RYEOS_APP_ROOT") {
         return Ok(PathBuf::from(p));
     }
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
-        .ok_or_else(|| anyhow!("could not determine system space directory"))
+        .ok_or_else(|| anyhow!("could not determine app rootectory"))
 }
 
-fn state_root(system_space_dir: &Path) -> PathBuf {
-    system_space_dir.join(ryeos_engine::AI_DIR).join("state")
+fn runtime_state_dir(app_root: &Path) -> PathBuf {
+    app_root.join(ryeos_engine::AI_DIR).join("state")
 }
 
 fn canonical_project_path(path: &Path) -> Result<PathBuf> {
@@ -507,24 +502,16 @@ fn canonical_project_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn operator_principal_key() -> Result<String> {
-    let key_path = if let Ok(p) = std::env::var("RYEOS_CLI_KEY_PATH") {
-        PathBuf::from(p)
-    } else {
-        ryeos_engine::roots::user_root()
-            .map_err(|e| anyhow!("resolve user root: {e}"))?
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem")
-    };
+    let key_path = ryeos_engine::roots::runtime_root()
+        .map_err(|e| anyhow!("resolve app root: {e}"))?
+        .operator_signing_key_path();
     let signing_key = lillux::crypto::load_signing_key(&key_path)
-        .with_context(|| format!("load user signing key {}", key_path.display()))?;
+        .with_context(|| format!("load operator signing key {}", key_path.display()))?;
     Ok(lillux::crypto::fingerprint(&signing_key.verifying_key()))
 }
 
-fn load_ignore(system_space_dir: &Path) -> IgnoreMatcher {
-    ryeos_app::ignore::load_from_system_space(system_space_dir)
+fn load_ignore(app_root: &Path) -> IgnoreMatcher {
+    ryeos_app::ignore::load_from_app_root(app_root)
         .unwrap_or_else(|_| ryeos_state::ignore::matcher_from_builtins())
 }
 

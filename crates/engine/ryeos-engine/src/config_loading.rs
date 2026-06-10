@@ -53,7 +53,7 @@ pub fn resolve_config_spec(
         ResolveMode::DeepMerge => {
             let mut merged = Value::Object(Map::new());
             let mut layers = Vec::new();
-            for root in &ctx.roots.ordered {
+            for root in ctx.roots.ordered.iter().rev() {
                 let candidate = root.ai_root.join("config").join(&spec.path);
                 if candidate.exists() {
                     tracing::info!(
@@ -76,7 +76,7 @@ pub fn resolve_config_spec(
             })
         }
         ResolveMode::FirstMatch => {
-            for target in &[ItemSpace::Project, ItemSpace::User, ItemSpace::System] {
+            for target in &[ItemSpace::Project, ItemSpace::Bundle] {
                 for root in ctx.roots.ordered.iter().filter(|r| r.space == *target) {
                     let candidate = root.ai_root.join("config").join(&spec.path);
                     if candidate.exists() {

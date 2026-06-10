@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:bc5f49c66bb07637fde2defa9ae9353525dcfc54ea745311c8fa5171625af715:Efi/Fg41jgoacJvJ0DgU5Ae+dKLIXslaQ+l26DbOB6vh8vCv78sud+rMXhhzjCdAwmwiiBeCbc/1y6ECavyZAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-10T04:17:44Z:ab6881a38e0f77390c234403875d3e7430842b43873317505ad54e28bc0a3eb3:wXAsj4nwg9MBfgko84Avg2qiRCjpwFV1jRatOg7F44oSk6je/L8TL+ccbv5EazTI5Q4oiqa9yCoLClmBV1DyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
@@ -118,8 +118,8 @@ This prevents accumulation of empty directories from deleted objects.
 
 GC uses file-based locking to prevent concurrent runs:
 
-- **Lock file**: `{state_root}/gc.lock` — persistent lock anchor
-- **State sidecar**: `{state_root}/gc.state.json` — records PID, node
+- **Lock file**: `{runtime_state_dir}/gc.lock` — persistent lock anchor
+- **State sidecar**: `{runtime_state_dir}/gc.state.json` — records PID, node
   ID, phase, and start time
 - **Mechanism**: `libc::flock()` with `LOCK_EX | LOCK_NB` (exclusive,
   non-blocking). Fails immediately if another GC run is in progress.
@@ -128,7 +128,7 @@ GC uses file-based locking to prevent concurrent runs:
 
 ## Event Logging
 
-GC results are logged to `{state_root}/logs/gc.jsonl` — one JSON object
+GC results are logged to `{runtime_state_dir}/logs/gc.jsonl` — one JSON object
 per line, append-only:
 
 ```json

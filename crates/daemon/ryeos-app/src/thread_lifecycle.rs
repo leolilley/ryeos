@@ -30,7 +30,7 @@ pub struct ThreadLifecycleService {
     _events: Arc<EventStoreService>,
     current_site_id: String,
     scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
-    system_space_dir: std::sync::RwLock<Option<std::path::PathBuf>>,
+    app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -199,7 +199,7 @@ impl ThreadLifecycleService {
             _events,
             current_site_id: format!("site:{hostname}"),
             scheduler_db: std::sync::RwLock::new(None),
-            system_space_dir: std::sync::RwLock::new(None),
+            app_root: std::sync::RwLock::new(None),
         })
     }
 
@@ -208,10 +208,10 @@ impl ThreadLifecycleService {
     pub fn set_scheduler_db(
         &self,
         db: Arc<ryeos_scheduler::db::SchedulerDb>,
-        system_space_dir: std::path::PathBuf,
+        app_root: std::path::PathBuf,
     ) {
         *self.scheduler_db.write().unwrap() = Some(db);
-        *self.system_space_dir.write().unwrap() = Some(system_space_dir);
+        *self.app_root.write().unwrap() = Some(app_root);
     }
 
     pub fn kind_profiles(&self) -> &KindProfileRegistry {
@@ -496,7 +496,7 @@ impl ThreadLifecycleService {
                     }
 
                     // Append completion to JSONL
-                    if let Ok(dir_guard) = self.system_space_dir.read() {
+                    if let Ok(dir_guard) = self.app_root.read() {
                         if let Some(ref sys_dir) = *dir_guard {
                             let entry = serde_json::json!({
                                 "entry_type": fire_status,
@@ -958,15 +958,14 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
 
     // Inject the daemon's subprocess env contract into every subprocess
     // node: allowlisted parent env (PATH/HOME/...) + daemon-resolved
-    // roots (USER_SPACE/RYEOS_SYSTEM_SPACE_DIR) + declared secrets, then
+    // roots (RYEOS_APP_ROOT) + declared secrets, then
     // layer the daemon callback infra (socket path, callback token,
     // thread id, project path) on top. Mirrors `execution::launch::
     // spawn_runtime`'s composition so engine-dispatched `bin:` items
     // (e.g. `bin:ryeos-core-tools`) see the same env contract as runtime-
     // binary spawns. Without this, `lillux::run`'s post-Part-B
     // `env_clear()` would leave the subprocess with only a handful of
-    // RYEOSD_* vars and `ryeos_engine::roots::user_root()` would fail
-    // to resolve in the child.
+    // RYEOSD_* vars without the operator app-root context.
     let secret_map: std::collections::BTreeMap<String, String> = vault_bindings
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
@@ -1052,7 +1051,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
             builder = builder.with_typed_bindings(runtime_bindings)?;
 
             let daemon_callback_bindings = daemon_callback_env.iter().filter_map(|(key, value)| {
-                if key == "USER_SPACE" || key == "RYEOS_SYSTEM_SPACE_DIR" {
+                if key == "RYEOS_APP_ROOT" {
                     None
                 } else {
                     Some(EnvBinding::new(

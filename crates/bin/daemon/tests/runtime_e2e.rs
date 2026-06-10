@@ -32,7 +32,7 @@ use lillux::crypto::SigningKey;
 
 // ── Helpers (signing setup uses the fast fixture's publisher key) ──────
 
-/// Install one signed runtime YAML in user space with a default
+/// Install one signed runtime YAML in app root with a default
 /// well-formed `binary_ref: bin/<host_triple>/<name>`. For tests that
 /// need to exercise post-B1 gates (notably P1.5 below) use
 /// [`install_runtime_with_binary_ref`] instead so a deliberately
@@ -88,7 +88,7 @@ description: "synth runtime for runtime_e2e"
     Ok(())
 }
 
-/// Install a minimal kind schema for `kind` under user space so the
+/// Install a minimal kind schema for `kind` under app root so the
 /// engine's RuntimeRegistry boot validation (ε.2) accepts a runtime
 /// that serves it. The schema declares an executable kind that
 /// delegates to the runtime registry — exactly the contract a synth
@@ -182,7 +182,7 @@ async fn e2e_knowledge_ref_returns_501_in_v53() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_direct_runtime_routes_through_native_dispatch() {
-    // Plant a synth runtime in user space; auth-disabled wildcard
+    // Plant a synth runtime in app root; auth-disabled wildcard
     // scope satisfies `runtime.execute`, so dispatch_managed_subprocess
     // proceeds past the cap gate and reaches the binary materialization
     // step. The binary doesn't exist, so we expect an error mentioning
@@ -193,7 +193,7 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // V5.4 P2.1 note: the `standard` bundle now ships
     // `ryeos-directive-runtime` and `ryeos-graph-runtime` in its
     // SourceManifest, but this harness uses `bundles/core` as
-    // RYEOS_SYSTEM_SPACE_DIR (see `crates/bin/daemon/tests/common/mod.rs::workspace_core_dir`)
+    // RYEOS_APP_ROOT (see `crates/bin/daemon/tests/common/mod.rs::workspace_core_dir`)
     // and `core` has no `bin/` directory. Real coverage would plant a
     // signed `bundles` registration under
     // `<workspace_core_dir>/.ai/node/bundles/standard.yaml` so the engine
@@ -266,13 +266,13 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     // RuntimeRegistry::build_from_bundles must error; engine_init.rs
     // propagates the error; daemon child exits non-zero.
     //
-    // The system_space_dir must contain real kind schemas so the daemon
+    // The app_root must contain real kind schemas so the daemon
     // can parse the planted runtime YAMLs as kind=runtime items. We copy
     // the workspace core bundle to a writable tempdir and use that as
-    // both --system-space-dir AND the location to drop additional state
-    // (post-config resolution unifies CLI --system-space-dir with the
+    // both --app-root AND the location to drop additional state
+    // (post-config resolution unifies CLI --app-root with the
     // daemon's writable system_data_dir).
-    let user_space = tempfile::tempdir().expect("user space");
+    let user_space = tempfile::tempdir().expect("app root");
     let (_core_tmp, state_path) = common::copy_core_to_temp();
 
     // Pre-populate via fast fixture (no  on the daemon
@@ -310,15 +310,14 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     let uds_path = state_path.join("ryeosd.sock");
 
     let mut cmd = Command::new(common::ryeosd_binary());
-    cmd.arg("--system-space-dir")
+    cmd.arg("--app-root")
         .arg(&state_path)
         .arg("--bind")
         .arg(&bind)
         .arg("--uds-path")
         .arg(&uds_path)
         .env("HOSTNAME", "testhost")
-        .env("RYEOS_SYSTEM_SPACE_DIR", common::workspace_core_dir())
-        .env("USER_SPACE", user_space.path())
+        .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -557,7 +556,7 @@ inputs: []
 // caller-typed subject's identity, not the executor's.
 //
 // This test pins that contract end-to-end using the real standard
-// bundle's directive runtime. A synth directive item in user space
+// bundle's directive runtime. A synth directive item in app root
 // dispatches through the real runtime. The dispatch either succeeds
 // or fails at runtime execution (no LLM provider configured), but
 // either way the thread row must record the SUBJECT's identity.

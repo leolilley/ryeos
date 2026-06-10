@@ -30,11 +30,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     config::validate_remote_project_path(&req.remote_project)?;
     let local = config::canonical_local_project_path(&req.project)?;
     let local_key = local.to_string_lossy().to_string();
+    let app_root = state.config.runtime_root();
 
-    let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let mut remotes = config::load_remotes(app_root.as_path())?;
     if !remotes.contains_key(&req.remote) {
-        let report =
-            config::load_remotes_layered_report(&state.config.system_space_dir, Some(&local))?;
+        let report = config::load_remotes_layered_report(app_root.as_path(), Some(&local))?;
         let loaded = config::get_loaded_remote(&report.remotes, &req.remote).map_err(|_| {
             anyhow::anyhow!(
                 "remote '{}' not found in operator config; run `ryeos remote configure {}` first",
@@ -56,11 +56,11 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             sync_scope: req.sync_scope,
         },
     );
-    config::save_remotes(&state.config.system_space_dir, &remotes)?;
+    config::save_remotes(app_root.as_path(), &remotes)?;
 
     Ok(serde_json::json!({
         "remote": req.remote,
-        "scope": "user",
+        "scope": "operator",
         "local_project_path": local_key,
         "remote_project_path": req.remote_project,
         "sync_scope": req.sync_scope,

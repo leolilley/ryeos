@@ -11,8 +11,8 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::{parse_request, HandlerError};
 use ryeos_app::state::AppState;
-use ryeos_app::user_space::{
-    LockedUserSpaceStore, PrincipalUserSpaceResolver, UserSpaceStore, LOCAL_PRINCIPAL_ID,
+use ryeos_app::principal::{
+    LockedPrincipalStore, HostedPrincipalResolver, PrincipalStore, LOCAL_PRINCIPAL_ID,
 };
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -148,7 +148,7 @@ pub async fn handle_projects_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let store = resolve_user_space_store(&ctx, &state)?;
+    let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     Ok(json!({
         "version": projects.version,
@@ -165,7 +165,7 @@ pub async fn handle_projects_add(
     let req: AddProjectRequest = parse_request(params)?;
     let root = canonical_project_root(&req.root)?;
     let root_text = root.display().to_string();
-    let store = locked_user_space_store(&ctx, &state).await?;
+    let store = locked_principal_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
 
     if let Some(existing) = projects.projects.iter_mut().find(|p| p.root == root_text) {
@@ -213,7 +213,7 @@ pub async fn handle_projects_forget(
         (None, None) => None,
     };
 
-    let store = locked_user_space_store(&ctx, &state).await?;
+    let store = locked_principal_store(&ctx, &state).await?;
     let mut projects = store.load_projects()?;
     let before = projects.projects.len();
     projects.projects.retain(|p| {
@@ -245,7 +245,7 @@ pub async fn handle_projects_resolve(
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
     let req: ResolveProjectRequest = parse_request(params)?;
-    let store = resolve_user_space_store(&ctx, &state)?;
+    let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     let project = projects
         .projects
@@ -264,7 +264,7 @@ pub async fn handle_projects_open(
     let req: OpenProjectRequest = parse_request(params)?;
     let session_id = session_id_from_context(&ctx)
         .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let store = locked_user_space_store(&ctx, &state).await?;
+    let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
     let project = projects
         .projects
@@ -300,7 +300,7 @@ pub async fn handle_recent_touch(
 ) -> Result<Value> {
     ensure_writable_session(&ctx, &state)?;
     let req: TouchRecentRequest = parse_request(params)?;
-    let store = locked_user_space_store(&ctx, &state).await?;
+    let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
     if !projects.projects.iter().any(|p| p.local_id == req.local_id) {
         return Err(HandlerError::NotFound.into());
@@ -316,7 +316,7 @@ pub async fn handle_recent_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let store = resolve_user_space_store(&ctx, &state)?;
+    let store = resolve_principal_store(&ctx, &state)?;
     let recent = store.load_recent()?;
     Ok(json!(recent))
 }
@@ -327,7 +327,7 @@ pub async fn handle_config_get(
     state: Arc<AppState>,
 ) -> Result<Value> {
     ensure_read_session(&ctx, &state)?;
-    let store = resolve_user_space_store(&ctx, &state)?;
+    let store = resolve_principal_store(&ctx, &state)?;
     let config = store.load_studio_config()?;
     Ok(json!(config))
 }
@@ -352,7 +352,7 @@ pub async fn handle_config_update(
             &["normal", "read_only"],
         )?;
     }
-    let store = locked_user_space_store(&ctx, &state).await?;
+    let store = locked_principal_store(&ctx, &state).await?;
     let mut config = store.load_studio_config()?;
     if let Some(theme) = req.theme {
         config.theme = theme;
@@ -392,13 +392,13 @@ fn project_root_locator_for_forget(root: &str) -> Result<String> {
     }
 }
 
-trait StudioUserSpaceStoreExt {
+trait StudioPrincipalStoreExt {
     fn load_projects(&self) -> Result<ProjectsFile>;
     fn load_studio_config(&self) -> Result<StudioConfigFile>;
     fn load_recent(&self) -> Result<RecentFile>;
 }
 
-impl StudioUserSpaceStoreExt for UserSpaceStore {
+impl StudioPrincipalStoreExt for PrincipalStore {
     fn load_projects(&self) -> Result<ProjectsFile> {
         let projects: ProjectsFile = self.load_yaml(&self.paths().projects_config())?;
         ensure_version("projects.yaml", projects.version, PROJECTS_VERSION)?;
@@ -418,14 +418,14 @@ impl StudioUserSpaceStoreExt for UserSpaceStore {
     }
 }
 
-trait LockedStudioUserSpaceStoreExt {
+trait LockedStudioPrincipalStoreExt {
     fn write_projects(&self, projects: &ProjectsFile) -> Result<()>;
     fn write_studio_config(&self, config: &StudioConfigFile) -> Result<()>;
     fn write_recent(&self, recent: &RecentFile) -> Result<()>;
     fn touch_recent_project(&self, local_id: &str) -> Result<RecentFile>;
 }
 
-impl LockedStudioUserSpaceStoreExt for LockedUserSpaceStore {
+impl LockedStudioPrincipalStoreExt for LockedPrincipalStore {
     fn write_projects(&self, projects: &ProjectsFile) -> Result<()> {
         ensure_version("projects.yaml", projects.version, PROJECTS_VERSION)?;
         self.write_yaml(&self.paths().projects_config(), projects)
@@ -457,23 +457,23 @@ impl LockedStudioUserSpaceStoreExt for LockedUserSpaceStore {
     }
 }
 
-fn resolve_user_space_store(ctx: &HandlerContext, state: &AppState) -> Result<UserSpaceStore> {
+fn resolve_principal_store(ctx: &HandlerContext, state: &AppState) -> Result<PrincipalStore> {
     if let Some(user_principal_id) = session_user_principal_id(ctx, state)? {
-        let resolver = PrincipalUserSpaceResolver::for_system_space(&state.config.system_space_dir);
-        return UserSpaceStore::resolve_with(&resolver, &user_principal_id);
+        let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
+        return PrincipalStore::resolve_with(&resolver, &user_principal_id);
     }
-    UserSpaceStore::resolve_principal(LOCAL_PRINCIPAL_ID)
+    PrincipalStore::resolve_principal(LOCAL_PRINCIPAL_ID)
 }
 
-async fn locked_user_space_store(
+async fn locked_principal_store(
     ctx: &HandlerContext,
     state: &AppState,
-) -> Result<LockedUserSpaceStore> {
+) -> Result<LockedPrincipalStore> {
     if let Some(user_principal_id) = session_user_principal_id(ctx, state)? {
-        let resolver = PrincipalUserSpaceResolver::for_system_space(&state.config.system_space_dir);
-        return UserSpaceStore::locked_with(&resolver, &user_principal_id).await;
+        let resolver = HostedPrincipalResolver::for_app_root(&state.config.app_root);
+        return PrincipalStore::locked_with(&resolver, &user_principal_id).await;
     }
-    UserSpaceStore::locked_principal(LOCAL_PRINCIPAL_ID).await
+    PrincipalStore::locked_principal(LOCAL_PRINCIPAL_ID).await
 }
 
 fn session_user_principal_id(ctx: &HandlerContext, state: &AppState) -> Result<Option<String>> {

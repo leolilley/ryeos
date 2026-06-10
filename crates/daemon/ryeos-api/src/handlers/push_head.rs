@@ -65,19 +65,11 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     }
 
-    // 3b. Validate user manifest paths (if present). When
-    // user_manifest_hash is populated, validate all paths against the
-    // allow-list and reject absolute/..-traversal paths.
-    if let Some(ref user_manifest_hash) = snapshot.user_manifest_hash {
-        let user_manifest_obj = cas.get_object(user_manifest_hash)?.ok_or_else(|| {
-            anyhow!(
-                "user manifest {} not found in CAS (referenced by snapshot {})",
-                user_manifest_hash,
-                req.snapshot_hash
-            )
-        })?;
-        let user_manifest = ryeos_state::objects::SourceManifest::from_value(&user_manifest_obj)?;
-        ryeos_state::user_sync::validate_user_manifest_paths(&user_manifest)?;
+    if snapshot.user_manifest_hash.is_some() {
+        return Err(anyhow!(
+            "snapshot {} includes user_manifest_hash, but global user-space sync is not supported",
+            req.snapshot_hash
+        ));
     }
 
     // 4. Compute principal-scoped project key.
@@ -162,12 +154,3 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
-
-// User-space sync allow-list + validation moved to
-// `ryeos_state::user_sync` so both push-side ingest and the
-// push_head verifier share one source of truth. See
-// `ryeos_state::user_sync::USER_SPACE_SYNC_DIRS` and
-// `validate_user_manifest_paths`.
-
-// User-manifest path validation tests live alongside the canonical
-// implementation in `ryeos_state::user_sync::tests`.

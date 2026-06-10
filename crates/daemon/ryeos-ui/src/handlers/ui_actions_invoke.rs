@@ -82,9 +82,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             .project_root
             .as_deref()
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                ryeos_engine::roots::user_root().unwrap_or_else(|_| std::path::PathBuf::from("."))
-            });
+            .unwrap_or_else(|| state.config.app_root.clone());
         let action_ctx = action_context_for_session(&ctx, &session);
         let result = execute_item_ref(&req, &action_ctx, &state, &project_path).await?;
 

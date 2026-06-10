@@ -1,4 +1,4 @@
-//! User-key signing — operator-side validated sign.
+//! Operator-key signing — validated local sign.
 //!
 //! Used by:
 //! - `ryeos sign <ref>` (CLI verb → tool:ryeos/core/sign → ryeos-core-tools binary)
@@ -7,14 +7,13 @@
 //!
 //! The flow:
 //!   1. Parse the canonical ref (`<kind>:<bare-id>`).
-//!   2. Build the engine's three-tier `TrustStore` and `KindRegistry`.
-//!   3. Resolve the ref to a single file within `source` (project | user;
-//!      system is rejected — those are bundle items, signed by bundle keys).
+//!   2. Build the engine's `TrustStore` and `KindRegistry`.
+//!   3. Resolve the ref to a single file within the project source.
 //!   4. Parse the file via the kind's parser.
 //!   5. Apply the kind schema's `metadata.rules` and run
 //!      `validate_metadata_anchoring` — refuses on failure with the
 //!      typed error.
-//!   6. Sign in place (atomic rename) using the user signing key.
+//!   6. Sign in place (atomic rename) using the operator signing key.
 //!
 //! Does NOT hardcode kinds. Adding a new kind = adding a new
 //! `kind-schema.yaml`; this tool picks it up automatically.
@@ -38,32 +37,28 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 
-/// Where to look for the item to sign. The system tier is intentionally
-/// not a variant — bundle items are signed by their author key, never
-/// re-signed in place by an operator.
+/// Where to look for the item to sign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignSource {
     Project,
-    User,
 }
 
 impl SignSource {
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "project" => Ok(Self::Project),
-            "user" => Ok(Self::User),
             "system" => bail!(
                 "source `system` is rejected — bundle items are signed by their \
                  author key during bundle authoring, not re-signed in place"
             ),
-            other => bail!("unknown source `{other}` (expected: project | user)"),
+            "operator" => bail!("source `operator` is rejected — app-root config is not an item source"),
+            other => bail!("unknown source `{other}` (expected: project)"),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::Project => "project",
-            Self::User => "user",
         }
     }
 }
@@ -80,9 +75,8 @@ impl SignSource {
 ///   * `directive:agent/**/*`        — every directive under `agent/`
 ///
 /// `project_path` is required when `source = Project`; ignored
-/// otherwise. The user signing key is loaded from `RYE_SIGNING_KEY`
-/// env, `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the
-/// old `~/.ai/config/keys/signing/private_key.pem` fallback.
+/// otherwise. The operator signing key is loaded from
+/// `<app_root>/.ai/config/keys/signing/private_key.pem`.
 ///
 /// Returns a `BatchReport` always — single-item refs produce a one-
 /// element vec. Per-item failures are collected; a failed validator
@@ -94,15 +88,14 @@ pub fn run_sign(
 ) -> Result<BatchReport> {
     let target = parse_sign_target(item_ref)?;
 
-    let user_root = roots::user_root().ok();
-    let system_roots = {
-        let system_space_dir = match std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+    let bundle_roots = {
+        let app_root = match std::env::var("RYEOS_APP_ROOT") {
             Ok(p) => PathBuf::from(p),
             Err(_) => dirs::data_dir()
                 .map(|d| d.join("ryeos"))
                 .expect("could not determine XDG data directory"),
         };
-        let bundles_dir = system_space_dir.join(ryeos_engine::AI_DIR).join("bundles");
+        let bundles_dir = app_root.join(ryeos_engine::AI_DIR).join("bundles");
         let mut additional: Vec<PathBuf> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
             for entry in entries.flatten() {
@@ -111,23 +104,27 @@ pub fn run_sign(
                 }
             }
         }
-        roots::system_roots(&additional)
+        roots::bundle_roots(&additional)
     };
 
-    let trust_store =
-        TrustStore::load_three_tier(project_path, user_root.as_deref(), &system_roots)
-            .with_context(|| "load trust store")?;
+    let operator_config_root = roots::runtime_root().ok().map(|root| root.config());
+    let trust_store = TrustStore::load(
+        project_path,
+        operator_config_root
+            .as_deref()
+            .ok_or_else(|| anyhow!("cannot resolve app root"))?,
+    )
+    .with_context(|| "load trust store")?;
 
-    let kinds = build_kind_registry(&system_roots, &trust_store)?;
+    let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
     let kind_schema = kinds
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
 
-    let parsers =
-        build_parser_dispatcher(&system_roots, user_root.as_deref(), &kinds, &trust_store)?;
+    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store)?;
 
-    let kind_dir = source_kind_dir(kind_schema, source, project_path, user_root.as_deref())?;
-    let ai_root = source_ai_root(source, project_path, user_root.as_deref())?;
+    let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
+    let ai_root = source_ai_root(source, project_path)?;
 
     let targets = if is_glob(&target.bare_id) {
         glob_match_items(&kind_dir, kind_schema, &target.bare_id)?
@@ -424,27 +421,17 @@ fn source_kind_dir(
     kind_schema: &KindSchema,
     source: SignSource,
     project_path: Option<&Path>,
-    user_root: Option<&Path>,
 ) -> Result<PathBuf> {
-    let ai_root = source_ai_root(source, project_path, user_root)?;
+    let ai_root = source_ai_root(source, project_path)?;
     Ok(ai_root.join(&kind_schema.directory))
 }
 
-fn source_ai_root(
-    source: SignSource,
-    project_path: Option<&Path>,
-    user_root: Option<&Path>,
-) -> Result<PathBuf> {
+fn source_ai_root(source: SignSource, project_path: Option<&Path>) -> Result<PathBuf> {
     match source {
         SignSource::Project => {
             let p =
                 project_path.ok_or_else(|| anyhow!("source=project requires --project path"))?;
             Ok(p.join(ryeos_engine::AI_DIR))
-        }
-        SignSource::User => {
-            let h =
-                user_root.ok_or_else(|| anyhow!("source=user but $HOME (user root) is not set"))?;
-            Ok(h.join(ryeos_engine::AI_DIR))
         }
     }
 }
@@ -490,14 +477,14 @@ pub struct ItemOutcome {
     pub warnings: Vec<String>,
 }
 
-fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
+fn build_kind_registry(bundle_roots: &[PathBuf], trust_store: &TrustStore) -> Result<KindRegistry> {
     // Kind schemas are node-tier items: they live exclusively under
     // `<bundle-root>/.ai/node/engine/kinds/` in node bundles laid down
-    // at the system roots. They do NOT participate in the
-    // project/user/system three-tier resolution that operator-edited
-    // items use, so this loader scans only system bundle roots.
+    // at the bundle roots. They do NOT participate in the
+    // project + bundle resolution that operator-edited
+    // items use, so this loader scans only bundle roots.
     let mut search = Vec::new();
-    for r in system_roots {
+    for r in bundle_roots {
         let p = r.join(ryeos_engine::AI_DIR).join("node/engine/kinds");
         if p.exists() {
             search.push(p);
@@ -515,28 +502,20 @@ fn build_kind_registry(system_roots: &[PathBuf], trust_store: &TrustStore) -> Re
 /// the in-process parsers (`yaml/yaml`, `markdown/frontmatter`, etc.)
 /// that the descriptors point at.
 fn build_parser_dispatcher(
-    system_roots: &[PathBuf],
-    user_root: Option<&Path>,
+    bundle_roots: &[PathBuf],
     kinds: &KindRegistry,
     trust_store: &TrustStore,
 ) -> Result<ParserDispatcher> {
-    let mut search: Vec<PathBuf> = system_roots.to_vec();
-    let mut tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = system_roots
+    let search: Vec<PathBuf> = bundle_roots.to_vec();
+    let tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = bundle_roots
         .iter()
         .map(|r| {
             (
                 r.clone(),
-                ryeos_engine::resolution::TrustClass::TrustedSystem,
+                ryeos_engine::resolution::TrustClass::TrustedBundle,
             )
         })
         .collect();
-    if let Some(u) = user_root {
-        search.push(u.to_path_buf());
-        tagged_search.push((
-            u.to_path_buf(),
-            ryeos_engine::resolution::TrustClass::TrustedUser,
-        ));
-    }
     let (parser_tools, _duplicates) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
     let handlers = HandlerRegistry::load_base(&tagged_search, trust_store)
@@ -551,9 +530,8 @@ fn build_parser_dispatcher(
 /// user key, the file is left untouched and `SignOutcome::Unchanged` is
 /// returned. Otherwise the file is (re-)signed atomically.
 ///
-/// Loads the user signing key from `RYE_SIGNING_KEY` env,
-/// `~/.ryeos/.ai/config/keys/signing/private_key.pem`, or the old
-/// `~/.ai/config/keys/signing/private_key.pem` fallback.
+/// Loads the operator signing key from
+/// `<app_root>/.ai/config/keys/signing/private_key.pem`.
 fn sign_in_place(
     input: &Path,
     validated_content: &str,
@@ -663,26 +641,9 @@ pub struct SignatureReport {
 }
 
 pub fn load_user_signing_key() -> Result<SigningKey> {
-    let path: PathBuf = match std::env::var("RYE_SIGNING_KEY") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => {
-            let user_root = roots::user_root().ok().context(
-                "cannot resolve user root (set USER_SPACE or ensure $HOME is discoverable)",
-            )?;
-            let canonical_path = user_root
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("signing")
-                .join("private_key.pem");
-            if canonical_path.is_file() {
-                canonical_path
-            } else {
-                let home = std::env::var("HOME").context("HOME not set")?;
-                Path::new(&home).join(".ai/config/keys/signing/private_key.pem")
-            }
-        }
-    };
+    let path: PathBuf = roots::runtime_root()
+        .context("cannot resolve app root for operator signing key")?
+        .operator_signing_key_path();
 
     let pem = fs::read_to_string(&path)
         .with_context(|| format!("read signing key from {}", path.display()))?;
@@ -711,9 +672,17 @@ mod tests {
     }
 
     #[test]
-    fn sign_source_parses_project_and_user() {
+    fn sign_source_parses_project() {
         assert_eq!(SignSource::parse("project").unwrap(), SignSource::Project);
-        assert_eq!(SignSource::parse("user").unwrap(), SignSource::User);
+    }
+
+    #[test]
+    fn sign_source_rejects_operator() {
+        let err = SignSource::parse("operator").unwrap_err();
+        assert!(
+            err.to_string().contains("operator") && err.to_string().contains("rejected"),
+            "expected operator-rejected error, got: {err}"
+        );
     }
 
     #[test]
@@ -779,11 +748,18 @@ mod tests {
         let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let key_path = tmp.path().join("signing.pem");
+        let key_path = tmp
+            .path()
+            .join(ryeos_engine::AI_DIR)
+            .join("config")
+            .join("keys")
+            .join("signing")
+            .join("private_key.pem");
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
         let pem = key.to_pkcs8_pem(Default::default()).unwrap();
         std::fs::write(&key_path, pem.as_bytes()).unwrap();
-        let old_key = std::env::var_os("RYE_SIGNING_KEY");
-        std::env::set_var("RYE_SIGNING_KEY", &key_path);
+        let old_app_root = std::env::var_os("RYEOS_APP_ROOT");
+        std::env::set_var("RYEOS_APP_ROOT", tmp.path());
 
         let item_path = tmp.path().join("item.yaml");
         std::fs::write(&item_path, "name: unvalidated\n").unwrap();
@@ -806,10 +782,10 @@ mod tests {
         assert_eq!(stripped, validated);
         assert!(!written.contains("unvalidated"));
 
-        if let Some(old_key) = old_key {
-            std::env::set_var("RYE_SIGNING_KEY", old_key);
+        if let Some(old_app_root) = old_app_root {
+            std::env::set_var("RYEOS_APP_ROOT", old_app_root);
         } else {
-            std::env::remove_var("RYE_SIGNING_KEY");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 

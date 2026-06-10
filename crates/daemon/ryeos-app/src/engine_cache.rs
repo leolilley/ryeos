@@ -3,16 +3,16 @@
 //! Background:
 //!
 //! The daemon builds one `Engine` at startup against its own roots
-//! (system bundles + the operator's own user space). For
+//! (bundle roots + the operator's own app root). For
 //! `pushed_head` requests, we need a different engine: one whose
-//! user-tier roots point at the **caller's** materialised user space,
+//! project-tier roots point at the **caller's** materialised content,
 //! and whose trust store includes the caller's pushed trust pins as
 //! an overlay.
 //!
-//! Materialising the user overlay and rebuilding the engine on every
+//! Materialising the caller overlay and rebuilding the engine on every
 //! request would be wasteful — many threads in a session run against
 //! the same snapshot. This cache keeps the engine alive (with its
-//! associated user overlay temp dir) keyed by snapshot hash, so
+//! associated caller overlay temp dir) keyed by snapshot hash, so
 //! concurrent / sequential threads with the same snapshot reuse it.
 //!
 //! # Cache key
@@ -122,7 +122,7 @@ struct EngineCacheInner {
     slots: Mutex<HashMap<CacheKey, CacheSlot>>,
     /// Bumped on every `bundle.install` / `bundle.uninstall`. Mixed
     /// into the cache key so a bundle change invalidates all entries
-    /// built against the previous system root set without an explicit
+    /// built against the previous bundle root set without an explicit
     /// flush.
     system_install_generation: AtomicU64,
     capacity: usize,
@@ -439,7 +439,6 @@ mod tests {
                 ryeos_engine::parsers::registry::ParserRegistry::empty(),
                 std::sync::Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
             ),
-            None,
             vec![],
         ))
     }

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 
 use ryeos_engine::engine::Engine;
-use ryeos_engine::roots;
 use ryeos_engine::trust::TrustStore;
 use ryeos_engine::AI_DIR;
 
@@ -26,14 +25,14 @@ pub struct InitOptions {
     pub force: bool,
 }
 
-/// Collect signed node-config items under `system_space_dir/<AI_DIR>/node/`
+/// Collect signed node-config items under `app_root/<AI_DIR>/node/`
 /// that would become unverifiable if the node signing key is
 /// regenerated.
 ///
 /// A file is considered signed if its first non-empty line begins
 /// with `# ryeos:signed:`. Returns sorted, deduplicated absolute paths.
-fn find_signed_node_config_items(system_space_dir: &Path) -> Result<Vec<PathBuf>> {
-    let node_dir = system_space_dir.join(AI_DIR).join("node");
+fn find_signed_node_config_items(app_root: &Path) -> Result<Vec<PathBuf>> {
+    let node_dir = app_root.join(AI_DIR).join("node");
     if !node_dir.exists() {
         return Ok(Vec::new());
     }
@@ -88,11 +87,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     create_directory_layout(config)?;
 
     // 2. Write default config file if missing (or force rewrite)
-    let config_path = config
-        .system_space_dir
-        .join(".ai")
-        .join("node")
-        .join("config.yaml");
+    let config_path = config.app_root.join(".ai").join("node").join("config.yaml");
     if options.force || !config_path.exists() {
         write_default_config(&config_path, config)?;
         tracing::info!(path = %config_path.display(), "wrote default config");
@@ -101,14 +96,9 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // 3. Create auth directory
     fs::create_dir_all(&config.authorized_keys_dir)?;
 
-    // Discover trust directory early — needed for stale-entry cleanup during
-    // node-key regeneration.
-    let user_space = roots::user_root().context("resolve user root for bootstrap")?;
-    let trust_dir = user_space
-        .join(".ai")
-        .join("config")
-        .join("keys")
-        .join("trusted");
+    // Discover operator trust directory early — needed for stale-entry cleanup
+    // during node-key regeneration. Operator config is folded into the app root.
+    let trust_dir = config.runtime_root().trusted_keys_dir();
 
     // 4. Generate or load the NODE signing key (daemon-internal state)
     let node_key_path = &config.node_signing_key_path;
@@ -117,7 +107,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         // the node key would make them unverifiable. The operator must
         // manually re-sign items before rotating, or use --force only on
         // fresh installs.
-        let signed_items = find_signed_node_config_items(&config.system_space_dir)?;
+        let signed_items = find_signed_node_config_items(&config.app_root)?;
         if !signed_items.is_empty() {
             let lines: Vec<String> = signed_items
                 .iter()
@@ -166,10 +156,10 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         "node signing key ready"
     );
 
-    // 5. Generate or load the USER signing key (operator edits in project/user space).
+    // 5. Generate or load the operator signing key (operator edits in project/app root).
     //    NEVER force-regenerate: the user key is the operator's persistent identity.
     //    Rotation is an explicit out-of-band action.
-    let user_key_path = &config.user_signing_key_path;
+    let user_key_path = &config.operator_signing_key_path;
     let user_identity = if user_key_path.exists() {
         NodeIdentity::load(user_key_path)?
     } else {
@@ -184,7 +174,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 
     // 6. Write public identity document (node only)
     let identity_path = config
-        .system_space_dir
+        .app_root
         .join(".ai")
         .join("node")
         .join("identity")
@@ -199,7 +189,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // first boot if missing (parallel to user/node keys above); never
     // force-rotated by daemon bootstrap (rotation is `ryeos vault rewrap`).
     let vault_dir = config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("vault");
@@ -222,16 +212,16 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         "vault X25519 keypair ready"
     );
 
-    // 7. Authorize the USER key so the local CLI can authenticate to
-    // the local daemon. The CLI signs requests with the user key
-    // (the operator's persistent identity at ~/.ryeos/.ai/config/keys/signing/).
+    // 7. Authorize the operator key so the local CLI can authenticate to
+    // the local daemon. The CLI signs requests with the operator's persistent
+    // identity at <app_root>/.ai/config/keys/signing/.
     // The authorized-key TOML must be signed by the node key per
     // auth::load_authorized_key().
     let user_auth_entry = config
         .authorized_keys_dir
         .join(format!("{}.toml", user_identity.fingerprint()));
     if options.force || !user_auth_entry.exists() {
-        write_user_authorized(
+        write_operator_authorized(
             &user_auth_entry,
             &user_identity,
             node_identity.signing_key(),
@@ -266,7 +256,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
     // NOTE: Bundle registrations are written by `ryeos init` (ryeos-tools),
     // not by daemon bootstrap. The daemon only reads registrations during
     // `load_node_config_two_phase`. Any bundles discovered by init are
-    // registered at `system_space_dir/.ai/node/bundles/{name}.yaml`.
+    // registered at `app_root/.ai/node/bundles/{name}.yaml`.
 
     Ok(())
 }
@@ -274,7 +264,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
 /// Write a self-signed trusted-key TOML entry so the key's own signed items verify.
 ///
 /// The document is signed by the key it declares (self-signature), using the
-/// `# ryeos:signed:...` envelope format consumed by `TrustStore::load_three_tier`.
+/// `# ryeos:signed:...` envelope format consumed by `TrustStore::load`.
 fn write_self_trust(
     trust_dir: &Path,
     trust_entry: &Path,
@@ -331,7 +321,7 @@ pem = "ed25519:{key_b64}"
 /// Write a node-signed authorized-key TOML entry for the bootstrap
 /// operator user. Delegates to the shared `write_authorized_key_toml`
 /// so there is exactly one TOML emitter.
-fn write_user_authorized(
+fn write_operator_authorized(
     entry_path: &Path,
     user_identity: &NodeIdentity,
     node_signing_key: &lillux::crypto::SigningKey,
@@ -369,7 +359,7 @@ fn write_user_authorized(
 
 // V5.2-CLOSEOUT: sign_unsigned_items + walk helpers deleted.
 // Daemon bootstrap is bootstrap-only — must NEVER mutate
-// system_space_dir or any operator/publisher-managed bundle.
+// app_root or any operator/publisher-managed bundle.
 // To re-sign bundled items, use:
 //   ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev
 // or `ryeos publish <bundle-dir> --key ... --owner ...` for one bundle.
@@ -380,56 +370,32 @@ fn create_directory_layout(config: &Config) -> Result<()> {
     // runtime state under .ai/state/.
     let dirs = [
         // Node identity
-        config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("identity"),
+        config.app_root.join(".ai").join("node").join("identity"),
         // Node auth
         config
-            .system_space_dir
+            .app_root
             .join(".ai")
             .join("node")
             .join("auth")
             .join("authorized_keys"),
         // Node vault (sealed secrets)
-        config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("vault"),
+        config.app_root.join(".ai").join("node").join("vault"),
         // Node config (model routing, etc.)
-        config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("config"),
+        config.app_root.join(".ai").join("node").join("config"),
         // Node bundle registrations
-        config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("bundles"),
+        config.app_root.join(".ai").join("node").join("bundles"),
         // Node engine (merged kind schemas cache)
         config
-            .system_space_dir
+            .app_root
             .join(".ai")
             .join("node")
             .join("engine")
             .join("kinds"),
         // Installed bundles
-        config.system_space_dir.join(".ai").join("bundles"),
+        config.app_root.join(".ai").join("bundles"),
         // CAS state
-        config
-            .system_space_dir
-            .join(".ai")
-            .join("state")
-            .join("objects"),
-        config
-            .system_space_dir
-            .join(".ai")
-            .join("state")
-            .join("refs"),
+        config.runtime_state_dir().join("objects"),
+        config.runtime_state_dir().join("refs"),
     ];
     for dir in &dirs {
         fs::create_dir_all(dir)
@@ -450,18 +416,18 @@ fn write_default_config(path: &Path, config: &Config) -> Result<()> {
 /// Check if the daemon has been initialized (Model B).
 ///
 /// Verifies:
-/// - system_space_dir exists
+/// - app_root exists
 /// - at least one bundle registration exists at `.ai/node/bundles/*.yaml`
 ///
 /// No bundle names are checked — the engine is agnostic about what's
 /// installed. Any registered bundle contributes its kinds and items.
 pub fn verify_initialized(config: &Config) -> Result<()> {
-    ryeos_node::require_initialized(&config.system_space_dir)?;
+    ryeos_node::require_initialized(&config.app_root)?;
 
     if !config.node_signing_key_path.exists() {
         tracing::warn!("no node signing key found — signed items will fail to verify");
     }
-    if !config.user_signing_key_path.exists() {
+    if !config.operator_signing_key_path.exists() {
         tracing::warn!("no user signing key found — operator-signed items will fail to verify");
     }
     Ok(())
@@ -469,50 +435,47 @@ pub fn verify_initialized(config: &Config) -> Result<()> {
 
 /// Repair daemon-local artifacts after init-state verification.
 ///
-/// `ryeos init` is the single authoritative path for user-space artifacts
-/// (user signing key, user/node trust docs, official-publisher pinning,
+/// `ryeos init` is the single authoritative path for operator artifacts
+/// (operator signing key, user/node trust docs, official-publisher pinning,
 /// bundle install + registration). Daemon startup must NOT recreate or
 /// partially substitute for any of those.
 ///
 /// This function:
-///   1. Verifies the user-space artifacts that `ryeos init` is
+///   1. Verifies the operator artifacts that `ryeos init` is
 ///      responsible for. Missing → fail with guidance.
 ///   2. Verifies the node signing key exists. Missing → fail (we cannot
 ///      safely regenerate the node key here because doing so would
-///      invalidate the existing node trust doc in user space).
+///      invalidate the existing node trust doc in operator config).
 ///   3. Repairs daemon-local artifacts only: daemon-local directory
 ///      layout, default config, vault X25519 keypair, public identity
 ///      document, node-signed authorized-key entry for the user key.
 ///
-/// Trust docs in user space are NEVER written here.
+/// Trust docs in operator config are NEVER written here.
 pub fn repair_daemon_local(config: &Config) -> Result<()> {
     // Derive the trust dir from the resolved user signing key path
-    // rather than re-reading `roots::user_root()`. The user signing
-    // key path was already resolved at config-load time and is the
-    // authoritative anchor; deriving from the live env again here
-    // could give a different answer if `USER_SPACE`/`HOME` changed
-    // between operator init and daemon start.
+    // rather than re-reading ambient environment. The user signing key path was
+    // already resolved at config-load time and is the authoritative anchor.
     //
     // Layout:
-    //   <user_root>/.ai/config/keys/signing/private_key.pem
-    //   <user_root>/.ai/config/keys/trusted/
+    //   <app_root>/.ai/config/keys/signing/private_key.pem
+    //   <app_root>/.ai/config/keys/trusted/
     let trust_dir = config
-        .user_signing_key_path
+        .operator_signing_key_path
         .parent() // .../keys/signing
         .and_then(|p| p.parent()) // .../keys
         .map(|p| p.join("trusted"))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "user_signing_key_path {} has no parent",
-                config.user_signing_key_path.display()
+                "operator_signing_key_path {} has no parent",
+                config.operator_signing_key_path.display()
             )
         })?;
 
-    // ── 1. Required user-space artifacts ──
-    if !config.user_signing_key_path.exists() {
+    // ── 1. Required operator config artifacts ──
+    if !config.operator_signing_key_path.exists() {
         bail!(
-            "user signing key missing at {} — run: ryeos init",
-            config.user_signing_key_path.display()
+            "operator signing key missing at {} — run: ryeos init",
+            config.operator_signing_key_path.display()
         );
     }
 
@@ -520,12 +483,12 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
         bail!(
             "node signing key missing at {} — run: ryeos init\n\
              (daemon refuses to regenerate the node key automatically because doing so \
-             would invalidate the node trust doc already pinned in user space)",
+             would invalidate the node trust doc already pinned in app root)",
             config.node_signing_key_path.display()
         );
     }
 
-    let user_identity = NodeIdentity::load(&config.user_signing_key_path)?;
+    let user_identity = NodeIdentity::load(&config.operator_signing_key_path)?;
     let node_identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
     let user_trust_entry = trust_dir.join(format!("{}.toml", user_identity.fingerprint()));
@@ -548,7 +511,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 
     // ── 3. Default daemon config file (daemon-local) ──
     let config_path = config
-        .system_space_dir
+        .app_root
         .join(AI_DIR)
         .join("node")
         .join("config.yaml");
@@ -559,7 +522,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 
     // ── 4. Public identity (daemon-local; derives from node key) ──
     let identity_path = config
-        .system_space_dir
+        .app_root
         .join(AI_DIR)
         .join("node")
         .join("identity")
@@ -571,11 +534,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 
     // ── 5. Vault X25519 keypair (daemon-local). Decoupled from node
     //    identity so node-key rotation does not brick the vault. ──
-    let vault_dir = config
-        .system_space_dir
-        .join(AI_DIR)
-        .join("node")
-        .join("vault");
+    let vault_dir = config.app_root.join(AI_DIR).join("node").join("vault");
     fs::create_dir_all(&vault_dir)
         .with_context(|| format!("create vault dir {}", vault_dir.display()))?;
     let vault_secret_path = vault_dir.join("private_key.pem");
@@ -595,7 +554,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 
     // ── 6. Node-signed authorized-key entry for the user key
     //    (daemon-local — the file lives under
-    //    `<system_space>/.ai/node/auth/authorized_keys/`). ──
+    //    `<app_root>/.ai/node/auth/authorized_keys/`). ──
     fs::create_dir_all(&config.authorized_keys_dir).with_context(|| {
         format!(
             "create authorized_keys dir {}",
@@ -606,7 +565,7 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
         .authorized_keys_dir
         .join(format!("{}.toml", user_identity.fingerprint()));
     if !user_auth_entry.exists() {
-        write_user_authorized(
+        write_operator_authorized(
             &user_auth_entry,
             &user_identity,
             node_identity.signing_key(),
@@ -618,14 +577,14 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 
 /// Two-phase node-config bootstrap: shared by daemon-start and standalone paths.
 ///
-/// 1. Phase 1: load bundle section from system space to determine effective bundle roots.
+/// 1. Phase 1: load bundle section from the app root to determine effective bundle roots.
 /// 2. Build the engine with those roots.
 /// 3. Phase 2: full node-config scan across all sections → snapshot.
 ///
 /// Trust continuity: the trust store used for node-config verification is
-/// loaded via the engine's `TrustStore::load_three_tier`, which sources trust
-/// from operator tiers ONLY (project + user). The daemon's identity must
-/// have its trust doc pinned in the user tier (created by `ryeos init` /
+/// loaded via the engine's `TrustStore::load`, which sources trust
+/// from operator tiers ONLY (project + operator config). The daemon's identity must
+/// have its trust doc pinned in the operator tier (created by `ryeos init` /
 /// daemon bootstrap) for daemon-written `kind: node` items to verify on
 /// next boot.
 ///
@@ -633,23 +592,16 @@ pub fn repair_daemon_local(config: &Config) -> Result<()> {
 pub fn load_node_config_two_phase(
     config: &Config,
 ) -> Result<(Arc<Engine>, Arc<NodeConfigSnapshot>)> {
-    let system_space_dir = &config.system_space_dir;
-
-    // Discover user root (same logic as engine_init)
-    let user_root = roots::user_root().ok();
-    let system_roots_phase1 = vec![system_space_dir.to_path_buf()];
+    let app_root = &config.app_root;
 
     // ── Phase 1: bootstrap trust store + bundle section ──
-    // Use three-tier trust (same as engine_init) so daemon-written items verify.
-    let bootstrap_trust_store = TrustStore::load_three_tier(
-        None, // project root unknown at startup
-        user_root.as_deref(),
-        &system_roots_phase1,
-    )
-    .context("failed to load bootstrap trust store for node-config verification")?;
+    // Use operator config trust so daemon-written items verify.
+    let operator_config_root = config.runtime_root().config();
+    let bootstrap_trust_store = TrustStore::load(None, &operator_config_root)
+        .context("failed to load bootstrap trust store for node-config verification")?;
 
     let bootstrap_loader = ryeos_app::node_config::loader::BootstrapLoader {
-        system_space_dir,
+        app_root,
         trust_store: &bootstrap_trust_store,
     };
 
@@ -661,7 +613,7 @@ pub fn load_node_config_two_phase(
         bundle_records.iter().map(|b| b.path.clone()).collect();
 
     tracing::info!(
-        system_space_dir = %system_space_dir.display(),
+        app_root = %app_root.display(),
         bundle_count = effective_bundle_roots.len(),
         trust_signers = bootstrap_trust_store.len(),
         "Phase 1: effective bundle roots determined"
@@ -676,7 +628,7 @@ pub fn load_node_config_two_phase(
     // ── Phase 2: full node-config scan ──
     let section_table = SectionTable::new();
     let full_loader = ryeos_app::node_config::loader::BootstrapLoader {
-        system_space_dir,
+        app_root,
         trust_store: &bootstrap_trust_store,
     };
     let snapshot = Arc::new(
@@ -700,33 +652,30 @@ mod tests {
 
     /// Build a minimal Config for testing with all paths under a tempdir.
     fn test_config(tmp: &std::path::Path) -> Config {
-        let system_space_dir = tmp.join("state");
+        let app_root = tmp.join("state");
         let user_keys = tmp.join("user_keys");
         std::fs::create_dir_all(
-            system_space_dir
+            app_root
                 .join(".ai")
                 .join("node")
                 .join("auth")
                 .join("authorized_keys"),
         )
         .unwrap();
-        std::fs::create_dir_all(system_space_dir.join(".ai").join("state")).unwrap();
+        std::fs::create_dir_all(app_root.join(".ai").join("state")).unwrap();
         std::fs::create_dir_all(user_keys.join("signing")).unwrap();
         Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            db_path: system_space_dir
-                .join(".ai")
-                .join("state")
-                .join("runtime.sqlite3"),
-            uds_path: system_space_dir.join("ryeosd.sock"),
-            system_space_dir: system_space_dir.clone(),
-            node_signing_key_path: system_space_dir
+            db_path: app_root.join(".ai").join("state").join("runtime.sqlite3"),
+            uds_path: app_root.join("ryeosd.sock"),
+            app_root: app_root.clone(),
+            node_signing_key_path: app_root
                 .join(".ai")
                 .join("node")
                 .join("identity")
                 .join("private_key.pem"),
-            user_signing_key_path: user_keys.join("signing").join("private_key.pem"),
-            authorized_keys_dir: system_space_dir
+            operator_signing_key_path: user_keys.join("signing").join("private_key.pem"),
+            authorized_keys_dir: app_root
                 .join(".ai")
                 .join("node")
                 .join("auth")
@@ -742,34 +691,34 @@ mod tests {
         id.fingerprint().to_string()
     }
 
-    /// Process-wide mutex for tests that mutate the `USER_SPACE` env var.
+    /// Process-wide mutex for tests that mutate the `RYEOS_APP_ROOT` env var.
     /// Without this, parallel tests in this module race on the shared env
-    /// and observe each other's `USER_SPACE` values, producing trust-dir
+    /// and observe each other's `RYEOS_APP_ROOT` values, producing trust-dir
     /// paths under the wrong tempdir and bogus "stale entry not removed"
     /// failures.
-    static USER_SPACE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static RYEOS_APP_ROOT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// RAII guard that holds `USER_SPACE_MUTEX`, sets `USER_SPACE` for the
+    /// RAII guard that holds `RYEOS_APP_ROOT_MUTEX`, sets `RYEOS_APP_ROOT` for the
     /// duration of the test, and unsets it on drop (not restore — avoids
     /// inheriting stale values from previous tests).
-    struct UserSpaceGuard {
+    struct PrincipalGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
-    impl UserSpaceGuard {
+    impl PrincipalGuard {
         fn new(tmp: &std::path::Path) -> Self {
             // Recover from prior panics: PoisonError still exposes the guard.
-            let lock = USER_SPACE_MUTEX
+            let lock = RYEOS_APP_ROOT_MUTEX
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::env::set_var("USER_SPACE", tmp);
+            std::env::set_var("RYEOS_APP_ROOT", tmp);
             Self { _lock: lock }
         }
     }
 
-    impl Drop for UserSpaceGuard {
+    impl Drop for PrincipalGuard {
         fn drop(&mut self) {
-            std::env::remove_var("USER_SPACE");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 
@@ -777,7 +726,7 @@ mod tests {
     fn init_creates_both_keys_on_fresh_state() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: false }).unwrap();
 
@@ -786,11 +735,11 @@ mod tests {
             "node key should be created"
         );
         assert!(
-            config.user_signing_key_path.exists(),
+            config.operator_signing_key_path.exists(),
             "user key should be created"
         );
 
-        // Trust entries for both keys — trust_dir = <USER_SPACE>/.ai/config/keys/trusted/
+        // Trust entries for both keys — trust_dir = <RYEOS_APP_ROOT>/.ai/config/keys/trusted/
         let trust_dir = tmp
             .path()
             .join(".ai")
@@ -798,7 +747,7 @@ mod tests {
             .join("keys")
             .join("trusted");
         let node_fp = fingerprint_at(&config.node_signing_key_path);
-        let user_fp = fingerprint_at(&config.user_signing_key_path);
+        let user_fp = fingerprint_at(&config.operator_signing_key_path);
         assert!(
             trust_dir.join(format!("{}.toml", node_fp)).exists(),
             "node trust entry"
@@ -813,16 +762,16 @@ mod tests {
     fn init_idempotent_reuses_existing_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: false }).unwrap();
         let node_fp1 = fingerprint_at(&config.node_signing_key_path);
-        let user_fp1 = fingerprint_at(&config.user_signing_key_path);
+        let user_fp1 = fingerprint_at(&config.operator_signing_key_path);
 
         // Second init without force — keys should be the same
         init(&config, &InitOptions { force: false }).unwrap();
         let node_fp2 = fingerprint_at(&config.node_signing_key_path);
-        let user_fp2 = fingerprint_at(&config.user_signing_key_path);
+        let user_fp2 = fingerprint_at(&config.operator_signing_key_path);
 
         assert_eq!(
             node_fp1, node_fp2,
@@ -835,18 +784,18 @@ mod tests {
     }
 
     #[test]
-    fn force_regenerates_node_key_but_preserves_user_key() {
+    fn force_regenerates_node_key_but_preserves_operator_key() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: false }).unwrap();
-        let user_fp_before = fingerprint_at(&config.user_signing_key_path);
+        let user_fp_before = fingerprint_at(&config.operator_signing_key_path);
         let node_fp_before = fingerprint_at(&config.node_signing_key_path);
 
         // Force regenerate
         init(&config, &InitOptions { force: true }).unwrap();
-        let user_fp_after = fingerprint_at(&config.user_signing_key_path);
+        let user_fp_after = fingerprint_at(&config.operator_signing_key_path);
         let node_fp_after = fingerprint_at(&config.node_signing_key_path);
 
         assert_ne!(
@@ -882,7 +831,7 @@ mod tests {
     fn force_creates_fresh_keys_when_none_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: true }).unwrap();
 
@@ -891,7 +840,7 @@ mod tests {
             "node key should be created even with --force on fresh state"
         );
         assert!(
-            config.user_signing_key_path.exists(),
+            config.operator_signing_key_path.exists(),
             "user key should be created on fresh state"
         );
     }
@@ -902,18 +851,14 @@ mod tests {
     fn force_refuses_when_signed_node_config_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         // Run init once normally to create node key.
         init(&config, &InitOptions { force: false }).unwrap();
         assert!(config.node_signing_key_path.exists());
 
         // Plant a signed YAML in the node dir.
-        let node_bundles = config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("bundles");
+        let node_bundles = config.app_root.join(".ai").join("node").join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
         let signed_yaml = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nname: test-bundle\n";
         fs::write(node_bundles.join("test.yaml"), signed_yaml).unwrap();
@@ -930,7 +875,7 @@ mod tests {
     fn force_succeeds_on_fresh_install() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         // Fresh state, --force should succeed (no signed items to protect).
         init(&config, &InitOptions { force: true })
@@ -941,17 +886,13 @@ mod tests {
     fn force_succeeds_when_node_dir_has_only_unsigned_files() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = UserSpaceGuard::new(tmp.path());
+        let _guard = PrincipalGuard::new(tmp.path());
 
         // Run init once to create keys and node dir.
         init(&config, &InitOptions { force: false }).unwrap();
 
         // Plant an unsigned YAML.
-        let node_bundles = config
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("bundles");
+        let node_bundles = config.app_root.join(".ai").join("node").join("bundles");
         fs::create_dir_all(&node_bundles).unwrap();
         fs::write(
             node_bundles.join("unsigned.yaml"),
@@ -979,20 +920,20 @@ mod tests {
     }
 
     /// `repair_daemon_local` must derive the user trust dir from the
-    /// resolved `user_signing_key_path` (not by re-reading the env), and
+    /// resolved `operator_signing_key_path` (not by re-reading the env), and
     /// the derivation must match the canonical layout
-    /// `<user_root>/.ai/config/keys/{signing,trusted}/`.
+    /// `<app_root>/.ai/config/keys/{signing,trusted}/`.
     #[test]
-    fn repair_daemon_local_trust_dir_derives_from_user_signing_key_path() {
+    fn repair_daemon_local_trust_dir_derives_from_operator_signing_key_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let user_root = tmp.path().join("home");
-        let signing_path = user_root
+        let app_root = tmp.path().join("home");
+        let signing_path = app_root
             .join(".ai")
             .join("config")
             .join("keys")
             .join("signing")
             .join("private_key.pem");
-        let expected_trust_dir = user_root
+        let expected_trust_dir = app_root
             .join(".ai")
             .join("config")
             .join("keys")
@@ -1010,26 +951,26 @@ mod tests {
         );
     }
 
-    /// `repair_daemon_local` must refuse to start when user-space
+    /// `repair_daemon_local` must refuse to start when operator
     /// init artifacts are missing — daemon never substitutes for
     /// `ryeos init`.
     #[test]
-    fn repair_daemon_local_fails_when_user_signing_key_missing() {
+    fn repair_daemon_local_fails_when_operator_signing_key_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let user_root = tmp.path().join("home");
-        let signing_dir = user_root
+        let app_root = tmp.path().join("home");
+        let signing_dir = app_root
             .join(".ai")
             .join("config")
             .join("keys")
             .join("signing");
         fs::create_dir_all(&signing_dir).unwrap();
-        let system_space_dir = tmp.path().join("state");
-        fs::create_dir_all(system_space_dir.join(".ai").join("node").join("bundles")).unwrap();
+        let app_root = tmp.path().join("state");
+        fs::create_dir_all(app_root.join(".ai").join("node").join("bundles")).unwrap();
         // Plant a signed bundle registration so verify_initialized would
         // pass; we want repair_daemon_local itself to be the one that
-        // surfaces the missing user-space artifact.
+        // surfaces the missing operator artifact.
         fs::write(
-            system_space_dir
+            app_root
                 .join(".ai")
                 .join("node")
                 .join("bundles")
@@ -1040,19 +981,16 @@ mod tests {
 
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            db_path: system_space_dir
-                .join(".ai")
-                .join("state")
-                .join("runtime.sqlite3"),
-            uds_path: system_space_dir.join("ryeosd.sock"),
-            system_space_dir: system_space_dir.clone(),
-            node_signing_key_path: system_space_dir
+            db_path: app_root.join(".ai").join("state").join("runtime.sqlite3"),
+            uds_path: app_root.join("ryeosd.sock"),
+            app_root: app_root.clone(),
+            node_signing_key_path: app_root
                 .join(".ai")
                 .join("node")
                 .join("identity")
                 .join("private_key.pem"),
-            user_signing_key_path: signing_dir.join("private_key.pem"),
-            authorized_keys_dir: system_space_dir
+            operator_signing_key_path: signing_dir.join("private_key.pem"),
+            authorized_keys_dir: app_root
                 .join(".ai")
                 .join("node")
                 .join("auth")

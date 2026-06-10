@@ -75,13 +75,13 @@ mod tests {
             completed_at: None,
             cost: None,
             outputs: None,
-            effective_trust_class: Some(TrustClass::TrustedSystem),
+            effective_trust_class: Some(TrustClass::TrustedBundle),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
         // Enum serializes to lowercase snake_case (no `format!("{:?}")` hack).
         assert!(
-            json.contains("\"effective_trust_class\":\"trusted_system\""),
+            json.contains("\"effective_trust_class\":\"trusted_bundle\""),
             "expected snake_case enum serialization, got: {json}"
         );
         let parsed: ThreadMeta = serde_json::from_str(&json).unwrap();
@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(parsed.status, "running");
         assert_eq!(
             parsed.effective_trust_class,
-            Some(TrustClass::TrustedSystem)
+            Some(TrustClass::TrustedBundle)
         );
     }
 }

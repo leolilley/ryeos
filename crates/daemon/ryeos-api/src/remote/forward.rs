@@ -351,7 +351,7 @@ pub async fn execute_unary_forward(
     // 4. Pull results and apply to local workspace.
     let pull_result = pull_results(
         client,
-        &state.config.system_space_dir,
+        &state.config.app_root,
         &push_result.snapshot_hash,
         &result_snapshot_hash,
         req.local_project_path,
@@ -506,7 +506,7 @@ async fn push_no_project(
 
     let local_cas_root = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("objects");
@@ -519,13 +519,9 @@ async fn push_no_project(
         .store_object(&empty_manifest.to_value())
         .map_err(|e| RemoteForwardError::PushFailed(format!("store empty manifest: {e:#}")))?;
 
-    let (user_manifest_hash, user_manifest) =
-        crate::remote::push::ingest_user_space_for_push(&local_cas)
-            .map_err(|e| RemoteForwardError::PushFailed(format!("ingest user space: {e:#}")))?;
-
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: user_manifest_hash.clone(),
+        user_manifest_hash: None,
         message: None,
         project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
         parent_hashes: Vec::new(),
@@ -539,8 +535,8 @@ async fn push_no_project(
     let all_hashes = collect_snapshot_hashes(
         &local_cas,
         &empty_manifest,
-        user_manifest.as_ref(),
-        user_manifest_hash.as_deref(),
+        None,
+        None,
         &manifest_hash,
         &snapshot_hash,
     );
@@ -560,8 +556,8 @@ async fn push_no_project(
         manifest_entries: 0,
         blobs_uploaded,
         blobs_skipped,
-        user_manifest_hash,
-        user_manifest,
+        user_manifest_hash: None,
+        user_manifest: None,
     })
 }
 

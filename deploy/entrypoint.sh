@@ -5,9 +5,8 @@
 # it creates keys, trust, and lays down bundles; on subsequent boots it
 # re-verifies and re-copies to bring bundles up to date with the image.
 #
-# Both system space (/data/core) and user space (/data/user) live on the
-# persistent /data volume, so operator trust and signing keys survive
-# container redeploys.
+# App root (/data/app) lives on the persistent /data volume, so operator
+# trust, signing keys, node identity, and runtime state survive redeploys.
 #
 # If init fails the container exits immediately — never start ryeosd against
 # an unverified state.
@@ -29,8 +28,7 @@ for f in /opt/ryeos/.ai/PUBLISHER_TRUST.toml /opt/ryeos/*/PUBLISHER_TRUST.toml; 
 done
 
 ryeos init \
-  --system-space-dir /data/core \
-  --user-root /data/user \
+  --app-root /data/app \
   --source /opt/ryeos \
   "${TRUST_ARGS[@]}"
 
@@ -39,5 +37,5 @@ echo "[entrypoint] init complete, starting daemon"
 # (e.g. public-identity.json, vault keypair). Idempotent — no-op when
 # already written.
 exec ryeosd \
-  --system-space-dir /data/core \
+  --app-root /data/app \
   --bind "[::]:${PORT:-8000}"

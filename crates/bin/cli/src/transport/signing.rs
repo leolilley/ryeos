@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use base64::Engine;
 use lillux::crypto::{fingerprint as compute_fp, load_signing_key, SigningKey};
-use ryeos_engine::roots;
 use ryeos_engine::AI_DIR;
 
 use crate::error::CliTransportError;
@@ -16,37 +15,24 @@ pub struct Signer {
 
 impl Signer {
     /// Resolve the signing key:
-    ///   1. RYEOS_CLI_KEY_PATH env var (explicit override)
-    ///   2. `<user_root>/<AI_DIR>/config/keys/signing/private_key.pem`
-    ///      where `<user_root>` is `roots::user_root()` (canonically
-    ///      `~/.ryeos/`). This is the operator's persistent identity,
-    ///      created by `ryeos init`.
-    ///   3. Fail
+    ///   1. `<app_root>/<AI_DIR>/config/keys/signing/private_key.pem`.
+    ///      This is the operator's persistent identity, created by `ryeos init`.
+    ///   2. Fail
     ///
-    /// This is the USER key — the operator's identity for authenticating to
+    /// This is the operator key — the operator's identity for authenticating to
     /// daemons. The node key is the daemon's own identity; the CLI must NOT
     /// silently fall back to it.
     ///
-    /// User-root resolution is delegated to `roots::user_root()` (single
-    /// source of truth — no ad-hoc `BaseDirs::home_dir()` reads here).
-    pub fn resolve(_system_space_dir: &Path) -> Result<Self, CliTransportError> {
-        if let Ok(p) = std::env::var("RYEOS_CLI_KEY_PATH") {
-            let pb = PathBuf::from(&p);
-            return Self::load_from(&pb);
-        }
-        let user_root = roots::user_root().map_err(|_| CliTransportError::SigningKeyMissing {
-            path: PathBuf::from(format!(
-                "<user_root>/{AI_DIR}/config/keys/signing/private_key.pem \
-                     (set USER_SPACE or ensure $HOME is discoverable)"
-            )),
-        })?;
-        let user_key = user_root
+    /// The app root is supplied by the transport after applying CLI/env config
+    /// resolution; no separate `RYEOS_APP_ROOT` lookup is performed here.
+    pub fn resolve(app_root: &Path) -> Result<Self, CliTransportError> {
+        let operator_key = app_root
             .join(AI_DIR)
             .join("config")
             .join("keys")
             .join("signing")
             .join("private_key.pem");
-        Self::load_from(&user_key)
+        Self::load_from(&operator_key)
     }
 
     fn load_from(path: &Path) -> Result<Self, CliTransportError> {

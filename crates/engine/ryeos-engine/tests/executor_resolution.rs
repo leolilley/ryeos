@@ -279,12 +279,12 @@ fn trusted_binary_passes() {
     let (trust_class, fp) = verify_executor_trust(
         &item_source,
         |f| f == "trusted-fp",
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     );
 
     assert_eq!(
         trust_class,
-        ryeos_engine::resolution::TrustClass::TrustedSystem
+        ryeos_engine::resolution::TrustClass::TrustedBundle
     );
     assert_eq!(fp.as_deref(), Some("trusted-fp"));
 }
@@ -296,12 +296,12 @@ fn untrusted_binary_with_unknown_signer() {
     let (trust_class, fp) = verify_executor_trust(
         &item_source,
         |_f| false,
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     );
 
     assert_eq!(
         trust_class,
-        ryeos_engine::resolution::TrustClass::UntrustedUserSpace
+        ryeos_engine::resolution::TrustClass::UntrustedProject
     );
     assert_eq!(fp.as_deref(), Some("unknown-fp"));
 }
@@ -313,7 +313,7 @@ fn unsigned_binary_is_unsigned() {
     let (trust_class, fp) = verify_executor_trust(
         &item_source,
         |_f| false,
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     );
 
     assert_eq!(trust_class, ryeos_engine::resolution::TrustClass::Unsigned);
@@ -336,12 +336,12 @@ fn empty_fingerprint_is_untrusted() {
     let (trust_class, fp) = verify_executor_trust(
         &item_source,
         |_f| false,
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     );
 
     assert_eq!(
         trust_class,
-        ryeos_engine::resolution::TrustClass::UntrustedUserSpace
+        ryeos_engine::resolution::TrustClass::UntrustedProject
     );
     assert!(fp.is_none());
 }

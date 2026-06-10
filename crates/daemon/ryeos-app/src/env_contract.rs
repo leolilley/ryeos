@@ -25,7 +25,7 @@ pub const BASE_ALLOWLIST_NAMES: &[&str] = &[
     "SSL_CERT_DIR",
 ];
 
-const DAEMON_ROOT_NAMES: &[&str] = &["USER_SPACE", "RYEOS_SYSTEM_SPACE_DIR"];
+const DAEMON_ROOT_NAMES: &[&str] = &["RYEOS_APP_ROOT"];
 
 const ENGINE_PLAN_NAMES: &[&str] = &[
     "RYEOS_ITEM_PATH",
@@ -133,30 +133,16 @@ impl EnvBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DaemonRootEnv {
-    pub user_space: Option<String>,
-    pub system_space_dir: Option<String>,
+    pub app_root: Option<String>,
 }
 
 impl DaemonRootEnv {
     pub fn from_resolution_roots(
-        roots: &ryeos_engine::item_resolution::ResolutionRoots,
-        system_space_dir: &std::path::Path,
+        _roots: &ryeos_engine::item_resolution::ResolutionRoots,
+        app_root: &std::path::Path,
     ) -> Self {
-        let user_space = roots
-            .ordered
-            .iter()
-            .find(|root| root.space == ryeos_engine::contracts::ItemSpace::User)
-            .map(|root| {
-                root.ai_root
-                    .parent()
-                    .map(|parent| parent.to_path_buf())
-                    .unwrap_or_else(|| root.ai_root.clone())
-                    .to_string_lossy()
-                    .into_owned()
-            });
         Self {
-            user_space,
-            system_space_dir: Some(system_space_dir.to_string_lossy().into_owned()),
+            app_root: Some(app_root.to_string_lossy().into_owned()),
         }
     }
 }
@@ -217,17 +203,10 @@ impl EnvContractBuilder {
     }
 
     pub fn with_daemon_roots(mut self, roots: DaemonRootEnv) -> Result<Self, EnvContractError> {
-        if let Some(user_space) = roots.user_space {
+        if let Some(app_root) = roots.app_root {
             self.insert(EnvBinding::new(
-                "USER_SPACE",
-                user_space,
-                EnvSourceDetail::DaemonRoot,
-            ))?;
-        }
-        if let Some(system_space_dir) = roots.system_space_dir {
-            self.insert(EnvBinding::new(
-                "RYEOS_SYSTEM_SPACE_DIR",
-                system_space_dir,
+                "RYEOS_APP_ROOT",
+                app_root,
                 EnvSourceDetail::DaemonRoot,
             ))?;
         }
@@ -417,7 +396,7 @@ fn validate_protocol_injection_name(
         (EnvInjectionSource::ProjectPath, "RYEOSD_PROJECT_PATH") => true,
         (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH") => true,
         (EnvInjectionSource::ThreadAuthToken, "RYEOSD_THREAD_AUTH_TOKEN") => true,
-        (EnvInjectionSource::SystemSpaceDir, "RYEOS_SYSTEM_SPACE_DIR") => true,
+        (EnvInjectionSource::AppRoot, "RYEOS_APP_ROOT") => true,
         _ => false,
     };
     if allowed {
@@ -497,8 +476,7 @@ mod tests {
             "",
             "BAD=NAME",
             "BAD\0NAME",
-            "USER_SPACE",
-            "RYEOS_SYSTEM_SPACE_DIR",
+            "RYEOS_APP_ROOT",
             "RYEOSD_THREAD_AUTH_TOKEN",
             "RYEOS_PROJECT_SECRET",
             "HTTP_PROXY",
@@ -543,24 +521,16 @@ mod tests {
     #[test]
     fn daemon_roots_override_host_roots() {
         let env = EnvContractBuilder::new()
-            .with_base_allowlist(host_env(&[
-                ("USER_SPACE", "/evil-user"),
-                ("RYEOS_SYSTEM_SPACE_DIR", "/evil-system"),
-            ]))
+            .with_base_allowlist(host_env(&[("RYEOS_APP_ROOT", "/evil-system")]))
             .unwrap()
             .with_daemon_roots(DaemonRootEnv {
-                user_space: Some("/real-user".to_string()),
-                system_space_dir: Some("/real-system".to_string()),
+                app_root: Some("/real-system".to_string()),
             })
             .unwrap()
             .build();
         let map: BTreeMap<_, _> = env.into_iter().collect();
         assert_eq!(
-            map.get("USER_SPACE").map(String::as_str),
-            Some("/real-user")
-        );
-        assert_eq!(
-            map.get("RYEOS_SYSTEM_SPACE_DIR").map(String::as_str),
+            map.get("RYEOS_APP_ROOT").map(String::as_str),
             Some("/real-system")
         );
     }
@@ -579,16 +549,15 @@ mod tests {
 
         let err = EnvContractBuilder::new()
             .with_daemon_roots(DaemonRootEnv {
-                user_space: Some("/real-user".to_string()),
-                system_space_dir: None,
+                app_root: Some("/real-system".to_string()),
             })
             .unwrap()
             .with_bindings(
                 EnvSourceKind::DeclaredSecret,
-                vec![("USER_SPACE".to_string(), "secret".to_string())],
+                vec![("RYEOS_APP_ROOT".to_string(), "secret".to_string())],
             )
             .unwrap_err();
-        assert!(format!("{err:#}").contains("USER_SPACE"));
+        assert!(format!("{err:#}").contains("RYEOS_APP_ROOT"));
     }
 
     #[test]
@@ -632,16 +601,15 @@ mod tests {
     fn per_spawn_daemon_cannot_override_daemon_roots() {
         let err = EnvContractBuilder::new()
             .with_daemon_roots(DaemonRootEnv {
-                user_space: Some("/real-user".to_string()),
-                system_space_dir: Some("/real-system".to_string()),
+                app_root: Some("/real-system".to_string()),
             })
             .unwrap()
             .with_bindings(
                 EnvSourceKind::PerSpawnDaemon,
-                vec![("RYEOS_SYSTEM_SPACE_DIR".to_string(), "/evil".to_string())],
+                vec![("RYEOS_APP_ROOT".to_string(), "/evil".to_string())],
             )
             .unwrap_err();
-        assert!(format!("{err:#}").contains("RYEOS_SYSTEM_SPACE_DIR"));
+        assert!(format!("{err:#}").contains("RYEOS_APP_ROOT"));
     }
 
     #[test]

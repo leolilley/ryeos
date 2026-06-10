@@ -61,7 +61,7 @@ async fn standalone_bundle_install_then_list_then_remove() {
     let src_kinds = src.path().join(".ai/node/engine/kinds/service");
     std::fs::create_dir_all(&src_kinds).unwrap();
     let core_kind = harness
-        .system_space_dir
+        .app_root
         .join(".ai/node/engine/kinds/service/service.kind-schema.yaml");
     std::fs::copy(&core_kind, src_kinds.join("service.kind-schema.yaml"))
         .expect("copy real kind schema from core");
@@ -86,7 +86,7 @@ async fn standalone_bundle_install_then_list_then_remove() {
 
     // 2. Verify the bundle was copied to disk.
     let installed = harness
-        .system_space_dir
+        .app_root
         .join(".ai/bundles/testbundle/.ai/node/engine/kinds/service/service.kind-schema.yaml");
     assert!(
         installed.exists(),
@@ -95,9 +95,7 @@ async fn standalone_bundle_install_then_list_then_remove() {
     );
 
     // 3. Verify the signed node-config item was written.
-    let node_item = harness
-        .system_space_dir
-        .join(".ai/node/bundles/testbundle.yaml");
+    let node_item = harness.app_root.join(".ai/node/bundles/testbundle.yaml");
     assert!(
         node_item.exists(),
         "expected node-config item at {}",

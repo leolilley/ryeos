@@ -76,21 +76,14 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
-    pub fn load_from_roots(
-        project_root: &Path,
-        user_root: Option<&Path>,
-        system_roots: Vec<PathBuf>,
-    ) -> Self {
+    pub fn load_from_roots(project_root: &Path, bundle_roots: Vec<PathBuf>) -> Self {
         let mut keys = HashMap::new();
 
         let mut roots: Vec<&Path> = Vec::new();
-        for sr in &system_roots {
+        roots.push(project_root);
+        for sr in &bundle_roots {
             roots.push(sr);
         }
-        if let Some(ur) = user_root {
-            roots.push(ur);
-        }
-        roots.push(project_root);
 
         for root in &roots {
             let trusted_dir = root.join(".ai/config/keys/trusted");
@@ -235,16 +228,8 @@ impl TrustStore {
 
 pub struct VerifiedLoader {
     project_root: PathBuf,
-    user_root: Option<PathBuf>,
-    system_roots: Vec<PathBuf>,
+    bundle_roots: Vec<PathBuf>,
     trust_store: TrustStore,
-}
-
-#[derive(Debug)]
-pub struct ResolvedPath {
-    pub path: PathBuf,
-    pub root: PathBuf,
-    pub space: String,
 }
 
 #[derive(Debug)]
@@ -262,17 +247,11 @@ pub struct ScannedItem {
 }
 
 impl VerifiedLoader {
-    pub fn new(
-        project_root: PathBuf,
-        user_root: Option<PathBuf>,
-        system_roots: Vec<PathBuf>,
-    ) -> Self {
-        let trust_store =
-            TrustStore::load_from_roots(&project_root, user_root.as_deref(), system_roots.clone());
+    pub fn new(project_root: PathBuf, bundle_roots: Vec<PathBuf>) -> Self {
+        let trust_store = TrustStore::load_from_roots(&project_root, bundle_roots.clone());
         Self {
             project_root,
-            user_root,
-            system_roots,
+            bundle_roots,
             trust_store,
         }
     }
@@ -289,59 +268,6 @@ impl VerifiedLoader {
             "config" => ".ai/config/",
             _ => ".ai/",
         }
-    }
-
-    fn strip_kind_prefix(item_id: &str) -> (&str, &str) {
-        if let Some(rest) = item_id.split_once(':') {
-            (rest.0, rest.1)
-        } else {
-            (item_id, item_id)
-        }
-    }
-
-    pub fn resolve_item(&self, kind: &str, item_id: &str) -> Result<ResolvedPath> {
-        let (effective_kind, bare_id) = Self::strip_kind_prefix(item_id);
-        let kind = if effective_kind != bare_id {
-            effective_kind
-        } else {
-            kind
-        };
-        let subdir = Self::kind_subdir(kind);
-
-        let item_path = PathBuf::from(format!("{subdir}{bare_id}.md"));
-
-        if self.project_root.join(&item_path).exists() {
-            tracing::trace!(ref_path = %item_id, space = %"project", "resolved item location");
-            return Ok(ResolvedPath {
-                path: self.project_root.join(&item_path),
-                root: self.project_root.clone(),
-                space: "project".to_string(),
-            });
-        }
-
-        if let Some(ref user_root) = self.user_root {
-            if user_root.join(&item_path).exists() {
-                tracing::trace!(ref_path = %item_id, space = %"user", "resolved item location");
-                return Ok(ResolvedPath {
-                    path: user_root.join(&item_path),
-                    root: user_root.clone(),
-                    space: "user".to_string(),
-                });
-            }
-        }
-
-        for system_root in &self.system_roots {
-            if system_root.join(&item_path).exists() {
-                tracing::trace!(ref_path = %item_id, space = %"system", "resolved item location");
-                return Ok(ResolvedPath {
-                    path: system_root.join(&item_path),
-                    root: system_root.clone(),
-                    space: "system".to_string(),
-                });
-            }
-        }
-
-        bail!("item not found: {kind}:{bare_id}");
     }
 
     /// Load and verify a file. Permissive mode — warns on unsigned/unknown-signer.
@@ -483,17 +409,13 @@ impl VerifiedLoader {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
+        // Collect least-specific first (bundles) then project last, so the
+        // deep merge below — where each later overlay wins — yields the
+        // documented `project > bundle` precedence.
         let mut candidate_paths = Vec::new();
 
-        for system_root in &self.system_roots {
-            let p = system_root.join(&item_path);
-            if p.exists() {
-                candidate_paths.push(p);
-            }
-        }
-
-        if let Some(ref user_root) = self.user_root {
-            let p = user_root.join(&item_path);
+        for bundle_root in &self.bundle_roots {
+            let p = bundle_root.join(&item_path);
             if p.exists() {
                 candidate_paths.push(p);
             }
@@ -571,8 +493,8 @@ impl VerifiedLoader {
     }
 
     /// Same as `load_config_strict` but also returns the set of source root
-    /// labels (`"system"` / `"user"` / `"project"`) that contributed a file
-    /// to the result, in resolution order (system → user → project).
+    /// labels (`"project"` / `"bundle"`) that contributed a file
+    /// to the result, in resolution order (bundle → project; project wins).
     /// Used for trust decisions where ANY contribution from an untrusted
     /// root must be detectable.
     ///
@@ -606,20 +528,15 @@ impl VerifiedLoader {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
-        // Collect (path, root_label) pairs in system → user → project order.
+        // Collect (path, root_label) pairs least-specific first (bundle →
+        // project), so the deep merge below — where each later overlay wins —
+        // yields the documented `project > bundle` precedence.
         let mut candidate_paths: Vec<(PathBuf, &'static str)> = Vec::new();
 
-        for system_root in &self.system_roots {
-            let p = system_root.join(&item_path);
+        for bundle_root in &self.bundle_roots {
+            let p = bundle_root.join(&item_path);
             if p.exists() {
-                candidate_paths.push((p, "system"));
-            }
-        }
-
-        if let Some(ref user_root) = self.user_root {
-            let p = user_root.join(&item_path);
-            if p.exists() {
-                candidate_paths.push((p, "user"));
+                candidate_paths.push((p, "bundle"));
             }
         }
 
@@ -700,13 +617,10 @@ impl VerifiedLoader {
 
         let roots_to_scan: Vec<(&Path, &str)> = {
             let mut v = Vec::new();
-            for sr in &self.system_roots {
-                v.push((sr.as_path(), "system"));
-            }
-            if let Some(ref ur) = self.user_root {
-                v.push((ur.as_path(), "user"));
-            }
             v.push((self.project_root.as_path(), "project"));
+            for sr in &self.bundle_roots {
+                v.push((sr.as_path(), "bundle"));
+            }
             v
         };
 
@@ -817,89 +731,15 @@ pem = """
     }
 
     #[test]
-    fn resolve_item_finds_in_project_first() {
+    fn load_config_project_overrides_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
-        let system = tmp.path().join("system");
+        let bundle = tmp.path().join("bundle");
 
-        create_file(&project, ".ai/directives/hello.md", "# Project Hello\n");
-        create_file(&system, ".ai/directives/hello.md", "# System Hello\n");
-
-        let loader = VerifiedLoader::new(project, None, vec![system]);
-        let resolved = loader.resolve_item("directive", "hello").unwrap();
-
-        assert_eq!(resolved.space, "project");
-        assert!(resolved.path.to_string_lossy().contains("project"));
-    }
-
-    #[test]
-    fn resolve_item_falls_back_to_user() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("project");
-        let user = tmp.path().join("user");
-        let system = tmp.path().join("system");
-
-        create_file(&user, ".ai/directives/shared.md", "# User Shared\n");
-        create_file(&system, ".ai/directives/shared.md", "# System Shared\n");
-
-        let loader = VerifiedLoader::new(project, Some(user), vec![system]);
-        let resolved = loader.resolve_item("directive", "shared").unwrap();
-
-        assert_eq!(resolved.space, "user");
-    }
-
-    #[test]
-    fn resolve_item_falls_back_to_system() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("project");
-        let user = tmp.path().join("user");
-        let system = tmp.path().join("system");
-
-        create_file(&system, ".ai/tools/run.md", "# System Tool\n");
-
-        let loader = VerifiedLoader::new(project, Some(user), vec![system]);
-        let resolved = loader.resolve_item("tool", "run").unwrap();
-
-        assert_eq!(resolved.space, "system");
-    }
-
-    #[test]
-    fn resolve_item_strips_kind_prefix() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("project");
-
-        create_file(&project, ".ai/directives/agent.md", "# Agent Directive\n");
-
-        let loader = VerifiedLoader::new(project, None, vec![]);
-        let resolved = loader.resolve_item("directive", "directive:agent").unwrap();
-
-        assert_eq!(resolved.space, "project");
-        assert!(resolved.path.to_string_lossy().ends_with("agent.md"));
-    }
-
-    #[test]
-    fn resolve_item_not_found() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("project");
-
-        let loader = VerifiedLoader::new(project, None, vec![]);
-        let result = loader.resolve_item("directive", "nonexistent");
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn load_config_system_user_project_override() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("project");
-        let user = tmp.path().join("user");
-        let system = tmp.path().join("system");
-
-        create_file(&system, ".ai/config/test.yaml", "name: system\n");
-        create_file(&user, ".ai/config/test.yaml", "name: user\n");
+        create_file(&bundle, ".ai/config/test.yaml", "name: bundle\n");
         create_file(&project, ".ai/config/test.yaml", "name: project\n");
 
-        let loader = VerifiedLoader::new(project, Some(user), vec![system]);
+        let loader = VerifiedLoader::new(project, vec![bundle]);
         let config: serde_yaml::Value = loader.load_config_strict("test").unwrap().unwrap();
 
         assert_eq!(config["name"], "project");
@@ -910,7 +750,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, None, vec![]);
+        let loader = VerifiedLoader::new(project, vec![]);
         let config = loader
             .load_config_strict::<serde_yaml::Value>("nonexistent")
             .unwrap();
@@ -925,7 +765,7 @@ pem = """
 
         create_file(&project, ".ai/config/bad.yaml", "not valid yaml: [");
 
-        let loader = VerifiedLoader::new(project, None, vec![]);
+        let loader = VerifiedLoader::new(project, vec![]);
         let result = loader.load_config_strict::<serde_yaml::Value>("bad");
 
         assert!(
@@ -935,17 +775,17 @@ pem = """
     }
 
     #[test]
-    fn load_config_system_only() {
+    fn load_config_bundle_only() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
-        let system = tmp.path().join("system");
+        let bundle = tmp.path().join("bundle");
 
-        create_file(&system, ".ai/config/defaults.yaml", "key: from_system\n");
+        create_file(&bundle, ".ai/config/defaults.yaml", "key: from_bundle\n");
 
-        let loader = VerifiedLoader::new(project, None, vec![system]);
+        let loader = VerifiedLoader::new(project, vec![bundle]);
         let config: serde_yaml::Value = loader.load_config_strict("defaults").unwrap().unwrap();
 
-        assert_eq!(config["key"], "from_system");
+        assert_eq!(config["key"], "from_bundle");
     }
 
     #[test]
@@ -959,7 +799,7 @@ pem = """
         let path = tmp.path().join("test.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(!verified.content.contains("ryeos:signed:"));
@@ -974,7 +814,7 @@ pem = """
         let content = "# Plain Directive\n\nSome content here.\n";
         fs::write(&path, content).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert_eq!(verified.content, content);
@@ -993,7 +833,7 @@ pem = """
         let path = tmp.path().join("tampered.md");
         fs::write(&path, &tampered).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -1018,7 +858,7 @@ pem = """
         let path = tmp.path().join("bad_sig.md");
         fs::write(&path, &forged).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -1037,7 +877,7 @@ pem = """
         let path = tmp.path().join("unknown_signer.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(verified.content.contains("# Test"));
@@ -1051,7 +891,7 @@ pem = """
         create_trust_store(&system, &sk);
 
         let store =
-            TrustStore::load_from_roots(&tmp.path().join("project"), None, vec![system.clone()]);
+            TrustStore::load_from_roots(&tmp.path().join("project"), vec![system.clone()]);
 
         assert_eq!(store.len(), 1);
         let fp = lillux::signature::compute_fingerprint(&sk.verifying_key());
@@ -1060,7 +900,7 @@ pem = """
 
     #[test]
     fn trust_store_empty_when_no_dirs() {
-        let store = TrustStore::load_from_roots(Path::new("/nonexistent"), None, vec![]);
+        let store = TrustStore::load_from_roots(Path::new("/nonexistent"), vec![]);
         assert!(store.is_empty());
     }
 
@@ -1071,7 +911,7 @@ pem = """
         let content = "deterministic content";
         fs::write(&path, content).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), None, vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
         let v1 = loader.load_verified("directive", &path).unwrap();
         let v2 = loader.load_verified("directive", &path).unwrap();
 
@@ -1082,27 +922,26 @@ pem = """
     fn scan_kind_finds_across_roots() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
-        let user = tmp.path().join("user");
-        let system = tmp.path().join("system");
+        let bundle = tmp.path().join("bundle");
 
-        create_file(&system, ".ai/tools/sys_tool.md", "# System Tool\n");
-        create_file(&system, ".ai/tools/shared.md", "# System Shared\n");
-        create_file(&user, ".ai/tools/user_tool.md", "# User Tool\n");
-        create_file(&user, ".ai/tools/shared.md", "# User Shared\n");
+        create_file(&bundle, ".ai/tools/bundle_tool.md", "# Bundle Tool\n");
+        create_file(&bundle, ".ai/tools/shared.md", "# Bundle Shared\n");
         create_file(&project, ".ai/tools/proj_tool.md", "# Project Tool\n");
+        create_file(&project, ".ai/tools/shared.md", "# Project Shared\n");
 
-        let system_clone = system.clone();
-        let loader = VerifiedLoader::new(project, Some(user), vec![system]);
+        let project_clone = project.clone();
+        let loader = VerifiedLoader::new(project, vec![bundle]);
         let items = loader.scan_kind("tool").unwrap();
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
 
-        assert!(names.contains(&"sys_tool"));
-        assert!(names.contains(&"user_tool"));
+        assert!(names.contains(&"bundle_tool"));
         assert!(names.contains(&"proj_tool"));
         assert!(names.contains(&"shared"));
 
+        // Project is scanned first, so a name present in both roots is
+        // attributed to the project root (first-found-wins for enumeration).
         let shared = items.iter().find(|i| i.name == "shared").unwrap();
-        assert_eq!(shared.root, system_clone);
+        assert_eq!(shared.root, project_clone);
     }
 
     #[test]
@@ -1110,7 +949,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, None, vec![]);
+        let loader = VerifiedLoader::new(project, vec![]);
         let items = loader.scan_kind("directive").unwrap();
 
         assert!(items.is_empty());
@@ -1152,7 +991,7 @@ pem = """
         )
         .unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
+        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system]);
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
@@ -1177,7 +1016,7 @@ pem = """
             lillux::signature::sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
+        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system]);
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");
@@ -1199,7 +1038,7 @@ pem = """
         let signed = sign_and_pin(yaml_body, &system);
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), None, vec![system]);
+        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system]);
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_ok(), "strict mode must accept trusted-signed config");

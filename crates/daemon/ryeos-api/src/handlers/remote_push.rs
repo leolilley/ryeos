@@ -57,8 +57,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Default scope is `AiOnly` (see `ProjectSyncScope::default`) so an
     // unbound `remote push` ships only the `.ai/` subtree, never the
     // surrounding codebase or asset trees.
-    let report =
-        config::load_remotes_layered_report(&state.config.system_space_dir, Some(&req.project))?;
+    let report = config::load_remotes_layered_report(&state.config.app_root, Some(&req.project))?;
     let loaded_remote = config::get_loaded_remote(&report.remotes, &req.remote).ok();
     let remote_cfg = loaded_remote.as_ref().map(|loaded| loaded.config.clone());
     let mut scope = ProjectSyncScope::default();

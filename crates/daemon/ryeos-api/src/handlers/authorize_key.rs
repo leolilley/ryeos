@@ -132,7 +132,7 @@ pub async fn handle(
     let now = lillux::time::iso8601_now();
     let auth_dir = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("auth")

@@ -248,14 +248,14 @@ write_seed_trust_doc
 # binary directly rather than `ryeos publish`, because `publish` is no longer
 # a lifecycle-local CLI verb on `next` and would otherwise route through a
 # daemon/initialized-node dispatch path during Docker builds.
-SIGN_USER_SPACE="$(mktemp -d)"
-trap 'rm -rf "$SIGN_USER_SPACE"' EXIT
-mkdir -p "$SIGN_USER_SPACE/.ai/config/keys/signing"
-cp "$KEY" "$SIGN_USER_SPACE/.ai/config/keys/signing/private_key.pem"
-chmod 0600 "$SIGN_USER_SPACE/.ai/config/keys/signing/private_key.pem"
+SIGN_APP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$SIGN_APP_ROOT"' EXIT
+mkdir -p "$SIGN_APP_ROOT/.ai/config/keys/signing"
+cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
+chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 
 echo "[populate-bundles] publishing core bundle…"
-USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$CORE" \
+RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
@@ -263,7 +263,7 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] publishing standard bundle…"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
-  USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STD" \
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STD" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 
@@ -272,25 +272,25 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
   # `knowledge` kind is provided by standard. Once standard has been signed, run
   # core through the authoring path again with both roots so those extension-kind
   # items are signed by the publisher key instead of being silently skipped.
-  USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$CORE" \
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 
   echo "[populate-bundles] publishing web bundle…"
-  USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$WEB" \
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 
   echo "[populate-bundles] publishing studio bundle…"
-  USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$STUDIO" \
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STUDIO" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 
 echo "[populate-bundles] publishing hosted-node bundle…"
-USER_SPACE="$SIGN_USER_SPACE" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
+RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 

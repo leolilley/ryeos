@@ -107,7 +107,7 @@ fn build_engine_against_bundle() -> Engine {
     let composers =
         ComposerRegistry::from_kinds(&kinds, &native_handlers).expect("composer registry");
 
-    Engine::new(kinds, parser_dispatcher, None, vec![bundle_root])
+    Engine::new(kinds, parser_dispatcher, vec![bundle_root])
         .with_trust_store(trust_store)
         .with_composers(composers)
 }

@@ -25,8 +25,8 @@ pub enum EnvInjectionSource {
     CasRoot,
     /// Vault handle the child uses to fetch decrypted secrets.
     VaultHandle,
-    /// Daemon-wide system space directory (e.g. `RYEOS_SYSTEM_SPACE_DIR`).
-    SystemSpaceDir,
+    /// Daemon-wide app rootectory (e.g. `RYEOS_APP_ROOT`).
+    AppRoot,
     /// Per-thread auth token proving subprocess identity on callbacks.
     /// Required on every `runtime.dispatch_action` call.
     ThreadAuthToken,
@@ -77,9 +77,7 @@ pub fn produce_env_value(
         EnvInjectionSource::VaultHandle => request.vault_handle.clone().ok_or_else(|| {
             EngineError::Internal("vault_handle requested but no vault_handle available".into())
         }),
-        EnvInjectionSource::SystemSpaceDir => {
-            Ok(request.system_space_dir.to_string_lossy().to_string())
-        }
+        EnvInjectionSource::AppRoot => Ok(request.app_root.to_string_lossy().to_string()),
         EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.clone().ok_or_else(|| {
             EngineError::Internal(
                 "thread_auth_token requested but no thread_auth_token available".into(),
@@ -121,7 +119,7 @@ mod tests {
             callback_token: Some("tok-abc".to_string()),
             callback_socket_path: Some("/tmp/ryeos-callback.sock".to_string()),
             vault_handle: Some("vault-handle-1".to_string()),
-            system_space_dir: PathBuf::from("/var/lib/ryeos"),
+            app_root: PathBuf::from("/var/lib/ryeos"),
             thread_auth_token: Some("tat-abc123".to_string()),
             params: serde_json::json!({}),
             resolution_output: None,
@@ -139,7 +137,7 @@ mod tests {
             EnvInjectionSource::ActingPrincipal,
             EnvInjectionSource::CasRoot,
             EnvInjectionSource::VaultHandle,
-            EnvInjectionSource::SystemSpaceDir,
+            EnvInjectionSource::AppRoot,
             EnvInjectionSource::ThreadAuthToken,
         ] {
             let yaml = serde_yaml::to_string(&src).unwrap();

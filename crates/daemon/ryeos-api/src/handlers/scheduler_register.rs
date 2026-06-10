@@ -106,7 +106,7 @@ pub async fn handle(
     // existing_spec.is_none() means this is a new registration, not an update.
     let fires_dir = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("schedules")
@@ -221,7 +221,7 @@ pub async fn handle(
     // Write signed YAML
     let node_dir = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let spec_path = writer::write_signed_node_item(
@@ -309,7 +309,7 @@ fn is_valid_misfire_policy(p: &str) -> bool {
 fn read_existing_schedule_body(state: &AppState, schedule_id: &str) -> Result<Option<Value>> {
     let existing_yaml_path = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("schedules")

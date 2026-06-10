@@ -42,7 +42,7 @@ pub struct ExecuteRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
     #[serde(default)]
     pub item_ref: Option<String>,
-    /// Project root path for three-tier resolution.
+    /// Project root path for resolution.
     #[serde(default)]
     pub project_path: Option<String>,
     #[serde(default)]
@@ -232,11 +232,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // re-runs canonical_project_ref defensively, but we still need
         // a PathBuf here to feed it.
         //
-        // For LiveFs with no project_path, fall back to the user-space
-        // root (~/.ryeos/). The daemon's cwd is irrelevant to the
-        // caller — when no project is in play the natural context for
-        // an item is the operator's user space, not whatever directory
-        // the daemon happens to have been launched from.
         let project_path = match &request.project_path {
             Some(p) => std::path::PathBuf::from(p),
             None => {
@@ -246,11 +241,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
                     ).into_response());
                 }
-                ryeos_engine::roots::user_root().map_err(|err| {
-                    RouteDispatchError::Internal(format!(
-                        "no project_path supplied and user_root unavailable: {err}"
-                    ))
-                })?
+                state.config.app_root.clone()
             }
         };
 
@@ -314,7 +305,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             caller_scopes: caller_scopes.clone(),
             // Per-request engine: for PushedHead this is the
             // per-snapshot overlay engine (built against the caller's
-            // materialised user space + trust overlay). For LiveFs
+            // materialised project + trust overlay). For LiveFs
             // it's just state.engine. Either way, all downstream
             // resolution flows through this Arc.
             engine: project_ctx.request_engine.clone(),
@@ -628,7 +619,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             };
             Some(
                 crate::remote::config::load_remotes_layered_report(
-                    &state.config.system_space_dir,
+                    &state.config.app_root,
                     project_for_layering,
                 )
                 .map(|report| report.remotes)
@@ -1102,7 +1093,7 @@ mod tests {
     fn loaded(remote: crate::remote::config::RemoteConfig) -> LoadedRemote {
         LoadedRemote {
             config: remote,
-            scope: crate::remote::config::RemoteConfigScope::User,
+            scope: crate::remote::config::RemoteConfigScope::Operator,
             config_path: PathBuf::new(),
         }
     }

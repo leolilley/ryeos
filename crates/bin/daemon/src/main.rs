@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
 
     // Verify operator-owned node initialization before any local repairs
     // or runtime-state writes. `ryeos init` is authoritative for bundle
-    // registrations and user-space identity/trust artifacts.
+    // registrations and operator identity/trust artifacts.
     bootstrap::verify_initialized(&config)?;
 
     // Handle subcommands BEFORE acquiring the daemon state lock or
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
     // standalone service) from racing in and removing the first
     // daemon's live socket. The lock is automatically released when
     // the process exits (Drop on the file descriptor).
-    let state_lock_path = state_lock::default_lock_path(&config.system_space_dir);
+    let state_lock_path = state_lock::default_lock_path(&config.app_root);
     let _state_lock = state_lock::StateLock::acquire(&state_lock_path).context(
         "failed to acquire state lock — is another ryeosd instance or standalone service running?",
     )?;
@@ -103,10 +103,10 @@ async fn main() -> Result<()> {
     // Initialize tracing with file sink only after init-state passes so direct
     // `ryeosd` startup on a fresh system cannot create runtime state.
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(
-        &config.system_space_dir,
+        &config.app_root,
     ));
 
-    // Repair only daemon-local artifacts. Missing user-space artifacts
+    // Repair only daemon-local artifacts. Missing operator artifacts
     // (user signing key, trust docs) fail with guidance to run
     // `ryeos init` — daemon never substitutes for operator init.
     bootstrap::repair_daemon_local(&config)?;
@@ -255,21 +255,26 @@ async fn main() -> Result<()> {
     )));
     let identity = NodeIdentity::load(&config.node_signing_key_path)?;
 
-    let state_root = config.system_space_dir.join(".ai").join("state");
+    let runtime_state_dir = config.runtime_state_dir();
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
 
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
 
     let state_store = Arc::new(
-        state_store::StateStore::new(state_root, runtime_db_path, signer, write_barrier.clone())
-            .context("StateStore initialization failed")?,
+        state_store::StateStore::new(
+            runtime_state_dir,
+            runtime_db_path,
+            signer,
+            write_barrier.clone(),
+        )
+        .context("StateStore initialization failed")?,
     );
     tracing::info!("StateStore initialized successfully");
 
     // Open scheduler DB
     let scheduler_db_path = config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("scheduler.sqlite3");
@@ -285,7 +290,7 @@ async fn main() -> Result<()> {
         kind_profiles.clone(),
         events.clone(),
     )?);
-    threads.set_scheduler_db(scheduler_db.clone(), config.system_space_dir.clone());
+    threads.set_scheduler_db(scheduler_db.clone(), config.app_root.clone());
     let commands = Arc::new(CommandService::new(
         state_store.clone(),
         kind_profiles.clone(),
@@ -303,7 +308,7 @@ async fn main() -> Result<()> {
     // `thread_lifecycle::spawn_item`. Daemon stays vendor-
     // agnostic — `vault.rs` only moves opaque `String -> String` pairs.
     let vault: Arc<dyn ryeos_app::vault::NodeVault> = Arc::new(
-        ryeos_app::vault::SealedEnvelopeVault::load(&config.system_space_dir)
+        ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
             .context("load sealed-envelope vault — did `ryeos init` (or daemon bootstrap) run?")?,
     );
 
@@ -363,12 +368,12 @@ async fn main() -> Result<()> {
         scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(
-            ryeos_app::ignore::load_from_system_space(&config.system_space_dir)
+            ryeos_app::ignore::load_from_app_root(&config.app_root)
                 .context("load ingest ignore config — did `ryeos init` run?")?,
         ),
         vault_fingerprint: {
             let vault_pk_path = config
-                .system_space_dir
+                .app_root
                 .join(ryeos_engine::AI_DIR)
                 .join("node/vault/public_key.pem");
             if vault_pk_path.exists() {
@@ -422,17 +427,15 @@ async fn main() -> Result<()> {
         bind: Some(actual_bind.to_string()),
         started_at: Some(lillux::time::iso8601_now()),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        system_space_dir: config.system_space_dir.clone(),
+        app_root: config.app_root.clone(),
     };
-    let daemon_json_path = config.system_space_dir.join("daemon.json");
-    daemon_info
-        .write(&config.system_space_dir)
-        .with_context(|| {
-            format!(
-                "failed to write daemon.json at {} — tools cannot discover the daemon without it",
-                daemon_json_path.display()
-            )
-        })?;
+    let daemon_json_path = config.app_root.join("daemon.json");
+    daemon_info.write(&config.app_root).with_context(|| {
+        format!(
+            "failed to write daemon.json at {} — tools cannot discover the daemon without it",
+            daemon_json_path.display()
+        )
+    })?;
 
     #[cfg(unix)]
     {
@@ -690,7 +693,7 @@ async fn run_service_standalone(
     // perform identity/engine/node-config loads while a competing
     // daemon held the lock, only to fail late.
     let _state_lock =
-        state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.system_space_dir))
+        state_lock::StateLock::acquire(&state_lock::default_lock_path(&config.app_root))
             .context("failed to acquire state lock — is the daemon running?")?;
 
     // Two-phase node-config bootstrap (same as daemon-start path)
@@ -703,12 +706,12 @@ async fn run_service_standalone(
 
     let services = Arc::new(build_service_registry());
 
-    let state_root = config.system_space_dir.join(".ai").join("state");
+    let runtime_state_dir = config.runtime_state_dir();
     let runtime_db_path = config.db_path.clone();
     let signer = Arc::new(state_store::NodeIdentitySigner::from_identity(&identity));
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(state_store::StateStore::new(
-        state_root,
+        runtime_state_dir,
         runtime_db_path,
         signer,
         write_barrier.clone(),
@@ -764,7 +767,7 @@ async fn run_service_standalone(
         service_descriptors: service_descriptors(),
         node_config: node_config_snapshot.clone(),
         vault: Arc::new(
-            ryeos_app::vault::SealedEnvelopeVault::load(&config.system_space_dir)
+            ryeos_app::vault::SealedEnvelopeVault::load(&config.app_root)
                 .context("load sealed-envelope vault — did `ryeos init` run?")?,
         ),
         command_registry: standalone_command_registry,

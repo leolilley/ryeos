@@ -1,6 +1,6 @@
 //! Node-config loader: two-phase bootstrap for daemon-consumed control-plane items.
 //!
-//! Phase 1: `load_bundle_section()` — minimal bootstrap verifier, system space only.
+//! Phase 1: `load_bundle_section()` — minimal bootstrap verifier, bundle roots only.
 //! Phase 2: `load_full()` — full engine-based scan across all sources.
 //!
 //! Section directories support recursive subfolders. For example:
@@ -37,10 +37,10 @@ use crate::route_raw::RawRouteSpec;
 
 /// Bootstrap loader for node-config items.
 ///
-/// Phase 1: `load_bundle_section()` — minimal bootstrap verifier, system space only.
+/// Phase 1: `load_bundle_section()` — minimal bootstrap verifier, bundle roots only.
 /// Phase 2: `load_full()` — full engine-based scan across all sources.
 pub struct BootstrapLoader<'a> {
-    pub system_space_dir: &'a Path,
+    pub app_root: &'a Path,
     pub trust_store: &'a TrustStore,
 }
 
@@ -213,17 +213,13 @@ fn verify_and_parse(
 impl<'a> BootstrapLoader<'a> {
     /// Phase 1: load only the `bundles` section to determine effective bundle roots.
     ///
-    /// Scans `<system_space_dir>/.ai/node/bundles/` (flat only — no recursion).
+    /// Scans `<app_root>/.ai/node/bundles/` (flat only — no recursion).
     /// Uses minimal bootstrap verifier (signature + hash, no full engine).
     pub fn load_bundle_section(&self) -> Result<Vec<BundleRecord>> {
         let section = BundleSection;
         let mut records: Vec<BundleRecord> = Vec::new();
 
-        let node_dir = self
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join("bundles");
+        let node_dir = self.app_root.join(".ai").join("node").join("bundles");
         if !node_dir.is_dir() {
             return Ok(records);
         }
@@ -316,13 +312,13 @@ impl<'a> BootstrapLoader<'a> {
             let scan_roots = match section.source_policy() {
                 SectionSourcePolicy::SystemAndState => {
                     vec![system_scan_root(
-                        self.system_space_dir,
+                        self.app_root,
                         &command_registration_policy.policy,
                     )]
                 }
                 SectionSourcePolicy::EffectiveBundleRootsAndState => {
                     let mut roots = vec![system_scan_root(
-                        self.system_space_dir,
+                        self.app_root,
                         &command_registration_policy.policy,
                     )];
                     for b in bundles {
@@ -501,15 +497,11 @@ impl<'a> BootstrapLoader<'a> {
         section_table: &SectionTable,
     ) -> Result<CommandRegistrationPolicyRecord> {
         let section_name = "command_registration";
-        let node_fingerprint = node_identity_fingerprint(self.system_space_dir)?;
+        let node_fingerprint = node_identity_fingerprint(self.app_root)?;
         let section = section_table
             .get(section_name)
             .context("command_registration section handler missing")?;
-        let section_dir = self
-            .system_space_dir
-            .join(".ai")
-            .join("node")
-            .join(section_name);
+        let section_dir = self.app_root.join(".ai").join("node").join(section_name);
         if !section_dir.is_dir() {
             bail!(
                 "missing required node config section '{}' at {}",
@@ -575,8 +567,8 @@ impl<'a> BootstrapLoader<'a> {
     }
 }
 
-fn node_identity_fingerprint(system_space_dir: &Path) -> Result<String> {
-    let key_path = system_space_dir
+fn node_identity_fingerprint(app_root: &Path) -> Result<String> {
+    let key_path = app_root
         .join(".ai")
         .join("node")
         .join("identity")
@@ -607,11 +599,11 @@ fn check_hosted_policy_uniqueness(records: &[HostedNodePolicyRecord]) -> Result<
 }
 
 fn system_scan_root(
-    system_space_dir: &Path,
+    app_root: &Path,
     policy: &ryeos_runtime::CommandRegistrationPolicy,
 ) -> NodeConfigScanRoot {
     NodeConfigScanRoot {
-        path: system_space_dir.to_path_buf(),
+        path: app_root.to_path_buf(),
         command_provenance: ryeos_runtime::CommandProvenance {
             origin: ryeos_runtime::CommandOrigin::SystemSpace,
             command_registration_caps: policy.system_source_caps.clone(),
@@ -999,7 +991,7 @@ mod tests {
         }];
 
         let loader = BootstrapLoader {
-            system_space_dir: system.path(),
+            app_root: system.path(),
             trust_store: &trust_store,
         };
         let snapshot = loader
@@ -1054,7 +1046,7 @@ mod tests {
         }];
 
         let loader = BootstrapLoader {
-            system_space_dir: system.path(),
+            app_root: system.path(),
             trust_store: &trust_store,
         };
         let snapshot = loader

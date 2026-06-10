@@ -12,9 +12,9 @@ use crate::actions::hosted_policy::load_hosted_policy;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExportRemoteDescriptorParams {
-    /// System space directory for the node being described.
+    /// App root directory for the node being described.
     #[serde(default)]
-    pub system_space_dir: Option<String>,
+    pub app_root: Option<String>,
     /// Name callers should use for the remote.
     pub name: String,
     /// Public HTTPS URL callers should use to reach the node.
@@ -96,8 +96,8 @@ pub fn run_export_remote_descriptor(
         bail!("url must not be empty");
     }
 
-    let system_space_dir = resolve_system_space_dir(params.system_space_dir)?;
-    let identity_path = system_space_dir
+    let app_root = resolve_app_root(params.app_root)?;
+    let identity_path = app_root
         .join(".ai")
         .join("node")
         .join("identity")
@@ -125,7 +125,7 @@ pub fn run_export_remote_descriptor(
         );
     }
 
-    let hosted_policy = load_hosted_policy(&system_space_dir)?;
+    let hosted_policy = load_hosted_policy(&app_root)?;
     if let Some(policy) = &hosted_policy {
         enforce_hosted_transport_policy(&url, policy)?;
     }
@@ -231,16 +231,16 @@ pub fn run_export_remote_descriptor(
     }
 }
 
-fn resolve_system_space_dir(opt: Option<String>) -> Result<PathBuf> {
+fn resolve_app_root(opt: Option<String>) -> Result<PathBuf> {
     if let Some(path) = opt {
         return Ok(PathBuf::from(path));
     }
-    if let Ok(path) = std::env::var("RYEOS_SYSTEM_SPACE_DIR") {
+    if let Ok(path) = std::env::var("RYEOS_APP_ROOT") {
         return Ok(PathBuf::from(path));
     }
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
-        .ok_or_else(|| anyhow::anyhow!("could not determine system space directory"))
+        .ok_or_else(|| anyhow::anyhow!("could not determine app rootectory"))
 }
 
 fn enforce_hosted_transport_policy(
@@ -327,7 +327,7 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("USER_SPACE", &user);
+            std::env::set_var("RYEOS_APP_ROOT", &user);
             Self {
                 _env_guard: env_guard,
                 _user: user,
@@ -338,12 +338,12 @@ mod tests {
 
     impl Drop for HostedPolicyFixture {
         fn drop(&mut self) {
-            std::env::remove_var("USER_SPACE");
+            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 
-    fn write_hosted_policy(system_space_dir: &std::path::Path, key: &lillux::crypto::SigningKey) {
-        let path = system_space_dir.join(".ai/node/hosted/policy.yaml");
+    fn write_hosted_policy(app_root: &std::path::Path, key: &lillux::crypto::SigningKey) {
+        let path = app_root.join(".ai/node/hosted/policy.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = r#"
 category: "hosted"
@@ -389,7 +389,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec![],
@@ -418,7 +418,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "http://node.example.com".into(),
             capabilities: vec![],
@@ -446,7 +446,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-local".into(),
             url: "http://127.0.0.1:8000".into(),
             capabilities: vec![],
@@ -471,7 +471,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-local".into(),
             url: "http://[::1]:8000".into(),
             capabilities: vec![],
@@ -496,7 +496,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "http://127.example.com".into(),
             capabilities: vec![],
@@ -524,7 +524,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec![],
@@ -553,7 +553,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let err = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec!["provider-dashboard".into()],
@@ -582,7 +582,7 @@ operations:
         write_hosted_policy(tmp.path(), &fixture.key);
 
         let result = run_export_remote_descriptor(ExportRemoteDescriptorParams {
-            system_space_dir: Some(tmp.path().to_string_lossy().to_string()),
+            app_root: Some(tmp.path().to_string_lossy().to_string()),
             name: "hosted-prod".into(),
             url: "https://node.example.com".into(),
             capabilities: vec!["remote-execute".into()],

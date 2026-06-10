@@ -198,10 +198,10 @@ pub async fn run(
     };
 
     // 10. Resolve the native executor path and spawn.
-    let system_roots: Vec<std::path::PathBuf> = engine_roots
+    let bundle_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
         .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .map(|r| {
             r.ai_root
                 .parent()
@@ -211,15 +211,15 @@ pub async fn run(
         .collect();
     let cache_root = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
-        &system_roots,
+        &bundle_roots,
         &executor_ref,
         &cache_root,
         &engine.trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
     .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
 
@@ -227,7 +227,7 @@ pub async fn run(
     let stdin_data = serde_json::to_string(&envelope)?;
     let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
-        &state.config.system_space_dir,
+        &state.config.app_root,
     );
     let envs = ryeos_app::process::build_subprocess_envs_with_roots(
         &std::collections::BTreeMap::new(),

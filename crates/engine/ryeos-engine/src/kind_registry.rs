@@ -839,7 +839,7 @@ impl KindSchema {
 /// Unified kind registry — maps kind strings to `KindSchema`.
 ///
 /// Built in two stages:
-///   1. Base registry from user + system space at engine startup
+///   1. Base registry from bundle roots at engine startup
 ///   2. Project overlay per request after `ProjectContext` materialization
 ///
 /// The loader uses raw filesystem paths — it must NOT depend on
@@ -869,7 +869,7 @@ impl KindRegistry {
     ///
     /// Kind schemas are node-tier items (live under
     /// `<bundle-root>/.ai/node/engine/kinds/`); they do NOT participate
-    /// in the project/user/system three-tier resolution that operator-
+    /// in the project + bundle resolution that operator-
     /// edited items use. Multiple roots are supported only because more
     /// than one node bundle may ship kind schemas — there is no
     /// per-project override path, and the first-found bundle wins on a
@@ -2658,7 +2658,7 @@ execution:
     }
 
     // Removed: `project_overlay_replaces_resolution` — kind schemas are
-    // node-tier items, not three-tier-resolved. There is no project
+    // node-tier items, not project+bundle-resolved. There is no project
     // overlay path; `with_project_overlay` was deleted.
 
     fn parse_exec(yaml: &str) -> Result<Option<ExecutionSchema>, EngineError> {

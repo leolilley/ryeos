@@ -26,8 +26,8 @@ use ryeos_scheduler::{SchedulerContext, ThreadResultOutcome};
 pub struct AppSchedulerContext(pub Arc<AppState>);
 
 impl SchedulerContext for AppSchedulerContext {
-    fn system_space_dir(&self) -> &std::path::Path {
-        &self.0.config.system_space_dir
+    fn app_root(&self) -> &std::path::Path {
+        &self.0.config.app_root
     }
 
     fn scheduler_db(&self) -> Arc<SchedulerDb> {
@@ -81,11 +81,12 @@ impl SchedulerContext for AppSchedulerContext {
         _trigger_reason: &str,
     ) -> Result<()> {
         let params: serde_json::Value = serde_json::from_str(&spec.params)?;
-        let project_path = spec.project_root.as_deref().unwrap_or_else(|| {
-            self.0.config.system_space_dir.to_str().expect(
-                "system_space_dir must be valid UTF-8 — it is configured from a known directory",
-            )
-        });
+        let project_path =
+            spec.project_root.as_deref().unwrap_or_else(|| {
+                self.0.config.app_root.to_str().expect(
+                    "app_root must be valid UTF-8 — it is configured from a known directory",
+                )
+            });
         let project_path_buf = std::path::PathBuf::from(project_path);
         let original_root_kind = CanonicalRef::parse(&spec.item_ref)
             .map(|ref_| ref_.kind)

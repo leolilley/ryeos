@@ -332,20 +332,19 @@ fn read_declared_host_env(required_secrets: &[String]) -> Result<HashMap<String,
     Ok(out)
 }
 
-/// Compute the conventional `.env` search directories for the
-/// dispatch path: `[user_home, project_root]` when both are
-/// available, falling back to whichever is present.
+/// Compute the conventional `.env` search directories for the dispatch path:
+/// operator config first, then project root.
 ///
 /// Order matters — later entries win on key collision (see
-/// [`read_required_secrets`]). The operator's user-wide `.env` is
-/// loaded first; the project's `.env` overrides on top.
+/// [`read_required_secrets`]). The operator `.env` is loaded first; the
+/// project's `.env` overrides on top.
 ///
 /// Returns an empty vector when neither is resolvable. The dispatch
 /// path then degenerates to vault-only (the pre-step-7c behavior).
 pub fn dotenv_search_dirs(project_path: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(p) = roots::user_dotenv_path() {
-        dirs.push(p.parent().unwrap().to_path_buf());
+    if let Ok(root) = roots::runtime_root() {
+        dirs.push(root.config());
     }
     if let Some(p) = project_path {
         dirs.push(p.to_path_buf());
@@ -410,20 +409,17 @@ impl SealedEnvelopeVault {
         }
     }
 
-    /// Load the vault secret key from `<system_space_dir>/.ai/node/vault/private_key.pem`
-    /// and bind it to `<system_space_dir>/.ai/state/secrets/store.enc`.
-    pub fn load(system_space_dir: &Path) -> Result<Self> {
-        let secret_path = system_space_dir
+    /// Load the vault secret key from `<app_root>/.ai/node/vault/private_key.pem`
+    /// and bind it to `<app_root>/.ai/state/secrets/store.enc`.
+    pub fn load(app_root: &Path) -> Result<Self> {
+        let secret_path = app_root
             .join(ryeos_engine::AI_DIR)
             .join("node")
             .join("vault")
             .join("private_key.pem");
         let secret_key = lillux::vault::read_secret_key(&secret_path)
             .map_err(|e| anyhow!("vault: load secret key {}: {e:#}", secret_path.display()))?;
-        Ok(Self::new(
-            default_sealed_store_path(system_space_dir),
-            secret_key,
-        ))
+        Ok(Self::new(default_sealed_store_path(app_root), secret_key))
     }
 
     pub fn store_path(&self) -> &Path {

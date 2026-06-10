@@ -35,14 +35,14 @@ pub struct HooksFile {
 
 pub struct HooksLoader {
     system_hook_conditions_path: PathBuf,
-    user_space: Option<PathBuf>,
+    operator_root: Option<PathBuf>,
 }
 
 impl HooksLoader {
-    pub fn new(system_hook_conditions_path: PathBuf, user_space: Option<PathBuf>) -> Self {
+    pub fn new(system_hook_conditions_path: PathBuf, operator_root: Option<PathBuf>) -> Self {
         Self {
             system_hook_conditions_path,
-            user_space,
+            operator_root,
         }
     }
 
@@ -71,12 +71,12 @@ impl HooksLoader {
         Ok(self.load()?.infra_hooks)
     }
 
-    pub fn get_user_hooks(&self) -> anyhow::Result<Vec<HookDefinition>> {
-        let user_space = match &self.user_space {
+    pub fn get_operator_hooks(&self) -> anyhow::Result<Vec<HookDefinition>> {
+        let operator_root = match &self.operator_root {
             Some(p) => p,
             None => return Ok(vec![]),
         };
-        let path = crate::paths::user_hooks_path(user_space);
+        let path = crate::paths::operator_hooks_path(operator_root);
         load_hooks_file(&path)
     }
 
@@ -115,12 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn get_user_hooks_returns_empty_when_missing() {
+    fn get_operator_hooks_returns_empty_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("hook_conditions.yaml");
         std::fs::write(&path, "builtin_hooks: []\n").unwrap();
         let loader = HooksLoader::new(path, Some(tmp.path().join("no-such-user")));
-        assert!(loader.get_user_hooks().unwrap().is_empty());
+        assert!(loader.get_operator_hooks().unwrap().is_empty());
     }
 
     #[test]

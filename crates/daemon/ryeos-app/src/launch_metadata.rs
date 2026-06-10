@@ -32,7 +32,7 @@ pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 /// notably the `checkpoints/` subdir written by replay-aware
 /// subprocesses and read by the resume path.
 ///
-/// Lives under `config.system_space_dir` (daemon-owned, persistent, NOT in
+/// Lives under `config.app_root` (daemon-owned, persistent, NOT in
 /// CAS) rather than under the project working dir, because the
 /// working dir is an ephemeral CAS checkout and fold-back skips
 /// `state/` and dotfile paths.
@@ -47,11 +47,8 @@ pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 /// which is intentionally separate from the CAS projection
 /// (`state_db`) because it holds OS-level facts (pids, pgids,
 /// runtime decisions) that have no CAS source to project from.
-pub fn daemon_thread_state_dir(
-    system_space_dir: &std::path::Path,
-    thread_id: &str,
-) -> std::path::PathBuf {
-    system_space_dir.join("threads").join(thread_id)
+pub fn daemon_thread_state_dir(app_root: &std::path::Path, thread_id: &str) -> std::path::PathBuf {
+    app_root.join("threads").join(thread_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_thread_state_dir_is_under_system_space_dir() {
+    fn daemon_thread_state_dir_is_under_app_root() {
         let dir = daemon_thread_state_dir(std::path::Path::new("/var/lib/ryeosd"), "T-abc");
         assert_eq!(dir, PathBuf::from("/var/lib/ryeosd/threads/T-abc"));
     }

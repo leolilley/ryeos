@@ -39,7 +39,7 @@ pub async fn handle(
     // Delete YAML file
     let yaml_path = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("node")
         .join("schedules")

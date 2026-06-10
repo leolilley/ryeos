@@ -55,7 +55,7 @@ pub fn standard_bundle_root() -> PathBuf {
 /// in the dev tree — kind schemas, handler descriptor YAMLs, and the
 /// binary `item_source.json` sidecars all anchor to this single key.
 /// Public-key bytes are pinned here so the engine doesn't have to read
-/// `~/.ryeos/.ai/config/keys/signing/private_key.pem` from operator state.
+/// `<app_root>/.ai/config/keys/signing/private_key.pem` from operator state.
 ///
 /// PEM source: `crates/bin/daemon/tests/fixtures/trusted_signers/<fp>.toml`.
 pub fn platform_author_verifying_key() -> VerifyingKey {
@@ -116,8 +116,8 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
     let std_root = standard_bundle_root();
     let trust_store = live_trust_store();
     let tagged_roots: Vec<(PathBuf, TrustClass)> = vec![
-        (core_root, TrustClass::TrustedSystem),
-        (std_root, TrustClass::TrustedSystem),
+        (core_root, TrustClass::TrustedBundle),
+        (std_root, TrustClass::TrustedBundle),
     ];
     let registry = HandlerRegistry::load_base(&tagged_roots, &trust_store)
         .expect("live HandlerRegistry must load from bundles/{core,standard}/");

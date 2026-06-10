@@ -1,7 +1,7 @@
-//! Shared test-only mutex for USER_SPACE env-var mutations.
+//! Shared test-only mutex for app-root env-var mutations.
 //!
 //! Multiple modules (`project_resolve`, `dispatcher`) mutate the
-//! process-wide `USER_SPACE` environment variable in their tests. To
+//! process-wide `RYEOS_APP_ROOT` environment variable in their tests. To
 //! prevent races when tests run in parallel inside the same binary,
 //! they all acquire this single shared mutex via `test_env::lock()`.
 #![cfg(test)]

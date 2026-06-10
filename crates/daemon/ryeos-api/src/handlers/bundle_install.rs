@@ -1,7 +1,7 @@
 //! `bundle.install` — install a downstream bundle via node-config writer.
 //!
-//! Copies source to `<system_space_dir>/.ai/bundles/<name>/`, writes a signed
-//! `kind: node` `section: bundles` item at `<system_space_dir>/.ai/node/bundles/<name>.yaml`.
+//! Copies source to `<app_root>/.ai/bundles/<name>/`, writes a signed
+//! `kind: node` `section: bundles` item at `<app_root>/.ai/node/bundles/<name>.yaml`.
 //!
 //! Any bundle name is accepted — no special treatment for any name.
 //!
@@ -15,7 +15,6 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use ryeos_bundle::preflight::preflight_verify_bundle_in_context;
-use ryeos_engine::roots;
 
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
@@ -66,7 +65,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         );
     }
 
-    let bundles_root = state.config.system_space_dir.join(".ai").join("bundles");
+    let bundles_root = state.config.app_root.join(".ai").join("bundles");
     let target = bundles_root.join(&req.name);
 
     let replaced = target.exists();
@@ -81,29 +80,24 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // Preflight verification: parse + validate + signature-check every
     // signable item in the bundle BEFORE any filesystem mutation.
     //
-    // Trust source: operator-tier ONLY (project + user). System bundles
-    // (`system_space_dir`) contribute kind schemas + parser tools, never
-    // trust docs. Bundles whose signers aren't already trusted are
-    // rejected — operators must `ryeos trust pin <fingerprint>` first.
-    let user_root = roots::user_root().ok();
+    // Trust source: project + operator app root. Bundles whose signers aren't
+    // already trusted are rejected — operators must pin trust first.
+    let operator_config_root = state.config.runtime_root().config();
     let source_canonical = req
         .source_path
         .canonicalize()
         .with_context(|| format!("canonicalize source path {}", req.source_path.display()))?;
     let installed_dependency_roots: Vec<PathBuf> =
-        ryeos_bundle::installed::load_installed_bundle_records(
-            &state.config.system_space_dir,
-            user_root.as_deref(),
-        )
-        .context("preflight: load installed bundle registrations")?
-        .into_iter()
-        .filter(|record| record.name != req.name && record.bundle_root != source_canonical)
-        .map(|record| record.bundle_root)
-        .collect();
+        ryeos_bundle::installed::load_installed_bundle_records(&state.config.app_root)
+            .context("preflight: load installed bundle registrations")?
+            .into_iter()
+            .filter(|record| record.name != req.name && record.bundle_root != source_canonical)
+            .map(|record| record.bundle_root)
+            .collect();
     preflight_verify_bundle_in_context(
         &req.source_path,
         &installed_dependency_roots,
-        user_root.as_deref(),
+        &operator_config_root,
     )
     .context("preflight verification refused install")?;
 
@@ -135,7 +129,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     // Write signed kind: node bundle registration
     let config_item_path = ryeos_app::node_config::writer::write_signed_node_item(
-        &state.config.system_space_dir.join(".ai").join("node"),
+        &state.config.app_root.join(".ai").join("node"),
         "bundles",
         &req.name,
         &serde_json::json!({ "path": canonical_target }),

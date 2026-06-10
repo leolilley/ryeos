@@ -51,7 +51,7 @@ mod tests {
             item: ComposeItemContext {
                 requested_id: "x:r".into(),
                 resolved_ref: "x:r".into(),
-                trust_class: TrustClassWire::TrustedSystem,
+                trust_class: TrustClassWire::TrustedBundle,
             },
             parsed,
         }

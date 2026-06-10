@@ -590,10 +590,10 @@ fn project_single_root(
         }))
         .unwrap_or(Value::Null),
         trust_class: match a.trust_class {
-            ryeos_engine::resolution::TrustClass::TrustedSystem => TrustClass::TrustedSystem,
-            ryeos_engine::resolution::TrustClass::TrustedUser => TrustClass::TrustedUser,
-            ryeos_engine::resolution::TrustClass::UntrustedUserSpace => TrustClass::TrustedProject,
-            ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Untrusted,
+            ryeos_engine::resolution::TrustClass::TrustedBundle => TrustClass::TrustedBundle,
+            ryeos_engine::resolution::TrustClass::TrustedProject => TrustClass::TrustedProject,
+            ryeos_engine::resolution::TrustClass::UntrustedProject => TrustClass::UntrustedProject,
+            ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Unsigned,
         },
     };
 
@@ -844,10 +844,10 @@ pub(crate) async fn dispatch_op(
     }
 
     // 8. Resolve the native executor path and spawn via lillux.
-    let system_roots: Vec<std::path::PathBuf> = engine_roots
+    let bundle_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
         .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .map(|r| {
             r.ai_root
                 .parent()
@@ -857,15 +857,15 @@ pub(crate) async fn dispatch_op(
         .collect();
     let cache_root = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
-        &system_roots,
+        &bundle_roots,
         &executor_ref,
         &cache_root,
         &ctx.engine.trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
         executor_ref: executor_ref.clone(),
@@ -875,7 +875,7 @@ pub(crate) async fn dispatch_op(
     let executor_path_str = executor_path.to_string_lossy().to_string();
     let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
-        &state.config.system_space_dir,
+        &state.config.app_root,
     );
     let envs = ryeos_app::process::build_subprocess_envs_with_roots(
         &std::collections::BTreeMap::new(),
@@ -1454,10 +1454,10 @@ async fn dispatch_streaming_subprocess(
         .engine
         .resolution_roots(Some(request.project_path.to_path_buf()));
 
-    let system_roots: Vec<std::path::PathBuf> = engine_roots
+    let bundle_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
         .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::System)
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
         .map(|r| {
             r.ai_root
                 .parent()
@@ -1531,15 +1531,15 @@ async fn dispatch_streaming_subprocess(
 
     let cache_root = state
         .config
-        .system_space_dir
+        .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
     let executor_path = crate::execution::launch::resolve_native_executor_path(
-        &system_roots,
+        &bundle_roots,
         &executor_ref,
         &cache_root,
         &ctx.engine.trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedSystem,
+        ryeos_engine::resolution::TrustClass::TrustedBundle,
     )
     .map_err(|e| DispatchError::RuntimeMaterializationFailed {
         executor_ref: executor_ref.clone(),
@@ -1549,7 +1549,7 @@ async fn dispatch_streaming_subprocess(
     let executor_path_str = executor_path.to_string_lossy().to_string();
     let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine_roots,
-        &state.config.system_space_dir,
+        &state.config.app_root,
     );
     let envs = ryeos_app::process::build_subprocess_envs_with_roots(
         &std::collections::BTreeMap::new(),
@@ -2153,7 +2153,7 @@ metadata:
             ParserRegistry::empty(),
             std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
         );
-        Engine::new(kinds, parser_dispatcher, None, vec![]).with_trust_store(ts)
+        Engine::new(kinds, parser_dispatcher, vec![]).with_trust_store(ts)
     }
 
     fn test_plan_context(project_path: PathBuf) -> ryeos_engine::contracts::PlanContext {
@@ -2929,14 +2929,14 @@ runtime_vault:
 
     #[test]
     fn project_single_root_root_only() {
-        let root = make_ancestor("knowledge:my/doc", "hello", EngineTrustClass::TrustedSystem);
+        let root = make_ancestor("knowledge:my/doc", "hello", EngineTrustClass::TrustedBundle);
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![],
             references_edges: vec![],
             referenced_items: vec![],
             step_outputs: std::collections::HashMap::new(),
-            effective_trust_class: EngineTrustClass::TrustedSystem,
+            effective_trust_class: EngineTrustClass::TrustedBundle,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2956,17 +2956,25 @@ runtime_vault:
         let root = make_ancestor(
             "directive:base",
             "base body",
-            EngineTrustClass::TrustedSystem,
+            EngineTrustClass::TrustedBundle,
         );
-        let mid = make_ancestor("directive:mid", "mid body", EngineTrustClass::TrustedUser);
-        let leaf = make_ancestor("directive:leaf", "leaf body", EngineTrustClass::TrustedUser);
+        let mid = make_ancestor(
+            "directive:mid",
+            "mid body",
+            EngineTrustClass::TrustedProject,
+        );
+        let leaf = make_ancestor(
+            "directive:leaf",
+            "leaf body",
+            EngineTrustClass::TrustedProject,
+        );
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![mid.clone(), leaf.clone()],
             references_edges: vec![],
             referenced_items: vec![],
             step_outputs: std::collections::HashMap::new(),
-            effective_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedProject,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -2994,12 +3002,12 @@ runtime_vault:
         let root = make_ancestor(
             "knowledge:main",
             "main content",
-            EngineTrustClass::TrustedUser,
+            EngineTrustClass::TrustedProject,
         );
         let ref_item = make_ancestor(
             "knowledge:other",
             "other content",
-            EngineTrustClass::TrustedSystem,
+            EngineTrustClass::TrustedBundle,
         );
         let output = ResolutionOutput {
             root: root.clone(),
@@ -3009,12 +3017,12 @@ runtime_vault:
                 from_source_path: std::path::PathBuf::from("/tmp/main"),
                 to_ref: "knowledge:other".to_string(),
                 to_source_path: std::path::PathBuf::from("/tmp/other"),
-                trust_class: EngineTrustClass::TrustedSystem,
+                trust_class: EngineTrustClass::TrustedBundle,
                 added_by: ResolutionStepName::ResolveReferences,
             }],
             referenced_items: vec![ref_item.clone()],
             step_outputs: std::collections::HashMap::new(),
-            effective_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedProject,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -3035,19 +3043,18 @@ runtime_vault:
 
     #[test]
     fn project_single_root_trust_class_mapping() {
-        // Engine TrustClass → Wire TrustClass mapping is the critical semantic bridge.
-        let root_system = make_ancestor("item:sys", "sys", EngineTrustClass::TrustedSystem);
-        let root_user = make_ancestor("item:user", "user", EngineTrustClass::TrustedUser);
+        // Engine TrustClass → Wire TrustClass mapping must preserve trust exactly.
+        let root_bundle = make_ancestor("item:bundle", "bundle", EngineTrustClass::TrustedBundle);
+        let root_project = make_ancestor("item:project", "project", EngineTrustClass::TrustedProject);
         let root_untrusted =
-            make_ancestor("item:untrusted", "un", EngineTrustClass::UntrustedUserSpace);
+            make_ancestor("item:untrusted", "un", EngineTrustClass::UntrustedProject);
         let root_unsigned = make_ancestor("item:unsigned", "us", EngineTrustClass::Unsigned);
 
         let cases: Vec<(ResolvedAncestor, WireTrustClass)> = vec![
-            (root_system, WireTrustClass::TrustedSystem),
-            (root_user, WireTrustClass::TrustedUser),
-            // UntrustedUserSpace → TrustedProject (semantic bridge)
-            (root_untrusted, WireTrustClass::TrustedProject),
-            (root_unsigned, WireTrustClass::Untrusted),
+            (root_bundle, WireTrustClass::TrustedBundle),
+            (root_project, WireTrustClass::TrustedProject),
+            (root_untrusted, WireTrustClass::UntrustedProject),
+            (root_unsigned, WireTrustClass::Unsigned),
         ];
 
         for (ancestor, expected_trust) in cases {
@@ -3073,7 +3080,11 @@ runtime_vault:
     fn project_single_root_edge_endpoint_missing_is_error() {
         // An edge referencing an item NOT in items_by_ref should produce
         // a ProjectionInvariant error.
-        let root = make_ancestor("knowledge:main", "content", EngineTrustClass::TrustedUser);
+        let root = make_ancestor(
+            "knowledge:main",
+            "content",
+            EngineTrustClass::TrustedProject,
+        );
         let output = ResolutionOutput {
             root: root.clone(),
             ancestors: vec![],
@@ -3082,12 +3093,12 @@ runtime_vault:
                 from_source_path: std::path::PathBuf::from("/tmp/main"),
                 to_ref: "knowledge:missing".to_string(), // not in referenced_items!
                 to_source_path: std::path::PathBuf::from("/tmp/missing"),
-                trust_class: EngineTrustClass::TrustedSystem,
+                trust_class: EngineTrustClass::TrustedBundle,
                 added_by: ResolutionStepName::ResolveReferences,
             }],
             referenced_items: vec![], // missing item NOT included
             step_outputs: std::collections::HashMap::new(),
-            effective_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedProject,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -3108,16 +3119,16 @@ runtime_vault:
     fn project_single_root_referenced_items_in_payload() {
         // Verify that referenced_items are included in items_by_ref
         // (not just root + ancestors).
-        let root = make_ancestor("knowledge:main", "main", EngineTrustClass::TrustedUser);
+        let root = make_ancestor("knowledge:main", "main", EngineTrustClass::TrustedProject);
         let ref1 = make_ancestor(
             "knowledge:ref1",
             "ref1 content",
-            EngineTrustClass::TrustedSystem,
+            EngineTrustClass::TrustedBundle,
         );
         let ref2 = make_ancestor(
             "knowledge:ref2",
             "ref2 content",
-            EngineTrustClass::TrustedUser,
+            EngineTrustClass::TrustedProject,
         );
         let output = ResolutionOutput {
             root: root.clone(),
@@ -3128,7 +3139,7 @@ runtime_vault:
                     from_source_path: std::path::PathBuf::from("/tmp/main"),
                     to_ref: "knowledge:ref1".to_string(),
                     to_source_path: std::path::PathBuf::from("/tmp/ref1"),
-                    trust_class: EngineTrustClass::TrustedSystem,
+                    trust_class: EngineTrustClass::TrustedBundle,
                     added_by: ResolutionStepName::ResolveReferences,
                 },
                 ResolutionEdge {
@@ -3136,13 +3147,13 @@ runtime_vault:
                     from_source_path: std::path::PathBuf::from("/tmp/main"),
                     to_ref: "knowledge:ref2".to_string(),
                     to_source_path: std::path::PathBuf::from("/tmp/ref2"),
-                    trust_class: EngineTrustClass::TrustedUser,
+                    trust_class: EngineTrustClass::TrustedProject,
                     added_by: ResolutionStepName::ResolveReferences,
                 },
             ],
             referenced_items: vec![ref1.clone(), ref2.clone()],
             step_outputs: std::collections::HashMap::new(),
-            effective_trust_class: EngineTrustClass::TrustedUser,
+            effective_trust_class: EngineTrustClass::TrustedProject,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 
@@ -3166,12 +3177,12 @@ runtime_vault:
         let root = make_ancestor(
             "knowledge:dup",
             "root version",
-            EngineTrustClass::TrustedSystem,
+            EngineTrustClass::TrustedBundle,
         );
         let ref_dup = make_ancestor(
             "knowledge:dup",
             "ref version",
-            EngineTrustClass::TrustedUser,
+            EngineTrustClass::TrustedProject,
         );
         let output = ResolutionOutput {
             root: root.clone(),
@@ -3179,7 +3190,7 @@ runtime_vault:
             references_edges: vec![],
             referenced_items: vec![ref_dup], // same ref as root
             step_outputs: std::collections::HashMap::new(),
-            effective_trust_class: EngineTrustClass::TrustedSystem,
+            effective_trust_class: EngineTrustClass::TrustedBundle,
             composed: ryeos_engine::resolution::KindComposedView::identity(json!({})),
         };
 

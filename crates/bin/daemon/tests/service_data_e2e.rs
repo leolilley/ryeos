@@ -11,7 +11,7 @@ mod common;
 use common::DaemonHarness;
 use serde_json::{json, Value};
 
-/// Spawn the fast-fixture daemon harness with `RYEOS_SYSTEM_SPACE_DIR`
+/// Spawn the fast-fixture daemon harness with `RYEOS_APP_ROOT`
 /// pointed at a per-test isolated copy of the `core` bundle. Use this
 /// instead of `DaemonHarness::start_fast()` for any test that
 /// exercises `bin:ryeos-core-tools` resolution
@@ -31,7 +31,7 @@ async fn start_with_isolated_bundle(
     DaemonHarness::start_fast_with(
         |state, _, fixture| common::fast_fixture::register_standard_bundle(state, fixture),
         move |cmd| {
-            cmd.env("RYEOS_SYSTEM_SPACE_DIR", &bundle);
+            cmd.env("RYEOS_APP_ROOT", &bundle);
         },
     )
     .await
@@ -452,7 +452,7 @@ async fn tool_verify_returns_trusted_for_core_service() {
 // ── 3.16 node-sign — rejects non-system space ─────────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn service_node_sign_rejects_non_system_space() {
+async fn service_node_sign_rejects_non_app_root() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
 
     // node-sign only accepts system space — project space must be rejected.
@@ -528,7 +528,7 @@ async fn service_maintenance_gc_real_run_writes_event_log() {
     )
     .await;
     let _ = unwrap_result(status, &body, "maintenance.gc real");
-    // GC writes to <system_space_dir>/.ai/state/<event-log>. The exact path
+    // GC writes to <app_root>/.ai/state/<event-log>. The exact path
     // is `gc::event_log::append_event` — read its source if needed.
     // We just assert the GC succeeded and SOME file under state changed.
     let state_dir = h.state_path.join(".ai/state");

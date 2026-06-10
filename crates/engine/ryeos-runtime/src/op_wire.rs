@@ -119,10 +119,10 @@ pub enum EdgeKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustClass {
-    TrustedSystem,
-    TrustedUser,
+    TrustedBundle,
     TrustedProject,
-    Untrusted,
+    UntrustedProject,
+    Unsigned,
 }
 
 /// Generic single-root payload: a root ref, a set of verified items,

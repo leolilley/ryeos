@@ -32,7 +32,7 @@ pub use event_log::GcEvent;
 pub use lock::GcLock;
 
 /// GC parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcParams {
     /// Don't delete anything, just report.
@@ -44,6 +44,20 @@ pub struct GcParams {
     /// Retention policy for compaction (uses default if None).
     #[serde(default)]
     pub policy: Option<RetentionPolicy>,
+}
+
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn empty_gc_params_deserialize_to_default() {
+        let params: GcParams = serde_json::from_value(json!({})).unwrap();
+        assert!(!params.dry_run);
+        assert!(!params.compact);
+        assert!(params.policy.is_none());
+    }
 }
 
 /// Full GC result.

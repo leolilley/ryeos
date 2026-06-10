@@ -539,19 +539,19 @@ fn compute_cache_key(
 /// 4-variant tier, preserving the source-space distinction.
 ///
 /// Wave 5.5 oracle audit: previously this collapsed every `Trusted` item
-/// to `TrustedSystem` regardless of source space, so a user-space item
+/// to `TrustedBundle` regardless of source space, so a project item
 /// whose signer happened to be in the trust store was passed downstream
-/// as if it were system-tier. The `binary_resolver` then computed
+/// as if it were bundle-tier. The `binary_resolver` then computed
 /// `min(raw_binary_trust, root_trust_class)` against an over-strong
-/// `TrustedSystem` cap, defeating the cap on the runtime command
+/// `TrustedBundle` cap, defeating the cap on the runtime command
 /// resolution path.
 ///
 /// The mapping is:
-/// - `Trusted` from `System` → `TrustedSystem`
-/// - `Trusted` from `User` or `Project` → `TrustedUser` (any binary they
-///   reach is dispatched at user tier even if the signer is a system
+/// - `Trusted` from `System` → `TrustedBundle`
+/// - `Trusted` from `Project` → `TrustedProject` (any binary it
+///   reaches is dispatched below system tier even if the signer is a system
 ///   author — the descriptor's space is the cap)
-/// - `Untrusted` (any space) → `UntrustedUserSpace`
+/// - `Untrusted` (any space) → `UntrustedProject`
 /// - `Unsigned` (any space) → `Unsigned`
 fn widen_root_trust_class(
     trust_class: ContractTrustClass,
@@ -559,10 +559,9 @@ fn widen_root_trust_class(
 ) -> TrustClass {
     use crate::contracts::ItemSpace;
     match (trust_class, source_space) {
-        (ContractTrustClass::Trusted, ItemSpace::System) => TrustClass::TrustedSystem,
-        (ContractTrustClass::Trusted, ItemSpace::User)
-        | (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedUser,
-        (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedUserSpace,
+        (ContractTrustClass::Trusted, ItemSpace::Bundle) => TrustClass::TrustedBundle,
+        (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedProject,
+        (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
         (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
     }
 }
@@ -582,43 +581,35 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn widen_trusted_system_stays_trusted_system() {
+    fn widen_trusted_bundle_stays_trusted_bundle() {
         assert_eq!(
-            widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::System),
-            ResolutionTrustClass::TrustedSystem
+            widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::Bundle),
+            ResolutionTrustClass::TrustedBundle
         );
     }
 
     #[test]
-    fn widen_trusted_user_demotes_to_trusted_user() {
-        assert_eq!(
-            widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::User),
-            ResolutionTrustClass::TrustedUser
-        );
-    }
-
-    #[test]
-    fn widen_trusted_project_demotes_to_trusted_user() {
+    fn widen_trusted_project_demotes_to_trusted_project() {
         assert_eq!(
             widen_root_trust_class(ContractTrustClass::Trusted, ItemSpace::Project),
-            ResolutionTrustClass::TrustedUser
+            ResolutionTrustClass::TrustedProject
         );
     }
 
     #[test]
-    fn widen_untrusted_any_space_is_untrusted_userspace() {
-        for space in [ItemSpace::System, ItemSpace::User, ItemSpace::Project] {
+    fn widen_untrusted_any_space_is_untrusted_projectspace() {
+        for space in [ItemSpace::Bundle, ItemSpace::Project] {
             assert_eq!(
                 widen_root_trust_class(ContractTrustClass::Untrusted, space),
-                ResolutionTrustClass::UntrustedUserSpace,
-                "untrusted in {space:?} should widen to UntrustedUserSpace"
+                ResolutionTrustClass::UntrustedProject,
+                "untrusted in {space:?} should widen to UntrustedProject"
             );
         }
     }
 
     #[test]
     fn widen_unsigned_any_space_is_unsigned() {
-        for space in [ItemSpace::System, ItemSpace::User, ItemSpace::Project] {
+        for space in [ItemSpace::Bundle, ItemSpace::Project] {
             assert_eq!(
                 widen_root_trust_class(ContractTrustClass::Unsigned, space),
                 ResolutionTrustClass::Unsigned,
@@ -873,7 +864,7 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         let plan = build_plan(BuildPlanInput {
             item: &item,
@@ -921,7 +912,7 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         let err = build_plan(BuildPlanInput {
             item: &item,
@@ -988,7 +979,7 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         let err = build_plan(BuildPlanInput {
             item: &item,
@@ -1031,7 +1022,7 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         let err = build_plan(BuildPlanInput {
             item: &item,
@@ -1067,7 +1058,7 @@ config:
     };
 
     fn empty_roots() -> ResolutionRoots {
-        ResolutionRoots::from_flat(None, None, vec![])
+        ResolutionRoots::from_flat(None, vec![])
     }
 
     fn empty_kinds() -> KindRegistry {
@@ -1113,7 +1104,7 @@ config:
             &kinds,
             &ts,
             &roots,
-            ResolutionTrustClass::TrustedSystem,
+            ResolutionTrustClass::TrustedBundle,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::NoRuntimeConfig { .. }));
@@ -1163,7 +1154,7 @@ config:
             &kinds,
             &ts,
             &roots,
-            ResolutionTrustClass::TrustedSystem,
+            ResolutionTrustClass::TrustedBundle,
         )
         .unwrap_err();
         // Cardinality::Singleton on RuntimeConfigHandler catches this
@@ -1213,7 +1204,7 @@ config:
             &kinds,
             &ts,
             &roots,
-            ResolutionTrustClass::TrustedSystem,
+            ResolutionTrustClass::TrustedBundle,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::ReservedEnvKey { .. }));
@@ -1257,7 +1248,7 @@ config:
             &kinds,
             &ts,
             &roots,
-            ResolutionTrustClass::TrustedSystem,
+            ResolutionTrustClass::TrustedBundle,
         )
         .unwrap();
 
@@ -1307,7 +1298,7 @@ config:
             &kinds,
             &ts,
             &roots,
-            ResolutionTrustClass::TrustedSystem,
+            ResolutionTrustClass::TrustedBundle,
         )
         .unwrap_err();
         assert!(
@@ -1383,7 +1374,7 @@ config:
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         let err = build_plan(BuildPlanInput {
             item: &item,
@@ -1526,7 +1517,7 @@ category: ryeos/core/subprocess\n";
         );
 
         let ctx = test_plan_context(Some(project_dir.clone()));
-        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), None, vec![]);
+        let roots = ResolutionRoots::from_flat(Some(project_dir.join(AI_DIR)), vec![]);
 
         // 5. Build plan — this walks the full 3-hop chain
         let plan = build_plan(BuildPlanInput {

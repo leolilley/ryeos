@@ -1,6 +1,6 @@
 //! GC event logging — JSONL append-only log for GC runs.
 //!
-//! One JSON line per GC run at `state_root/logs/gc.jsonl`.
+//! One JSON line per GC run at `runtime_state_dir/logs/gc.jsonl`.
 //! Provides operational observability: when did GC run, how much did it free.
 
 use std::fs::{self, OpenOptions};
@@ -58,8 +58,8 @@ impl GcEvent {
 /// Append a GC event to the JSONL log.
 ///
 /// Creates the log directory and file if they don't exist.
-pub fn append_event(state_root: &Path, event: &GcEvent) -> Result<()> {
-    let log_dir = state_root.join("logs");
+pub fn append_event(runtime_state_dir: &Path, event: &GcEvent) -> Result<()> {
+    let log_dir = runtime_state_dir.join("logs");
     let log_path = log_dir.join("gc.jsonl");
 
     fs::create_dir_all(&log_dir).context("failed to create GC log directory")?;
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn append_and_read_event() {
         let tmp = tempfile::tempdir().unwrap();
-        let state_root = tmp.path().join("state");
+        let runtime_state_dir = tmp.path().join("state");
 
         let event = GcEvent {
             timestamp: "2026-04-23T00:00:00Z".to_string(),
@@ -100,9 +100,9 @@ mod tests {
             duration_ms: 150,
         };
 
-        append_event(&state_root, &event).unwrap();
+        append_event(&runtime_state_dir, &event).unwrap();
 
-        let content = fs::read_to_string(state_root.join("logs/gc.jsonl")).unwrap();
+        let content = fs::read_to_string(runtime_state_dir.join("logs/gc.jsonl")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 1);
 
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn append_multiple_events() {
         let tmp = tempfile::tempdir().unwrap();
-        let state_root = tmp.path().join("state");
+        let runtime_state_dir = tmp.path().join("state");
 
         for i in 0..3 {
             let event = GcEvent {
@@ -130,10 +130,10 @@ mod tests {
                 snapshots_compacted: 0,
                 duration_ms: 100,
             };
-            append_event(&state_root, &event).unwrap();
+            append_event(&runtime_state_dir, &event).unwrap();
         }
 
-        let content = fs::read_to_string(state_root.join("logs/gc.jsonl")).unwrap();
+        let content = fs::read_to_string(runtime_state_dir.join("logs/gc.jsonl")).unwrap();
         assert_eq!(content.lines().count(), 3);
     }
 }

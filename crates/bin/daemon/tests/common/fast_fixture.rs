@@ -30,7 +30,7 @@
 //!     daemon's trust store needs that key pinned. Real `init` doesn't
 //!     pin publisher keys — the operator does that via `ryeos trust pin`.
 //!   * **Adds** system-bundle signer trust (via
-//!     `super::populate_user_space`): without this the daemon refuses
+//!     `super::populate_trusted_keys`): without this the daemon refuses
 //!     to load `node:engine/kinds/...` items in the core bundle and
 //!     bootstrap aborts. Real `init` doesn't seed this either; the
 //!     operator pins the platform author key manually or via the
@@ -119,7 +119,7 @@ impl FastFixture {
     }
 }
 
-/// Pre-populate `state_path` + `user_space` with everything
+/// Pre-populate `state_path` with everything
 /// `bootstrap::init` would produce, using deterministic keys.
 ///
 /// After this returns the daemon can boot WITHOUT ``:
@@ -136,15 +136,15 @@ impl FastFixture {
 /// <state>/.ai/node/auth/authorized_keys/               (empty dir)
 /// <state>/.ai/state/objects/                           (empty dir)
 /// <state>/.ai/state/refs/                              (empty dir)
-/// <user>/.ai/config/keys/signing/private_key.pem       (deterministic user Ed25519)
-/// <user>/.ai/config/keys/trusted/<publisher_fp>.toml   (self-signed trust doc)
-/// <user>/.ai/config/keys/trusted/<node_fp>.toml        (self-signed trust doc)
-/// <user>/.ai/config/keys/trusted/<user_fp>.toml        (self-signed trust doc)
+/// <state>/.ai/config/keys/signing/private_key.pem      (deterministic operator Ed25519)
+/// <state>/.ai/config/keys/trusted/<publisher_fp>.toml  (self-signed trust doc)
+/// <state>/.ai/config/keys/trusted/<node_fp>.toml       (self-signed trust doc)
+/// <state>/.ai/config/keys/trusted/<user_fp>.toml       (self-signed trust doc)
 /// ```
 ///
 /// Does NOT install bundles. Tests that need the standard bundle
 /// installed call `register_standard_bundle()` separately.
-pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Result<FastFixture> {
+pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result<FastFixture> {
     let publisher = publisher_signing_key();
     let node = node_signing_key();
     let user = user_signing_key();
@@ -165,12 +165,12 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
         state_path.join(AI_DIR).join("node").join("identity"),
         state_path.join(AI_DIR).join("state").join("objects"),
         state_path.join(AI_DIR).join("state").join("refs"),
-        user_space
+        state_path
             .join(AI_DIR)
             .join("config")
             .join("keys")
             .join("signing"),
-        user_space
+        state_path
             .join(AI_DIR)
             .join("config")
             .join("keys")
@@ -205,9 +205,9 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     materialize_seed_command_registration_policy(state_path, &node)
         .context("materialize command registration policy")?;
 
-    // ── User Ed25519 identity ──
+    // ── Operator Ed25519 identity ──
     write_pem_signing_key(
-        &user_space
+        &state_path
             .join(AI_DIR)
             .join("config")
             .join("keys")
@@ -215,7 +215,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
             .join("private_key.pem"),
         &user,
     )
-    .context("write user signing key")?;
+    .with_context(|| format!("write operator signing key under {}", state_path.display()))?;
 
     // ── Vault X25519 keypair ──
     let vault_dir = state_path.join(AI_DIR).join("node").join("vault");
@@ -239,14 +239,19 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     )
     .context("write ignore config")?;
 
-    // ── Self-signed trust docs (publisher + node + user) ──
-    let trust_dir = user_space
+    // ── Self-signed trust docs (publisher + node + operator) ──
+    let trust_dir = state_path
         .join(AI_DIR)
         .join("config")
         .join("keys")
         .join("trusted");
     for sk in [&publisher, &node, &user] {
-        write_self_signed_trust_doc(&trust_dir, sk).context("write self-signed trust doc")?;
+        write_self_signed_trust_doc(&trust_dir, sk).with_context(|| {
+            format!(
+                "write self-signed trust doc under {}",
+                state_path.display()
+            )
+        })?;
     }
 
     // ── Trust the system-bundle signer (signs `bundles/core` items) ──
@@ -254,8 +259,8 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
     // Without this the daemon refuses to load the kind schemas inside
     // the core bundle and bootstrap aborts with `untrusted signer` for
     // every `node:engine/kinds/...` item. Mirrors what the existing
-    // `populate_user_space()` helper does on the slow path.
-    super::populate_user_space(user_space);
+    // `populate_trusted_keys()` helper does on the slow path.
+    super::populate_trusted_keys(state_path);
 
     Ok(FastFixture {
         publisher,
@@ -268,7 +273,7 @@ pub fn populate_initialized_state(state_path: &Path, user_space: &Path) -> Resul
 /// Write a `kind: node, section: bundles` record registering the core
 /// bundle that lives at `state_path` itself (the daemon harness copies
 /// `bundles/core` into the test tempdir and uses that as
-/// `system_space_dir`). `bootstrap::verify_initialized` requires at
+/// `app_root`). `bootstrap::verify_initialized` requires at
 /// least one registered bundle, so the harness calls this before
 /// spawning the daemon.
 pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -> Result<()> {

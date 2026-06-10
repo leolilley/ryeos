@@ -74,7 +74,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     // correctly. Fail hard if unavailable.
     let ingest_ignore = client.get_ingest_ignore().await?;
 
-    let mut remotes = config::load_remotes(&state.config.system_space_dir)?;
+    let app_root = state.config.runtime_root();
+    let mut remotes = config::load_remotes(app_root.as_path())?;
     let existing_project_bindings = if let Some(remote) = remotes.get(&remote_name) {
         remote.project_bindings.clone()
     } else {
@@ -94,12 +95,12 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     };
     remote_config.validate()?;
     remotes.insert(remote_name.clone(), remote_config);
-    config::save_remotes(&state.config.system_space_dir, &remotes)?;
+    config::save_remotes(app_root.as_path(), &remotes)?;
 
     Ok(serde_json::json!({
         "configured": remote_name,
-        "scope": "user",
-        "config_path": config::remotes_config_path(&state.config.system_space_dir),
+        "scope": "operator",
+        "config_path": config::remotes_config_path(app_root.as_path()),
         "url": remote_url,
         "principal_id": pubkey.principal_id,
         "signing_key": signing_key,

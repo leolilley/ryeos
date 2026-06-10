@@ -14,7 +14,7 @@ pub enum LifecycleStatus {
         diagnostics: InitDiagnostics,
     },
     Stopped {
-        system_space_dir: PathBuf,
+        app_root: PathBuf,
     },
     Running {
         metadata: DaemonMetadata,
@@ -43,7 +43,7 @@ pub struct StaleDiagnostics {
 ///   5. Otherwise return Stopped.
 pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
     let config = env.config();
-    if let InitState::NotInitialized { diagnostics } = init_state(&config.system_space_dir)? {
+    if let InitState::NotInitialized { diagnostics } = init_state(&config.app_root)? {
         return Ok(LifecycleStatus::NotInitialized { diagnostics });
     }
 
@@ -74,20 +74,20 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
             continue;
         }
 
-        let live_system_space_dir = value
-            .get("system_space_dir")
+        let live_app_root = value
+            .get("app_root")
             .and_then(|v| v.as_str())
             .map(PathBuf::from);
-        let reports_requested_system_space = live_system_space_dir
+        let reports_requested_app_root = live_app_root
             .as_ref()
-            .map(|path| path == &config.system_space_dir)
+            .map(|path| path == &config.app_root)
             .unwrap_or_else(|| {
                 metadata_hint
                     .as_ref()
-                    .map(|metadata| metadata.system_space_dir == config.system_space_dir)
+                    .map(|metadata| metadata.app_root == config.app_root)
                     .unwrap_or(false)
             });
-        if !reports_requested_system_space {
+        if !reports_requested_app_root {
             continue;
         }
 
@@ -120,9 +120,9 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned)
                 .or_else(|| hint.as_ref().and_then(|m| m.version.clone())),
-            system_space_dir: live_system_space_dir
-                .or_else(|| hint.as_ref().map(|m| m.system_space_dir.clone()))
-                .unwrap_or_else(|| config.system_space_dir.clone()),
+            app_root: live_app_root
+                .or_else(|| hint.as_ref().map(|m| m.app_root.clone()))
+                .unwrap_or_else(|| config.app_root.clone()),
         };
         return Ok(LifecycleStatus::Running { metadata });
     }
@@ -142,7 +142,7 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
             })
         }
         None => Ok(LifecycleStatus::Stopped {
-            system_space_dir: config.system_space_dir.clone(),
+            app_root: config.app_root.clone(),
         }),
     }
 }
@@ -160,8 +160,7 @@ mod tests {
 
     fn test_config(root: &std::path::Path) -> NodeConfig {
         NodeConfig {
-            system_space_dir: root.join("state"),
-            user_root: root.join("user"),
+            app_root: root.join("state"),
             bind: "127.0.0.1:7400".parse::<SocketAddr>().unwrap(),
             uds_path: root.join("runtime/ryeosd.sock"),
         }
@@ -171,8 +170,8 @@ mod tests {
         LocalLifecycleEnv::from_config(test_config(root))
     }
 
-    fn mark_initialized(system_space_dir: &std::path::Path) {
-        let bundles = system_space_dir.join(".ai/node/bundles");
+    fn mark_initialized(app_root: &std::path::Path) {
+        let bundles = app_root.join(".ai/node/bundles");
         std::fs::create_dir_all(&bundles).unwrap();
         std::fs::write(
             bundles.join("core.yaml"),
@@ -187,7 +186,7 @@ mod tests {
         let env = test_env(tmp.path());
         let status = status(&env).await.unwrap();
         assert!(matches!(status, LifecycleStatus::NotInitialized { .. }));
-        assert!(!env.config().system_space_dir.exists());
+        assert!(!env.config().app_root.exists());
         assert!(!tmp.path().join("runtime").exists());
     }
 
@@ -196,16 +195,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         DaemonMetadata {
             pid: Some(999_999),
             bind: Some(config.bind.to_string()),
             uds_path: Some(config.uds_path.clone()),
             started_at: Some("now".to_string()),
             version: Some("test".to_string()),
-            system_space_dir: config.system_space_dir.clone(),
+            app_root: config.app_root.clone(),
         }
-        .write(&config.system_space_dir)
+        .write(&config.app_root)
         .unwrap();
 
         let status = status(&env).await.unwrap();
@@ -217,11 +216,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
         let uds_path = config.uds_path.clone();
-        let system_space_dir = config.system_space_dir.clone();
+        let app_root = config.app_root.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
@@ -232,7 +231,7 @@ mod tests {
                     "pid": 1234u64,
                     "bind": "127.0.0.1:7400",
                     "uds_path": uds_path.display().to_string(),
-                    "system_space_dir": system_space_dir.display().to_string(),
+                    "app_root": app_root.display().to_string(),
                     "started_at": "now",
                     "version": "test"
                 }
@@ -247,7 +246,7 @@ mod tests {
             panic!("expected running")
         };
         assert_eq!(metadata.pid, Some(1234));
-        assert!(!DaemonMetadata::path(&config.system_space_dir).exists());
+        assert!(!DaemonMetadata::path(&config.app_root).exists());
     }
 
     #[tokio::test]
@@ -255,7 +254,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         let hinted_uds_path = tmp.path().join("hinted/ryeosd.sock");
         std::fs::create_dir_all(hinted_uds_path.parent().unwrap()).unwrap();
         DaemonMetadata {
@@ -264,13 +263,13 @@ mod tests {
             uds_path: Some(hinted_uds_path.clone()),
             started_at: Some("metadata".to_string()),
             version: Some("metadata".to_string()),
-            system_space_dir: config.system_space_dir.clone(),
+            app_root: config.app_root.clone(),
         }
-        .write(&config.system_space_dir)
+        .write(&config.app_root)
         .unwrap();
 
         let listener = tokio::net::UnixListener::bind(&hinted_uds_path).unwrap();
-        let system_space_dir = config.system_space_dir.clone();
+        let app_root = config.app_root.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
@@ -278,7 +277,7 @@ mod tests {
                 "request_id": 1u64,
                 "result": {
                     "status": "running",
-                    "system_space_dir": system_space_dir.display().to_string()
+                    "app_root": app_root.display().to_string()
                 }
             });
             let encoded = rmp_serde::to_vec_named(&response).unwrap();
@@ -299,7 +298,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
         DaemonMetadata {
             pid: Some(1),
@@ -307,13 +306,13 @@ mod tests {
             uds_path: Some(config.uds_path.clone()),
             started_at: Some("stale".to_string()),
             version: Some("stale".to_string()),
-            system_space_dir: config.system_space_dir.clone(),
+            app_root: config.app_root.clone(),
         }
-        .write(&config.system_space_dir)
+        .write(&config.app_root)
         .unwrap();
 
         let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
-        let system_space_dir = config.system_space_dir.clone();
+        let app_root = config.app_root.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
@@ -323,7 +322,7 @@ mod tests {
                     "status": "running",
                     "pid": 9999u64,
                     "bind": "127.0.0.1:7400",
-                    "system_space_dir": system_space_dir.display().to_string(),
+                    "app_root": app_root.display().to_string(),
                     "started_at": "live",
                     "version": "live"
                 }
@@ -352,7 +351,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
         DaemonMetadata {
             pid: Some(42),
@@ -360,9 +359,9 @@ mod tests {
             uds_path: Some(config.uds_path.clone()),
             started_at: Some("hint".to_string()),
             version: Some("hint".to_string()),
-            system_space_dir: config.system_space_dir.clone(),
+            app_root: config.app_root.clone(),
         }
-        .write(&config.system_space_dir)
+        .write(&config.app_root)
         .unwrap();
 
         let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
@@ -388,14 +387,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_control_for_different_system_space_is_not_trusted_as_live() {
+    async fn live_control_for_different_app_root_is_not_trusted_as_live() {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
         let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
-        let other_system_space = tmp.path().join("other-state");
+        let other_app_root = tmp.path().join("other-state");
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _request = read_frame(&mut stream).await;
@@ -404,7 +403,7 @@ mod tests {
                 "result": {
                     "status": "running",
                     "pid": 9999u64,
-                    "system_space_dir": other_system_space.display().to_string()
+                    "app_root": other_app_root.display().to_string()
                 }
             });
             let encoded = rmp_serde::to_vec_named(&response).unwrap();
@@ -415,7 +414,7 @@ mod tests {
         server.await.unwrap();
         assert!(
             matches!(status, LifecycleStatus::Stopped { .. }),
-            "response for a different system space should be ignored, got: {status:?}"
+            "response for a different app root should be ignored, got: {status:?}"
         );
     }
 
@@ -424,10 +423,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = test_env(tmp.path());
         let config = env.config();
-        mark_initialized(&config.system_space_dir);
+        mark_initialized(&config.app_root);
         // Plant a daemon.json that is valid file but invalid JSON.
         std::fs::write(
-            DaemonMetadata::path(&config.system_space_dir),
+            DaemonMetadata::path(&config.app_root),
             "{ this is : not json",
         )
         .unwrap();

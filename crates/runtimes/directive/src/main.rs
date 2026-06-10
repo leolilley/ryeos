@@ -81,8 +81,7 @@ fn run_directive() -> Result<RuntimeResult> {
 
 async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let project_root = envelope.roots.project_root.clone();
-    let user_root = envelope.roots.user_root.clone();
-    let system_roots = envelope.roots.system_roots.clone();
+    let bundle_roots = envelope.roots.bundle_roots.clone();
 
     // The runtime no longer parses the directive body or walks extends.
     // The daemon-side extends-chain composer (handler:ryeos/core/extends-chain)
@@ -91,8 +90,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     // — we hand that view straight into bootstrap.
     let verified_loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
         envelope.roots.project_root.clone(),
-        envelope.roots.user_root.clone(),
-        envelope.roots.system_roots.clone(),
+        envelope.roots.bundle_roots.clone(),
     );
 
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
@@ -118,8 +116,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let bootstrap_output = bootstrap::bootstrap(
         &bootstrap::BootstrapRoots {
             project_root: &project_root,
-            user_root: user_root.as_deref(),
-            system_roots: &system_roots,
+            bundle_roots: &bundle_roots,
         },
         &envelope.resolution.composed,
         &envelope.policy.hard_limits,

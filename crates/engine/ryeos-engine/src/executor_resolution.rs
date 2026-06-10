@@ -191,11 +191,11 @@ pub fn verify_executor_trust(
             .unwrap_or("");
 
         if fingerprint.is_empty() {
-            TrustClass::UntrustedUserSpace
+            TrustClass::UntrustedProject
         } else if trust_store_has_fingerprint(fingerprint) {
-            TrustClass::TrustedSystem
+            TrustClass::TrustedBundle
         } else {
-            TrustClass::UntrustedUserSpace
+            TrustClass::UntrustedProject
         }
     } else {
         TrustClass::Unsigned
@@ -225,8 +225,8 @@ mod tests {
                 "fingerprint": "sys-fp"
             }
         });
-        let (tc, fp) = verify_executor_trust(&item_source, |_| true, TrustClass::TrustedUser);
-        assert_eq!(tc, TrustClass::TrustedUser);
+        let (tc, fp) = verify_executor_trust(&item_source, |_| true, TrustClass::TrustedProject);
+        assert_eq!(tc, TrustClass::TrustedProject);
         assert_eq!(fp.as_deref(), Some("sys-fp"));
     }
 
@@ -237,33 +237,33 @@ mod tests {
                 "fingerprint": "sys-fp"
             }
         });
-        let (tc, _) = verify_executor_trust(&item_source, |_| true, TrustClass::TrustedSystem);
-        assert_eq!(tc, TrustClass::TrustedSystem);
+        let (tc, _) = verify_executor_trust(&item_source, |_| true, TrustClass::TrustedBundle);
+        assert_eq!(tc, TrustClass::TrustedBundle);
     }
 
     #[test]
-    fn verify_trust_user_root_system_binary() {
+    fn verify_trust_app_root_system_binary() {
         let item_source = json!({
             "signature_info": {
                 "fingerprint": "sys-fp"
             }
         });
-        let (tc, _) = verify_executor_trust(&item_source, |_| true, TrustClass::TrustedUser);
-        assert_eq!(tc, TrustClass::TrustedUser);
+        let (tc, _) = verify_executor_trust(&item_source, |_| true, TrustClass::TrustedProject);
+        assert_eq!(tc, TrustClass::TrustedProject);
     }
 
     #[test]
     fn min_returns_weaker() {
         assert_eq!(
-            TrustClass::TrustedSystem.min(TrustClass::TrustedUser),
-            TrustClass::TrustedUser
+            TrustClass::TrustedBundle.min(TrustClass::TrustedProject),
+            TrustClass::TrustedProject
         );
         assert_eq!(
-            TrustClass::TrustedUser.min(TrustClass::TrustedSystem),
-            TrustClass::TrustedUser
+            TrustClass::TrustedProject.min(TrustClass::TrustedBundle),
+            TrustClass::TrustedProject
         );
         assert_eq!(
-            TrustClass::Unsigned.min(TrustClass::TrustedUser),
+            TrustClass::Unsigned.min(TrustClass::TrustedProject),
             TrustClass::Unsigned
         );
     }

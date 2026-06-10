@@ -279,9 +279,9 @@ fn to_compose_input(a: &ResolvedAncestor, parsed: Value) -> ComposeInput {
 
 fn trust_class_to_wire(t: TrustClass) -> TrustClassWire {
     match t {
-        TrustClass::TrustedSystem => TrustClassWire::TrustedSystem,
-        TrustClass::TrustedUser => TrustClassWire::TrustedUser,
-        TrustClass::UntrustedUserSpace => TrustClassWire::UntrustedUserSpace,
+        TrustClass::TrustedBundle => TrustClassWire::TrustedBundle,
+        TrustClass::TrustedProject => TrustClassWire::TrustedProject,
+        TrustClass::UntrustedProject => TrustClassWire::UntrustedProject,
         TrustClass::Unsigned => TrustClassWire::Unsigned,
     }
 }
@@ -460,7 +460,7 @@ composer: {composer}
             requested_id: "directive:test".into(),
             resolved_ref: "directive:test".into(),
             source_path: root.join("directive/test.directive.md"),
-            trust_class: TrustClass::TrustedSystem,
+            trust_class: TrustClass::TrustedBundle,
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: String::new(),

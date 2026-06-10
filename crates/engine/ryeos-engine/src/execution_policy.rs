@@ -486,7 +486,7 @@ mod tests {
             &mut policy,
             &system,
             Some(PathBuf::from("/system/execution.yaml")),
-            Some(ItemSpace::System),
+            Some(ItemSpace::Bundle),
         )
         .unwrap();
         apply_defaults_layer(
@@ -501,7 +501,7 @@ mod tests {
             &system,
             &item_ref,
             Some(PathBuf::from("/system/execution.yaml")),
-            Some(ItemSpace::System),
+            Some(ItemSpace::Bundle),
         )
         .unwrap();
         apply_item_override_layer(

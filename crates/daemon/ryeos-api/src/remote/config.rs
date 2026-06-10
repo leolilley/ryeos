@@ -1,7 +1,7 @@
 //! Remote node configuration.
 //!
 //! Remotes are named connection targets stored in YAML. The config is
-//! loaded from `<system_space_dir>/.ai/config/remotes/remotes.yaml`.
+//! loaded from `<app_root>/.ai/config/remotes/remotes.yaml`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -177,8 +177,8 @@ impl RemoteConfig {
 /// Where a loaded remote config came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteConfigScope {
-    /// User-level RyeOS space.
-    User,
+    /// Operator-level runtime config under the app root.
+    Operator,
     /// Project-level config rooted at this local project path.
     Project { root: PathBuf },
 }
@@ -186,7 +186,7 @@ pub enum RemoteConfigScope {
 impl RemoteConfigScope {
     pub fn label(&self) -> &'static str {
         match self {
-            RemoteConfigScope::User => "user",
+            RemoteConfigScope::Operator => "operator",
             RemoteConfigScope::Project { .. } => "project",
         }
     }
@@ -256,15 +256,15 @@ pub fn remotes_config_path(root: &Path) -> PathBuf {
 /// guided to repair such entries via `ryeos remote configure`, but
 /// stale entries must not block listing or using other valid remotes,
 /// including project-level overrides layered on top.
-pub fn load_remotes(system_space_dir: &Path) -> Result<HashMap<String, RemoteConfig>> {
-    let path = remotes_config_path(system_space_dir);
+pub fn load_remotes(app_root: &Path) -> Result<HashMap<String, RemoteConfig>> {
+    let path = remotes_config_path(app_root);
     load_remotes_at(&path)
 }
 
 /// Load a remotes file from an explicit absolute path. Same per-entry
 /// resilience as [`load_remotes`].
 pub fn load_remotes_at(path: &Path) -> Result<HashMap<String, RemoteConfig>> {
-    Ok(load_remotes_at_report(path, RemoteConfigScope::User)?
+    Ok(load_remotes_at_report(path, RemoteConfigScope::Operator)?
         .remotes
         .into_iter()
         .map(|(name, loaded)| (name, loaded.config))
@@ -327,7 +327,7 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
                         "edit or remove {} and re-sign the project config",
                         path.display()
                     ),
-                    RemoteConfigScope::User => match url.as_deref() {
+                    RemoteConfigScope::Operator => match url.as_deref() {
                         Some(url) => format!("run `ryeos remote configure {} --url {}`", name, url),
                         None => format!("run `ryeos remote configure {} --url <https-url>`", name),
                     },
@@ -348,32 +348,30 @@ fn load_remotes_at_report(path: &Path, scope: RemoteConfigScope) -> Result<Remot
 
 /// Load remotes layered project-over-user.
 ///
-/// Loads the user-level remotes file from `system_space_dir`, then if
+/// Loads the operator-level remotes file from `app_root`, then if
 /// `project_path` is provided, loads project-level remotes from
 /// `<project>/.ai/config/remotes/remotes.yaml` and merges them on top
 /// (project entries win on name collision). Either side missing or
 /// individually malformed does not prevent the other from being used.
 pub fn load_remotes_layered(
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: Option<&Path>,
 ) -> Result<HashMap<String, RemoteConfig>> {
-    Ok(load_remotes_layered_report(system_space_dir, project_path)?
+    Ok(load_remotes_layered_report(app_root, project_path)?
         .remotes
         .into_iter()
         .map(|(name, loaded)| (name, loaded.config))
         .collect())
 }
 
-/// Load user remotes plus optional project remotes, retaining invalid
+/// Load operator remotes plus optional project remotes, retaining invalid
 /// entries as diagnostics for user-facing commands.
 pub fn load_remotes_layered_report(
-    system_space_dir: &Path,
+    app_root: &Path,
     project_path: Option<&Path>,
 ) -> Result<RemotesLoadReport> {
-    let mut report = load_remotes_at_report(
-        &remotes_config_path(system_space_dir),
-        RemoteConfigScope::User,
-    )?;
+    let mut report =
+        load_remotes_at_report(&remotes_config_path(app_root), RemoteConfigScope::Operator)?;
     let user_bindings: HashMap<String, HashMap<String, RemoteProjectBinding>> = report
         .remotes
         .iter()
@@ -399,10 +397,7 @@ pub fn load_remotes_layered_report(
 }
 
 /// Save remotes config to disk.
-pub fn save_remotes(
-    system_space_dir: &Path,
-    remotes: &HashMap<String, RemoteConfig>,
-) -> Result<()> {
+pub fn save_remotes(app_root: &Path, remotes: &HashMap<String, RemoteConfig>) -> Result<()> {
     for (name, cfg) in remotes {
         if name.trim().is_empty() {
             anyhow::bail!("remote config key must not be empty");
@@ -417,7 +412,7 @@ pub fn save_remotes(
         cfg.validate()
             .with_context(|| format!("invalid remote '{}'", name))?;
     }
-    let path = remotes_config_path(system_space_dir);
+    let path = remotes_config_path(app_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -812,7 +807,7 @@ node:
 
     #[test]
     fn load_remotes_layered_accepts_project_remotes_with_category() {
-        let user_root = tempfile::tempdir().unwrap();
+        let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
         let project_path = remotes_config_path(project_root.path());
@@ -840,7 +835,7 @@ remotes:
         .unwrap();
 
         let report =
-            load_remotes_layered_report(user_root.path(), Some(project_root.path())).unwrap();
+            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
         assert_eq!(
             report.remotes["example"].config.url,
             "https://project-level.example.com"
@@ -852,8 +847,8 @@ remotes:
     }
 
     #[test]
-    fn load_remotes_layered_preserves_user_bindings_on_project_override() {
-        let user_root = tempfile::tempdir().unwrap();
+    fn load_remotes_layered_preserves_operator_bindings_on_project_override() {
+        let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project_root.path()).unwrap();
         let project_root_path = project_root.path().canonicalize().unwrap();
@@ -867,8 +862,8 @@ remotes:
                 sync_scope: ProjectSyncScope::FullProject,
             },
         );
-        let mut user_remotes = HashMap::new();
-        user_remotes.insert(
+        let mut operator_remotes = HashMap::new();
+        operator_remotes.insert(
             "example".into(),
             RemoteConfig {
                 name: "example".into(),
@@ -881,7 +876,7 @@ remotes:
                 project_bindings: bindings,
             },
         );
-        save_remotes(user_root.path(), &user_remotes).unwrap();
+        save_remotes(app_root.path(), &operator_remotes).unwrap();
 
         let project_path = remotes_config_path(&project_root_path);
         std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
@@ -907,7 +902,7 @@ remotes:
         .unwrap();
 
         let report =
-            load_remotes_layered_report(user_root.path(), Some(&project_root_path)).unwrap();
+            load_remotes_layered_report(app_root.path(), Some(&project_root_path)).unwrap();
         let loaded = &report.remotes["example"];
         assert_eq!(loaded.config.url, "https://project.example.com");
         let binding = resolve_loaded_project_binding(loaded, &project_root_path).unwrap();
@@ -917,7 +912,7 @@ remotes:
 
     #[test]
     fn load_remotes_layered_rejects_project_sourced_bindings() {
-        let user_root = tempfile::tempdir().unwrap();
+        let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
         let project_path = remotes_config_path(project_root.path());
         std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
@@ -947,7 +942,7 @@ remotes:
         .unwrap();
 
         let report =
-            load_remotes_layered_report(user_root.path(), Some(project_root.path())).unwrap();
+            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
         assert!(!report.remotes.contains_key("example"));
         assert_eq!(report.invalid.len(), 1);
         assert!(report.invalid[0].error.contains("project_bindings"));
@@ -976,7 +971,7 @@ remotes:
 
     #[test]
     fn layered_report_includes_invalid_missing_signing_key() {
-        let user_root = tempfile::tempdir().unwrap();
+        let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project_root.path().join(ryeos_engine::AI_DIR)).unwrap();
         let project_path = remotes_config_path(project_root.path());
@@ -998,7 +993,7 @@ remotes:
         .unwrap();
 
         let report =
-            load_remotes_layered_report(user_root.path(), Some(project_root.path())).unwrap();
+            load_remotes_layered_report(app_root.path(), Some(project_root.path())).unwrap();
         assert!(!report.remotes.contains_key("default"));
         assert_eq!(report.invalid.len(), 1);
         assert_eq!(report.invalid[0].name, "default");
@@ -1127,14 +1122,14 @@ remotes:
     }
 
     #[test]
-    fn load_remotes_layered_merges_project_over_user() {
-        let user_root = tempfile::tempdir().unwrap();
+    fn load_remotes_layered_merges_project_over_operator() {
+        let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
 
-        let user_path = remotes_config_path(user_root.path());
-        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        let operator_path = remotes_config_path(app_root.path());
+        std::fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
         std::fs::write(
-            &user_path,
+            &operator_path,
             format!(
                 r#"
 remotes:
@@ -1199,7 +1194,7 @@ remotes:
         )
         .unwrap();
 
-        let merged = load_remotes_layered(user_root.path(), Some(project_root.path())).unwrap();
+        let merged = load_remotes_layered(app_root.path(), Some(project_root.path())).unwrap();
         assert_eq!(
             merged["v2"].url, "https://project-level.example.com",
             "project-level remotes must win on name collision"
@@ -1209,14 +1204,14 @@ remotes:
     }
 
     #[test]
-    fn load_remotes_layered_survives_broken_user_config() {
-        let user_root = tempfile::tempdir().unwrap();
+    fn load_remotes_layered_survives_broken_operator_config() {
+        let app_root = tempfile::tempdir().unwrap();
         let project_root = tempfile::tempdir().unwrap();
 
-        let user_path = remotes_config_path(user_root.path());
-        std::fs::create_dir_all(user_path.parent().unwrap()).unwrap();
+        let operator_path = remotes_config_path(app_root.path());
+        std::fs::create_dir_all(operator_path.parent().unwrap()).unwrap();
         std::fs::write(
-            &user_path,
+            &operator_path,
             r#"
 remotes:
   broken:
@@ -1253,7 +1248,7 @@ remotes:
         )
         .unwrap();
 
-        let merged = load_remotes_layered(user_root.path(), Some(project_root.path()))
+        let merged = load_remotes_layered(app_root.path(), Some(project_root.path()))
             .expect("layered load must not fail when only user-level config has a malformed entry");
         assert!(
             merged.contains_key("v2"),

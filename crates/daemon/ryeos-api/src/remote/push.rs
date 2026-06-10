@@ -29,9 +29,9 @@ pub struct PushResult {
     pub manifest_entries: usize,
     pub blobs_uploaded: usize,
     pub blobs_skipped: usize,
-    /// User-space manifest hash, if the operator's user space had any
+    /// Operator manifest hash, if the operator's app root had any
     /// content under the sync allow-list. Used by pull_results() as
-    /// the symmetric base for user-side diff/apply.
+    /// the symmetric base for operator-side diff/apply.
     pub user_manifest_hash: Option<String>,
     /// The exact pushed user manifest. None when the operator's user
     /// space is empty / absent.
@@ -54,10 +54,10 @@ pub async fn push_project_ai_only(
     remote_project_path_for_ref: &str,
     remote_ignore: Option<&IgnoreMatcher>,
 ) -> Result<PushResult> {
-    let system_space_dir = &state.config.system_space_dir;
-    refuse_walking_root(local_project_path, system_space_dir)?;
+    let app_root = &state.config.app_root;
+    refuse_walking_root(local_project_path, app_root)?;
 
-    let local_cas_root = system_space_dir
+    let local_cas_root = app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("objects");
@@ -133,19 +133,19 @@ pub async fn push_project(
     project_path_for_ref: &str,
     remote_ignore: &IgnoreMatcher,
 ) -> Result<PushResult> {
-    let system_space_dir = &state.config.system_space_dir;
+    let app_root = &state.config.app_root;
 
     // Fail-fast guards: prevent the common footgun of running
     // `ryeos remote execute` from $HOME or some other catch-all
     // directory and silently ingest-walking thousands of unrelated
     // files. The push step recursively walks `project_path`; if
-    // that's `$HOME` or contains the daemon's system space, the
+    // that's `$HOME` or contains the daemon's app root, the
     // walk takes minutes-to-hours and never produces a meaningful
     // snapshot. Detect both cases up front.
-    refuse_walking_root(project_path, system_space_dir)?;
+    refuse_walking_root(project_path, app_root)?;
 
     // 1. Ingest project directory into local CAS using remote's ignore rules.
-    let local_cas_root = system_space_dir
+    let local_cas_root = app_root
         .join(ryeos_engine::AI_DIR)
         .join("state")
         .join("objects");
@@ -167,17 +167,10 @@ pub async fn push_project(
     };
     let manifest_hash = local_cas.store_object(&manifest.to_value())?;
 
-    // 2b. Build user-space manifest (separate from project manifest).
-    //     Walks the operator's `~/.ryeos/.ai/` allow-list dirs and
-    //     hashes each file. The remote materialises this into a
-    //     per-request engine overlay so user-tier items resolve
-    //     against the caller's user space, never the remote's.
-    let (user_manifest_hash, user_manifest) = ingest_user_space_for_push(&local_cas)?;
-
     // 3. Build snapshot
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: user_manifest_hash.clone(),
+        user_manifest_hash: None,
         message: None,
         project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
         parent_hashes: Vec::new(),
@@ -190,8 +183,8 @@ pub async fn push_project(
     let all_hashes = collect_snapshot_hashes(
         &local_cas,
         &manifest,
-        user_manifest.as_ref(),
-        user_manifest_hash.as_deref(),
+        None,
+        None,
         &manifest_hash,
         &snapshot_hash,
     );
@@ -211,8 +204,8 @@ pub async fn push_project(
         manifest_entries,
         blobs_uploaded,
         blobs_skipped,
-        user_manifest_hash,
-        user_manifest,
+        user_manifest_hash: None,
+        user_manifest: None,
     })
 }
 
@@ -288,12 +281,12 @@ pub(crate) async fn upload_missing(
 }
 
 /// Reject project paths that would walk the entire home directory
-/// or contain the daemon's own system space.
+/// or contain the daemon's own app root.
 ///
 /// Returns an error describing why and how to fix it. The error
 /// message names the offending path so the operator can copy-paste a
 /// corrected `-p` flag.
-fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<()> {
+fn refuse_walking_root(project_path: &Path, app_root: &Path) -> Result<()> {
     // Canonicalise both so symlinks and `.` aren't false negatives.
     // If canonicalisation fails (e.g. path doesn't exist), skip the
     // check — the upstream walk will fail with its own clearer error.
@@ -301,14 +294,14 @@ fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<(
         Ok(p) => p,
         Err(_) => return Ok(()),
     };
-    let sys = system_space_dir
+    let app_root_canon = app_root
         .canonicalize()
-        .unwrap_or_else(|_| system_space_dir.to_path_buf());
+        .unwrap_or_else(|_| app_root.to_path_buf());
 
-    // Reject filesystem root
+    // Reject filebundle root
     if proj.parent().is_none() {
         anyhow::bail!(
-            "refusing to push filesystem root '/'. \
+            "refusing to push filebundle root '/'. \
              `remote execute` recursively ingests the project; \
              walking '/' would ingest the entire filesystem. \
              Re-run from inside a project directory, or pass \
@@ -333,107 +326,21 @@ fn refuse_walking_root(project_path: &Path, system_space_dir: &Path) -> Result<(
         }
     }
 
-    // Reject the ryeos user root (~/.ryeos/)
-    if let Ok(user_root) = ryeos_engine::roots::user_root() {
-        let user_root_canon = user_root.canonicalize().unwrap_or(user_root);
-        if proj == user_root_canon || proj.starts_with(&user_root_canon) {
-            anyhow::bail!(
-                "refusing to push {} — that path is inside the ryeos \
-                 user root ({}). The user root contains node identity \
-                 and signing keys that must not be pushed to remotes. \
-                 Re-run from inside a project directory.",
-                proj.display(),
-                user_root_canon.display(),
-            );
-        }
-    }
-
-    if proj == sys || proj.starts_with(&sys) || sys.starts_with(&proj) {
+    if proj == app_root_canon
+        || proj.starts_with(&app_root_canon)
+        || app_root_canon.starts_with(&proj)
+    {
         anyhow::bail!(
             "refusing to push {} — that path overlaps the daemon's \
-             system space ({}). Pushing the daemon's own state to a \
+             app root ({}). Pushing the daemon's own state to a \
              remote would corrupt both nodes. Re-run from a project \
              directory outside the daemon state tree.",
             proj.display(),
-            sys.display(),
+            app_root_canon.display(),
         );
     }
 
     Ok(())
-}
-
-/// Walk the operator's user space (`~/.ryeos/.ai/`) along the
-/// [`USER_SPACE_SYNC_DIRS`](ryeos_state::user_sync::USER_SPACE_SYNC_DIRS)
-/// + trust-pin allow-list, hash each file, and build a user-space
-/// `SourceManifest`. Returns `Ok(None)` if the user space doesn't
-/// exist (operator hasn't run `ryeos init`).
-///
-/// All paths in the returned manifest are RELATIVE to `<user_root>/.ai/`
-/// so the remote can materialise into a sibling temp dir and feed it
-/// to the per-request engine overlay without any path rewriting.
-///
-/// Items + trust pins share the same manifest. The remote splits them
-/// using [`ryeos_state::user_sync::is_trust_pin_path`] when building
-/// the request-scoped trust overlay — trust pins are NEVER written to
-/// the remote's persistent trust dir.
-pub(crate) fn ingest_user_space_for_push(
-    cas: &CasStore,
-) -> Result<(Option<String>, Option<SourceManifest>)> {
-    let user_root = match ryeos_engine::roots::user_root() {
-        Ok(r) => r,
-        Err(_) => return Ok((None, None)),
-    };
-    let user_ai = user_root.join(ryeos_engine::AI_DIR);
-    if !user_ai.is_dir() {
-        return Ok((None, None));
-    }
-
-    let mut items: HashMap<String, String> = HashMap::new();
-
-    // Walk each allow-listed sync dir.
-    //
-    // NOTE(remediation): `symlink_metadata` is used instead of
-    // `is_dir()` so symlinked allowlist roots themselves are caught.
-    // A symlinked `~/.ryeos/.ai/directories` pointing outside the user
-    // root would bypass the per-entry symlink skip inside
-    // `ingest_user_dir_for_push`. This does NOT protect against
-    // TOCTOU races (adversarial concurrent symlink swaps); for that,
-    // `openat(O_NOFOLLOW)` style walks would be needed, which is a
-    // larger change unjustified for this attack surface (the operator
-    // runs against their own user space).
-    for dir in ryeos_state::user_sync::USER_SPACE_SYNC_DIRS
-        .iter()
-        .copied()
-        .chain(std::iter::once(ryeos_state::user_sync::USER_TRUST_SYNC_DIR))
-    {
-        let abs = user_ai.join(dir);
-        match std::fs::symlink_metadata(&abs) {
-            Ok(md) if md.file_type().is_symlink() => {
-                tracing::warn!(
-                    path = %abs.display(),
-                    "skipping symlinked allowlist root in user-space ingest"
-                );
-                continue;
-            }
-            Ok(md) if md.is_dir() => {
-                ingest_user_dir_for_push(cas, &user_ai, &abs, &mut items)?;
-            }
-            _ => continue,
-        }
-    }
-
-    if items.is_empty() {
-        // Nothing to push under the user allow-list — return None
-        // rather than an empty manifest so the snapshot's
-        // user_manifest_hash stays None.
-        return Ok((None, None));
-    }
-
-    let manifest = SourceManifest {
-        item_source_hashes: items,
-    };
-    let manifest_hash = cas.store_object(&manifest.to_value())?;
-    Ok((Some(manifest_hash), Some(manifest)))
 }
 
 /// Walk only managed project AI roots and ingest regular files.
@@ -538,64 +445,6 @@ fn executable_mode(path: &Path) -> Option<u32> {
     }
 }
 
-/// Recursive helper for [`ingest_user_space_for_push`]. Walks `dir`,
-/// hashes every regular file, and inserts an `ItemSource` keyed by
-/// the path relative to `user_ai` (so the remote can materialise into
-/// `<temp>/.ai/<rel>` and have everything line up).
-///
-/// **Symlinks are skipped** — user-space ingest must not follow
-/// symlinks because a symlink at `~/.ryeos/.ai/directives/exfil.md`
-/// pointing at `~/.ssh/id_rsa` would be read, hashed, and uploaded.
-/// The allow-list (`USER_SPACE_SYNC_DIRS`) constrains entry paths,
-/// but does not stop symlink content escape. We check
-/// `entry.file_type()?.is_symlink()` first (which does NOT follow
-/// the link, unlike `Path::is_dir()` / `Path::is_file()`).
-fn ingest_user_dir_for_push(
-    cas: &CasStore,
-    user_ai: &Path,
-    dir: &Path,
-    items: &mut HashMap<String, String>,
-) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            tracing::warn!(
-                path = %entry.path().display(),
-                "skipping symlink in user-space ingest (would follow outside user root)"
-            );
-            continue;
-        }
-        let path = entry.path();
-        if ft.is_dir() {
-            ingest_user_dir_for_push(cas, user_ai, &path, items)?;
-        } else if ft.is_file() {
-            let rel = path
-                .strip_prefix(user_ai)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
-            let bytes = std::fs::read(&path)?;
-            let blob_hash = cas.store_blob(&bytes)?;
-            let integrity = sha256_hex(&bytes);
-            let item_source = ryeos_state::objects::ItemSource {
-                item_ref: rel.clone(),
-                content_blob_hash: blob_hash,
-                integrity,
-                signature_info: None,
-                mode: None,
-            };
-            let obj_hash = cas.store_object(&item_source.to_value())?;
-            items.insert(rel, obj_hash);
-        }
-    }
-    Ok(())
-}
-
 /// Walk a project directory and ingest files for push.
 fn ingest_for_push(
     cas: &CasStore,
@@ -688,17 +537,13 @@ mod refuse_walking_root_tests {
     use super::refuse_walking_root;
     use tempfile::TempDir;
 
-    /// Tests in this module mutate `$HOME` to spoof what `user_root()`
-    /// resolves to. Cargo runs tests in the same process concurrently
-    /// by default, so all HOME-mutating tests must take this lock to
-    /// serialize. The lock is held across the set / refuse_walking_root /
-    /// restore sequence in each test.
+    /// Tests in this module mutate `$HOME`; serialize those mutations.
     static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn ordinary_project_dir_outside_home_passes() {
         // A tempdir under /tmp is neither $HOME nor inside the daemon
-        // system space — must pass.
+        // app root — must pass.
         let proj = TempDir::new().unwrap();
         let sys = TempDir::new().unwrap();
         refuse_walking_root(proj.path(), sys.path()).expect("ordinary dir must pass");
@@ -733,31 +578,31 @@ mod refuse_walking_root_tests {
     }
 
     #[test]
-    fn project_path_inside_system_space_is_refused() {
+    fn project_path_inside_app_root_is_refused() {
         let sys = TempDir::new().unwrap();
         let inside = sys.path().join("inner");
         std::fs::create_dir_all(&inside).unwrap();
         let err = refuse_walking_root(&inside, sys.path())
-            .expect_err("paths inside system space must be refused");
+            .expect_err("paths inside app root must be refused");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("system space"),
-            "error must mention system space, got: {msg}"
+            msg.contains("app root"),
+            "error must mention app root, got: {msg}"
         );
     }
 
     #[test]
-    fn project_path_containing_system_space_is_refused() {
+    fn project_path_containing_app_root_is_refused() {
         // The inverse: project is the parent that contains the
-        // system_space_dir. Walking it would still hit the daemon
+        // app_root. Walking it would still hit the daemon
         // state.
         let proj = TempDir::new().unwrap();
         let sys = proj.path().join("daemon-state");
         std::fs::create_dir_all(&sys).unwrap();
         let err = refuse_walking_root(proj.path(), &sys)
-            .expect_err("paths containing system space must be refused");
+            .expect_err("paths containing app root must be refused");
         let msg = format!("{err:#}");
-        assert!(msg.contains("system space"), "got: {msg}");
+        assert!(msg.contains("app root"), "got: {msg}");
     }
 
     #[test]
@@ -778,75 +623,11 @@ mod refuse_walking_root_tests {
         // Walking '/' would ingest the entire filesystem. Must hard error.
         let sys = TempDir::new().unwrap();
         let err = refuse_walking_root(std::path::Path::new("/"), sys.path())
-            .expect_err("filesystem root must be refused");
+            .expect_err("filebundle root must be refused");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("filesystem root") || msg.contains("'/'"),
-            "error must mention filesystem root, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn user_ryeos_root_is_refused() {
-        // ~/.ryeos/ contains node identity + signing keys; must never
-        // be pushed to a remote. Spoof HOME so user_root() resolves
-        // inside our tempdir.
-        let fake_home = TempDir::new().unwrap();
-        let user_ryeos = fake_home.path().join(".ryeos");
-        std::fs::create_dir_all(&user_ryeos).unwrap();
-        let sys = TempDir::new().unwrap();
-
-        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", fake_home.path());
-        }
-        let result = refuse_walking_root(&user_ryeos, sys.path());
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        // First: $HOME containment kicks in (proj is inside HOME).
-        // That's also correct: $HOME guard catches it. Either error
-        // message is acceptable; we just need a refusal.
-        let err = result.expect_err("~/.ryeos/ must be refused");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("home directory") || msg.contains("user root") || msg.contains(".ryeos"),
-            "must refuse with home/user-root reason, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn nested_under_user_ryeos_is_refused() {
-        // A nested dir like ~/.ryeos/.ai/state/ must also be refused —
-        // it's still under the user root and contains node state
-        // (the real state lives at <user_root>/.ai/state/, not directly
-        // under <user_root>/state/).
-        let fake_home = TempDir::new().unwrap();
-        let inner = fake_home.path().join(".ryeos").join(".ai").join("state");
-        std::fs::create_dir_all(&inner).unwrap();
-        let sys = TempDir::new().unwrap();
-
-        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", fake_home.path());
-        }
-        let result = refuse_walking_root(&inner, sys.path());
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        let err = result.expect_err("dirs under ~/.ryeos/ must be refused");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("home directory") || msg.contains("user root") || msg.contains(".ryeos"),
-            "must refuse, got: {msg}"
+            msg.contains("filebundle root") || msg.contains("'/'"),
+            "error must mention filebundle root, got: {msg}"
         );
     }
 }
@@ -855,159 +636,6 @@ mod refuse_walking_root_tests {
 mod ingest_symlink_tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn ingest_user_space_skips_symlinks() {
-        // Set up a temp CAS store and a user .ai directory with a real
-        // file and a symlink (pointing outside the user root).
-        let cas_dir = TempDir::new().unwrap();
-        let cas = CasStore::new(cas_dir.path().to_path_buf());
-
-        let user_root = TempDir::new().unwrap();
-        let user_ai = user_root.path().join(".ai");
-        let directives_dir = user_ai.join("directives");
-        std::fs::create_dir_all(&directives_dir).unwrap();
-
-        // Real file.
-        std::fs::write(directives_dir.join("real.md"), "hello").unwrap();
-
-        // File outside user root (simulating ~/.ssh/id_rsa).
-        let outside = TempDir::new().unwrap();
-        std::fs::write(outside.path().join("secret"), "sensitive").unwrap();
-
-        // Symlink under directives/ pointing at the outside file.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            outside.path().join("secret"),
-            directives_dir.join("exfil.md"),
-        )
-        .unwrap();
-        #[cfg(not(unix))]
-        {
-            // Symlink support is Unix-only in practice for this test;
-            // skip on non-Unix.
-            return;
-        }
-
-        let mut items = HashMap::new();
-        ingest_user_dir_for_push(&cas, &user_ai, &user_ai, &mut items).unwrap();
-
-        // "real.md" should be in the manifest.
-        assert!(
-            items.keys().any(|k| k.contains("real.md")),
-            "real file must be ingested, got keys: {:?}",
-            items.keys().collect::<Vec<_>>()
-        );
-
-        // "exfil.md" must NOT be in the manifest.
-        assert!(
-            !items.keys().any(|k| k.contains("exfil.md")),
-            "symlink must be skipped, got keys: {:?}",
-            items.keys().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn ingest_user_space_skips_symlinked_subdir() {
-        // A symlinked directory should not be recursed into.
-        let cas_dir = TempDir::new().unwrap();
-        let cas = CasStore::new(cas_dir.path().to_path_buf());
-
-        let user_root = TempDir::new().unwrap();
-        let user_ai = user_root.path().join(".ai");
-        let directives_dir = user_ai.join("directives");
-        std::fs::create_dir_all(&directives_dir).unwrap();
-
-        // Directory outside user root with a file in it.
-        let outside = TempDir::new().unwrap();
-        std::fs::create_dir_all(outside.path().join("sub")).unwrap();
-        std::fs::write(outside.path().join("sub").join("leaked.txt"), "oops").unwrap();
-
-        // Symlinked directory under directives/.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(outside.path().join("sub"), directives_dir.join("leaky-dir"))
-            .unwrap();
-        #[cfg(not(unix))]
-        {
-            return;
-        };
-
-        let mut items = HashMap::new();
-        ingest_user_dir_for_push(&cas, &user_ai, &user_ai, &mut items).unwrap();
-
-        // Nothing from the symlinked dir should appear.
-        assert!(
-            !items
-                .keys()
-                .any(|k| k.contains("leaked.txt") || k.contains("leaky-dir")),
-            "symlinked directory must be skipped, got keys: {:?}",
-            items.keys().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn ingest_user_space_skips_symlinked_allowlist_root() {
-        // Invariant: a symlinked allowlist root directory (e.g.
-        // directives → /somewhere) is detected by symlink_metadata
-        // and skipped, preventing the walk from following it.
-        #[cfg(not(unix))]
-        {
-            return;
-        }
-
-        let cas_dir = TempDir::new().unwrap();
-        let cas = CasStore::new(cas_dir.path().to_path_buf());
-
-        // Create a synthetic user .ai directory.
-        let user_ai = TempDir::new().unwrap().path().join(".ai");
-        std::fs::create_dir_all(&user_ai).unwrap();
-
-        // Create an outside directory with files that should NOT be ingested.
-        let outside = TempDir::new().unwrap();
-        std::fs::write(outside.path().join("exfil.md"), "stolen").unwrap();
-
-        // Symlink the directives root to the outside dir.
-        std::os::unix::fs::symlink(outside.path(), user_ai.join("directives")).unwrap();
-
-        // Also create a REAL tools dir with a file to prove the real
-        // root is still walked.
-        let tools_dir = user_ai.join("tools");
-        std::fs::create_dir_all(&tools_dir).unwrap();
-        std::fs::write(tools_dir.join("my-tool.yaml"), "tool: content").unwrap();
-
-        // Walk the user_ai dir using the same allowlist-loop logic.
-        let mut items = HashMap::new();
-        for dir in ryeos_state::user_sync::USER_SPACE_SYNC_DIRS
-            .iter()
-            .copied()
-            .chain(std::iter::once(ryeos_state::user_sync::USER_TRUST_SYNC_DIR))
-        {
-            let abs = user_ai.join(dir);
-            match std::fs::symlink_metadata(&abs) {
-                Ok(md) if md.file_type().is_symlink() => {
-                    continue;
-                }
-                Ok(md) if md.is_dir() => {
-                    ingest_user_dir_for_push(&cas, &user_ai, &abs, &mut items).unwrap();
-                }
-                _ => continue,
-            }
-        }
-
-        // The symlinked directives root must be skipped.
-        assert!(
-            !items.keys().any(|k| k.contains("exfil")),
-            "symlinked allowlist root must be skipped, got keys: {:?}",
-            items.keys().collect::<Vec<_>>()
-        );
-
-        // The real tools dir must be walked.
-        assert!(
-            items.keys().any(|k| k.contains("my-tool.yaml")),
-            "real allowlist root must be walked, got keys: {:?}",
-            items.keys().collect::<Vec<_>>()
-        );
-    }
 
     #[test]
     fn ingest_project_ai_walks_only_managed_roots() {

@@ -39,7 +39,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     } else {
         req.project_path.as_deref()
     };
-    let report = config::load_remotes_layered_report(&state.config.system_space_dir, project)?;
+    let report = config::load_remotes_layered_report(&state.config.app_root, project)?;
     let remote_cfg = match config::get_loaded_remote(&report.remotes, &req.remote) {
         Ok(loaded) => loaded.config,
         Err(e) => {
@@ -108,7 +108,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "ryeos.execute.service.threads.get",
     ];
     let authorize_command = format!(
-        "ryeos-core-tools authorize-client --system-space-dir <remote-system-space> --public-key '{}' --scopes '{}' --label local-operator-{}",
+        "ryeos-core-tools authorize-client --app-root <remote-app-root> --public-key '{}' --scopes '{}' --label local-operator-{}",
         local_public_key.trim_start_matches("ed25519:"),
         bootstrap_scopes.join(","),
         local_fingerprint.chars().take(12).collect::<String>(),

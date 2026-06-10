@@ -45,7 +45,7 @@ pub struct Response {
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     // Require a verified signed caller. Hosted principal launches bind
-    // user-space storage to this caller's fingerprint.
+    // principal storage to this caller's fingerprint.
     if !ctx.is_present() {
         return Err(HandlerError::Forbidden(
             "ui.launch.mint requires verified signed caller".into(),
@@ -56,7 +56,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let user_principal_id = req
         .user_principal_id
         .map(|principal| {
-            ryeos_app::user_space::principal_storage_key(&principal)
+            ryeos_app::principal::principal_storage_key(&principal)
                 .map_err(|err| HandlerError::BadRequest(err.to_string()))?;
             if principal != ctx.fingerprint {
                 return Err(HandlerError::Forbidden(

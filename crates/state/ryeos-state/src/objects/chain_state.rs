@@ -47,7 +47,7 @@ impl ChainThreadEntry {
     }
 }
 
-/// Authoritative state root for an entire execution chain.
+/// Authoritative runtime state dir for an entire execution chain.
 ///
 /// Matches the JSON schema from ARCHITECTURE.md §3:
 /// ```json

@@ -42,15 +42,15 @@ pub struct StateDb {
 }
 
 impl StateDb {
-    /// Open (or create) a state database rooted at `state_root`.
+    /// Open (or create) a state database rooted at `runtime_state_dir`.
     ///
     /// Creates `objects/`, `refs/`, and `locators/` subdirectories and opens
-    /// `projection.sqlite3` inside `state_root`.
-    pub fn open(state_root: &Path) -> anyhow::Result<Self> {
-        let cas_root = state_root.join("objects");
-        let refs_root = state_root.join("refs");
-        let locators_root = state_root.join("locators");
-        let projection_path = state_root.join("projection.sqlite3");
+    /// `projection.sqlite3` inside `runtime_state_dir`.
+    pub fn open(runtime_state_dir: &Path) -> anyhow::Result<Self> {
+        let cas_root = runtime_state_dir.join("objects");
+        let refs_root = runtime_state_dir.join("refs");
+        let locators_root = runtime_state_dir.join("locators");
+        let projection_path = runtime_state_dir.join("projection.sqlite3");
 
         std::fs::create_dir_all(&cas_root).context("creating objects root")?;
         std::fs::create_dir_all(&refs_root).context("creating refs root")?;
@@ -87,17 +87,17 @@ impl StateDb {
         &self.projection
     }
 
-    /// CAS objects root (`state_root/objects`).
+    /// CAS objects root (`runtime_state_dir/objects`).
     pub fn cas_root(&self) -> &Path {
         &self.cas_root
     }
 
-    /// Refs root (`state_root/refs`).
+    /// Refs root (`runtime_state_dir/refs`).
     pub fn refs_root(&self) -> &Path {
         &self.refs_root
     }
 
-    /// Locators root (`state_root/locators`).
+    /// Locators root (`runtime_state_dir/locators`).
     pub fn locators_root(&self) -> &Path {
         &self.locators_root
     }
@@ -346,10 +346,10 @@ impl StateDb {
         projection_name: &str,
     ) -> anyhow::Result<BundleProjectionDb> {
         validate_bundle_identifier("projection_name", projection_name)?;
-        let state_root = self.cas_root.parent().ok_or_else(|| {
+        let runtime_state_dir = self.cas_root.parent().ok_or_else(|| {
             anyhow::anyhow!("CAS root has no parent: {}", self.cas_root.display())
         })?;
-        let projection_root = state_root.join("bundle-projections");
+        let projection_root = runtime_state_dir.join("bundle-projections");
         fs::create_dir_all(&projection_root).context("creating bundle projection root")?;
         BundleProjectionDb::open(&projection_root.join(format!("{projection_name}.sqlite3")))
     }
