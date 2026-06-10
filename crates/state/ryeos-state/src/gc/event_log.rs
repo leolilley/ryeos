@@ -22,6 +22,7 @@ pub struct GcEvent {
     pub reachable_blobs: usize,
     pub deleted_objects: usize,
     pub deleted_blobs: usize,
+    pub deleted_runtime_files: usize,
     pub freed_bytes: u64,
     pub snapshots_compacted: usize,
     pub duration_ms: u64,
@@ -44,6 +45,7 @@ impl GcEvent {
             reachable_blobs: result.reachable_blobs,
             deleted_objects: result.deleted_objects,
             deleted_blobs: result.deleted_blobs,
+            deleted_runtime_files: result.deleted_runtime_files,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
@@ -95,6 +97,7 @@ mod tests {
             reachable_blobs: 20,
             deleted_objects: 10,
             deleted_blobs: 5,
+            deleted_runtime_files: 0,
             freed_bytes: 4096,
             snapshots_compacted: 0,
             duration_ms: 150,
@@ -126,6 +129,7 @@ mod tests {
                 reachable_blobs: 10,
                 deleted_objects: 5,
                 deleted_blobs: 2,
+                deleted_runtime_files: 0,
                 freed_bytes: 1024,
                 snapshots_compacted: 0,
                 duration_ms: 100,

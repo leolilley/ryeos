@@ -17,6 +17,7 @@ pub mod compact;
 pub mod event_log;
 pub mod lock;
 
+use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
@@ -41,6 +42,24 @@ pub struct GcParams {
     /// Compact project snapshot history before sweep.
     #[serde(default)]
     pub compact: bool,
+    /// Purge disposable runtime state before sweeping CAS.
+    ///
+    /// This is intentionally opt-in: normal GC preserves execution history.
+    /// Deep GC drops local runtime-only history/caches that can be rebuilt or
+    /// are not part of operator config, node identity, installed bundles, or
+    /// project/deployed heads.
+    #[serde(default)]
+    pub deep: bool,
+    /// Purge executor/materialization caches under `.ai/state/cache`.
+    #[serde(default)]
+    pub purge_cache: bool,
+    /// Truncate `.ai/state/trace-events.ndjson`.
+    #[serde(default)]
+    pub truncate_trace: bool,
+    /// Drop generic execution chain refs before CAS sweep, making local thread
+    /// and chain runtime history collectible.
+    #[serde(default)]
+    pub prune_runtime_history: bool,
     /// Retention policy for compaction (uses default if None).
     #[serde(default)]
     pub policy: Option<RetentionPolicy>,
@@ -69,9 +88,51 @@ pub struct GcResult {
     pub reachable_blobs: usize,
     pub deleted_objects: usize,
     pub deleted_blobs: usize,
+    pub deleted_runtime_files: usize,
     pub freed_bytes: u64,
     pub compaction: Option<CompactionResult>,
     pub duration_ms: u64,
+}
+
+/// Purge opt-in runtime-only state before CAS sweep.
+///
+/// The caller should hold the daemon write barrier. This helper deliberately
+/// stays away from `.ai/config`, `.ai/node`, `.ai/bundles`, project heads, and
+/// deployed project heads. `deep` is a convenience flag that enables every
+/// runtime purge below.
+pub fn purge_runtime_state(
+    runtime_state_dir: &Path,
+    params: &GcParams,
+    result: &mut GcResult,
+) -> Result<()> {
+    if params.deep || params.prune_runtime_history {
+        remove_path_contents(
+            &runtime_state_dir
+                .join("refs")
+                .join("generic")
+                .join("chains"),
+            params.dry_run,
+            result,
+        )?;
+    }
+
+    if params.deep || params.purge_cache {
+        remove_path_contents(&runtime_state_dir.join("cache"), params.dry_run, result)?;
+        if !params.dry_run {
+            fs::create_dir_all(runtime_state_dir.join("cache"))
+                .context("failed to recreate runtime cache directory")?;
+        }
+    }
+
+    if params.deep || params.truncate_trace {
+        truncate_file(
+            &runtime_state_dir.join("trace-events.ndjson"),
+            params.dry_run,
+            result,
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Full GC pipeline: compact (optional) → sweep.
@@ -262,6 +323,65 @@ fn remove_dir_if_empty(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn remove_path_contents(path: &Path, dry_run: bool, result: &mut GcResult) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_file() {
+        remove_runtime_file(path, dry_run, result)?;
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
+        let entry = entry.context("failed to read runtime state entry")?;
+        let entry_path = entry.path();
+        let file_type = entry
+            .file_type()
+            .context("failed to stat runtime state entry")?;
+        if file_type.is_dir() {
+            remove_path_contents(&entry_path, dry_run, result)?;
+            if !dry_run {
+                fs::remove_dir(&entry_path).with_context(|| {
+                    format!(
+                        "failed to remove runtime directory {}",
+                        entry_path.display()
+                    )
+                })?;
+            }
+        } else if file_type.is_file() {
+            remove_runtime_file(&entry_path, dry_run, result)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_runtime_file(path: &Path, dry_run: bool, result: &mut GcResult) -> Result<()> {
+    let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+    if !dry_run {
+        fs::remove_file(path)
+            .with_context(|| format!("failed to remove runtime file {}", path.display()))?;
+    }
+    result.deleted_runtime_files += 1;
+    result.freed_bytes += file_size;
+    Ok(())
+}
+
+fn truncate_file(path: &Path, dry_run: bool, result: &mut GcResult) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+    if !dry_run {
+        fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("failed to truncate {}", path.display()))?;
+    }
+    result.deleted_runtime_files += 1;
+    result.freed_bytes += file_size;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +406,7 @@ mod tests {
             dry_run: true,
             compact: false,
             policy: None,
+            ..GcParams::default()
         };
         assert!(params.dry_run);
         assert!(!params.compact);
@@ -401,6 +522,7 @@ mod tests {
             dry_run: false,
             compact: true,
             policy: Some(policy),
+            ..GcParams::default()
         };
 
         let result = run_gc(&cas_root, &refs_root, Some(&signer), &params).unwrap();
@@ -440,6 +562,7 @@ mod tests {
             dry_run: false,
             compact: false,
             policy: None,
+            ..GcParams::default()
         };
 
         let result = run_gc(&cas_root, &refs_root, Some(&signer), &params).unwrap();
@@ -576,6 +699,61 @@ mod tests {
     }
 
     #[test]
+    fn deep_runtime_purge_removes_only_runtime_disposable_paths() {
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime_state_dir = tmp.path().join("state");
+        let chain_ref = runtime_state_dir.join("refs/generic/chains/T-1/head");
+        let project_ref = runtime_state_dir.join("refs/projects/fp/project/head");
+        let bundle_event_ref =
+            runtime_state_dir.join("refs/generic/bundle_events/email/event/head");
+        let cache_file = runtime_state_dir.join("cache/executors/hash/runtime/bin");
+        let trace_file = runtime_state_dir.join("trace-events.ndjson");
+
+        fs::create_dir_all(chain_ref.parent().unwrap()).unwrap();
+        fs::create_dir_all(project_ref.parent().unwrap()).unwrap();
+        fs::create_dir_all(bundle_event_ref.parent().unwrap()).unwrap();
+        fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::write(&chain_ref, b"chain").unwrap();
+        fs::write(&project_ref, b"project").unwrap();
+        fs::write(&bundle_event_ref, b"bundle-event").unwrap();
+        fs::write(&cache_file, b"cache").unwrap();
+        fs::write(&trace_file, b"trace line\n").unwrap();
+
+        let mut result = GcResult::default();
+        let params = GcParams {
+            deep: true,
+            ..GcParams::default()
+        };
+        purge_runtime_state(&runtime_state_dir, &params, &mut result).unwrap();
+
+        assert!(
+            !chain_ref.exists(),
+            "deep purge should drop execution chain refs"
+        );
+        assert!(
+            !cache_file.exists(),
+            "deep purge should drop executor cache files"
+        );
+        assert_eq!(
+            fs::metadata(&trace_file).unwrap().len(),
+            0,
+            "deep purge should truncate daemon trace output"
+        );
+        assert!(
+            project_ref.exists(),
+            "deep purge must preserve project refs"
+        );
+        assert!(
+            bundle_event_ref.exists(),
+            "deep purge must preserve bundle/application event refs"
+        );
+        assert!(result.deleted_runtime_files >= 3);
+        assert!(result.freed_bytes >= b"chain".len() as u64 + b"cache".len() as u64);
+    }
+
+    #[test]
     fn gc_params_fields_default_when_omitted() {
         // The service schema advertises dry_run/compact as optional (boolean?);
         // omitting them must deserialize to false rather than erroring, so the
@@ -583,6 +761,10 @@ mod tests {
         let p: GcParams = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!p.dry_run);
         assert!(!p.compact);
+        assert!(!p.deep);
+        assert!(!p.purge_cache);
+        assert!(!p.truncate_trace);
+        assert!(!p.prune_runtime_history);
         assert!(p.policy.is_none());
 
         let p: GcParams = serde_json::from_value(serde_json::json!({"dry_run": true})).unwrap();
@@ -592,5 +774,8 @@ mod tests {
         let p: GcParams = serde_json::from_value(serde_json::json!({"compact": true})).unwrap();
         assert!(!p.dry_run);
         assert!(p.compact);
+
+        let p: GcParams = serde_json::from_value(serde_json::json!({"deep": true})).unwrap();
+        assert!(p.deep);
     }
 }

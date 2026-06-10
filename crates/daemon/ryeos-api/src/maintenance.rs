@@ -39,6 +39,7 @@ const DEFAULT_QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
     fields(
         dry_run = params.dry_run,
         compact = params.compact,
+        deep = params.deep,
     )
 )]
 pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<GcResult> {
@@ -53,6 +54,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     tracing::info!(
         dry_run = params.dry_run,
         compact = params.compact,
+        deep = params.deep,
         "maintenance GC: lock acquired"
     );
 
@@ -118,8 +120,14 @@ fn run_gc_and_log(
     params: &GcParams,
     runtime_state_dir: &std::path::Path,
 ) -> Result<GcResult> {
-    let result =
+    let mut runtime_cleanup = GcResult::default();
+    gc::purge_runtime_state(runtime_state_dir, params, &mut runtime_cleanup)
+        .context("runtime-state purge failed")?;
+
+    let mut result =
         gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
+    result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
+    result.freed_bytes += runtime_cleanup.freed_bytes;
 
     // Log the event (best-effort)
     if let Err(err) = gc::event_log::append_event(
@@ -133,6 +141,7 @@ fn run_gc_and_log(
             reachable_blobs: result.reachable_blobs,
             deleted_objects: result.deleted_objects,
             deleted_blobs: result.deleted_blobs,
+            deleted_runtime_files: result.deleted_runtime_files,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
