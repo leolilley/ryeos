@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:23d2610694cd632eb07c86579ba30b98ce90aff805ac5aee6fe17c30ff972c3f:wlwVuTmDlJrqFe3tt2+0td0L2DzgRIsxtFYieNxJDf+Ym7YuUxinOo/bIAgiXFANr/f12Is7RTNROTPChD6BBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T05:13:18Z:a2b45d6005ea85d9bd0e95e563692dd23b0b54196e0dde821cc040fbf3b2b0e4:QxwiS3oSeDQGUHeQ4M3SH8oVCREO8g13Ba6t8C+wOsXyCaAnR+4MiOCLOW+1Pu0JuU1Va0u6RupqGdYhKcYXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -31,24 +31,24 @@ remote operator when requesting access.
 
 | Command | Local service cap | Remote scopes on target | Remote routes used |
 |---|---|---|---|
-| `ryeos remote configure` | `ryeos.execute.service.remote.configure` | none | `GET /public-key`, `GET /ingest-ignore` |
+| `ryeos remote configure` | `ryeos.execute.service.remote/configure` | none | `GET /public-key`, `GET /ingest-ignore` |
 | `ryeos remote-descriptor` | local tool execution | none | none |
 | `ryeos admission-token` | local tool execution | none | none |
-| `ryeos remote admit` | `ryeos.execute.service.remote.admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
-| `ryeos remote list` | `ryeos.execute.service.remote.list` | none | none |
-| `ryeos remote status` | `ryeos.execute.service.remote.status` | none | `GET /health`, `GET /public-key` |
-| `ryeos remote doctor` | `ryeos.execute.service.remote.doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
-| `ryeos remote authorize` | `ryeos.execute.service.remote.admin` | `ryeos.execute.service.authorize.key` | `POST /authorize-key` |
-| `ryeos remote push` | `ryeos.execute.service.remote.push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push.head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
-| `ryeos remote pull` | `ryeos.execute.service.objects.get` | `ryeos.execute.service.objects.get` | `POST /objects/get` |
-| `ryeos remote execute` | `ryeos.execute.service.remote.admin` | push scopes + `ryeos.execute.service.objects.get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
-| `ryeos remote run` | `ryeos.execute.service.remote.admin` | caps required by the executed item | `POST /execute` |
-| `ryeos remote threads` | `ryeos.execute.service.remote.admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
-| `ryeos remote thread-status` | `ryeos.execute.service.remote.admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
-| `ryeos remote bundle-install` | `ryeos.execute.service.bundle.install` | `ryeos.execute.service.bundle.export`, `ryeos.execute.service.objects.get` | `POST /bundle/export`, `POST /objects/get` |
-| `ryeos remote vault-set` | `ryeos.execute.service.remote.admin` | `ryeos.execute.service.vault.set` | `POST /vault/set` |
-| `ryeos remote vault-list` | `ryeos.execute.service.remote.admin` | `ryeos.execute.service.vault.list` | `GET /vault/list` |
-| `ryeos remote vault-delete` | `ryeos.execute.service.remote.admin` | `ryeos.execute.service.vault.delete` | `POST /vault/delete` |
+| `ryeos remote admit` | `ryeos.execute.service.remote/admit` | none before claim; claim creates requested grant | `GET /public-key`, `POST /admission/claim` |
+| `ryeos remote list` | `ryeos.execute.service.remote/list` | none | none |
+| `ryeos remote status` | `ryeos.execute.service.remote/status` | none | `GET /health`, `GET /public-key` |
+| `ryeos remote doctor` | `ryeos.execute.service.remote/doctor` | signed auth probe; project status if `--project` is supplied | `GET /health`, `GET /public-key`, `GET /threads?limit=1`, optionally `POST /project/status` |
+| `ryeos remote authorize` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.identity/authorize-key` | `POST /authorize-key` |
+| `ryeos remote push` | `ryeos.execute.service.remote/push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head` |
+| `ryeos remote pull` | `ryeos.execute.service.objects/get` | `ryeos.execute.service.objects/get` | `POST /objects/get` |
+| `ryeos remote execute` | `ryeos.execute.service.remote/admin` | push scopes + `ryeos.execute.service.objects/get` + caps required by the executed item | `GET /ingest-ignore`, `POST /objects/has`, `POST /objects/put`, `POST /push-head`, `POST /execute`, `POST /objects/get` |
+| `ryeos remote run` | `ryeos.execute.service.remote/admin` | caps required by the executed item | `POST /execute` |
+| `ryeos remote threads` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads?limit=N` |
+| `ryeos remote thread-status` | `ryeos.execute.service.remote/admin` | signed auth; no extra thread service cap in v1 | `GET /threads/{thread_id}` |
+| `ryeos remote bundle-install` | `ryeos.execute.service.bundle/install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` | `POST /bundle/export`, `POST /objects/get` |
+| `ryeos remote vault-set` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/set` | `POST /vault/set` |
+| `ryeos remote vault-list` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/list` | `GET /vault/list` |
+| `ryeos remote vault-delete` | `ryeos.execute.service.remote/admin` | `ryeos.execute.service.vault/delete` | `POST /vault/delete` |
 
 Notes:
 
@@ -114,7 +114,7 @@ Mint a one-time, node-local bootstrap token file on the target node.
 ```bash
 ryeos admission-token \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600
 ```
 
@@ -134,7 +134,7 @@ ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
 ```
 
 Before sending the token, the command fetches the live remote identity
@@ -174,11 +174,11 @@ ryeos remote authorize \
   --remote prod \
   --public-key "ed25519:<base64_pubkey>" \
   --label "ci-runner" \
-  --scopes "ryeos.execute.service.objects.get"
+  --scopes "ryeos.execute.service.objects/get"
 ```
 
 This is a remote administrative operation. Your caller node must already
-be authorized on the target for `ryeos.execute.service.authorize.key`.
+be authorized on the target for `ryeos.execute.service.identity/authorize-key`.
 For initial bootstrap, the remote operator can run `ryeos authorize-key`
 locally on the remote node instead.
 

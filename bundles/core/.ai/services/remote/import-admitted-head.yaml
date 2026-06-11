@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:d33cb1321140897ac52e81d5c095b67f9a7880cc7e22bb5349d0eac79782bdcb:MdkwPAh1vOD65vWNP2xdQbnFN411aqDxRS9MqcM3rGMT/iEYnPIDyguMuwzxYL+sNYVbEWbM3ZwndEh0b9JvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:9dd483c89d9aa3fd9a9d69fe74f36af452972a579901cdc4030810d8a8a580b8:XnZeM7hZsGh0dfTR0AGCD0dNuIRCD0GQJey5yozaZbKYelJXXTy47hzuCsYr/pB14bBNSYfnc/h0X7um9eY+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.import-admitted-head
-required_caps: ["ryeos.execute.service.remote.import-admitted-head"]
+required_caps: ["ryeos.execute.service.remote/import-admitted-head"]
 schema:
   remote: string?
   project: string?

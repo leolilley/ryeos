@@ -39,6 +39,14 @@ pub struct StructuredErrorPayload {
     /// Matches the `items.effective` `contract_violation` envelope shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+    /// Service-not-installed fields: the requested item ref, the
+    /// bundles registered on the answering node, and an operator hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_bundles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 impl StructuredErrorPayload {
@@ -54,6 +62,26 @@ impl StructuredErrorPayload {
             remediation: None,
             required_cap: None,
             details: None,
+            item_ref: None,
+            installed_bundles: None,
+            hint: None,
+        }
+    }
+
+    /// Build the `service_not_installed` envelope: the requested
+    /// service item resolved to nothing because the bundle that ships
+    /// it is not installed on the answering node.
+    pub fn service_not_installed(
+        error_msg: impl Into<String>,
+        item_ref: impl Into<String>,
+        installed_bundles: Vec<String>,
+        hint: impl Into<String>,
+    ) -> Self {
+        Self {
+            item_ref: Some(item_ref.into()),
+            installed_bundles: Some(installed_bundles),
+            hint: Some(hint.into()),
+            ..Self::generic("service_not_installed", error_msg)
         }
     }
 
@@ -69,28 +97,19 @@ impl StructuredErrorPayload {
         remediation: impl Into<String>,
     ) -> Self {
         Self {
-            code: "required_secret_missing".to_string(),
-            error: error_msg.into(),
             env_var: Some(env_var.into()),
             source_kind: Some(source_kind.into()),
             source_name: Some(source_name.into()),
             remediation: Some(remediation.into()),
-            required_cap: None,
-            details: None,
+            ..Self::generic("required_secret_missing", error_msg)
         }
     }
 
     /// Build the `missing_cap` envelope (existing `/execute` surface).
     pub fn missing_cap(error_msg: impl Into<String>, required: impl Into<String>) -> Self {
         Self {
-            code: "missing_cap".to_string(),
-            error: error_msg.into(),
-            env_var: None,
-            source_kind: None,
-            source_name: None,
-            remediation: None,
             required_cap: Some(required.into()),
-            details: None,
+            ..Self::generic("missing_cap", error_msg)
         }
     }
 
@@ -101,16 +120,10 @@ impl StructuredErrorPayload {
         details: crate::dispatch_error::ContractViolationDetails,
     ) -> Self {
         Self {
-            code: "contract_violation".to_string(),
-            error: error_msg.into(),
-            env_var: None,
-            source_kind: None,
-            source_name: None,
-            remediation: None,
-            required_cap: None,
             details: Some(
                 serde_json::to_value(details).expect("ContractViolationDetails always serializes"),
             ),
+            ..Self::generic("contract_violation", error_msg)
         }
     }
 
@@ -139,6 +152,17 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 remediation,
             ),
             DispatchError::MissingCap { required } => Self::missing_cap(e.to_string(), required),
+            DispatchError::ServiceNotInstalled {
+                service_ref,
+                installed_bundles,
+                ..
+            } => Self::service_not_installed(
+                e.to_string(),
+                service_ref,
+                installed_bundles.clone(),
+                "install the bundle that provides this service item on the target node, \
+                 or deploy an image profile that includes it",
+            ),
             DispatchError::ComposedValueContractViolation { details, .. } => {
                 Self::contract_violation(e.to_string(), details.clone())
             }

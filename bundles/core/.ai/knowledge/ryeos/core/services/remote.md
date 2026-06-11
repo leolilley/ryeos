@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-05T04:12:08Z:8c73992cd867e749f4a3cb49b59c2f9ff353b1e5a4fdc2a7c58e365e7bddde55:1wAPL4UGu5qjqb97Te4hpSyolt8Jsz2OWGzGSYhQGc/10iO3fTS/N8Axh4elWMOY4SaAyX3ldtZqgX85I6GaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T05:13:19Z:4fc0c03a5bdd33cdc58625e3e574089bf8050c0ab3a66e2db60351f662fd188b:2CkACPwz3UNnNIeFAVUL4Qe48FcFBXrOsyualU7vPiy4DmaHLEz4fHKgHn3UG2CF0BsosFEEgmabCxtC6GRhAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/services
 tags: [service, remote, pushed-head, transfer, capabilities]
@@ -22,21 +22,21 @@ The authoritative matrix is in
 
 | Service | Endpoint | Local capability |
 |---|---|---|
-| `remote/configure` | `remote.configure` | `ryeos.execute.service.remote.configure` |
-| `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
-| `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
-| `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
-| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.admit` |
-| `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
-| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
-| `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |
-| `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote.admin` |
-| `remote/threads` | `remote.threads` | `ryeos.execute.service.remote.admin` |
-| `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote.admin` |
-| `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle.install` |
-| `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote.admin` |
-| `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote.admin` |
-| `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote.admin` |
+| `remote/configure` | `remote.configure` | `ryeos.execute.service.remote/configure` |
+| `remote/list` | `remote.list` | `ryeos.execute.service.remote/list` |
+| `remote/status` | `remote.status` | `ryeos.execute.service.remote/status` |
+| `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote/doctor` |
+| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
+| `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
+| `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
+| `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
+| `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
+| `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |
+| `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
+| `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
+| `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
 
 ## Operational invariants
 

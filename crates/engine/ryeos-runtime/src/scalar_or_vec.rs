@@ -5,7 +5,7 @@
 //! `string[]` (or any homogeneous array) so the CLI can pass a single
 //! value naturally:
 //!
-//!   --scopes ryeos.execute.service.bundle.install
+//!   --scopes ryeos.execute.service.bundle/install
 //!
 //! produces the JSON scalar `"ryeos..."`, which deserializes to a
 //! one-element `Vec<String>`. Repeated flags accumulate into an array

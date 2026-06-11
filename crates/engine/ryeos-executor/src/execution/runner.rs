@@ -1578,9 +1578,11 @@ pub async fn run_existing_detached(
         })?;
 
         let mut vault_bindings = vault_bindings;
+        let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
         crate::execution::launch::preflight_inject_provider_secret(
             &resolution.composed,
             &engine_roots,
+            &operator_trusted_keys_dir,
             state.vault.as_ref(),
             &params.acting_principal,
             &params.resolved.item_ref,

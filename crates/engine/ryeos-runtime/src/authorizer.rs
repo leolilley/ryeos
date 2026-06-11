@@ -5,10 +5,20 @@
 //!
 //! Wire format: `ryeos.<verb>.<kind>.<subject>`
 //!
-//! Subjects use `/` as path separators, matching canonical ref format.
+//! For item-execution capabilities the subject is the canonical bare
+//! item id, preserving `/`: `cap = ryeos.<verb>.<kind>.<bare_id>`
+//! (e.g. `service:scheduler/register` →
+//! `ryeos.execute.service.scheduler/register`). The `.` characters
+//! before the subject separate the capability envelope; `/` inside the
+//! subject preserves item namespace layout.
+//!
 //! Wildcards use `*` (matches any characters including `/`).
-//! Path-prefix wildcards use `.*` (e.g., `ryeos.execute.service.bundle.*`
-//! matches `bundle.install`, `bundle.remove`, but not `bundleX`).
+//! Path-prefix wildcards use `/*` (e.g.,
+//! `ryeos.execute.service.scheduler/*` matches `scheduler/register`
+//! and `scheduler/pause`, but not `schedulerX`). A `.` inside a
+//! subject pattern is literal — it does NOT match `/`, so legacy
+//! dot-form grants like `ryeos.execute.service.scheduler.*` satisfy
+//! nothing.
 //!
 //! Required-side patterns support wildcards in verb, kind, and subject
 //! positions. `require("ryeos.*")` means "any rye cap".
@@ -20,7 +30,7 @@
 //!
 //! let authorizer = Authorizer::new();
 //!
-//! let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle.install");
+//! let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
 //! let scopes = vec!["ryeos.execute.service.*".to_string()];
 //!
 //! assert!(authorizer.authorize(&scopes, &policy).is_ok());
@@ -48,8 +58,8 @@ pub enum CapabilityParseError {
 impl Capability {
     /// Parse a capability string into structured parts.
     ///
-    /// `ryeos.execute.service.bundle.install` →
-    /// `Capability { verb: "execute", kind: "service", subject: "bundle.install" }`
+    /// `ryeos.execute.service.bundle/install` →
+    /// `Capability { verb: "execute", kind: "service", subject: "bundle/install" }`
     pub fn parse(s: &str) -> Result<Self, CapabilityParseError> {
         let parts: Vec<&str> = s.splitn(4, '.').collect();
         if parts.len() < 4 || parts[0] != "ryeos" {
@@ -70,10 +80,11 @@ impl Capability {
 
 /// Derive a canonical capability string from an executable ref.
 ///
-/// `canonical_cap("service", "bundle.install", "execute")` →
-/// `"ryeos.execute.service.bundle.install"`
+/// `canonical_cap("service", "bundle/install", "execute")` →
+/// `"ryeos.execute.service.bundle/install"`
 ///
-/// Subject preserves `/` separators from the ref path. Wildcards match `/`.
+/// Subject is the canonical bare item id verbatim, preserving `/`
+/// separators. `*` wildcards in grants match `/`.
 pub fn canonical_cap(kind: &str, ref_path: &str, verb: &str) -> String {
     format!("ryeos.{}.{}.{}", verb, kind, ref_path)
 }
@@ -288,7 +299,7 @@ impl Authorizer {
     ///
     /// Two matching mechanisms:
     /// 1. **Wildcard granted**: `granted = "ryeos.execute.service.*"` satisfies
-    ///    `required = "ryeos.execute.service.bundle.install"`.
+    ///    `required = "ryeos.execute.service.bundle/install"`.
     /// 2. **Wildcard required**: `required = "ryeos.*"` is satisfied by any
     ///    granted rye cap. `required = "ryeos.execute.service.*"` is satisfied
     ///    by any granted cap with verb=execute, kind=service.
@@ -318,9 +329,13 @@ impl Default for Authorizer {
 /// Supports:
 /// - Exact match (`ryeos.execute.service.x` matches itself)
 /// - Global wildcard (`*` matches everything)
-/// - Prefix wildcard (`ryeos.execute.service.*` matches `ryeos.execute.service.bundle.install`)
-/// - Path-prefix wildcard (`ryeos.execute.service.bundle.*` matches `ryeos.execute.service.bundle.install`)
+/// - Prefix wildcard (`ryeos.execute.service.*` matches `ryeos.execute.service.bundle/install`)
+/// - Path-prefix wildcard (`ryeos.execute.service.bundle/*` matches `ryeos.execute.service.bundle/install`)
 /// - Single-char wildcard (`?` matches exactly one character)
+///
+/// Non-wildcard characters are literal: a `.` in the granted pattern
+/// does not match `/`, so dot-form grants cannot satisfy slash-form
+/// canonical caps.
 ///
 /// Special regex chars in the granted pattern are escaped; only `*` and `?`
 /// are treated as wildcards.
@@ -366,11 +381,11 @@ mod tests {
 
     #[test]
     fn capability_parse_round_trip() {
-        let cap = Capability::parse("ryeos.execute.service.bundle.install").unwrap();
+        let cap = Capability::parse("ryeos.execute.service.bundle/install").unwrap();
         assert_eq!(cap.verb, "execute");
         assert_eq!(cap.kind, "service");
-        assert_eq!(cap.subject, "bundle.install");
-        assert_eq!(cap.to_wire(), "ryeos.execute.service.bundle.install");
+        assert_eq!(cap.subject, "bundle/install");
+        assert_eq!(cap.to_wire(), "ryeos.execute.service.bundle/install");
     }
 
     #[test]
@@ -387,8 +402,8 @@ mod tests {
     #[test]
     fn canonical_cap_derivation() {
         assert_eq!(
-            canonical_cap("service", "bundle.install", "execute"),
-            "ryeos.execute.service.bundle.install"
+            canonical_cap("service", "bundle/install", "execute"),
+            "ryeos.execute.service.bundle/install"
         );
         assert_eq!(
             canonical_cap("tool", "ryeos/file-system/read", "execute"),
@@ -427,7 +442,7 @@ mod tests {
 
     #[test]
     fn required_pattern_full() {
-        let p = RequiredPattern::parse("ryeos.execute.service.bundle.install");
+        let p = RequiredPattern::parse("ryeos.execute.service.bundle/install");
         match p {
             RequiredPattern::Full {
                 verb,
@@ -436,7 +451,7 @@ mod tests {
             } => {
                 assert_eq!(verb, "execute");
                 assert_eq!(kind, "service");
-                assert_eq!(subject, "bundle.install");
+                assert_eq!(subject, "bundle/install");
             }
             _ => panic!("expected Full, got {:?}", p),
         }
@@ -476,23 +491,33 @@ mod tests {
     #[test]
     fn subject_wildcard_matches_any_subject() {
         let p = RequiredPattern::parse("ryeos.execute.service.*");
-        assert!(p.matches("ryeos.execute.service.bundle.install"));
-        assert!(p.matches("ryeos.execute.service.threads.get"));
+        assert!(p.matches("ryeos.execute.service.bundle/install"));
+        assert!(p.matches("ryeos.execute.service.threads/get"));
         assert!(!p.matches("ryeos.execute.tool.x"));
     }
 
     #[test]
     fn full_pattern_exact_subject() {
-        let p = RequiredPattern::parse("ryeos.execute.service.bundle.install");
-        assert!(p.matches("ryeos.execute.service.bundle.install"));
-        assert!(!p.matches("ryeos.execute.service.bundle.remove"));
+        let p = RequiredPattern::parse("ryeos.execute.service.bundle/install");
+        assert!(p.matches("ryeos.execute.service.bundle/install"));
+        assert!(!p.matches("ryeos.execute.service.bundle/remove"));
     }
 
     #[test]
     fn full_pattern_wildcard_subject() {
+        let p = RequiredPattern::parse("ryeos.execute.service.bundle/*");
+        assert!(p.matches("ryeos.execute.service.bundle/install"));
+        assert!(p.matches("ryeos.execute.service.bundle/remove"));
+        assert!(!p.matches("ryeos.execute.service.bundleX"));
+    }
+
+    #[test]
+    fn full_pattern_dot_wildcard_does_not_match_slash_subjects() {
+        // Legacy dot-form required patterns must satisfy nothing under
+        // the slash-form canonical cap convention: `.` is literal.
         let p = RequiredPattern::parse("ryeos.execute.service.bundle.*");
-        assert!(p.matches("ryeos.execute.service.bundle.install"));
-        assert!(p.matches("ryeos.execute.service.bundle.remove"));
+        assert!(!p.matches("ryeos.execute.service.bundle/install"));
+        assert!(!p.matches("ryeos.execute.service.bundle/remove"));
         assert!(!p.matches("ryeos.execute.service.bundleX"));
     }
 
@@ -507,22 +532,22 @@ mod tests {
     #[test]
     fn exact_match() {
         assert!(cap_matches(
-            "ryeos.execute.service.threads.get",
-            "ryeos.execute.service.threads.get"
+            "ryeos.execute.service.threads/get",
+            "ryeos.execute.service.threads/get"
         ));
     }
 
     #[test]
     fn no_match_denied() {
         assert!(!cap_matches(
-            "ryeos.execute.service.threads.get",
-            "ryeos.execute.service.threads.list"
+            "ryeos.execute.service.threads/get",
+            "ryeos.execute.service.threads/list"
         ));
     }
 
     #[test]
     fn global_wildcard() {
-        assert!(cap_matches("*", "ryeos.execute.service.threads.get"));
+        assert!(cap_matches("*", "ryeos.execute.service.threads/get"));
         assert!(cap_matches("*", "anything.at.all"));
     }
 
@@ -530,19 +555,42 @@ mod tests {
     fn prefix_wildcard() {
         assert!(cap_matches(
             "ryeos.execute.service.*",
-            "ryeos.execute.service.bundle.install"
+            "ryeos.execute.service.bundle/install"
         ));
     }
 
     #[test]
     fn path_prefix_wildcard() {
         assert!(cap_matches(
-            "ryeos.execute.service.bundle.*",
-            "ryeos.execute.service.bundle.install"
+            "ryeos.execute.service.bundle/*",
+            "ryeos.execute.service.bundle/install"
         ));
         assert!(!cap_matches(
-            "ryeos.execute.service.bundle.*",
+            "ryeos.execute.service.bundle/*",
             "ryeos.execute.service.bundleX"
+        ));
+    }
+
+    #[test]
+    fn dot_form_grant_does_not_match_slash_caps() {
+        // A legacy dot-form grant must not satisfy slash-form canonical
+        // caps — re-admit with slash-form scopes instead.
+        assert!(!cap_matches(
+            "ryeos.execute.service.scheduler.*",
+            "ryeos.execute.service.scheduler/register"
+        ));
+        assert!(!cap_matches(
+            "ryeos.execute.service.scheduler.register",
+            "ryeos.execute.service.scheduler/register"
+        ));
+        // The slash forms do.
+        assert!(cap_matches(
+            "ryeos.execute.service.scheduler/*",
+            "ryeos.execute.service.scheduler/register"
+        ));
+        assert!(cap_matches(
+            "ryeos.execute.service.scheduler/register",
+            "ryeos.execute.service.scheduler/register"
         ));
     }
 
@@ -581,7 +629,7 @@ mod tests {
     fn slash_in_subject_matches_wildcard() {
         assert!(cap_matches(
             "ryeos.execute.service.*",
-            "ryeos.execute.service.bundle.install"
+            "ryeos.execute.service.bundle/install"
         ));
     }
 
@@ -614,14 +662,14 @@ mod tests {
     #[test]
     fn wildcard_grant_satisfies_all() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle.install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth.authorize(&["*".to_string()], &policy).is_ok());
     }
 
     #[test]
     fn prefix_wildcard_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle.install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth
             .authorize(&["ryeos.execute.service.*".to_string()], &policy)
             .is_ok());
@@ -630,10 +678,14 @@ mod tests {
     #[test]
     fn path_prefix_wildcard_grant() {
         let auth = test_authorizer();
-        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle.install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
+        assert!(auth
+            .authorize(&["ryeos.execute.service.bundle/*".to_string()], &policy)
+            .is_ok());
+        // Legacy dot-form grant satisfies nothing.
         assert!(auth
             .authorize(&["ryeos.execute.service.bundle.*".to_string()], &policy)
-            .is_ok());
+            .is_err());
     }
 
     // ── Authorizer: required-side wildcard semantics ──────────────
@@ -673,12 +725,12 @@ mod tests {
         let policy = AuthorizationPolicy::require("ryeos.execute.service.*");
         assert!(auth
             .authorize(
-                &["ryeos.execute.service.bundle.install".to_string()],
+                &["ryeos.execute.service.bundle/install".to_string()],
                 &policy
             )
             .is_ok());
         assert!(auth
-            .authorize(&["ryeos.execute.service.threads.get".to_string()], &policy)
+            .authorize(&["ryeos.execute.service.threads/get".to_string()], &policy)
             .is_ok());
     }
 
@@ -686,7 +738,7 @@ mod tests {
     fn different_verbs_are_independent() {
         let auth = test_authorizer();
         // Without implication, each verb is checked independently
-        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle.install");
+        let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
         assert!(auth
             .authorize(&["ryeos.fetch.service.*".to_string()], &policy)
             .is_err());
@@ -746,8 +798,8 @@ mod tests {
     #[test]
     fn subject_uses_slash_not_dot() {
         assert_eq!(
-            canonical_cap("service", "bundle.install", "execute"),
-            "ryeos.execute.service.bundle.install"
+            canonical_cap("service", "bundle/install", "execute"),
+            "ryeos.execute.service.bundle/install"
         );
     }
 
@@ -755,7 +807,7 @@ mod tests {
     fn wildcard_matches_slash_subject() {
         assert!(cap_matches(
             "ryeos.execute.service.*",
-            "ryeos.execute.service.bundle.install"
+            "ryeos.execute.service.bundle/install"
         ));
     }
 
@@ -810,7 +862,7 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
     if !scope.starts_with("ryeos.") {
         return Err(format!(
             "scope '{}' is not canonical: must begin with 'ryeos.' \
-             (e.g. 'ryeos.execute.service.bundle.install'). \
+             (e.g. 'ryeos.execute.service.bundle/install'). \
              Short-form scopes like '{}' will never authorize any \
              handler — the matcher does not auto-prefix.",
             scope, scope,
@@ -871,8 +923,8 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
             "scope '{}' has an underscore in the verb token '{}': \
              verb tokens must be kebab-case or single words, not \
              underscore-separated. Did you mean to use a dot? \
-             (e.g. 'ryeos.execute.service.push.head', not \
-             'ryeos.execute.service.push_head')",
+             (e.g. 'ryeos.execute.service.system/push-head', not \
+             'ryeos.execute.service.system/push-head')",
             scope, parts[1]
         ));
     }
@@ -885,8 +937,8 @@ mod validate_scope_pattern_tests {
 
     #[test]
     fn accepts_canonical_full() {
-        assert!(validate_scope_pattern("ryeos.execute.service.bundle.install").is_ok());
-        assert!(validate_scope_pattern("ryeos.execute.service.remote.admin").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.bundle/install").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.remote/admin").is_ok());
         assert!(validate_scope_pattern("ryeos.fetch.tool.ryeos/file-system/read").is_ok());
         assert!(validate_scope_pattern(
             "ryeos.append.bundle-events.example-bundle/oauth_token_event"
@@ -967,11 +1019,11 @@ mod validate_scope_pattern_tests {
 
     #[test]
     fn accepts_canonical_authorize_key_scope() {
-        assert!(validate_scope_pattern("ryeos.execute.service.authorize.key").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.identity/authorize-key").is_ok());
     }
 
     #[test]
     fn accepts_canonical_push_head_scope() {
-        assert!(validate_scope_pattern("ryeos.execute.service.push.head").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.system/push-head").is_ok());
     }
 }

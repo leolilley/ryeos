@@ -115,6 +115,22 @@ pub enum DispatchError {
         mode: String,
         requires: String,
     },
+    /// The service item itself was not found in any installed bundle,
+    /// project, or user space. Distinct from `ServiceHandlerMissing`
+    /// (item YAML resolved but no compiled handler matched the
+    /// endpoint): this means the bundle that ships the service item is
+    /// not installed on this node. Carries the installed-bundle list so
+    /// a remote operator can fix the deployment without source-level
+    /// debugging.
+    #[error(
+        "service item '{service_ref}' was not found in installed bundles (installed: [{}])",
+        installed_bundles.join(", ")
+    )]
+    ServiceNotInstalled {
+        service_ref: String,
+        installed_bundles: Vec<String>,
+        searched_spaces: Vec<String>,
+    },
     /// Subprocess executor missing — the resolved item's executor_ref
     /// does not correspond to a known executor.
     #[error("subprocess executor missing for '{item_ref}': {detail}")]
@@ -273,7 +289,7 @@ impl DispatchError {
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
             | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
-            Self::NotFound => StatusCode::NOT_FOUND,
+            Self::NotFound | Self::ServiceNotInstalled { .. } => StatusCode::NOT_FOUND,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
@@ -325,6 +341,7 @@ impl DispatchError {
             Self::ServiceHandlerMissing { .. } => "service_handler_missing",
             Self::ServiceCapDenied { .. } => "service_cap_denied",
             Self::ServiceUnavailable { .. } => "service_unavailable",
+            Self::ServiceNotInstalled { .. } => "service_not_installed",
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
             Self::RootExecutorMissing { .. } => "root_executor_missing",
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
@@ -369,6 +386,26 @@ mod tests {
             }],
             warnings: vec![],
         }
+    }
+
+    #[test]
+    fn service_not_installed_maps_to_404_with_code() {
+        let e = DispatchError::ServiceNotInstalled {
+            service_ref: "service:scheduler/register".to_string(),
+            installed_bundles: vec!["core".to_string(), "hosted-node".to_string()],
+            searched_spaces: vec!["project".to_string(), "bundle".to_string()],
+        };
+        assert_eq!(e.http_status(), StatusCode::NOT_FOUND);
+        assert_eq!(e.code(), "service_not_installed");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("service:scheduler/register"),
+            "must name the ref, got: {msg}"
+        );
+        assert!(
+            msg.contains("core, hosted-node"),
+            "must list installed bundles, got: {msg}"
+        );
     }
 
     #[test]

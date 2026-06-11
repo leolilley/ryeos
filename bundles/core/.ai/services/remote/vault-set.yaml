@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-07T05:18:56Z:93870c9affecf3eff18de3f8a15d6c4c7cfc2d199387031172c8bf509cb02cf3:Dlaq2zA96QItlFq1d3yP3YaR5nGUzXXRKd+Ns16LTbcp8Ytok9eZPMSVWw/E0ZOyyaeqtjpbkGsb9ml0ACcOBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:14Z:563e79ef8c0bf7337771d2c4a83fd4e57aa6e0200873cd7cb23a56162b3712c3:cL8r0hAE2yfH3+eG1FkboeeyuRyBdFRcw3ZyFrQfYXNBw6uYIP1QmgisDL76/1OnTIZJTvjUrhhZ4QXpjcj1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: remote.vault-set
-required_caps: ["ryeos.execute.service.remote.admin"]
+required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   remote: string?
   name: string

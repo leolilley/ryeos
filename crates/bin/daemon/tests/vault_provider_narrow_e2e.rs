@@ -38,13 +38,13 @@ use lillux::crypto::SigningKey;
 // ── Helpers (mirror directive_provider_secret_injection_e2e.rs) ──
 
 fn plant_provider_config(
-    user_space: &Path,
+    root: &Path,
     provider_id: &str,
     mock_base_url: &str,
     env_var: Option<&str>,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space
+    let dir = root
         .join(ryeos_engine::AI_DIR)
         .join("config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
@@ -73,11 +73,11 @@ pricing:
 }
 
 fn plant_model_routing_to(
-    user_space: &Path,
+    root: &Path,
     provider_id: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space
+    let dir = root
         .join(ryeos_engine::AI_DIR)
         .join("config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
@@ -94,8 +94,8 @@ fn plant_model_routing_to(
     Ok(())
 }
 
-fn plant_directive(user_space: &Path, rel_path: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let path = user_space.join(format!("{}/directives/{rel_path}.md", ryeos_engine::AI_DIR));
+fn plant_directive(root: &Path, rel_path: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let path = root.join(format!("{}/directives/{rel_path}.md", ryeos_engine::AI_DIR));
     let stem = Path::new(rel_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -176,33 +176,38 @@ async fn missing_selected_secret_fails_before_provider_request() {
     let mock = MockProvider::start(vec![MockResponse::Text("should not be called".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_provider_config(
-                user,
-                "zen",
-                &mock_url,
-                Some("ZEN_API_KEY"),
-                &fixture.publisher,
-            )?;
-            plant_model_routing_to(user, "zen", &fixture.publisher)?;
-            plant_directive(user, "test/narrow_missing", &fixture.publisher)?;
-            // Empty vault — no ZEN_API_KEY sealed.
-            plant_empty_vault(state_path)?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        // Empty vault — no ZEN_API_KEY sealed.
+        plant_empty_vault(state_path)?;
+        Ok(())
+    };
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon starts (vault is read at request time)");
 
+    // Project-tier plants override the standard bundle's shipped zen
+    // routing/provider, pointing `zen` at the mock so the zero-request
+    // assertion below stays sharp.
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_provider_config(
+        project.path(),
+        "zen",
+        &mock_url,
+        Some("ZEN_API_KEY"),
+        &fixture.publisher,
+    )
+    .expect("plant provider");
+    plant_model_routing_to(project.path(), "zen", &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/narrow_missing", &fixture.publisher)
+        .expect("plant directive");
     let post_fut = h.post_execute(
         "directive:test/narrow_missing",
         project.path().to_str().unwrap(),
@@ -284,18 +289,9 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
     let mock = MockProvider::start(vec![MockResponse::Text("unused".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| {
+    let (h, fixture) = DaemonHarness::start_fast_with(
+        |state_path: &Path, _user: &Path, fixture: &FastFixture| {
             register_standard_bundle(state_path, fixture)?;
-            plant_provider_config(
-                user,
-                "zen",
-                &mock_url,
-                Some("ZEN_API_KEY"),
-                &fixture.publisher,
-            )?;
-            plant_model_routing_to(user, "zen", &fixture.publisher)?;
-            plant_directive(user, "test/resume_typed", &fixture.publisher)?;
             // Empty vault — no ZEN_API_KEY.
             plant_empty_vault(state_path)?;
             Ok(())
@@ -305,6 +301,7 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
             );
+            cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
         },
     )
     .await
@@ -314,6 +311,17 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
     // helper as resume). The error is routed through
     // DispatchError::RequiredSecretMissing with stable code.
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_provider_config(
+        project.path(),
+        "zen",
+        &mock_url,
+        Some("ZEN_API_KEY"),
+        &fixture.publisher,
+    )
+    .expect("plant provider");
+    plant_model_routing_to(project.path(), "zen", &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/resume_typed", &fixture.publisher)
+        .expect("plant directive");
     let post_fut = h.post_execute(
         "directive:test/resume_typed",
         project.path().to_str().unwrap(),
@@ -382,27 +390,31 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
     let mock = MockProvider::start(vec![MockResponse::Text("hello from noauth".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_provider_config(user, "noauth", &mock_url, None, &fixture.publisher)?;
-            plant_model_routing_to(user, "noauth", &fixture.publisher)?;
-            plant_directive(user, "test/narrow_noauth", &fixture.publisher)?;
-            // Empty vault — fine because provider declares no env var.
-            plant_empty_vault(state_path)?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        // Empty vault — fine because provider declares no env var.
+        plant_empty_vault(state_path)?;
+        Ok(())
+    };
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon starts with noauth provider + empty vault");
 
+    // Project routing overrides the bundle's shipped zen routing so
+    // tier `general` resolves to the no-auth mock provider.
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_provider_config(project.path(), "noauth", &mock_url, None, &fixture.publisher)
+        .expect("plant provider");
+    plant_model_routing_to(project.path(), "noauth", &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/narrow_noauth", &fixture.publisher)
+        .expect("plant directive");
     let post_fut = h.post_execute(
         "directive:test/narrow_noauth",
         project.path().to_str().unwrap(),
@@ -586,8 +598,9 @@ fn read_last_event(state_path: &Path, thread_id: &str) -> Option<(String, serde_
 async fn resume_missing_secret_after_daemon_restart() {
     // ── Setup ────────────────────────────────────────────────────
     //
-    // Provider "zen" declares auth.env_var: ZEN_API_KEY.
-    // Model routing maps "general" → zen.
+    // The standard bundle ships provider "zen" with
+    // auth.env_var: ZEN_API_KEY and model routing mapping
+    // "general" → zen, so no provider/routing plants are needed.
     // Vault is empty (no ZEN_API_KEY).
     // A tool with native_resume: true is planted in the project.
     //
@@ -597,16 +610,13 @@ async fn resume_missing_secret_after_daemon_restart() {
     // `run_existing_detached`, which runs the preflight and fails
     // with ProviderSecretMissing.
 
-    // Mock provider — not needed for the test assertions but
-    // required so model routing resolves.
+    // Mock provider — not needed for the test assertions; kept only
+    // to back the zero-request assertion at the end.
     let mock = MockProvider::start(vec![MockResponse::Text("unused".into())]).await;
-    let mock_url = mock.base_url.clone();
 
     let (mut h, fixture) = DaemonHarness::start_fast_with(
-        move |state_path: &Path, user: &Path, f: &FastFixture| {
+        |state_path: &Path, _user: &Path, f: &FastFixture| {
             register_standard_bundle(state_path, f)?;
-            plant_provider_config(user, "zen", &mock_url, Some("ZEN_API_KEY"), &f.publisher)?;
-            plant_model_routing_to(user, "zen", &f.publisher)?;
             // Empty vault — no ZEN_API_KEY.
             plant_empty_vault(state_path)?;
             Ok(())
@@ -873,11 +883,8 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     let mock_url = mock.base_url.clone();
 
     let (h, fixture) = DaemonHarness::start_fast_with(
-        move |state_path: &Path, user: &Path, f: &FastFixture| {
+        |state_path: &Path, _user: &Path, f: &FastFixture| {
             register_standard_bundle(state_path, f)?;
-            plant_provider_config(user, "zen", &mock_url, Some("ZEN_API_KEY"), &f.publisher)?;
-            plant_model_routing_to(user, "zen", &f.publisher)?;
-            plant_directive(user, "test/sse_secret", &f.publisher)?;
             plant_empty_vault(state_path)?;
             // Authorize the user key so /execute/stream accepts signed requests.
             common::fast_fixture::write_authorized_key_signed_by(state_path, &f.user, &f.node)?;
@@ -888,12 +895,24 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
                 "RUST_LOG",
                 std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
             );
+            cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
         },
     )
     .await
     .expect("daemon starts");
 
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_provider_config(
+        project.path(),
+        "zen",
+        &mock_url,
+        Some("ZEN_API_KEY"),
+        &fixture.publisher,
+    )
+    .expect("plant provider");
+    plant_model_routing_to(project.path(), "zen", &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/sse_secret", &fixture.publisher)
+        .expect("plant directive");
 
     // POST /execute/stream with a directive that requires ZEN_API_KEY.
     // The route requires ryeos_signed auth.

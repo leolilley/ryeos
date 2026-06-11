@@ -22,15 +22,15 @@ use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
 /// Plant the `model-providers/mock` config under
-/// `<user>/.ai/config/ryeos-runtime/model-providers/mock.yaml`.
+/// `<root>/.ai/config/ryeos-runtime/model-providers/mock.yaml`.
 /// `auth: {}` keeps the adapter's `Authorization` header skipped
 /// (see `crates/runtimes/directive/src/adapter.rs:38-43`).
 fn plant_mock_provider(
-    user_space: &Path,
+    root: &Path,
     mock_base_url: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/ryeos-runtime/model-providers");
+    let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"base_url: "{mock_base_url}"
@@ -53,8 +53,8 @@ pricing:
 }
 
 /// Plant `model_routing` mapping `tier: general` to provider `mock`.
-fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let dir = user_space.join(".ai/config/ryeos-runtime");
+fn plant_model_routing(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
   general:
@@ -67,7 +67,7 @@ fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result
     Ok(())
 }
 
-/// Plant a directive at `<user>/.ai/directives/<rel>.md`. The body
+/// Plant a directive at `<root>/.ai/directives/<rel>.md`. The body
 /// is whatever the LLM should be asked; the mock returns canned
 /// responses irrespective of body content, but a non-empty body is
 /// required by the directive kind's `composer_config.body` rule
@@ -81,13 +81,13 @@ fn plant_model_routing(user_space: &Path, signer: &SigningKey) -> anyhow::Result
 /// `Harness::check_permission` and `Dispatcher::check_permission` to
 /// gate tool calls.
 fn plant_directive(
-    user_space: &Path,
+    root: &Path,
     rel_path: &str,
     body_text: &str,
     execute_caps: &[&str],
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let path = user_space.join(format!(".ai/directives/{rel_path}.md"));
+    let path = root.join(format!(".ai/directives/{rel_path}.md"));
     std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
     let permissions_block = if execute_caps.is_empty() {
         String::new()
@@ -127,22 +127,22 @@ model:
     Ok(())
 }
 
-/// Plant a synth Python tool at `<user>/.ai/tools/<rel>.py`. The body
+/// Plant a synth Python tool at `<root>/.ai/tools/<rel>.py`. The body
 /// chains to the bundled `tool:ryeos/core/runtimes/python/script` runtime
 /// so the daemon's subprocess terminator can actually execute it (we
 /// reuse the dispatch_pin.rs::synth_tool_request pattern). The
 /// directive-runtime's `bootstrap::scan_tools` walks
-/// `<user>/.ai/tools/`, picks the file up via the loader's `tool` kind,
+/// `<root>/.ai/tools/`, picks the file up via the loader's `tool` kind,
 /// and registers it as `tool:<rel>.py` with the bare filename as the
 /// LLM-visible tool name. Unsigned is fine — `verified_loader` accepts
 /// missing signatures and returns the content as-is.
-fn plant_python_echo_tool(user_space: &Path, rel: &str) -> anyhow::Result<()> {
+fn plant_python_echo_tool(root: &Path, rel: &str) -> anyhow::Result<()> {
     let dir_relative = Path::new(rel)
         .parent()
         .and_then(|p| p.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(rel);
-    let dir = user_space.join(format!(".ai/tools/{dir_relative}"));
+    let dir = root.join(format!(".ai/tools/{dir_relative}"));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{rel}.py"));
     let body = r#"#!/usr/bin/env python3
@@ -175,22 +175,11 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     let mock = MockProvider::start(vec![MockResponse::Text("hello World".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_directive(
-                user,
-                "test/hello",
-                "Say hello to {{ name }}.",
-                &[],
-                &fixture.publisher,
-            )?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)
+    };
 
-    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         // Bubble runtime tracing through to the daemon's stderr so a
         // hung directive-runtime child can be debugged from the test
         // panic message.
@@ -199,11 +188,22 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(
+        project.path(),
+        "test/hello",
+        "Say hello to {{ name }}.",
+        &[],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let post_fut = h.post_execute(
         "directive:test/hello",
         project.path().to_str().unwrap(),
@@ -298,26 +298,27 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mock = MockProvider::start(vec![MockResponse::Text("hi P3b.3".into())]).await;
     let mock_url = mock.base_url.clone();
 
-    let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_directive(
-                user,
-                "p3b3/subject",
-                "irrelevant — mock returns canned text",
-                &[],
-                &fixture.publisher,
-            )?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)
+    };
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
+    })
         .await
         .expect("start daemon");
 
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(
+        project.path(),
+        "p3b3/subject",
+        "irrelevant — mock returns canned text",
+        &[],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let (status, body) = h
         .post_execute(
             "directive:p3b3/subject",
@@ -422,36 +423,33 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_python_echo_tool(user, "echo")?;
-            // Wildcard cap: the dispatcher checks `ryeos.execute.tool.<canonical_ref>`
-            // (see dispatcher.rs::resolve). The runner no longer does a separate
-            // name-based pre-check — permission is the dispatcher's job.
-            plant_directive(
-                user,
-                "test/round_trip",
-                "Call the echo tool, then summarise.",
-                &["ryeos.execute.tool.*"],
-                &fixture.publisher,
-            )?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)
+    };
 
-    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + standard bundle + echo tool");
 
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_python_echo_tool(project.path(), "echo").expect("plant echo tool");
+    plant_directive(
+        project.path(),
+        "test/round_trip",
+        "Call the echo tool, then summarise.",
+        &["ryeos.execute.tool.*"],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let post_fut = h.post_execute(
         "directive:test/round_trip",
         project.path().to_str().unwrap(),
@@ -534,36 +532,33 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-            register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_python_echo_tool(user, "echo")?;
-            // Grant ONLY a non-matching cap. `echo` is not in this set,
-            // and `cap_matches` is anchored ($-terminated regex) so the
-            // literal `allowed_only` does NOT subsume `echo`.
-            plant_directive(
-                user,
-                "test/denied",
-                "Try to call echo; you should be denied.",
-                &["ryeos.execute.tool.allowed_only"],
-                &fixture.publisher,
-            )?;
-            Ok(())
-        };
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)
+    };
 
-    let (mut h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
             "RUST_LOG",
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + non-matching cap");
 
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_python_echo_tool(project.path(), "echo").expect("plant echo tool");
+    plant_directive(
+        project.path(),
+        "test/denied",
+        "Try to call echo; you should be denied.",
+        &["ryeos.execute.tool.allowed_only"],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let post_fut = h.post_execute(
         "directive:test/denied",
         project.path().to_str().unwrap(),

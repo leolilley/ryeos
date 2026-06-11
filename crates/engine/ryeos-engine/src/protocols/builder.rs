@@ -394,6 +394,7 @@ mod tests {
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
+                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),

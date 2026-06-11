@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:55Z:e58da068d4c2d3e343b066916d9f0f1716fe8f93072168816b1df2cb96a3e464:wYieaT4yTkKA6fa0gc6jAM4JXLJb+hIA5st8cfAMM3ziycGvrfEFemfjCTCyYhH1pE3f746aifxVvTxw8y9NCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:12Z:e1c76e6d88c48bc46923e6cdaae16f9cf56c4415aa112cb12218fe4f8bd54779:5PrM56fZ52Nfze5HnS+2GODpcKgyLzl8ohg6vtLg9Bj5Llh6eqNWJMVDcKnle0mFFG4e+2/w6pYVm3Jpt4cSDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: admission.status
-required_caps: ["ryeos.execute.service.admission.status"]
+required_caps: ["ryeos.execute.service.admission/status"]
 schema:
   subject_hash: string
   policy: string

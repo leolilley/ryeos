@@ -72,6 +72,7 @@ pub mod scheduler_resume;
 pub mod scheduler_show_fires;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
+pub mod system_routes;
 pub mod system_status;
 pub mod threads_cancel;
 pub mod threads_chain;
@@ -100,6 +101,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     system_status::DESCRIPTOR,
+    system_routes::DESCRIPTOR,
     ingest_ignore::DESCRIPTOR,
     objects_has::DESCRIPTOR,
     objects_put::DESCRIPTOR,

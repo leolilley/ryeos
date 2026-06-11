@@ -219,22 +219,31 @@ async fn main() -> Result<()> {
             );
         }
 
-        if !missing.is_empty() {
+        // Missing items are NOT a boot failure: a lean node (e.g. the
+        // hosted-node image) deliberately installs a subset of bundles,
+        // so descriptors whose service YAML ships in an absent bundle
+        // simply don't resolve. The node boots degraded:
+        // `service:health/status` reports `missing_services`, and
+        // executing one returns the structured `service_not_installed`
+        // error. Only verification failures (tampered/unsigned items)
+        // remain fail-closed above.
+        if missing.is_empty() {
+            ryeos_app::state::CatalogHealth {
+                status: "ok".into(),
+                missing_services: vec![],
+            }
+        } else {
             for svc in &missing {
-                tracing::error!(
+                tracing::warn!(
                     svc,
-                    "refusing to start: operational service not found in bundle"
+                    "operational service not found in installed bundles; \
+                     starting degraded — executing it will return service_not_installed"
                 );
             }
-            anyhow::bail!(
-                "operational service catalog self-check failed: {} service(s) missing",
-                missing.len()
-            );
-        }
-
-        ryeos_app::state::CatalogHealth {
-            status: "ok".into(),
-            missing_services: vec![],
+            ryeos_app::state::CatalogHealth {
+                status: "degraded".into(),
+                missing_services: missing.iter().map(|s| s.to_string()).collect(),
+            }
         }
     };
 
@@ -248,6 +257,18 @@ async fn main() -> Result<()> {
         Arc::new(arc_swap::ArcSwap::from_pointee(table))
     };
     tracing::info!(routes = route_table.load().all.len(), "route table built");
+
+    // Publish the route diagnostics snapshot consumed by
+    // `service:system/routes`. Re-published on reload by
+    // `routes::reload::handle_routes_reload`.
+    let route_diagnostics = Arc::new(ryeos_app::route_diagnostics::RouteDiagnostics::new());
+    {
+        let table = route_table.load();
+        route_diagnostics.publish(
+            table.fingerprint.clone(),
+            ryeos_api::routes::route_diagnostic_entries(&table),
+        );
+    }
 
     // Build thread-kind profiles from the loaded kind schemas.
     let kind_profiles = Arc::new(kind_profiles::KindProfileRegistry::build(Some(
@@ -352,6 +373,7 @@ async fn main() -> Result<()> {
         extensions: {
             let mut ext = ryeos_app::extension_state::ExtensionState::new();
             ext.insert(ui_state);
+            ext.insert(route_diagnostics);
             Arc::new(ext)
         },
         write_barrier: Arc::new(write_barrier),

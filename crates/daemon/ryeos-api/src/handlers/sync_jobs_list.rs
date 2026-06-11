@@ -86,7 +86,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:sync/jobs/list",
     endpoint: "sync.jobs.list",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.sync.jobs.list"],
+    required_caps: &["ryeos.execute.service.sync/jobs/list"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

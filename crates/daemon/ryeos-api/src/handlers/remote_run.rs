@@ -64,7 +64,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/run",
     endpoint: "remote.run",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.remote.admin"],
+    required_caps: &["ryeos.execute.service.remote/admin"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

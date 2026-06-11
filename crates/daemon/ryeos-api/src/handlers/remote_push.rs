@@ -142,7 +142,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/push",
     endpoint: "remote.push",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.remote.push"],
+    required_caps: &["ryeos.execute.service.remote/push"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

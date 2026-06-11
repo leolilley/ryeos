@@ -32,13 +32,15 @@ use lillux::crypto::SigningKey;
 
 // ── Helpers (signing setup uses the fast fixture's publisher key) ──────
 
-/// Install one signed runtime YAML in app root with a default
-/// well-formed `binary_ref: bin/<host_triple>/<name>`. For tests that
+/// Install one signed runtime YAML at `<root>/.ai/runtimes/<name>.yaml`
+/// with a default well-formed `binary_ref: bin/<host_triple>/<name>`.
+/// `root` must be a registered bundle root (the harness state path) so
+/// `RuntimeRegistry::build_from_bundles` picks it up. For tests that
 /// need to exercise post-B1 gates (notably P1.5 below) use
 /// [`install_runtime_with_binary_ref`] instead so a deliberately
 /// malformed shape can drive `strip_binary_ref_prefix`.
 fn install_runtime(
-    user_space: &Path,
+    root: &Path,
     name: &str,
     serves: &str,
     default: bool,
@@ -46,7 +48,7 @@ fn install_runtime(
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
     install_runtime_with_binary_ref(
-        user_space,
+        root,
         name,
         serves,
         default,
@@ -62,7 +64,7 @@ fn install_runtime(
 /// failure mode is unambiguously `strip_binary_ref_prefix` rejecting
 /// the YAML.
 fn install_runtime_with_binary_ref(
-    user_space: &Path,
+    root: &Path,
     name: &str,
     serves: &str,
     default: bool,
@@ -70,7 +72,7 @@ fn install_runtime_with_binary_ref(
     binary_ref: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let runtimes_dir = user_space.join(".ai/runtimes");
+    let runtimes_dir = root.join(".ai/runtimes");
     std::fs::create_dir_all(&runtimes_dir)?;
     let body = format!(
         r#"kind: runtime
@@ -88,13 +90,15 @@ description: "synth runtime for runtime_e2e"
     Ok(())
 }
 
-/// Install a minimal kind schema for `kind` under app root so the
-/// engine's RuntimeRegistry boot validation (ε.2) accepts a runtime
-/// that serves it. The schema declares an executable kind that
-/// delegates to the runtime registry — exactly the contract a synth
-/// `install_runtime` line implies.
-fn install_kind_schema(user_space: &Path, kind: &str, signer: &SigningKey) -> anyhow::Result<()> {
-    let kinds_dir = user_space.join(format!(".ai/node/engine/kinds/{kind}"));
+/// Install a minimal kind schema for `kind` at
+/// `<root>/.ai/node/engine/kinds/<kind>/` so the engine's
+/// RuntimeRegistry boot validation (ε.2) accepts a runtime that serves
+/// it. `root` must be a registered bundle root (the harness state
+/// path). The schema declares an executable kind that delegates to the
+/// runtime registry — exactly the contract a synth `install_runtime`
+/// line implies.
+fn install_kind_schema(root: &Path, kind: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let kinds_dir = root.join(format!(".ai/node/engine/kinds/{kind}"));
     std::fs::create_dir_all(&kinds_dir)?;
     let body = format!(
         r##"category: "engine/kinds/{kind}"
@@ -203,11 +207,11 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // to tests; for now this test pins only that the dispatch loop
     // reaches the materialization step and surfaces a clean lookup
     // error rather than a silent fallthrough.
-    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         common::fast_fixture::register_standard_bundle(state, fixture)?;
-        install_kind_schema(user, "e2e_kind", &fixture.publisher)?;
+        install_kind_schema(state, "e2e_kind", &fixture.publisher)?;
         install_runtime(
-            user,
+            state,
             "e2e-direct-runtime",
             "e2e_kind",
             true,
@@ -287,7 +291,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
         .expect("register standard bundle");
 
     install_runtime(
-        user_space.path(),
+        &state_path,
         "dup-runtime-a",
         "dup_kind",
         true,
@@ -296,7 +300,7 @@ async fn e2e_multi_default_conflict_aborts_startup() {
     )
     .expect("plant dup-runtime-a");
     install_runtime(
-        user_space.path(),
+        &state_path,
         "dup-runtime-b",
         "dup_kind",
         true,
@@ -399,14 +403,21 @@ async fn e2e_multi_default_conflict_aborts_startup() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_does_not_require_runtime_execute() {
-    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
-        // Synth directive item — minimal valid YAML so engine
-        // resolution succeeds and the dispatch loop reaches the
-        // kind-schema delegation → runtime:directive-runtime hop.
-        let dir = user.join(".ai/directives/e2e_b1");
-        std::fs::create_dir_all(&dir)?;
-        let body = r#"---
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with standard bundle");
+
+    // Synth directive item planted in the PROJECT tier — minimal valid
+    // YAML so engine resolution succeeds and the dispatch loop reaches
+    // the kind-schema delegation → runtime:directive-runtime hop.
+    let project = tempfile::tempdir().expect("project tempdir");
+    let dir = project.path().join(".ai/directives/e2e_b1");
+    std::fs::create_dir_all(&dir).expect("create project directive dir");
+    let body = r#"---
 name: flow
 category: "e2e_b1"
 description: "B1 indirect-alias e2e"
@@ -414,16 +425,9 @@ inputs: []
 ---
 # E2E B1
 "#;
-        let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
-        std::fs::write(dir.join("flow.md"), signed)?;
-        Ok(())
-    };
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "<!--", Some("-->"));
+    std::fs::write(dir.join("flow.md"), signed).expect("write project directive");
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
-        .await
-        .expect("start daemon with standard bundle + synth directive");
-
-    let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
         .post_execute(
             "directive:e2e_b1/flow",
@@ -472,27 +476,36 @@ inputs: []
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_directive_via_registry_reaches_strip_binary_ref_prefix() {
-    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         common::fast_fixture::register_standard_bundle(state, fixture)?;
         // Synthetic kind + runtime with deliberately malformed binary_ref.
         // P1.5: the dispatcher must walk past B1's cap-gate site and
-        // hit strip_binary_ref_prefix.
-        install_kind_schema(user, "p15_kind", &fixture.publisher)?;
+        // hit strip_binary_ref_prefix. Both load from bundle roots at
+        // engine boot, so they go into the state path.
+        install_kind_schema(state, "p15_kind", &fixture.publisher)?;
         install_runtime_with_binary_ref(
-            user,
+            state,
             "p15-bad-runtime",
             "p15_kind",
             true,
             "v1",
             "badshape",
             &fixture.publisher,
-        )?;
-        // Synth item under the synthetic kind's directory so the
-        // dispatch resolves it as kind "p15_kind", delegates to
-        // runtime_registry, and finds the synth runtime with bad binary_ref.
-        let dir = user.join(".ai/p15_kind_items/p15");
-        std::fs::create_dir_all(&dir)?;
-        let body = r#"---
+        )
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with synth bad-binary-ref runtime");
+
+    // Synth item planted in the PROJECT tier under the synthetic
+    // kind's directory so the dispatch resolves it as kind "p15_kind",
+    // delegates to runtime_registry, and finds the synth runtime with
+    // bad binary_ref.
+    let project = tempfile::tempdir().expect("project tempdir");
+    let dir = project.path().join(".ai/p15_kind_items/p15");
+    std::fs::create_dir_all(&dir).expect("create project p15_kind dir");
+    let body = r#"---
 name: flow
 category: "p15"
 description: "P1.5 reach-past-B1 e2e"
@@ -500,16 +513,9 @@ inputs: []
 ---
 # P1.5
 "#;
-        let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
-        std::fs::write(dir.join("flow.md"), signed)?;
-        Ok(())
-    };
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
+    std::fs::write(dir.join("flow.md"), signed).expect("write project p15 item");
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
-        .await
-        .expect("start daemon with synth bad-binary-ref runtime");
-
-    let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
         .post_execute(
             "p15_kind:p15/flow",
@@ -570,14 +576,21 @@ inputs: []
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
-    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
-        // Synth directive item — minimal valid YAML so engine
-        // resolution succeeds and the dispatch loop reaches the
-        // real directive runtime via the registry hop.
-        let dir = user.join(".ai/directives/p16");
-        std::fs::create_dir_all(&dir)?;
-        let body = r#"---
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    // Synth directive item planted in the PROJECT tier — minimal valid
+    // YAML so engine resolution succeeds and the dispatch loop reaches
+    // the real directive runtime via the registry hop.
+    let project = tempfile::tempdir().expect("project tempdir");
+    let dir = project.path().join(".ai/directives/p16");
+    std::fs::create_dir_all(&dir).expect("create project directive dir");
+    let body = r#"---
 name: flow
 category: "p16"
 description: "P1.6 root/runtime split pin"
@@ -585,16 +598,9 @@ inputs: []
 ---
 # P1.6
 "#;
-        let signed = lillux::signature::sign_content(body, &fixture.publisher, "<!--", Some("-->"));
-        std::fs::write(dir.join("flow.md"), signed)?;
-        Ok(())
-    };
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "<!--", Some("-->"));
+    std::fs::write(dir.join("flow.md"), signed).expect("write project directive");
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
-        .await
-        .expect("start daemon");
-
-    let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
         .post_execute(
             "directive:p16/flow",
@@ -690,11 +696,19 @@ inputs: []
 
 #[tokio::test(flavor = "multi_thread")]
 async fn e2e_indirect_graph_records_graph_thread_profile() {
-    let plant = |state: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        common::fast_fixture::register_standard_bundle(state, fixture)?;
-        let dir = user.join(".ai/graphs/p4");
-        std::fs::create_dir_all(&dir)?;
-        let body = r#"category: "p4"
+    let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        common::fast_fixture::register_standard_bundle(state, fixture)
+    };
+
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
+
+    // Synth graph item planted in the PROJECT tier.
+    let project = tempfile::tempdir().expect("project tempdir");
+    let dir = project.path().join(".ai/graphs/p4");
+    std::fs::create_dir_all(&dir).expect("create project graph dir");
+    let body = r#"category: "p4"
 description: "P4 B2 graph subject/runtime split pin"
 config:
   start: done
@@ -702,18 +716,11 @@ config:
     done:
       node_type: return
 "#;
-        // Graph YAMLs use `#` for signature comments (matching
-        // `parser:ryeos/core/yaml/yaml`).
-        let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
-        std::fs::write(dir.join("flow.yaml"), signed)?;
-        Ok(())
-    };
+    // Graph YAMLs use `#` for signature comments (matching
+    // `parser:ryeos/core/yaml/yaml`).
+    let signed = lillux::signature::sign_content(body, &fixture.publisher, "#", None);
+    std::fs::write(dir.join("flow.yaml"), signed).expect("write project graph");
 
-    let (h, _fixture) = DaemonHarness::start_fast_with(plant, |_| {})
-        .await
-        .expect("start daemon");
-
-    let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
         .post_execute(
             "graph:p4/flow",

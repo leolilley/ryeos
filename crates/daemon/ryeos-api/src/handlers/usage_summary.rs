@@ -128,7 +128,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:threads/usage/summary",
     endpoint: "threads.usage.summary",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.threads.usage.summary"],
+    required_caps: &["ryeos.execute.service.threads/usage/summary"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {

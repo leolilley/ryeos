@@ -762,12 +762,12 @@ fn require_schedule_registration_authority(ctx: &ProjectDeployContext<'_>) -> Re
         .caller
         .scopes
         .iter()
-        .any(|scope| scope == "*" || scope == "ryeos.execute.service.scheduler.register")
+        .any(|scope| scope == "*" || scope == "ryeos.execute.service.scheduler/register")
     {
         Ok(())
     } else {
         anyhow::bail!(
-            "project schedule creation requires ryeos.execute.service.scheduler.register capability"
+            "project schedule creation requires ryeos.execute.service.scheduler/register capability"
         );
     }
 }

@@ -98,7 +98,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:federation/heads/list",
     endpoint: "federation.heads.list",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.federation.heads.list"],
+    required_caps: &["ryeos.execute.service.federation/heads/list"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {

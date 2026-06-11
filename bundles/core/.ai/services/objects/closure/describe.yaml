@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:8e76fbd32ff984cb8647f77ec6228a2741c004322eca4adab90cda097c55c360:VPqc9XHPF0U5xWCj129lXh4+NQKwOLR/eBBqpU49Vpy5b7k1gebi36HykwwroI3Mm2bb/2bdJRHeLuiWdA1dBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:5b0424b44d373e8c21f553243232b56823cd98b8b03416ef079b5c194cb57e4f:P4mQQiv/PuYiBEhqu9fck/EULugigvJXYmLWqIoVEHtNdNRV2Bbf0/EUJ+OadyPN0h8tA5ssB1NHQM5NTlEdAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: objects.closure.describe
-required_caps: ["ryeos.execute.service.objects.closure.describe"]
+required_caps: ["ryeos.execute.service.objects/closure/describe"]
 schema:
   roots: string[]
   max_objects: number?

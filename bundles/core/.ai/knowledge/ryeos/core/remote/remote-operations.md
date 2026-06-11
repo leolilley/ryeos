@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-10T04:17:44Z:73ab652c68471e88e65e80b7b2f6d129cbf70bab7e1b08e27d9acfa748b5d064:Z5I7BhlGFjSziM9cmca41m7TD0rVAkqdeJcPdUL4DjhndHnUr7JLqyHIojcSAXSEKwgsr35TPLr9EQq2d1iRAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T05:13:18Z:325755fab420fcf15a2743f3e34cc019c9ca961189c59322a85a512349393019:Qa1Sduw98j9sXnU/lc/3Ag1Ysfe5wsKWYXPGrnTja7JvnrteiN1alap51rB9RaX2RTABXfdIq/0zVaAWtHzOBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -80,7 +80,7 @@ ryeos identity
    ```bash
    ryeos admission-token \
      --label "dev-machine" \
-     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+     --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
      --ttl-secs 600
    ```
 
@@ -93,7 +93,7 @@ ryeos identity
      --remote production \
      --token "<one-time-token>" \
      --label "dev-machine" \
-     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+     --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
    ```
 
    Direct local authorization remains available when the operator has the
@@ -103,7 +103,7 @@ ryeos identity
    ryeos authorize-key \
      --public-key "ed25519:<caller_node_pubkey_b64>" \
      --label "dev-machine" \
-     --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+     --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
    ```
 
 3. **Choose scopes by operation**. Do not mix local remote-service caps
@@ -114,11 +114,11 @@ ryeos identity
 
    | Operation | Remote scopes on target |
    |-----------|-------------------------|
-   | `remote push` | `ryeos.execute.service.objects.has`, `ryeos.execute.service.objects.put`, `ryeos.execute.service.push.head` |
-   | `remote pull` | `ryeos.execute.service.objects.get` |
-   | `remote execute` | push scopes + `ryeos.execute.service.objects.get` + whatever caps the executed item requires |
-   | `remote authorize` | `ryeos.execute.service.authorize.key` |
-   | `remote bundle-install` | `ryeos.execute.service.bundle.export`, `ryeos.execute.service.objects.get` |
+   | `remote push` | `ryeos.execute.service.objects/has`, `ryeos.execute.service.objects/put`, `ryeos.execute.service.system/push-head` |
+   | `remote pull` | `ryeos.execute.service.objects/get` |
+   | `remote execute` | push scopes + `ryeos.execute.service.objects/get` + whatever caps the executed item requires |
+   | `remote authorize` | `ryeos.execute.service.identity/authorize-key` |
+   | `remote bundle-install` | `ryeos.execute.service.bundle/export`, `ryeos.execute.service.objects/get` |
    | `remote vault-set/list/delete` | matching `ryeos.execute.service.vault.*` cap |
    | `remote threads/thread-status` | signed auth; no additional thread service cap in v1 |
 
@@ -178,7 +178,7 @@ ryeos remote-descriptor \
 
 ryeos admission-token \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600
 ```
 
@@ -193,7 +193,7 @@ ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label "dev-machine" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
 
 ryeos remote doctor --remote prod
 
@@ -305,7 +305,7 @@ ryeos remote pull --remote production --hashes abc123 --output-dir /tmp/objects
 ```
 
 **Fail-closed**: aborts if any requested hash is missing. No partial fetches.
-Local capability and remote target scope: `ryeos.execute.service.objects.get`
+Local capability and remote target scope: `ryeos.execute.service.objects/get`
 
 ### Remote Bundle Install
 
@@ -320,15 +320,15 @@ ryeos remote bundle-install --remote production --bundle-name standard
 - Preflight failure → clean up partial directory.
 - No registration written unless preflight passes.
 
-Local capability: `ryeos.execute.service.bundle.install`.
-Remote scopes on the target: `ryeos.execute.service.bundle.export`,
-`ryeos.execute.service.objects.get`.
+Local capability: `ryeos.execute.service.bundle/install`.
+Remote scopes on the target: `ryeos.execute.service.bundle/export`,
+`ryeos.execute.service.objects/get`.
 
 ### Bundle Export (server-side)
 
 Walk an installed bundle's tree, ingest files into CAS, return manifest.
 Called automatically by `remote bundle-install` — not invoked directly.
-Remote target scope: `ryeos.execute.service.bundle.export`
+Remote target scope: `ryeos.execute.service.bundle/export`
 
 ## Additional Remote Commands
 

@@ -133,7 +133,7 @@ async fn remote_admit_refuses_to_send_token_on_live_identity_mismatch() {
             remote: "prod".to_string(),
             token: "secret-token".to_string(),
             label: Some("dev-machine".to_string()),
-            scopes: vec!["ryeos.execute.service.objects.has".to_string()],
+            scopes: vec!["ryeos.execute.service.objects/has".to_string()],
             project_path: None,
             no_project: true,
         },

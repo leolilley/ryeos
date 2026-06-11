@@ -5,7 +5,9 @@
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
 #   - bundle sources -> /usr/share/ryeos/{core,standard,studio,web,hosted-node}
-#     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node}
+#     or, with --bundle-set standard, /usr/share/ryeos/{core,standard};
+#     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node};
+#     with --bundle-set hosted-workflow, /usr/share/ryeos/{core,standard,hosted-node}
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -32,7 +34,9 @@ Options:
                         (default: .dev-keys/PUBLISHER_DEV.pem)
   --owner LABEL         Owner label for populate-bundles.sh
                         (default: ryeos-dev)
-  --bundle-set SET      Bundle set to populate/install: full or hosted-node
+  --bundle-set SET      Bundle set to populate/install: full, standard
+                        (core+standard), hosted-node, or hosted-workflow
+                        (core+standard+hosted-node)
                         (default: full)
   -h, --help            Show this help
 
@@ -159,16 +163,22 @@ case "$bundle_set" in
     full)
         bundle_names=(core standard studio web hosted-node)
         ;;
+    standard)
+        bundle_names=(core standard)
+        ;;
     hosted-node)
         bundle_names=(core hosted-node)
         ;;
+    hosted-workflow)
+        bundle_names=(core standard hosted-node)
+        ;;
     *)
-        die "--bundle-set must be 'full' or 'hosted-node', got: $bundle_set"
+        die "--bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
         ;;
 esac
 bundle_names_csv=$(IFS=,; echo "${bundle_names[*]}")
 
-if [[ "$bundle_set" == "hosted-node" && $run_init -eq 0 ]]; then
+if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
     echo "[install-local-direct] warning: --no-init installs lean sources only; existing local initialized state is not rewritten" >&2
 fi
 
@@ -377,6 +387,14 @@ if [[ $run_init -eq 1 ]]; then
                 die "initialized hosted-node state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
                 die "initialized hosted-node state unexpectedly contains $name registration"
+        done
+    fi
+    if [[ "$bundle_set" == "standard" ]]; then
+        for name in hosted-node studio web; do
+            test ! -e "$state_root/.ai/bundles/$name" || \
+                die "initialized standard state unexpectedly contains $name bundle"
+            test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
+                die "initialized standard state unexpectedly contains $name registration"
         done
     fi
     if [[ "$bundle_set" == "full" ]]; then

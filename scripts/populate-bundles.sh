@@ -10,7 +10,14 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|hosted-node]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|standard|hosted-node|hosted-workflow]
+#
+# Bundle sets:
+#   full            core + standard + web + studio + hosted-node (default)
+#   standard        core + standard — scheduler/graph/directive standard node
+#   hosted-node     core + hosted-node — lean remote-admission control plane
+#   hosted-workflow core + standard + hosted-node — hosted node that also
+#                   runs scheduler/graph/directive workloads
 #
 # Env:
 #   CARGO              cargo binary (default: cargo from PATH)
@@ -41,8 +48,8 @@ if ! command -v openssl >/dev/null 2>&1; then echo "populate-bundles.sh: openssl
 if ! command -v sha256sum >/dev/null 2>&1; then echo "populate-bundles.sh: sha256sum is required" >&2; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then echo "populate-bundles.sh: base64 is required" >&2; exit 2; fi
 case "$BUNDLE_SET" in
-  full|hosted-node) ;;
-  *) echo "populate-bundles.sh: --bundle-set must be 'full' or 'hosted-node', got: $BUNDLE_SET" >&2; exit 2 ;;
+  full|standard|hosted-node|hosted-workflow) ;;
+  *) echo "populate-bundles.sh: --bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $BUNDLE_SET" >&2; exit 2 ;;
 esac
 
 base64_one_line() {
@@ -145,8 +152,14 @@ case "$BUNDLE_SET" in
   full)
     BUNDLE_DIRS=("$CORE" "$STD" "$WEB" "$STUDIO" "$HOSTED_NODE")
     ;;
+  standard)
+    BUNDLE_DIRS=("$CORE" "$STD")
+    ;;
   hosted-node)
     BUNDLE_DIRS=("$CORE" "$HOSTED_NODE")
+    ;;
+  hosted-workflow)
+    BUNDLE_DIRS=("$CORE" "$STD" "$HOSTED_NODE")
     ;;
 esac
 
@@ -171,8 +184,14 @@ case "$BUNDLE_SET" in
   full)
     mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$STUDIO_BIN" "$HOSTED_NODE_BIN"
     ;;
+  standard)
+    mkdir -p "$CORE_BIN" "$STD_BIN"
+    ;;
   hosted-node)
     mkdir -p "$CORE_BIN" "$HOSTED_NODE_BIN"
+    ;;
+  hosted-workflow)
+    mkdir -p "$CORE_BIN" "$STD_BIN" "$HOSTED_NODE_BIN"
     ;;
 esac
 
@@ -201,6 +220,28 @@ case "$BUNDLE_SET" in
       -p ryeos-cli \
       -p ryeos-tools
     ;;
+  standard)
+    echo "[populate-bundles] building standard release binaries…"
+    "$CARGO" build --release \
+      -p ryeosd \
+      -p ryeos-directive-runtime \
+      -p ryeos-graph-runtime \
+      -p ryeos-knowledge-runtime \
+      -p ryeos-handler-bins \
+      -p ryeos-cli \
+      -p ryeos-tools
+    ;;
+  hosted-workflow)
+    echo "[populate-bundles] building hosted-workflow release binaries…"
+    "$CARGO" build --release \
+      -p ryeosd \
+      -p ryeos-directive-runtime \
+      -p ryeos-graph-runtime \
+      -p ryeos-knowledge-runtime \
+      -p ryeos-handler-bins \
+      -p ryeos-cli \
+      -p ryeos-tools
+    ;;
 esac
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
@@ -214,7 +255,7 @@ install -m 0755 \
   "$TARGET/release/ryeos-core-tools" \
   "$CORE_BIN/"
 
-if [[ "$BUNDLE_SET" == "full" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-directive-runtime" \
@@ -223,7 +264,9 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
     "$TARGET/release/rye-composer-extends-chain" \
     "$TARGET/release/rye-composer-graph-permissions" \
     "$STD_BIN/"
+fi
 
+if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] installing studio bundle binaries → $STUDIO_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
@@ -259,7 +302,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE"
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-if [[ "$BUNDLE_SET" == "full" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   echo "[populate-bundles] publishing standard bundle…"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
@@ -276,7 +319,9 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
+fi
 
+if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] publishing web bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
@@ -289,9 +334,11 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
     --owner "$OWNER" >/dev/null
 fi
 
-echo "[populate-bundles] publishing hosted-node bundle…"
-RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
-  --registry-root "$CORE" \
-  --owner "$OWNER" >/dev/null
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "hosted-node" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+  echo "[populate-bundles] publishing hosted-node bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$HOSTED_NODE" \
+    --registry-root "$CORE" \
+    --owner "$OWNER" >/dev/null
+fi
 
 echo "[populate-bundles] done"

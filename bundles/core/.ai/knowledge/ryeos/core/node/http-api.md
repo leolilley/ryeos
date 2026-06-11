@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:914bc209e6626f95621fcb1c47f952dca9df47d8058b98ec8b1fae71823524c8:Lvf9Ayrp8GNDCDe81cAW7i6kRjygSJ6fUuVE3JYLfYAjNbPqeUAABbLMA3b2NlRTlEY2mLw41LYtAGtyn39YBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T05:13:18Z:04a26d0cb7b7c40fa488547cbb0314e9b918a88149ea2fd2dd674f3074d44331:YPsK4JgFHy1+xVHlTHAwA+umagnNpiDJyi3Gwv/liqyECNvzag8581G2SeoxhJjcW1ni9kwYJhfThRfsqlz4Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, api, http, routes, remote]
@@ -78,7 +78,7 @@ Return the node ingest-ignore rules. No auth required.
 Authorize a public key with scoped capabilities. Authenticated.
 
 - **Source:** `service:identity/authorize-key`
-- **Required cap:** `ryeos.execute.service.authorize.key`
+- **Required cap:** `ryeos.execute.service.identity/authorize-key`
 - **Request:** `{ public_key, label, scopes }`
 - **Response:** authorized-key metadata including fingerprint and scopes
 
@@ -134,7 +134,7 @@ Cancel a running thread. Authenticated.
 Check whether CAS objects exist on this node.
 
 - **Source:** `service:objects/has`
-- **Required cap:** `ryeos.execute.service.objects.has`
+- **Required cap:** `ryeos.execute.service.objects/has`
 - **Used by:** remote push/execute upload planning
 
 ### `POST /objects/put`
@@ -142,7 +142,7 @@ Check whether CAS objects exist on this node.
 Upload CAS blobs/objects to this node.
 
 - **Source:** `service:objects/put`
-- **Required cap:** `ryeos.execute.service.objects.put`
+- **Required cap:** `ryeos.execute.service.objects/put`
 - **Used by:** remote push/execute
 
 ### `POST /objects/get`
@@ -150,7 +150,7 @@ Upload CAS blobs/objects to this node.
 Fetch CAS blobs/objects by hash.
 
 - **Source:** `service:objects/get`
-- **Required cap:** `ryeos.execute.service.objects.get`
+- **Required cap:** `ryeos.execute.service.objects/get`
 - **Used by:** remote pull, remote execute pull-back, remote bundle install
 - **Failure mode:** callers should treat missing requested hashes as
   fail-closed errors
@@ -160,7 +160,7 @@ Fetch CAS blobs/objects by hash.
 Write a principal-scoped pushed HEAD snapshot for remote execution.
 
 - **Source:** `service:system/push-head`
-- **Required cap:** `ryeos.execute.service.push.head`
+- **Required cap:** `ryeos.execute.service.system/push-head`
 - **Request:** `{ project_path, snapshot_hash }`
 - **Used by:** remote push and remote execute
 
@@ -171,7 +171,7 @@ Write a principal-scoped pushed HEAD snapshot for remote execution.
 Export an installed bundle as CAS file hashes.
 
 - **Source:** `service:bundle/export`
-- **Required cap:** `ryeos.execute.service.bundle.export`
+- **Required cap:** `ryeos.execute.service.bundle/export`
 - **Used by:** `ryeos remote bundle-install`
 
 ## Vault Routes
@@ -181,21 +181,21 @@ Export an installed bundle as CAS file hashes.
 Set a secret in the node vault.
 
 - **Source:** `service:vault/set`
-- **Required cap:** `ryeos.execute.service.vault.set`
+- **Required cap:** `ryeos.execute.service.vault/set`
 
 ### `GET /vault/list`
 
 List secret names in the node vault.
 
 - **Source:** `service:vault/list`
-- **Required cap:** `ryeos.execute.service.vault.list`
+- **Required cap:** `ryeos.execute.service.vault/list`
 
 ### `POST /vault/delete`
 
 Delete a secret from the node vault.
 
 - **Source:** `service:vault/delete`
-- **Required cap:** `ryeos.execute.service.vault.delete`
+- **Required cap:** `ryeos.execute.service.vault/delete`
 
 Vault route bodies are protected by request signing for authentication
 and integrity, but `vault/set` sends secret values in the HTTP body.

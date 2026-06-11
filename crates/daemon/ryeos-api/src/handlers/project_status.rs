@@ -83,7 +83,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:project/status",
     endpoint: "project.status",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.project.status"],
+    required_caps: &["ryeos.execute.service.project/status"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

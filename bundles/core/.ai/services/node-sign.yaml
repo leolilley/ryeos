@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:569ea02afff0cc19be7bdba097016d7861ab3919cd94a2ad5841daac5068765f:/Yjo8Uavb+oQDVRN1S0ZOP5/OJ4GjAihEjPWYlJzc9Sow55UtXyurvKDKGovCq3FMDrBawanB6JrzCott1lnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:3643adaacb4bd5bcd8c7ad4f7f19e8c3630e70c4c46031313e8efc21e9cd56cf:XRzPNcBRw8mpE7E/BP3LzdpjCe/qy88dW2XBHZuq75Nxw+rGCpN1iFN8W+VsYu9IkRBdqHb+z1dfvBW+95NcDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: node-sign
-required_caps: ["ryeos.execute.service.node_sign"]
+required_caps: ["ryeos.execute.service.node-sign"]
 schema:
   item_ref: string
   space: string

@@ -2262,7 +2262,11 @@ owner = "ryeos-dev"
         )
         .expect("write trust entry");
 
-        VerifiedLoader::new(project_root.path().to_path_buf(), vec![bundle_root()])
+        VerifiedLoader::new(
+            project_root.path().to_path_buf(),
+            vec![bundle_root()],
+            std::path::Path::new("/nonexistent-operator-trust"),
+        )
     }
 
     /// Resolve a provider+model through the real loader + preflight chain.

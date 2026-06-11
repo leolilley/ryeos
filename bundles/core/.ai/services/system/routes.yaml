@@ -1,0 +1,9 @@
+# ryeos:signed:2026-06-11T03:23:01Z:22955939f8002837d608cdd2bf76781c12d935d5d52033bfce98cbd57526519c:L9THbbc3P510IQZy1H5SS7GtMsKy4c6xmd0VrPFItbYAh+MbKplt/JDWynOBQ1uGrjVU/LvOjKppXL9GQzYSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: system.routes
+availability: daemon_only
+required_caps: ["ryeos.execute.service.system/routes"]
+schema:
+  path: string
+  method: string
+description: "Diagnostics: loaded route table (ids, methods, paths, source files) and registered bundles with installed paths"

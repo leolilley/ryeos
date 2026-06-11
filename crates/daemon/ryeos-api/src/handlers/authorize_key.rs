@@ -166,7 +166,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:identity/authorize-key",
     endpoint: "identity.authorize-key",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.authorize.key"],
+    required_caps: &["ryeos.execute.service.identity/authorize-key"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
@@ -215,9 +215,9 @@ mod tests {
 
     #[test]
     fn valid_canonical_scope() {
-        assert!(validate_scope_pattern("ryeos.execute.service.vault.set").is_ok());
-        assert!(validate_scope_pattern("ryeos.execute.service.bundle.install").is_ok());
-        assert!(validate_scope_pattern("ryeos.execute.service.remote.admin").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.vault/set").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.bundle/install").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.service.remote/admin").is_ok());
     }
 
     #[test]
@@ -237,7 +237,7 @@ mod tests {
         assert!(validate_scope_pattern("*").is_ok());
         // The handler's step-6 check rejects any list containing a wildcard.
         let normalized = vec![
-            "ryeos.execute.service.bundle.install".to_string(),
+            "ryeos.execute.service.bundle/install".to_string(),
             "*".to_string(),
         ];
         let has_wildcard = normalized.iter().any(|s| s.contains('*'));

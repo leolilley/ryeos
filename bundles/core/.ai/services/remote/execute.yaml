@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:4879332b214dca4bb5ab668003afe25de466cb10e7ce32abfec50158514d4448:Dzad6o2nyFRSuOvbofE34HkZZyIb2Td/IbrKmRdnfqySzngF3R/MDkt5iPVbut7fqGV6FzBxw3EzM8XelHy+Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:573ab10b313fedbbb66dd6b8e1804ecf5abc935c902b851fd538ea4a687a8819:+xudEehowerOJYm8AYVNGKmoTB47sZ5QNBbVTUqVGhWtTtwoM6EZRH334L/zBNYKCJUp3TFQ8Mj7bnx4We/1Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.execute
-required_caps: ["ryeos.execute.service.remote.admin"]
+required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   remote: string?
   item_ref: string
