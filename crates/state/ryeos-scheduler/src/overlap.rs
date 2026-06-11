@@ -58,7 +58,20 @@ pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx
                 );
                 false
             }
-            Ok(None) => true,
+            // In-flight fire with no thread row yet: dispatch is
+            // detached, so the claimed fire's thread may not have been
+            // created at evaluation time. Treat as still-pending — the
+            // next tick re-evaluates, and the repair sweep terminalizes
+            // genuinely lost threads.
+            Ok(None) => {
+                tracing::info!(
+                    schedule_id = %spec.schedule_id,
+                    previous_thread = %previous_thread_id,
+                    overlap = "skip",
+                    "previous fire claimed but thread not yet visible — skipping"
+                );
+                false
+            }
             Err(_) => true,
         },
 
@@ -74,7 +87,19 @@ pub async fn check_overlap<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx
                 let _ = ctx.submit_cancel(&previous_thread_id);
                 true
             }
-            Ok(None) => true,
+            // Thread row not visible yet (detached dispatch in flight):
+            // there is nothing to cancel, and proceeding would race the
+            // previous fire into a double-run. Hold this boundary; the
+            // next tick will see the thread and cancel it properly.
+            Ok(None) => {
+                tracing::info!(
+                    schedule_id = %spec.schedule_id,
+                    previous_thread = %previous_thread_id,
+                    overlap = "cancel_previous",
+                    "previous fire claimed but thread not yet visible — holding this boundary"
+                );
+                false
+            }
             Err(_) => true,
         },
     }
