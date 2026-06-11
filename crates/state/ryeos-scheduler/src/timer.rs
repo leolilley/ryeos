@@ -2,6 +2,15 @@
 //!
 //! A `tokio::spawn` background task that sleeps until the next fire,
 //! dispatches work, and listens for completion events.
+//!
+//! Dispatch is DETACHED: `dispatch_fire` claims the fire and records it
+//! `dispatched` synchronously, then spawns the actual item execution
+//! and returns. The runtime gate's read guard therefore covers only
+//! planning + claim, never job execution — a long-running scheduled
+//! job must not stall other schedules' evaluation, `scheduler/register`
+//! (write side of the gate), or project apply-snapshot reconciliation.
+//! Completion is finalized by the completion hook or the 30s repair
+//! sweep, exactly as for any other in-flight fire.
 
 use std::sync::Arc;
 
@@ -298,7 +307,7 @@ fn compute_soonest_fire<Ctx: SchedulerContext>(
         .min()
 }
 
-async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ctx) {
+async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Arc<Ctx>) {
     let now = lillux::time::timestamp_millis();
 
     // Get last fire for this schedule to compute scheduled_at
@@ -329,7 +338,8 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
     // evaluation instead of also dispatching it as a normal fire.
     let current_within_grace = plan.current_due_within_grace.unwrap_or(false);
     let misfire_horizon = plan.misfire_horizon_exclusive.unwrap_or(now);
-    let misfire_fires = misfire::evaluate_misfires_before(spec, ctx, misfire_horizon, now).await;
+    let misfire_fires =
+        misfire::evaluate_misfires_before(spec, ctx.as_ref(), misfire_horizon, now).await;
 
     // ── Build one ordered fire list (chronological) ──────────
     // Each fire gets its own overlap check before dispatch.
@@ -345,11 +355,11 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
 
     // ── Process each fire with overlap check ─────────────────
     for pending in all_fires {
-        let overlap_ok = overlap::check_overlap(spec, ctx).await;
+        let overlap_ok = overlap::check_overlap(spec, ctx.as_ref()).await;
         if !overlap_ok {
             // Skip this fire and all subsequent fires
             record_skip(
-                ctx,
+                ctx.as_ref(),
                 &pending.fire_id,
                 spec,
                 pending.scheduled_at,
@@ -371,7 +381,7 @@ async fn process_spec<Ctx: SchedulerContext>(spec: &ScheduleSpecRecord, ctx: &Ct
 }
 
 pub async fn dispatch_fire<Ctx: SchedulerContext>(
-    ctx: &Ctx,
+    ctx: &Arc<Ctx>,
     fire_id: &str,
     spec: &ScheduleSpecRecord,
     scheduled_at: i64,
@@ -523,73 +533,88 @@ pub async fn dispatch_fire<Ctx: SchedulerContext>(
         });
     }
 
-    // ── Dispatch via SchedulerContext ────────────────────────
-    match ctx
-        .dispatch_scheduled_item(spec, fire_id, &thread_id, scheduled_at, trigger_reason)
-        .await
-    {
-        Ok(_) => {
-            tracing::info!(
-                fire_id = %fire_id,
-                thread_id = %thread_id,
-                trigger = %trigger_reason,
-                schedule_id = %spec.schedule_id,
-                "schedule fired"
-            );
-        }
-        Err(err) => {
-            let now = lillux::time::timestamp_millis();
-            let fail_entry = serde_json::json!({
-                "entry_type": "failed",
-                "status": "failed",
-                "fire_id": fire_id,
-                "schedule_id": spec.schedule_id,
-                "scheduled_at": scheduled_at,
-                "fired_at": now,
-                "thread_id": thread_id,
-                "completed_at": now,
-                "trigger_reason": trigger_reason,
-                "outcome": "dispatch_failed",
-                "error": err.to_string(),
-                "signer_fingerprint": spec.signer_fingerprint,
-            });
-            let fail_rec = FireRecord {
-                fire_id: fire_id.to_string(),
-                schedule_id: spec.schedule_id.clone(),
-                scheduled_at,
-                fired_at: Some(now),
-                completed_at: Some(now),
-                thread_id: Some(thread_id),
-                status: "failed".to_string(),
-                trigger_reason: trigger_reason.to_string(),
-                outcome: Some("dispatch_failed".to_string()),
-                signer_fingerprint: Some(spec.signer_fingerprint.clone()),
-            };
-            {
-                let db = ctx.scheduler_db();
-                let fires_path = fires_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
-                        tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
-                            "dispatch failure: failed to append JSONL entry");
-                    }
-                    if let Err(e) = db.upsert_fire(&fail_rec) {
-                        tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
-                            "dispatch failure: failed to upsert fire record");
-                    }
-                }).await.unwrap_or_else(|e| {
-                    tracing::error!(fire_id = %fire_id, error = %e, "spawn_blocking task panicked or was cancelled (failure persist)");
-                });
+    // ── Dispatch via SchedulerContext (DETACHED) ─────────────
+    // The fire is claimed and recorded `dispatched`; the execution
+    // itself runs on its own task so the timer loop (and the runtime
+    // gate's read guard held by the caller) is released immediately.
+    // A long-running scheduled job must never stall evaluation of
+    // other schedules or block gate writers (scheduler/register,
+    // project apply-snapshot). Success/failure of the dispatch is
+    // recorded by the spawned task; completion of the thread itself is
+    // finalized by the completion hook or the repair sweep.
+    let ctx = Arc::clone(ctx);
+    let spec = spec.clone();
+    let fire_id = fire_id.to_string();
+    let trigger_reason = trigger_reason.to_string();
+    tokio::spawn(async move {
+        match ctx
+            .dispatch_scheduled_item(&spec, &fire_id, &thread_id, scheduled_at, &trigger_reason)
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(
+                    fire_id = %fire_id,
+                    thread_id = %thread_id,
+                    trigger = %trigger_reason,
+                    schedule_id = %spec.schedule_id,
+                    "schedule fired"
+                );
             }
+            Err(err) => {
+                let now = lillux::time::timestamp_millis();
+                let fail_entry = serde_json::json!({
+                    "entry_type": "failed",
+                    "status": "failed",
+                    "fire_id": fire_id,
+                    "schedule_id": spec.schedule_id,
+                    "scheduled_at": scheduled_at,
+                    "fired_at": now,
+                    "thread_id": thread_id,
+                    "completed_at": now,
+                    "trigger_reason": trigger_reason,
+                    "outcome": "dispatch_failed",
+                    "error": err.to_string(),
+                    "signer_fingerprint": spec.signer_fingerprint,
+                });
+                let fail_rec = FireRecord {
+                    fire_id: fire_id.to_string(),
+                    schedule_id: spec.schedule_id.clone(),
+                    scheduled_at,
+                    fired_at: Some(now),
+                    completed_at: Some(now),
+                    thread_id: Some(thread_id),
+                    status: "failed".to_string(),
+                    trigger_reason: trigger_reason.to_string(),
+                    outcome: Some("dispatch_failed".to_string()),
+                    signer_fingerprint: Some(spec.signer_fingerprint.clone()),
+                };
+                {
+                    let db = ctx.scheduler_db();
+                    let fires_path = fires_path.clone();
+                    let fire_id_log = fire_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = projection::append_jsonl_entry(&fires_path, &fail_entry) {
+                            tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
+                                "dispatch failure: failed to append JSONL entry");
+                        }
+                        if let Err(e) = db.upsert_fire(&fail_rec) {
+                            tracing::error!(fire_id = %fail_rec.fire_id, error = %e,
+                                "dispatch failure: failed to upsert fire record");
+                        }
+                    }).await.unwrap_or_else(|e| {
+                        tracing::error!(fire_id = %fire_id_log, error = %e, "spawn_blocking task panicked or was cancelled (failure persist)");
+                    });
+                }
 
-            tracing::error!(
-                fire_id = %fire_id,
-                schedule_id = %spec.schedule_id,
-                error = %err,
-                "schedule dispatch failed"
-            );
+                tracing::error!(
+                    fire_id = %fire_id,
+                    schedule_id = %spec.schedule_id,
+                    error = %err,
+                    "schedule dispatch failed"
+                );
+            }
         }
-    }
+    });
 }
 
 /// Dispatch a recovery fire (from reconciler).
@@ -720,6 +745,12 @@ mod tests {
         trust: TrustStore,
         statuses: Mutex<HashMap<String, String>>,
         outcomes: Mutex<HashMap<String, ThreadResultOutcome>>,
+        /// When true, `dispatch_scheduled_item` signals `dispatch_started`
+        /// then parks on `dispatch_release` — simulating a long-running
+        /// scheduled job for detachment tests.
+        hang_dispatch: std::sync::atomic::AtomicBool,
+        dispatch_started: Arc<tokio::sync::Notify>,
+        dispatch_release: Arc<tokio::sync::Notify>,
     }
 
     impl MockContext {
@@ -731,6 +762,9 @@ mod tests {
                 trust: TrustStore::empty(),
                 statuses: Mutex::new(HashMap::new()),
                 outcomes: Mutex::new(HashMap::new()),
+                hang_dispatch: std::sync::atomic::AtomicBool::new(false),
+                dispatch_started: Arc::new(tokio::sync::Notify::new()),
+                dispatch_release: Arc::new(tokio::sync::Notify::new()),
             }
         }
     }
@@ -775,7 +809,106 @@ mod tests {
             _scheduled_at: i64,
             _trigger_reason: &str,
         ) -> anyhow::Result<()> {
+            if self.hang_dispatch.load(std::sync::atomic::Ordering::SeqCst) {
+                self.dispatch_started.notify_one();
+                self.dispatch_release.notified().await;
+            }
             Ok(())
+        }
+    }
+
+    fn make_spec(schedule_id: &str, overlap_policy: &str) -> ScheduleSpecRecord {
+        ScheduleSpecRecord {
+            schedule_id: schedule_id.to_string(),
+            item_ref: "directive:test/job".to_string(),
+            params: "{}".to_string(),
+            schedule_type: "cron".to_string(),
+            expression: "* * * * * *".to_string(),
+            timezone: "UTC".to_string(),
+            misfire_policy: "skip".to_string(),
+            overlap_policy: overlap_policy.to_string(),
+            lateness_grace_secs: 60,
+            enabled: true,
+            project_root: None,
+            signer_fingerprint: "fp:test".to_string(),
+            spec_hash: "abc".to_string(),
+            registered_at: 0,
+            requester_fingerprint: "fp:test".to_string(),
+            capabilities: vec!["ryeos.execute.*".to_string()],
+        }
+    }
+
+    /// A long-running scheduled job must not hold the timer or the
+    /// runtime gate: `dispatch_fire` returns once the fire is claimed,
+    /// the fire row is `dispatched`, and a gate WRITER (scheduler/register,
+    /// project apply-snapshot) can proceed while the job is still running.
+    #[tokio::test]
+    async fn dispatch_fire_is_detached_and_releases_gate() {
+        let ctx = Arc::new(MockContext::new());
+        ctx.hang_dispatch
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let spec = make_spec("long-job", "skip");
+        let scheduled_at = 1000;
+        let fire_id = types::fire_id(&spec.schedule_id, scheduled_at);
+
+        // Mirror the timer loop: dispatch while holding the gate's read guard.
+        let gate = ctx.scheduler_runtime_gate();
+        {
+            let _read = gate.clone().try_read_owned().expect("gate free");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                dispatch_fire(&ctx, &fire_id, &spec, scheduled_at, "normal", false),
+            )
+            .await
+            .expect("dispatch_fire must return while the job is still running");
+        }
+
+        // The job actually started (and is parked).
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ctx.dispatch_started.notified(),
+        )
+        .await
+        .expect("spawned dispatch must start");
+
+        // Fire is recorded dispatched.
+        let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire claimed");
+        assert_eq!(fire.status, "dispatched");
+
+        // A gate writer must not block behind the running job.
+        tokio::time::timeout(std::time::Duration::from_secs(1), gate.write())
+            .await
+            .expect("gate writer must acquire while a scheduled job is running");
+
+        ctx.dispatch_release.notify_one();
+    }
+
+    /// Detached dispatch means a claimed fire's thread row may not exist
+    /// yet at the next overlap evaluation. Skip/cancel_previous must
+    /// treat that as still-pending, not proceed into a double-run.
+    #[tokio::test]
+    async fn overlap_holds_when_inflight_thread_not_yet_visible() {
+        let ctx = MockContext::new();
+        for policy in ["skip", "cancel_previous"] {
+            let spec = make_spec(&format!("race-{policy}"), policy);
+            let fire = FireRecord {
+                fire_id: types::fire_id(&spec.schedule_id, 1000),
+                schedule_id: spec.schedule_id.clone(),
+                scheduled_at: 1000,
+                fired_at: Some(lillux::time::timestamp_millis()),
+                completed_at: None,
+                thread_id: Some("T-not-yet-created".to_string()),
+                status: "dispatched".to_string(),
+                trigger_reason: "normal".to_string(),
+                outcome: None,
+                signer_fingerprint: Some("fp".to_string()),
+            };
+            ctx.db.upsert_fire(&fire).unwrap();
+            // No status entry for T-not-yet-created → get_thread_status None.
+            assert!(
+                !overlap::check_overlap(&spec, &ctx).await,
+                "policy {policy}: in-flight fire with invisible thread must hold the boundary"
+            );
         }
     }
 
