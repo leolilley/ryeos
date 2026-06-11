@@ -83,29 +83,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push full image
-        uses: docker/build-push-action@v6
-        id: build-full
-        with:
-          context: .
-          file: ./Dockerfile
-          # linux/amd64 only for now — bundle bin/ trees only contain
-          # x86_64-unknown-linux-gnu binaries. Add arm64 once we ship arm64
-          # binaries in the bundles.
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ghcr.io/leolilley/ryeosd-full:${{ steps.ver.outputs.version }}
-            ghcr.io/leolilley/ryeosd-full:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
-          secrets: |
-            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - name: Build & push standard image
         uses: docker/build-push-action@v6
         id: build-standard
@@ -136,7 +113,5 @@ jobs:
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
-          cosign sign --yes \
-            ghcr.io/leolilley/ryeosd-full@${{ steps.build-full.outputs.digest }}
           cosign sign --yes \
             ghcr.io/leolilley/ryeos-standard@${{ steps.build-standard.outputs.digest }}
