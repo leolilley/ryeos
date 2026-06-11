@@ -511,7 +511,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
                 "--scopes required, comma-separated, in canonical form. \
-                 Example: --scopes ryeos.execute.service.remote.admin,ryeos.execute.service.bundle.install"
+                 Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
             ))?;
             run_authorize_client(app_root, public_key, scopes, label, cli.stdin_json)
         }

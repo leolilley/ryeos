@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-07T05:18:55Z:c01cd91a3dff67539cec4eef07be0da13c5e4fdcca95f80732b304d548b247e7:7bHWtebp/0Z1Z9vX/J0CV5GcAlHwC6Q2TXrRpUA3C8/FFXVJj5TVgl6YB3fmlDwrBLmjEL8urK6tFInSQtRGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:12Z:897ddfa044456d08878c85cc52adba917366bed2b41da34457613385de62448d:GHaWVqAsl652KERm8s0qk31yhx69TqU1yxKiMxtG6D/pASP+7Uhj+/Md8IxBjnWH4gXYI8lCupKiu//kcrmRBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.remove
 availability: offline
-required_caps: ["ryeos.execute.service.bundle.remove"]
+required_caps: ["ryeos.execute.service.bundle/remove"]
 schema:
   name: string
 description: "Remove an installed bundle: delete <system_space_dir>/.ai/node/bundles/<name>.yaml and <system_space_dir>/.ai/bundles/<name>/. Offline-only: daemon must be stopped."

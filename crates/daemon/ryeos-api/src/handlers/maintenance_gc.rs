@@ -20,7 +20,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:maintenance/gc",
     endpoint: "maintenance.gc",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.maintenance.gc"],
+    required_caps: &["ryeos.execute.service.maintenance/gc"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = if params.is_null() {

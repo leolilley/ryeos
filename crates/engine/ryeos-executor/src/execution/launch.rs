@@ -413,9 +413,12 @@ fn extract_model_spec_from_resolved(
 
 /// Build a `VerifiedLoader` over the same root ordering the spawned
 /// runtime will see. This ensures the daemon's preflight resolve
-/// produces the same answer the runtime would get.
+/// produces the same answer the runtime would get. Trust context is
+/// the explicit operator trusted-keys dir plus the project root —
+/// matching the engine trust store's sources, not the bundle roots.
 fn build_verified_loader_for_thread(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    operator_trusted_keys_dir: &Path,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
         .ordered
@@ -444,6 +447,7 @@ fn build_verified_loader_for_thread(
     Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
         project_root,
         bundle_roots,
+        operator_trusted_keys_dir,
     ))
 }
 
@@ -457,6 +461,7 @@ fn build_verified_loader_for_thread(
 pub(crate) fn preflight_inject_provider_secret(
     composed: &ryeos_engine::resolution::KindComposedView,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    operator_trusted_keys_dir: &Path,
     vault: &dyn ryeos_app::vault::NodeVault,
     acting_principal: &str,
     item_ref_str: &str,
@@ -467,7 +472,7 @@ pub(crate) fn preflight_inject_provider_secret(
         model: extract_model_spec_from_resolved(composed)
             .map_err(|e| MaterializationError::Internal(e.to_string()))?,
     };
-    let loader = build_verified_loader_for_thread(engine_roots)
+    let loader = build_verified_loader_for_thread(engine_roots, operator_trusted_keys_dir)
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
     let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(&header, &loader)
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
@@ -869,9 +874,11 @@ pub async fn build_and_launch(
     //     so the operator gets a clear remediation hint before spawn.
     let mut effective_vault = vault_bindings.clone();
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
+    let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let provider_snapshot = preflight_inject_provider_secret(
         &resolution.composed,
         &engine_roots,
+        &operator_trusted_keys_dir,
         state.vault.as_ref(),
         acting_principal,
         &resolved.item_ref,
@@ -905,6 +912,7 @@ pub async fn build_and_launch(
         EnvelopeRoots {
             project_root: project_path.to_path_buf(),
             bundle_roots,
+            operator_trusted_keys_dir,
         },
         EnvelopeRequest {
             inputs: parameters.clone(),

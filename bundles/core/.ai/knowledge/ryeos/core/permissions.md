@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:c0af2ae2beb4eb6044e9985d0f124a06111a27e19afe76ac9b42750ca9c55428:CA5ols+UbWO3uDll7KH9pm+NplARCqNlZJWlhPyUMlW7Zp1hmdm2HLziAO1QM7rTx2u777vvIlry1Qo6E+hLAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T05:17:40Z:cde1b8594111d1305beef473532773d5377df6aa658251dcb71b411c5cb523e2:e8OmXjfoPUbbjjZHVf7k65b/ZEU8SWVZleY5LqYATMITAEcJYiiYGfnacA9UrmONZzOaW6n0++tSZ3WWVVOOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -29,15 +29,24 @@ ryeos.<verb>.<kind>.<subject>
 |---|---|---|
 | `verb` | What action | Kebab-case only (no underscores). Known verbs: `execute`, `fetch`, `sign`. |
 | `kind` | What resource type | Kebab-case only (no underscores). E.g. `service`, `tool`, `directive`. |
-| `subject` | Which specific resource | May contain `/`, `.`, `_`, `-`, `0-9`, `a-z`. E.g. `bundle.install`, `ryeos/file-system/read`. |
+| `subject` | Which specific resource | For item-execution caps: the canonical bare item id, preserving `/` (e.g. `bundle/install`, `ryeos/file-system/read`). May contain `/`, `.`, `_`, `-`, `0-9`, `a-z`. |
+
+The rule: `cap = ryeos.<verb>.<kind>.<bare_id>`, where `<bare_id>` is
+exactly the path after `kind:` in the canonical ref. The `.` characters
+before the subject separate the RyeOS capability envelope; `/` inside
+the subject preserves item namespace and filesystem layout. A `.` inside
+a subject is literal in wildcard matching — a grant of `scheduler.*`
+does NOT match `scheduler/register`; grant `scheduler/*` instead.
+Dot-form names survive only as internal handler endpoint keys
+(e.g. `endpoint: scheduler.register`), never as capability subjects.
 
 Examples:
 
 ```
-ryeos.execute.service.bundle.install
-ryeos.execute.tool.ryeos/file-system/read
-ryeos.fetch.tool.ryeos/core/sign
-ryeos.sign.directive.my/workflow
+service:scheduler/register   →  ryeos.execute.service.scheduler/register
+service:objects/closure/get  →  ryeos.execute.service.objects/closure/get
+tool:ryeos/file-system/read  →  ryeos.execute.tool.ryeos/file-system/read
+directive:my/workflow        →  ryeos.sign.directive.my/workflow
 ```
 
 ## Three-Level Validation
@@ -92,7 +101,7 @@ AuthorizationPolicy::Protected {
 Every clause must be satisfied (AND). Within a clause, any one scope is
 sufficient (OR).
 
-- `require("ryeos.execute.service.bundle.install")` — single-clause
+- `require("ryeos.execute.service.bundle/install")` — single-clause
   shorthand
 - `require_all(&["cap_a", "cap_b"])` — N clauses, each with one
   element; all must match
@@ -109,8 +118,8 @@ A broad grant covers narrow requirements:
 
 | Granted | Satisfies Required |
 |---|---|
-| `ryeos.execute.service.*` | `ryeos.execute.service.bundle.install` |
-| `ryeos.execute.*` | `ryeos.execute.service.bundle.install` |
+| `ryeos.execute.service.*` | `ryeos.execute.service.bundle/install` |
+| `ryeos.execute.*` | `ryeos.execute.service.bundle/install` |
 | `ryeos.*` | Any `ryeos.*` cap |
 | `*` | Everything (superuser) |
 
@@ -120,19 +129,21 @@ A broad requirement is satisfied by any narrow grant:
 
 | Required | Satisfied By |
 |---|---|
-| `ryeos.execute.service.*` | `ryeos.execute.service.bundle.install` |
-| `ryeos.execute.*` | `ryeos.execute.service.bundle.install` |
+| `ryeos.execute.service.*` | `ryeos.execute.service.bundle/install` |
+| `ryeos.execute.*` | `ryeos.execute.service.bundle/install` |
 | `ryeos.*` | Any `ryeos.*` grant |
 
 ### Path-Prefix Wildcards
 
-A prefix wildcard matches the dot boundary:
+A prefix wildcard matches at the `/` boundary of the subject's bare id:
 
-- `ryeos.execute.service.bundle.*` matches `bundle.install` ✓
-- `ryeos.execute.service.bundle.*` matches `bundleX` ✗ (dot is literal)
+- `ryeos.execute.service.bundle/*` matches `bundle/install` ✓
+- `ryeos.execute.service.bundle/*` matches `bundleX` ✗ (`/` is literal)
+- `ryeos.execute.service.bundle.*` matches `bundle/install` ✗ (`.` is
+  literal — dot-form grants satisfy nothing)
 
-The `*` becomes `.*` in regex, and the preceding dot is escaped, so
-prefix wildcards don't leak across segments.
+The `*` becomes `.*` in regex; every other character, including `.` and
+`/`, is escaped, so prefix wildcards don't leak across segments.
 
 ### Verbs Are Independent
 

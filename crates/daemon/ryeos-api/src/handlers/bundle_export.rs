@@ -110,7 +110,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/export",
     endpoint: "bundle.export",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.bundle.export"],
+    required_caps: &["ryeos.execute.service.bundle/export"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

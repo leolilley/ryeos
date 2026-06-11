@@ -17,8 +17,19 @@ pub async fn handle_routes_reload(state: &ApiState) -> Result<Value> {
 
     let fingerprint = new_table.fingerprint.clone();
     let route_count = new_table.all.len();
+    let diagnostic_entries = super::route_diagnostic_entries(&new_table);
 
     state.route_table.store(Arc::new(new_table));
+
+    // Keep the `service:system/routes` snapshot in step with the live
+    // table. Absent only in embedded test states.
+    if let Some(diags) = state
+        .app
+        .extensions
+        .get::<ryeos_app::route_diagnostics::RouteDiagnostics>()
+    {
+        diags.publish(fingerprint.clone(), diagnostic_entries);
+    }
 
     tracing::info!(
         fingerprint = %fingerprint,

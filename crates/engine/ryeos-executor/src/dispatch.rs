@@ -1074,7 +1074,31 @@ pub async fn dispatch_service(
                 &ctx.plan_ctx,
                 item_ref,
                 Some("service"),
-            )?;
+            )
+            .map_err(|e| match e.downcast_ref::<ryeos_engine::error::EngineError>() {
+                // The service item YAML is absent from every search
+                // space — the bundle shipping it is not installed.
+                // Surface the installed-bundle list instead of an
+                // opaque 500 so a remote operator can repair the
+                // deployment without source-level debugging.
+                Some(ryeos_engine::error::EngineError::ItemNotFound {
+                    searched_spaces, ..
+                }) => {
+                    let mut installed_bundles: Vec<String> = state
+                        .node_config
+                        .bundles
+                        .iter()
+                        .map(|b| b.name.clone())
+                        .collect();
+                    installed_bundles.sort();
+                    DispatchError::ServiceNotInstalled {
+                        service_ref: item_ref.to_string(),
+                        installed_bundles,
+                        searched_spaces: searched_spaces.clone(),
+                    }
+                }
+                _ => DispatchError::Internal(e),
+            })?;
 
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the

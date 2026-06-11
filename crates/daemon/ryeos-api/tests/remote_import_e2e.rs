@@ -800,7 +800,7 @@ fn import_services_expose_safe_default_and_admin_escape_hatch() {
     );
     assert_eq!(
         remote_import_admitted_head::DESCRIPTOR.required_caps,
-        &["ryeos.execute.service.remote.import-admitted-head"]
+        &["ryeos.execute.service.remote/import-admitted-head"]
     );
     assert_eq!(
         ryeos_api::handlers::remote_import_admitted_root::DESCRIPTOR.endpoint,
@@ -808,7 +808,7 @@ fn import_services_expose_safe_default_and_admin_escape_hatch() {
     );
     assert_eq!(
         ryeos_api::handlers::remote_import_admitted_root::DESCRIPTOR.required_caps,
-        &["ryeos.execute.service.remote.admin"]
+        &["ryeos.execute.service.remote/admin"]
     );
     assert_eq!(
         remote_sync_admitted_heads::DESCRIPTOR.endpoint,
@@ -816,7 +816,7 @@ fn import_services_expose_safe_default_and_admin_escape_hatch() {
     );
     assert_eq!(
         remote_sync_admitted_heads::DESCRIPTOR.required_caps,
-        &["ryeos.execute.service.remote.sync-admitted-heads"]
+        &["ryeos.execute.service.remote/sync-admitted-heads"]
     );
     assert!(!ryeos_api::handlers::ALL
         .iter()

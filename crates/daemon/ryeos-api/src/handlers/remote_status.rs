@@ -95,17 +95,17 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         }
     };
     let bootstrap_scopes = [
-        "ryeos.execute.service.objects.has",
-        "ryeos.execute.service.objects.put",
-        "ryeos.execute.service.objects.get",
-        "ryeos.execute.service.objects.closure.describe",
-        "ryeos.execute.service.objects.closure.get",
-        "ryeos.execute.service.push.head",
-        "ryeos.execute.service.project.status",
-        "ryeos.execute.service.project.apply",
-        "ryeos.execute.service.scheduler.register",
-        "ryeos.execute.service.threads.list",
-        "ryeos.execute.service.threads.get",
+        "ryeos.execute.service.objects/has",
+        "ryeos.execute.service.objects/put",
+        "ryeos.execute.service.objects/get",
+        "ryeos.execute.service.objects/closure/describe",
+        "ryeos.execute.service.objects/closure/get",
+        "ryeos.execute.service.system/push-head",
+        "ryeos.execute.service.project/status",
+        "ryeos.execute.service.project/apply-snapshot",
+        "ryeos.execute.service.scheduler/register",
+        "ryeos.execute.service.threads/list",
+        "ryeos.execute.service.threads/get",
     ];
     let authorize_command = format!(
         "ryeos-core-tools authorize-client --app-root <remote-app-root> --public-key '{}' --scopes '{}' --label local-operator-{}",
@@ -141,7 +141,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/status",
     endpoint: "remote.status",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.remote.status"],
+    required_caps: &["ryeos.execute.service.remote/status"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

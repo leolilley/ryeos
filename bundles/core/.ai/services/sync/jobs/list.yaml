@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:a76fcfeb1986abeca3f7eb523e1d9b77e0f0b7804deebde9e32f348e94d19d13:Kfx+8jxhcCJXfmXMuSBcD7PPe8jmHelgm/ybeNAvZNhQYyZEhZjrWAP2H1zsJ6dy5z/+uv+O8WjqNZ0/DtV0Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:14Z:463bc95ec94aa9f2f060c18ec4b5e96a4d194263ba80f7434c9fb643aba73f17:m5jen+6seoLIA9F30SyD1plZWhDox6c6PPJFE3g3dmJbhZmwNjXw9bDVtZjabmSVH5i7OApRZNB+Vf90CGHtDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: sync.jobs.list
-required_caps: ["ryeos.execute.service.sync.jobs.list"]
+required_caps: ["ryeos.execute.service.sync/jobs/list"]
 schema:
   state: string?
   limit: number?

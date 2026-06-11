@@ -353,8 +353,8 @@ mod tests {
             &fp,
             &key_b64,
             &[
-                "ryeos.execute.service.remote.admin".to_string(),
-                "ryeos.execute.service.bundle.install".to_string(),
+                "ryeos.execute.service.remote/admin".to_string(),
+                "ryeos.execute.service.bundle/install".to_string(),
             ],
             "test",
             "test-granter",
@@ -377,7 +377,7 @@ mod tests {
             dir.path(),
             &fp,
             &key_b64,
-            &["ryeos.execute.service.remote.admin".to_string()],
+            &["ryeos.execute.service.remote/admin".to_string()],
             "test-label",
             "test-granter",
             "2026-01-01T00:00:00Z",
@@ -395,7 +395,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(body.contains(&format!("fingerprint = \"{fp}\"")));
-        assert!(body.contains("ryeos.execute.service.remote.admin"));
+        assert!(body.contains("ryeos.execute.service.remote/admin"));
         assert!(body.contains("test-label"));
         assert!(body.contains("test-granter"));
     }

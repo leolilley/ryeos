@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-07T05:18:56Z:3e9d5c7346e13847ba31dd07a23746f3843a87a525efa8092c13617d6ea3e590:VyslKokRW/fn7BywEIjAm1BOkjyOzJyliURGQjnVewotWKNGVf6lqEu+6b8NI9ZUAsDcAy3MvDS8e/u/BQZpAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:14Z:d17b3c022fd12fe0b2a235dba49aa1259cea9719fc1fb31f422c74e026b8379d:xL1ffEa2NnkmlHmYnVqHpCzVjuHhknXg3o97cyKhTMH2uyZ9dIETvIS+TU6KRw34EBhbIErhZl5TABxOJWYfBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 kind: service
 endpoint: remote.thread-status
-required_caps: ["ryeos.execute.service.remote.admin"]
+required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   remote: string?
   thread_id: string

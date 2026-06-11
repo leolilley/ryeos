@@ -114,7 +114,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:objects/closure/get",
     endpoint: "objects.closure.get",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.objects.closure.get"],
+    required_caps: &["ryeos.execute.service.objects/closure/get"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

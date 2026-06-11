@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-10T11:46:35Z:4121177d393f8db06a2ef2a82a0636d172f8b852ce1f2620dc274e31a7638cbd:w6fEHhsyyiRTkQhbN6Evvo+rRdHNs6uKM6hGTT+vwjLROl0gG3rDZIVNo3DWeU0E3fCdwb8vD9iQ1nbio3qNBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:056fd919e1e85518dd4c5d4a665801a14af1c5fc46101666192ae9c3a3c8165f:ZbefB/mofdHyw+SQWk6+0nUie21SNAN+okXP+pwk9d4prpsnJJygX5K7Lc8JLTmm5NmCqoVdwxsA/MhHZNaXBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: maintenance.gc
-required_caps: ["ryeos.execute.service.maintenance.gc"]
+required_caps: ["ryeos.execute.service.maintenance/gc"]
 schema:
   dry_run: boolean?
   compact: boolean?

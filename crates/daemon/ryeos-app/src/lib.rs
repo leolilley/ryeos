@@ -25,6 +25,7 @@ pub mod kind_profiles;
 pub mod launch_metadata;
 pub mod node_config;
 pub mod process;
+pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_db;
 pub mod runtime_vault_service;

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:55Z:404b127cbc6f62dc7b561bd2d91e21321cb2dbeff340835032ac7a9ab7aacbb0:Ia6yTNTamTP3n48O8CKNxLq9nL26zOb4z3jVvXXtoSTW02UV1ttNFugYLvRsWEpH7QWWMv78GSJP7zS4HRAzAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:d2f101c1f0e280c7b10165423b1fb6e4741e5f1b0ab23b4407d1916ec7e39565:EKD8K9m1o0eGLUaMul/4fOePAHa516xrQK1MAfWA/UaqEiLpAZMuKho+7sjIOR4V6R3lGwwrehIx1EtMB1dODQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: federation.heads.list
-required_caps: ["ryeos.execute.service.federation.heads.list"]
+required_caps: ["ryeos.execute.service.federation/heads/list"]
 schema:
   prefix: string?
   limit: number?

@@ -72,6 +72,28 @@ impl RouteTable {
     }
 }
 
+/// Project a built route table into the diagnostic snapshot shape
+/// published into `AppState::extensions` (see
+/// `ryeos_app::route_diagnostics`). Called by the composition root at
+/// boot and by the reload handler, so `service:system/routes` always
+/// reflects the live table.
+pub fn route_diagnostic_entries(
+    table: &RouteTable,
+) -> Vec<ryeos_app::route_diagnostics::RouteDiagnosticEntry> {
+    table
+        .all
+        .iter()
+        .map(|r| ryeos_app::route_diagnostics::RouteDiagnosticEntry {
+            id: r.id.clone(),
+            methods: r.methods.iter().map(|m| m.to_string()).collect(),
+            path: r.path_pattern.clone(),
+            source_file: r.source_file.display().to_string(),
+            response_mode: r.raw_response.response.mode.clone(),
+            response_source: r.raw_response.response.source.clone(),
+        })
+        .collect()
+}
+
 pub fn build_route_table(
     raw_routes: &[RawRouteSpec],
     mode_registry: &ResponseModeRegistry,

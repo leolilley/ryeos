@@ -191,6 +191,10 @@ impl EnvelopeCallback {
 pub struct EnvelopeRoots {
     pub project_root: PathBuf,
     pub bundle_roots: Vec<PathBuf>,
+    /// Operator trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
+    /// The runtime's `VerifiedLoader` takes its trust context from here
+    /// and the project root — never from bundle roots, never from env.
+    pub operator_trusted_keys_dir: PathBuf,
 }
 
 /// Intentionally open payload — shape is kind-defined.
@@ -310,6 +314,7 @@ mod tests {
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
+                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
@@ -418,6 +423,7 @@ mod tests {
             EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
+                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),

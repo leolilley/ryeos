@@ -30,9 +30,9 @@ use lillux::crypto::Signer as _;
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /// Fixed test signing key. Used to pre-sign a synthesized
-/// `runtime:pin-fake-runtime` YAML in user space AND a matching
-/// trusted-signer entry, so the runtime registry verifies it at
-/// daemon startup. Deterministic seed → reproducible fingerprint.
+/// `runtime:pin-fake-runtime` YAML in a registered fixture bundle AND
+/// a matching trusted-signer entry, so the runtime registry verifies
+/// it at daemon startup. Deterministic seed → reproducible fingerprint.
 fn pin_test_signing_key() -> lillux::crypto::SigningKey {
     lillux::crypto::SigningKey::from_bytes(&[0x5Au8; 32])
 }
@@ -66,36 +66,49 @@ pem = "ed25519:{key_b64}"
 }
 
 /// Pre-init hook used by the three native-runtime pin tests: writes a
-/// trust entry for `pin_test_signing_key()` into user-space, then
-/// synthesizes `<user_space>/.ai/runtimes/pin-fake-runtime.yaml`
-/// (`kind: runtime`, `serves: pin_fake_kind`,
-/// `binary_ref: bin/<triple>/pin-fake-runtime`). Daemon engine init
-/// scans user-space → finds the runtime → registers
-/// `runtime:pin-fake-runtime`. The synthetic `serves` kind avoids
-/// colliding with any default runtime served from a real bundle.
+/// trust entry for `pin_test_signing_key()` into the app root's
+/// operator trust dir, then synthesizes a minimal registered
+/// `pin-fixture` bundle under `<app_root>/.ai/bundles/pin-fixture`
+/// carrying `.ai/runtimes/pin-fake-runtime.yaml` (`kind: runtime`,
+/// `serves: pin_fake_kind`, `binary_ref: bin/<triple>/pin-fake-runtime`)
+/// plus the `pin_fake_kind` schema. The v0.5.11 space collapse removed
+/// the user-space resolution tier, so registries scan registered
+/// bundle roots only — the fixture registers its own bundle record
+/// (signed by the fast-fixture publisher) instead of planting files in
+/// user space. The synthetic `serves` kind avoids colliding with any
+/// default runtime served from a real bundle.
 ///
 /// The binary need not exist on disk — every native pin test reaches
 /// only the `ProtocolCapabilities` resolution in
 /// `dispatch_managed_subprocess`, which fires BEFORE
 /// `launch::build_and_launch` materializes anything.
-fn install_pin_runtime(_state_path: &Path, user_space: &Path) -> anyhow::Result<()> {
+fn install_pin_runtime(
+    state_path: &Path,
+    fixture: &common::fast_fixture::FastFixture,
+) -> anyhow::Result<()> {
     let sk = pin_test_signing_key();
     let vk = sk.verifying_key();
-    write_trusted_signer(user_space, &vk)?;
+    write_trusted_signer(state_path, &vk)?;
+
+    let bundle_root = state_path.join(".ai/bundles/pin-fixture");
 
     // ε.2: synth runtimes serve a kind that must be registered. Install
     // a minimal `pin_fake_kind` schema delegating to the runtime registry.
-    let kind_dir = user_space.join(".ai/node/engine/kinds/pin_fake_kind");
+    let kind_dir = bundle_root.join(".ai/node/engine/kinds/pin_fake_kind");
     std::fs::create_dir_all(&kind_dir)?;
     let kind_body = r##"category: "engine/kinds/pin_fake_kind"
 version: "1.0.0"
 location:
   directory: pin_fake_items
+resolution: []
+effective_trust:
+  include_references: false
 execution:
   delegate:
     via: runtime_registry
-  thread_profile: pin_fake_run
-  resolution: []
+  thread_profile:
+    name: pin_fake_run
+    root_executable: true
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
@@ -111,7 +124,7 @@ metadata:
     let signed_kind = lillux::signature::sign_content(kind_body, &sk, "#", None);
     std::fs::write(kind_dir.join("pin_fake_kind.kind-schema.yaml"), signed_kind)?;
 
-    let runtimes_dir = user_space.join(".ai/runtimes");
+    let runtimes_dir = bundle_root.join(".ai/runtimes");
     std::fs::create_dir_all(&runtimes_dir)?;
     let body = r#"kind: runtime
 serves: pin_fake_kind
@@ -123,6 +136,20 @@ description: "synth runtime for V5.3 dispatch_pin capability tests"
 "#;
     let signed = lillux::signature::sign_content(body, &sk, "#", None);
     std::fs::write(runtimes_dir.join("pin-fake-runtime.yaml"), signed)?;
+
+    // Register the fixture bundle so engine init includes it in the
+    // effective bundle roots (mirrors register_core_bundle_at_state).
+    let abs = bundle_root
+        .canonicalize()
+        .unwrap_or_else(|_| bundle_root.clone());
+    let reg_dir = state_path.join(".ai/node/bundles");
+    std::fs::create_dir_all(&reg_dir)?;
+    let reg_body = format!(
+        "kind: node\nsection: bundles\nid: pin-fixture\npath: {}\n",
+        abs.display()
+    );
+    let signed_reg = lillux::signature::sign_content(&reg_body, &fixture.publisher, "#", None);
+    std::fs::write(reg_dir.join("pin-fixture.yaml"), signed_reg)?;
     Ok(())
 }
 
@@ -222,16 +249,17 @@ sys.exit(0)
 }
 
 /// Spin up a daemon with a synth `runtime:pin-fake-runtime` registered
-/// in user space, then POST /execute against that ref with the given
-/// `extras` (launch_mode / target_site_id / project_source). Used by
-/// the three native-runtime capability pin tests.
+/// in a registered fixture bundle, then POST /execute against that ref
+/// with the given `extras` (launch_mode / target_site_id /
+/// project_source). Used by the three native-runtime capability pin
+/// tests.
 async fn native_synth_request(
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
     let (h, _fixture) = DaemonHarness::start_fast_with(
-        |state_path, user_space, fixture| {
+        |state_path, _user_space, fixture| {
             register_standard_bundle(state_path, fixture)?;
-            install_pin_runtime(state_path, user_space)
+            install_pin_runtime(state_path, fixture)
         },
         |_| {},
     )
@@ -326,13 +354,18 @@ async fn pin_native_runtime_with_target_site_id() {
         reqwest::StatusCode::BAD_REQUEST,
         "expected 400, got {status}: {body}"
     );
+    // Target-site forwarding v1 plans the forward BEFORE protocol
+    // dispatch (see execute_mode.rs Phase 3), so an unconfigured site
+    // is rejected as unknown_target_site — the historical
+    // "remote execution not yet supported for native runtimes"
+    // ProtocolCapabilities rejection no longer fires first.
     assert_eq!(
         body,
         serde_json::json!({
-            "code": "capability_rejected",
-            "error": "remote execution not yet supported for native runtimes"
+            "code": "unknown_target_site",
+            "error": "unknown target site 'site:other'; configured sites: []"
         }),
-        "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"
+        "exact error body shape (target-site forwarding v1 planning)"
     );
 }
 

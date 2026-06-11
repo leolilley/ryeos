@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:fb84e40db47708edebeb3c3f3372a2a2759648e76cd252c5c78f3cbb5783f44f:Rnl9LBCLJBr4bkgPpoKphkeEpUbW3VjX6phPHheutuudSrQHF4YbCMt3aNRDXaxjWhwG1SNr27TgOqHvOrsFAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:bbe107dfccb9ed6d36dedb8193038321e647cbcadd0e7340a6046e0420012592:G2z4+HSDozwoUDWQvjMbOiJqZrjTB6sZSGpPiQjpB/0bRsM9JoB1zuZzbkwQJxXMWeuUvKGSj04cXDTi65/XBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.import-admitted-root-advanced
-required_caps: ["ryeos.execute.service.remote.admin"]
+required_caps: ["ryeos.execute.service.remote/admin"]
 schema:
   remote: string?
   project: string?

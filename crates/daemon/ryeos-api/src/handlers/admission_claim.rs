@@ -388,8 +388,8 @@ mod tests {
     fn normalize_scopes_accepts_concrete_scopes() {
         let scopes = normalize_scopes(
             &[
-                "ryeos.execute.service.objects.put".to_string(),
-                "ryeos.execute.service.objects.has".to_string(),
+                "ryeos.execute.service.objects/put".to_string(),
+                "ryeos.execute.service.objects/has".to_string(),
             ],
             "admission claim requests",
         )
@@ -398,8 +398,8 @@ mod tests {
         assert_eq!(
             scopes,
             vec![
-                "ryeos.execute.service.objects.has".to_string(),
-                "ryeos.execute.service.objects.put".to_string(),
+                "ryeos.execute.service.objects/has".to_string(),
+                "ryeos.execute.service.objects/put".to_string(),
             ]
         );
     }

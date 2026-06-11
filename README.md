@@ -109,7 +109,7 @@ ryeos remote admit \
   --remote prod \
   --token "<one-time-token>" \
   --label dev-machine \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
 ryeos remote doctor --remote prod
 ryeos remote execute \
   --remote prod \

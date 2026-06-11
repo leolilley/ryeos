@@ -74,10 +74,10 @@ id: "tv-tracker/backend"
 description: "Capabilities for the TV Tracker backend service account"
 
 grants:
-  - cap: "ryeos.execute.service.objects.has"
-  - cap: "ryeos.execute.service.objects.put"
-  - cap: "ryeos.execute.service.objects.get"
-  - cap: "ryeos.execute.service.push.head"
+  - cap: "ryeos.execute.service.objects/has"
+  - cap: "ryeos.execute.service.objects/put"
+  - cap: "ryeos.execute.service.objects/get"
+  - cap: "ryeos.execute.service.system/push-head"
 
   - select:
       verb: "execute"

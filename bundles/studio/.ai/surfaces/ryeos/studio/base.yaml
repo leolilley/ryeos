@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-10T04:04:00Z:7e6a4d58b06b5013970aee5f8d45971e2e69a165e7ec3b50fea11c75cf3a7907:QOEj+o0eg02IiwyzXw/1tv8wlmMX3rUcIzvSKXA7m7xsRAcNtkcRmdXG+TQRKCrcnerl0jL30KiLYQrCynNPAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T03:43:41Z:b88e6015cddf3b8eb495ba3409eda6ed682d85739362960433efa0ce25e013bd:BbOpkn2+eI3ic4PTNKb8EcnHNXWw8WCv9A8uCtfwlm1lnb9sZcooFYx4ATYEb4tfKFFUzwjYSE2Sv/HSocuyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -9,6 +9,11 @@ layout:
     home:
       type: pane
       view: graph
+
+input:
+  route:
+    type: directive
+    directive_ref: directive:rye/agent/core/base
 
 ambient:
   show_background: true

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T04:30:05Z:d64c918868f6385e9a7b70b1b1e369f61c4cd6a5c234858df5a36e9daab9effd:PbFjoQDGo2EtgkODgwqJg3gKJqAin67U8+gdeKhQFGZvk4MFk9NzH+4vOUK72iH0Tj2scjkedfvqfrkwPbzsDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T05:13:19Z:aef663d49789f9c0def9c57c95b4ac48d34c97b8ef22518b9bc03d8ac113c9e1:w0/BLOwaM+uaKsc83auFMtoo40p09IgMX5UXhzAem5sfqK8mxk2e2xrVSwiKAaO+yfZtlTtf/nXY5rIJlOMcCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -24,10 +24,10 @@ records consumed by the daemon registry.
 
 | Service | Endpoint | Caps Required |
 |---|---|---|
-| `bundle/install` | `bundle.install` | `ryeos.execute.service.bundle.install` |
-| `bundle/export` | `bundle.export` | `ryeos.execute.service.bundle.export` |
+| `bundle/install` | `bundle.install` | `ryeos.execute.service.bundle/install` |
+| `bundle/export` | `bundle.export` | `ryeos.execute.service.bundle/export` |
 | `bundle/list` | `bundle.list` | none |
-| `bundle/remove` | `bundle.remove` | `ryeos.execute.service.bundle.remove` |
+| `bundle/remove` | `bundle.remove` | `ryeos.execute.service.bundle/remove` |
 
 Local bundle install/remove are offline-only. `bundle/export` is
 daemon-only and is used by remote bundle installation to export bundle
@@ -39,15 +39,15 @@ file hashes through CAS.
 |---|---|---|
 | `fetch` | `fetch` | `ryeos.execute.service.fetch` |
 | `verify` | `verify` | `ryeos.execute.service.verify` |
-| `node-sign` | `node-sign` | `ryeos.execute.service.node_sign` |
+| `node-sign` | `node-sign` | `ryeos.execute.service.node-sign` |
 | `rebuild` | `rebuild` | `ryeos.execute.service.rebuild` |
-| `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance.gc` |
+| `maintenance/gc` | `maintenance.gc` | `ryeos.execute.service.maintenance/gc` |
 | `health/status` | `health.status` | none |
 | `identity/public_key` | `identity.public_key` | none |
-| `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.authorize.key` |
+| `identity/authorize-key` | `identity.authorize-key` | `ryeos.execute.service.identity/authorize-key` |
 | `system/status` | `system.status` | none |
 | `system/ingest-ignore` | `system.ingest-ignore` | none |
-| `system/push-head` | `system.push-head` | `ryeos.execute.service.push.head` |
+| `system/push-head` | `system.push-head` | `ryeos.execute.service.system/push-head` |
 
 `health/status`, `identity/public_key`, and `system/ingest-ignore` back
 unauthenticated discovery routes. Mutating routes such as
@@ -59,9 +59,9 @@ the listed capability.
 | Service | Endpoint | Caps Required |
 |---|---|---|
 | `admission/claim` | `admission.claim` | none; verifies one-time token plus claimant key signature |
-| `admission/submit` | `admission.submit` | `ryeos.execute.service.admission.submit` |
-| `admission/status` | `admission.status` | `ryeos.execute.service.admission.status` |
-| `admission/attestations-for-subject` | `admission.attestations-for-subject` | `ryeos.execute.service.admission.attestations-for-subject` |
+| `admission/submit` | `admission.submit` | `ryeos.execute.service.admission/submit` |
+| `admission/status` | `admission.status` | `ryeos.execute.service.admission/status` |
+| `admission/attestations-for-subject` | `admission.attestations-for-subject` | `ryeos.execute.service.admission/attestations-for-subject` |
 
 `admission/claim` is the decentralized remote-node bootstrap path. It
 does not trust a central account or a bearer token for ongoing access.
@@ -78,7 +78,7 @@ execution credentials. Shape:
 version = 1
 token_hash = "sha256-hex-of-token"
 label = "optional-default-label"
-scopes = ["ryeos.execute.service.threads.list"]
+scopes = ["ryeos.execute.service.threads/list"]
 expires_at_unix = 1767225600
 ```
 
@@ -92,9 +92,9 @@ ryeos-admission-claim-v1\n{target_node_principal_id}\n{token_hash}\n{public_key}
 
 | Service | Endpoint | Caps Required |
 |---|---|---|
-| `objects/has` | `objects.has` | `ryeos.execute.service.objects.has` |
-| `objects/put` | `objects.put` | `ryeos.execute.service.objects.put` |
-| `objects/get` | `objects.get` | `ryeos.execute.service.objects.get` |
+| `objects/has` | `objects.has` | `ryeos.execute.service.objects/has` |
+| `objects/put` | `objects.put` | `ryeos.execute.service.objects/put` |
+| `objects/get` | `objects.get` | `ryeos.execute.service.objects/get` |
 
 Object services read and write the node CAS. Remote push/pull, pushed
 HEAD execution, and remote bundle install all depend on these services.
@@ -104,9 +104,9 @@ Object fetch flows fail closed when requested hashes are missing.
 
 | Service | Endpoint | Caps Required |
 |---|---|---|
-| `vault/set` | `vault.set` | `ryeos.execute.service.vault.set` |
-| `vault/list` | `vault.list` | `ryeos.execute.service.vault.list` |
-| `vault/delete` | `vault.delete` | `ryeos.execute.service.vault.delete` |
+| `vault/set` | `vault.set` | `ryeos.execute.service.vault/set` |
+| `vault/list` | `vault.list` | `ryeos.execute.service.vault/list` |
+| `vault/delete` | `vault.delete` | `ryeos.execute.service.vault/delete` |
 
 Vault services mutate or read the node vault. In v1, vault storage is a
 single node-level store protected by capabilities, not a per-principal
@@ -122,21 +122,21 @@ for the full matrix.
 
 | Service | Endpoint | Local Caps Required |
 |---|---|---|
-| `remote/configure` | `remote.configure` | `ryeos.execute.service.remote.configure` |
-| `remote/list` | `remote.list` | `ryeos.execute.service.remote.list` |
-| `remote/status` | `remote.status` | `ryeos.execute.service.remote.status` |
-| `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote.doctor` |
-| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote.admit` |
-| `remote/push` | `remote.push` | `ryeos.execute.service.remote.push` |
-| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects.get` |
-| `remote/execute` | `remote.execute` | `ryeos.execute.service.remote.admin` |
-| `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote.admin` |
-| `remote/threads` | `remote.threads` | `ryeos.execute.service.remote.admin` |
-| `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote.admin` |
-| `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle.install` |
-| `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote.admin` |
-| `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote.admin` |
-| `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote.admin` |
+| `remote/configure` | `remote.configure` | `ryeos.execute.service.remote/configure` |
+| `remote/list` | `remote.list` | `ryeos.execute.service.remote/list` |
+| `remote/status` | `remote.status` | `ryeos.execute.service.remote/status` |
+| `remote/doctor` | `remote.doctor` | `ryeos.execute.service.remote/doctor` |
+| `remote/admit` | `remote.admit` | `ryeos.execute.service.remote/admit` |
+| `remote/push` | `remote.push` | `ryeos.execute.service.remote/push` |
+| `remote/pull` | `remote.pull` | `ryeos.execute.service.objects/get` |
+| `remote/execute` | `remote.execute` | `ryeos.execute.service.remote/admin` |
+| `remote/authorize` | `remote.authorize` | `ryeos.execute.service.remote/admin` |
+| `remote/threads` | `remote.threads` | `ryeos.execute.service.remote/admin` |
+| `remote/thread-status` | `remote.thread-status` | `ryeos.execute.service.remote/admin` |
+| `remote/bundle-install` | `remote.bundle-install` | `ryeos.execute.service.bundle/install` |
+| `remote/vault-set` | `remote.vault-set` | `ryeos.execute.service.remote/admin` |
+| `remote/vault-list` | `remote.vault-list` | `ryeos.execute.service.remote/admin` |
+| `remote/vault-delete` | `remote.vault-delete` | `ryeos.execute.service.remote/admin` |
 
 ## Standard Thread/Event/Scheduler Services
 
@@ -151,12 +151,12 @@ These are contributed by the standard bundle.
 | `threads/cancel` | `threads.cancel` | route-backed control surface |
 | `events/replay` | `events.replay` | none |
 | `events/chain_replay` | `events.chain_replay` | none |
-| `commands/submit` | `commands.submit` | `ryeos.execute.service.commands.submit` |
-| `scheduler/register` | `scheduler.register` | `ryeos.execute.service.scheduler.register` |
-| `scheduler/list` | `scheduler.list` | `ryeos.execute.service.scheduler.list` |
-| `scheduler/deregister` | `scheduler.deregister` | `ryeos.execute.service.scheduler.deregister` |
-| `scheduler/pause` | `scheduler.pause` | `ryeos.execute.service.scheduler.pause` |
-| `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler.resume` |
+| `commands/submit` | `commands.submit` | `ryeos.execute.service.commands/submit` |
+| `scheduler/register` | `scheduler.register` | `ryeos.execute.service.scheduler/register` |
+| `scheduler/list` | `scheduler.list` | `ryeos.execute.service.scheduler/list` |
+| `scheduler/deregister` | `scheduler.deregister` | `ryeos.execute.service.scheduler/deregister` |
+| `scheduler/pause` | `scheduler.pause` | `ryeos.execute.service.scheduler/pause` |
+| `scheduler/resume` | `scheduler.resume` | `ryeos.execute.service.scheduler/resume` |
 | `scheduler/show_fires` | `scheduler.show_fires` | `ryeos.execute.service.scheduler/show_fires` |
 
 Scheduler support is a node/runtime surface, not part of HTTP route

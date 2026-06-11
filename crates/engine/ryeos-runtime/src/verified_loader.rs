@@ -76,21 +76,20 @@ pub struct TrustStore {
 }
 
 impl TrustStore {
-    pub fn load_from_roots(project_root: &Path, bundle_roots: Vec<PathBuf>) -> Self {
+    /// Load trust from the project's trusted-keys dir plus the
+    /// operator's trusted-keys dir (`<app_root>/.ai/config/keys/trusted`,
+    /// passed explicitly by the caller — the daemon for preflight, the
+    /// launch envelope for runtimes). Bundle roots are NOT a trust
+    /// authority: a bundle cannot ship keys that vouch for itself.
+    pub fn load(project_root: &Path, operator_trusted_keys_dir: &Path) -> Self {
         let mut keys = HashMap::new();
 
-        let mut roots: Vec<&Path> = Vec::new();
-        roots.push(project_root);
-        for sr in &bundle_roots {
-            roots.push(sr);
-        }
-
-        for root in &roots {
-            let trusted_dir = root.join(".ai/config/keys/trusted");
-            if !trusted_dir.is_dir() {
+        let project_trusted_dir = project_root.join(".ai/config/keys/trusted");
+        for dir in [project_trusted_dir.as_path(), operator_trusted_keys_dir] {
+            if !dir.is_dir() {
                 continue;
             }
-            if let Ok(entries) = fs::read_dir(&trusted_dir) {
+            if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) != Some("toml") {
@@ -247,8 +246,16 @@ pub struct ScannedItem {
 }
 
 impl VerifiedLoader {
-    pub fn new(project_root: PathBuf, bundle_roots: Vec<PathBuf>) -> Self {
-        let trust_store = TrustStore::load_from_roots(&project_root, bundle_roots.clone());
+    /// `bundle_roots` are CONFIG search roots only (configs ship in
+    /// bundles); trust comes exclusively from the project root and the
+    /// explicit operator trusted-keys dir. No hidden env reads here —
+    /// the caller owns the trust context.
+    pub fn new(
+        project_root: PathBuf,
+        bundle_roots: Vec<PathBuf>,
+        operator_trusted_keys_dir: &Path,
+    ) -> Self {
+        let trust_store = TrustStore::load(&project_root, operator_trusted_keys_dir);
         Self {
             project_root,
             bundle_roots,
@@ -692,6 +699,12 @@ mod tests {
         p
     }
 
+    /// Operator trusted-keys dir for tests that don't exercise operator
+    /// trust. Nonexistent path — `TrustStore::load` skips non-dirs.
+    fn no_operator_trust() -> PathBuf {
+        PathBuf::from("/nonexistent-operator-trust")
+    }
+
     fn create_trust_store(dir: &Path, signing_key: &SigningKey) {
         let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
         let vk_bytes = signing_key.verifying_key().to_bytes();
@@ -739,7 +752,7 @@ pem = """
         create_file(&bundle, ".ai/config/test.yaml", "name: bundle\n");
         create_file(&project, ".ai/config/test.yaml", "name: project\n");
 
-        let loader = VerifiedLoader::new(project, vec![bundle]);
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust());
         let config: serde_yaml::Value = loader.load_config_strict("test").unwrap().unwrap();
 
         assert_eq!(config["name"], "project");
@@ -750,7 +763,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, vec![]);
+        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust());
         let config = loader
             .load_config_strict::<serde_yaml::Value>("nonexistent")
             .unwrap();
@@ -765,7 +778,7 @@ pem = """
 
         create_file(&project, ".ai/config/bad.yaml", "not valid yaml: [");
 
-        let loader = VerifiedLoader::new(project, vec![]);
+        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust());
         let result = loader.load_config_strict::<serde_yaml::Value>("bad");
 
         assert!(
@@ -782,7 +795,7 @@ pem = """
 
         create_file(&bundle, ".ai/config/defaults.yaml", "key: from_bundle\n");
 
-        let loader = VerifiedLoader::new(project, vec![bundle]);
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust());
         let config: serde_yaml::Value = loader.load_config_strict("defaults").unwrap().unwrap();
 
         assert_eq!(config["key"], "from_bundle");
@@ -799,7 +812,7 @@ pem = """
         let path = tmp.path().join("test.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(!verified.content.contains("ryeos:signed:"));
@@ -814,7 +827,7 @@ pem = """
         let content = "# Plain Directive\n\nSome content here.\n";
         fs::write(&path, content).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert_eq!(verified.content, content);
@@ -833,7 +846,7 @@ pem = """
         let path = tmp.path().join("tampered.md");
         fs::write(&path, &tampered).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -858,7 +871,7 @@ pem = """
         let path = tmp.path().join("bad_sig.md");
         fs::write(&path, &forged).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -877,30 +890,58 @@ pem = """
         let path = tmp.path().join("unknown_signer.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(verified.content.contains("# Test"));
     }
 
     #[test]
-    fn trust_store_loads_from_roots() {
+    fn trust_store_loads_operator_and_project_dirs() {
+        let op_sk = SigningKey::from_bytes(&[42u8; 32]);
+        let proj_sk = SigningKey::from_bytes(&[43u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let operator_root = tmp.path().join("app-root");
+        let project = tmp.path().join("project");
+        create_trust_store(&operator_root, &op_sk);
+        create_trust_store(&project, &proj_sk);
+
+        let store = TrustStore::load(
+            &project,
+            &operator_root.join(".ai/config/keys/trusted"),
+        );
+
+        assert_eq!(store.len(), 2);
+        let op_fp = lillux::signature::compute_fingerprint(&op_sk.verifying_key());
+        let proj_fp = lillux::signature::compute_fingerprint(&proj_sk.verifying_key());
+        assert!(store.get(&op_fp).is_some());
+        assert!(store.get(&proj_fp).is_some());
+    }
+
+    #[test]
+    fn trust_store_ignores_bundle_roots() {
+        // A bundle shipping its own trusted-keys dir must NOT become a
+        // trust authority — only project + operator dirs are consulted.
         let sk = SigningKey::from_bytes(&[42u8; 32]);
         let tmp = tempfile::tempdir().unwrap();
-        let system = tmp.path().join("system");
-        create_trust_store(&system, &sk);
+        let bundle = tmp.path().join("bundle");
+        create_trust_store(&bundle, &sk);
 
-        let store =
-            TrustStore::load_from_roots(&tmp.path().join("project"), vec![system.clone()]);
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            vec![bundle],
+            &no_operator_trust(),
+        );
 
-        assert_eq!(store.len(), 1);
-        let fp = lillux::signature::compute_fingerprint(&sk.verifying_key());
-        assert!(store.get(&fp).is_some());
+        assert!(
+            loader.trust_store().is_empty(),
+            "bundle-shipped trust dirs must be ignored"
+        );
     }
 
     #[test]
     fn trust_store_empty_when_no_dirs() {
-        let store = TrustStore::load_from_roots(Path::new("/nonexistent"), vec![]);
+        let store = TrustStore::load(Path::new("/nonexistent"), Path::new("/also-nonexistent"));
         assert!(store.is_empty());
     }
 
@@ -911,7 +952,7 @@ pem = """
         let content = "deterministic content";
         fs::write(&path, content).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![]);
+        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
         let v1 = loader.load_verified("directive", &path).unwrap();
         let v2 = loader.load_verified("directive", &path).unwrap();
 
@@ -930,7 +971,7 @@ pem = """
         create_file(&project, ".ai/tools/shared.md", "# Project Shared\n");
 
         let project_clone = project.clone();
-        let loader = VerifiedLoader::new(project, vec![bundle]);
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust());
         let items = loader.scan_kind("tool").unwrap();
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
 
@@ -949,7 +990,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, vec![]);
+        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust());
         let items = loader.scan_kind("directive").unwrap();
 
         assert!(items.is_empty());
@@ -957,9 +998,9 @@ pem = """
 
     // ── Strict mode tests ──────────────────────────────────────────────
 
-    /// Helper: sign YAML with a test key and pin it into the root's trust
-    /// store so strict mode accepts it.
-    fn sign_and_pin(yaml_body: &str, root: &Path) -> String {
+    /// Helper: sign YAML with a test key and pin it into `trust_dir`
+    /// (a trusted-keys dir, written as-is) so strict mode accepts it.
+    fn sign_and_pin(yaml_body: &str, trust_dir: &Path) -> String {
         use base64::Engine;
         use ed25519_dalek::SigningKey;
         use lillux::signature::{compute_fingerprint, sign_content_at};
@@ -969,8 +1010,7 @@ pem = """
         let fp = compute_fingerprint(&vk);
         let signed = sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
 
-        let trust_dir = root.join(".ai/config/keys/trusted");
-        std::fs::create_dir_all(&trust_dir).unwrap();
+        std::fs::create_dir_all(trust_dir).unwrap();
         let vk_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
         let toml =
             format!("fingerprint = \"{fp}\"\npem = \"ed25519:{vk_b64}\"\nowner = \"test\"\n");
@@ -991,7 +1031,8 @@ pem = """
         )
         .unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system]);
+        let loader =
+            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_operator_trust());
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
@@ -1016,7 +1057,8 @@ pem = """
             lillux::signature::sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system]);
+        let loader =
+            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_operator_trust());
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");
@@ -1028,21 +1070,57 @@ pem = """
     }
 
     #[test]
-    fn strict_load_accepts_trusted_signed_config() {
+    fn strict_load_accepts_operator_trusted_signed_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let system = tmp.path().join("system");
+        let operator_keys = tmp.path().join("app-root/.ai/config/keys/trusted");
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
+        std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
+
+        let yaml_body = "base_url: https://example.com/v1\n";
+        let signed = sign_and_pin(yaml_body, &operator_keys);
+        std::fs::write(system.join(cfg_subpath), signed).unwrap();
+
+        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system], &operator_keys);
+        let res = loader
+            .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
+        assert!(
+            res.is_ok(),
+            "strict mode must accept config signed by an operator-trusted key"
+        );
+        let val = res.unwrap().expect("should have a value");
+        assert_eq!(val["base_url"].as_str(), Some("https://example.com/v1"));
+    }
+
+    #[test]
+    fn strict_load_rejects_bundle_pinned_signer() {
+        // The signer is pinned ONLY inside the bundle's own
+        // `.ai/config/keys/trusted` — the removed self-vouching path.
+        // Strict verification must treat it as an unknown signer.
         let tmp = tempfile::tempdir().unwrap();
         let system = tmp.path().join("system");
         let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/test.yaml";
         std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).unwrap();
 
         let yaml_body = "base_url: https://example.com/v1\n";
-        let signed = sign_and_pin(yaml_body, &system);
+        let signed = sign_and_pin(yaml_body, &system.join(".ai/config/keys/trusted"));
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system]);
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            vec![system],
+            &no_operator_trust(),
+        );
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
-        assert!(res.is_ok(), "strict mode must accept trusted-signed config");
-        let val = res.unwrap().expect("should have a value");
-        assert_eq!(val["base_url"].as_str(), Some("https://example.com/v1"));
+        assert!(
+            res.is_err(),
+            "bundle-pinned signer must be rejected as unknown"
+        );
+        let msg = format!("{:#}", res.unwrap_err());
+        assert!(
+            msg.contains("unknown signer") || msg.contains("REJECTED"),
+            "error must explain unknown-signer rejection: {msg}"
+        );
     }
 }

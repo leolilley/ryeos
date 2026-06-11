@@ -110,9 +110,14 @@ pub fn resolve_and_verify(
     let canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| anyhow::anyhow!("invalid {label} ref '{item_ref}': {e}"))?;
 
-    let resolved = engine
-        .resolve(plan_ctx, &canonical)
-        .map_err(|e| anyhow::anyhow!("{label} '{item_ref}' failed to resolve: {e}"))?;
+    // Keep the typed `EngineError` as the anyhow source so callers can
+    // downcast (dispatch maps `ItemNotFound` for `service:` refs to a
+    // structured `service_not_installed` error). The context string is
+    // the Display surface — wording unchanged.
+    let resolved = engine.resolve(plan_ctx, &canonical).map_err(|e| {
+        let msg = format!("{label} '{item_ref}' failed to resolve: {e}");
+        anyhow::Error::new(e).context(msg)
+    })?;
 
     let verified = engine
         .verify(plan_ctx, resolved)

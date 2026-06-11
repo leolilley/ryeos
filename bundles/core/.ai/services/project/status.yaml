@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:30baa2e21a109205768d0ff76903970636a20056528af122e624c6a7b33e7600:GPWwKRC490PU0o0vYoVrJ1WAZh5ihcGzEU1FvE/3BswGLOEYZ4ZRyu5bIUIFN7SmHemiB65NcETf68JPX5B6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:bb4077126cd9b6690ded2d0b0588b77ebe186889ffd8c783607cc01255c7a466:b5PMh7FR7O9/HttuyXmyLs/cpUK+nypR7uYO3O3zrmUaMfkQJv8sH1XWyqRVC1UuqxuH4SBqX2t7ndTVl6uGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: project.status
-required_caps: ["ryeos.execute.service.project.status"]
+required_caps: ["ryeos.execute.service.project/status"]
 schema:
   project_path: string
 description: "Report the deployed snapshot for a live project directory"

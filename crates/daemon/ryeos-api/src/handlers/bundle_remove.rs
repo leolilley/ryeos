@@ -101,7 +101,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:bundle/remove",
     endpoint: "bundle.remove",
     availability: ServiceAvailability::OfflineOnly,
-    required_caps: &["ryeos.execute.service.bundle.remove"],
+    required_caps: &["ryeos.execute.service.bundle/remove"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request =

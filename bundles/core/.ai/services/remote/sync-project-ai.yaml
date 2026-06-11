@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-07T05:18:56Z:88c80dc8ed3365d28779dc4591b262336f89f540bc6fda3eb2d52fd5c0bd0671:4tsznCAkCZMNJMjgprr+tmFZV0Ez/cLCrTNPniluddAchTKFbunQrce75Uxfun34U6gq/7a0yYZo3KUhnVr2Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:14Z:5c40abf62d4602a07aeb59ba8dec864a3a75ca677ba46e82ddfcb04529d10de2:OVSikXYdkeo6Y02VHo+5oLRXhLesrKVtflH3cqMvBh9xKKSU0Y5itqZx4eNJUoXssKph0hrKEXWu80FMGwXWBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.sync-project-ai
-required_caps: ["ryeos.execute.service.remote.sync-project-ai"]
+required_caps: ["ryeos.execute.service.remote/sync-project-ai"]
 schema:
   remote: string?
   project: string

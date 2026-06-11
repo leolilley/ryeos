@@ -1,7 +1,7 @@
-# ryeos:signed:2026-05-23T12:11:50Z:fe6f979c362ca260cb87934e10f7c50fdb3f2b511835dc34eac21b82a427e30b:rAVUGBgSBqS3nKd1apBJhIHxAd1vryFPQMKgtAgrke/iPOV5RmVrQCROeTKa6Db3nwxrRE0QtnacHS8tTUL7DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:17Z:41ed3d8228d36d174e0d90a5499a1d93d40c86118afdc32bf376614b2e174f1f:hRiq/5B4/3a/1Cb83CbVwVtHrKCh2NKl1n022R8MehxInQjx45FdkQL0jF7EDDRlkR2Bi9VTgeVWKvyHfthhBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "scheduler"
 name: "register"
 kind: service
 endpoint: scheduler.register
-required_caps: []
+required_caps: ["ryeos.execute.service.scheduler/register"]
 description: "Create or update a schedule spec"

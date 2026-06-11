@@ -79,7 +79,7 @@ ryeos remote-descriptor \
 
 ryeos admission-token \
   --label "caller-node" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head" \
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head" \
   --ttl-secs 600
 ```
 
@@ -95,7 +95,7 @@ ryeos remote admit \
   --remote hosted-prod \
   --token "<one-time-token>" \
   --label "caller-node" \
-  --scopes "ryeos.execute.service.objects.has,ryeos.execute.service.objects.put,ryeos.execute.service.objects.get,ryeos.execute.service.push.head"
+  --scopes "ryeos.execute.service.objects/has,ryeos.execute.service.objects/put,ryeos.execute.service.objects/get,ryeos.execute.service.system/push-head"
 
 ryeos remote doctor --remote hosted-prod
 ```

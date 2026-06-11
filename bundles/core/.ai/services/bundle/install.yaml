@@ -1,8 +1,8 @@
-# ryeos:signed:2026-06-07T05:18:55Z:e231466f95d2a5fd312e74ffaba093a4c90aae642d02af4910c571f67fc5ea3d:M0CM2MHQYO6KyHYNMs6/kospYBnHQQDJ3cD4Y2tiwC4v1bjV25HzXnDNbh0bX4ToXAuXk99DclIalAAZ8jbJBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:12Z:f59cce611ae37792786e1cecbd7a5f3e0e858dffd8994618f50c087d2ca8dd49:/15E6eqovkKpEHAuBmEzd9xczevQVZW8GV2idszl4+R+5xSvMdHUdnkB50RF9a563fRewXH8Rd8AaiDeCd5JBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.install
 availability: offline
-required_caps: ["ryeos.execute.service.bundle.install"]
+required_caps: ["ryeos.execute.service.bundle/install"]
 schema:
   name: string
   source_path: string

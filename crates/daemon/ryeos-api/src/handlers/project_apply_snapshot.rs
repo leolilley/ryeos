@@ -451,7 +451,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:project/apply-snapshot",
     endpoint: "project.apply-snapshot",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.project.apply"],
+    required_caps: &["ryeos.execute.service.project/apply-snapshot"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

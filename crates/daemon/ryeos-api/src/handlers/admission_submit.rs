@@ -141,7 +141,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:admission/submit",
     endpoint: "admission.submit",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.admission.submit"],
+    required_caps: &["ryeos.execute.service.admission/submit"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

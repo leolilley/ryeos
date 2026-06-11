@@ -450,8 +450,8 @@ mod tests {
         // scopes like "remote.admin" would load fine but never
         // authorize a real handler — see authorizer.rs.
         let scopes = vec![
-            "ryeos.execute.service.remote.admin".to_string(),
-            "ryeos.execute.service.bundle.install".to_string(),
+            "ryeos.execute.service.remote/admin".to_string(),
+            "ryeos.execute.service.bundle/install".to_string(),
         ];
         let _path = ryeos_app::identity::write_authorized_key_toml(
             &auth_dir,
@@ -483,7 +483,7 @@ mod tests {
         // handler's required cap when fed to the authorizer.
         let authorizer = ryeos_runtime::authorizer::Authorizer::new();
         let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(
-            "ryeos.execute.service.bundle.install",
+            "ryeos.execute.service.bundle/install",
         );
         authorizer
             .authorize(&loaded.scopes, &policy)
@@ -492,7 +492,7 @@ mod tests {
 
     /// Regression: a legitimately node-signed TOML that uses
     /// short-form scopes (`bundle.install` instead of
-    /// `ryeos.execute.service.bundle.install`) must be REJECTED at
+    /// `ryeos.execute.service.bundle/install`) must be REJECTED at
     /// load time, not silently loaded with useless scopes.
     ///
     /// Without this guard the request authenticates, then every
@@ -559,7 +559,7 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
 
         let body = format!(
-            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault.list\"]\nlabel = \"ok\"\n"
+            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"ok\"\n"
         );
         let signed = lillux::signature::sign_content_at(
             &body,
@@ -574,7 +574,7 @@ mod tests {
             .expect("canonical scopes must load");
         assert_eq!(
             loaded.scopes,
-            vec!["ryeos.execute.service.vault.list".to_string()]
+            vec!["ryeos.execute.service.vault/list".to_string()]
         );
     }
 }

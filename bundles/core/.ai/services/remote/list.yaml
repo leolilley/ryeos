@@ -1,6 +1,6 @@
-# ryeos:signed:2026-06-07T05:18:56Z:ec7913577efbae7a7ff94ce25a89fdd078dd3523255e004129c447bbb1d63a7b:T23nwWDRd3Jcydr9L7W2iiZdv7aCnlksTJGMWfgW5CBYQA86N92DX38b9yucemFLiCvJi0rcME+QF0ZrWruZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T05:13:13Z:4464d68e2e7ba8582e28dd1aa68647a08b41812aab81f6afe63adacce429dbe8:RaQq6OdnmUxmLpU+XeeiHAae3CV+XHVv6W1cxqmvYUz1Znn6e3aX7zObz5oUbOfGsLHZeoOd00WbHOLQW6QtAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.list
-required_caps: ["ryeos.execute.service.remote.list"]
+required_caps: ["ryeos.execute.service.remote/list"]
 schema: {}
 description: "List configured remote nodes"

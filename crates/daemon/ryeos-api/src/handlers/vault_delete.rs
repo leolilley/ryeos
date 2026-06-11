@@ -47,7 +47,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:vault/delete",
     endpoint: "vault.delete",
     availability: ServiceAvailability::Both,
-    required_caps: &["ryeos.execute.service.vault.delete"],
+    required_caps: &["ryeos.execute.service.vault/delete"],
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

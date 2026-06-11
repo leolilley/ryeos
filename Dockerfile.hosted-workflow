@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1.7
+#
+# ryeosd-hosted-workflow — hosted remote-node image that also runs
+# workflow workloads.
+#
+# Bakes core + standard + hosted-node policy: the remote
+# admission/execution substrate of the hosted-node image PLUS the
+# standard bundle's scheduler/graph/directive/knowledge services,
+# kind schemas, and runtimes. Use this when a hosted node owns
+# schedules or runs graph/directive work; use ryeosd-hosted-node when
+# it should stay a lean control plane.
+
+FROM rust:1.95-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+RUN --mount=type=secret,id=publisher-key \
+    test -s /run/secrets/publisher-key && \
+    ./scripts/populate-bundles.sh \
+      --key /run/secrets/publisher-key \
+      --owner ryeos-official \
+      --bundle-set hosted-workflow
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=builder /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+
+COPY --from=builder /build/bundles/.ai        /opt/ryeos/.ai
+COPY --from=builder /build/bundles/core        /opt/ryeos/core
+COPY --from=builder /build/bundles/standard    /opt/ryeos/standard
+COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
+
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+EXPOSE 8000
+
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL io.ryeos.image="hosted-workflow"
+LABEL io.ryeos.bundle-protocol="1.0"
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

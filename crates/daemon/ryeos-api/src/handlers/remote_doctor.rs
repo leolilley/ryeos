@@ -283,17 +283,17 @@ fn local_identity_json(principal_id: String, fingerprint: String, public_key: St
 
 fn authorize_command(local_public_key: &str, local_fingerprint: &str) -> String {
     let scopes = [
-        "ryeos.execute.service.objects.has",
-        "ryeos.execute.service.objects.put",
-        "ryeos.execute.service.objects.get",
-        "ryeos.execute.service.objects.closure.describe",
-        "ryeos.execute.service.objects.closure.get",
-        "ryeos.execute.service.push.head",
-        "ryeos.execute.service.project.status",
-        "ryeos.execute.service.project.apply",
-        "ryeos.execute.service.scheduler.register",
-        "ryeos.execute.service.threads.list",
-        "ryeos.execute.service.threads.get",
+        "ryeos.execute.service.objects/has",
+        "ryeos.execute.service.objects/put",
+        "ryeos.execute.service.objects/get",
+        "ryeos.execute.service.objects/closure/describe",
+        "ryeos.execute.service.objects/closure/get",
+        "ryeos.execute.service.system/push-head",
+        "ryeos.execute.service.project/status",
+        "ryeos.execute.service.project/apply-snapshot",
+        "ryeos.execute.service.scheduler/register",
+        "ryeos.execute.service.threads/list",
+        "ryeos.execute.service.threads/get",
     ];
     format!(
         "ryeos-core-tools authorize-client --app-root <remote-app-root> --public-key '{}' --scopes '{}' --label local-operator-{}",
@@ -307,7 +307,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:remote/doctor",
     endpoint: "remote.doctor",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.remote.doctor"],
+    required_caps: &["ryeos.execute.service.remote/doctor"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

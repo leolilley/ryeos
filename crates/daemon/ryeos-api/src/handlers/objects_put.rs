@@ -74,7 +74,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:objects/put",
     endpoint: "objects.put",
     availability: ServiceAvailability::DaemonOnly,
-    required_caps: &["ryeos.execute.service.objects.put"],
+    required_caps: &["ryeos.execute.service.objects/put"],
     handler: |params, _ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;

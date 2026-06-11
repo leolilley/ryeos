@@ -12,10 +12,10 @@ use ryeos_api::handlers::{admission_claim, admission_status, admission_submit};
 
 const TEST_POLICY: &str = "local-node-v1";
 const PUSH_SCOPES: &[&str] = &[
-    "ryeos.execute.service.objects.has",
-    "ryeos.execute.service.objects.put",
-    "ryeos.execute.service.objects.get",
-    "ryeos.execute.service.push.head",
+    "ryeos.execute.service.objects/has",
+    "ryeos.execute.service.objects/put",
+    "ryeos.execute.service.objects/get",
+    "ryeos.execute.service.system/push-head",
 ];
 
 fn store_subject(state: &ryeos_app::state::AppState) -> String {
@@ -170,7 +170,7 @@ async fn admission_claim_rejects_wildcard_token_file_scope() {
         &state,
         token,
         &claimant,
-        &["ryeos.execute.service.objects.has"],
+        &["ryeos.execute.service.objects/has"],
         Some("dev-machine"),
     );
 
