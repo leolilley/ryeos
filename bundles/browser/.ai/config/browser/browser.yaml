@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-12T06:51:48Z:13520d9a6ec6f831e7102bb97e6af0e4a1274d5d127b86ac74800a8063693972:Y2+m9R5qUG+tirQN0TI1UnQIg8mLZPNRW8/GhATfRuLVi2ZGsT6a0VkGDyE8cXMlw+Jumx/uivMBhqv7gJXBAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-12T07:47:24Z:13520d9a6ec6f831e7102bb97e6af0e4a1274d5d127b86ac74800a8063693972:9jTHNIXw4YnyPsaS3+RtqAmWJyT1jWkg7RZA9NOYk+N8qLG+rJWp+xuLSTyT+eop6Y3STnNlsZ6BAb37nJbMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Browser config — system defaults for tool:rye/browser/browser.
 # Override per-project at .ai/config/browser/browser.yaml.
 # Set RYEOS_BROWSER_INTEGRATION=1 to enable actual Node/Playwright execution.
