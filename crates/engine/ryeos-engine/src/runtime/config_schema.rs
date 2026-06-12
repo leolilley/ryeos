@@ -17,9 +17,43 @@
 //! On validation failure → `EngineError::ParameterValidationFailed`
 //! with structured per-error messages.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use serde_json::Value;
 
 use crate::error::EngineError;
+
+/// Compiled-validator cache keyed by the schema's canonical-JSON hash.
+/// Schema compilation (regex builds, keyword resolution) is far more
+/// expensive than validation and tool schemas are immutable signed
+/// content, so plan building reuses validators across requests. The
+/// cache is cleared wholesale if it ever exceeds the cap — simpler
+/// than LRU and a node's distinct tool schemas sit nowhere near it.
+const VALIDATOR_CACHE_CAP: usize = 512;
+
+fn validator_for_cached(schema: &Value) -> Result<Arc<jsonschema::Validator>, String> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<jsonschema::Validator>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let key = lillux::sha256_hex(lillux::canonical_json(schema).as_bytes());
+    if let Some(validator) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        return Ok(validator);
+    }
+
+    let validator = Arc::new(jsonschema::validator_for(schema).map_err(|e| e.to_string())?);
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.len() >= VALIDATOR_CACHE_CAP {
+        guard.clear();
+    }
+    guard.insert(key, validator.clone());
+    Ok(validator)
+}
 
 /// Validate caller params against the root tool's `config_schema`, if
 /// the tool item exposes one.
@@ -41,7 +75,7 @@ pub fn validate_caller_params(
     };
 
     let validator =
-        jsonschema::validator_for(schema).map_err(|e| EngineError::InvalidRuntimeConfig {
+        validator_for_cached(schema).map_err(|e| EngineError::InvalidRuntimeConfig {
             path: tool_id.to_owned(),
             reason: format!("invalid JSON schema in config_schema: {e}"),
         })?;

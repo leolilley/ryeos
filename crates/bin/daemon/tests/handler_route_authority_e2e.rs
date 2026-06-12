@@ -116,7 +116,8 @@ fn build_engine_against_bundle() -> Engine {
 
     let bundle_root = workspace_root().join("bundles/core");
     let kinds_dir = bundle_root.join(".ai/node/engine/kinds");
-    let kinds = KindRegistry::load_base(&[kinds_dir], &trust_store).expect("live bundle kinds load");
+    let kinds =
+        KindRegistry::load_base(&[kinds_dir], &trust_store).expect("live bundle kinds load");
 
     let (parser_tools, _dups) =
         ParserRegistry::load_base(std::slice::from_ref(&bundle_root), &trust_store, &kinds)
@@ -247,14 +248,15 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         "handler subprocess did not complete cleanly: {completion:?}"
     );
 
-    let result = completion.result.expect("handler emitted a response envelope");
+    let result = completion
+        .result
+        .expect("handler emitted a response envelope");
     assert_eq!(
         result["response"]["status"], 302,
         "expected handler 302 redirect envelope, got {result:?}"
     );
     assert_eq!(
-        result["response"]["headers"]["Location"],
-        "https://agentkiwi.nz/?google=connected",
+        result["response"]["headers"]["Location"], "https://agentkiwi.nz/?google=connected",
         "expected handler redirect Location, got {result:?}"
     );
 }

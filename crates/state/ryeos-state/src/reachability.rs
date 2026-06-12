@@ -118,9 +118,72 @@ pub fn collect_reachable(cas_root: &Path, refs_root: &Path) -> Result<ReachableS
         }
     }
 
+    // Seed from bundle event chain heads:
+    // refs/generic/bundle_events/<bundle_id>/<event_kind>/chains/<chain_id>/head
+    // Bundle events are durable application state; without these roots a CAS
+    // sweep deletes event objects while their head refs survive.
+    let bundle_events_dir = refs_root.join("generic").join("bundle_events");
+    if bundle_events_dir.is_dir() {
+        collect_bundle_event_roots(refs_root, &bundle_events_dir, &mut roots)?;
+    }
+
     merge_object_closure(cas_root, roots, &mut set)?;
 
     Ok(set)
+}
+
+/// Recursively collect bundle event head ref targets as reachability roots.
+///
+/// Only heads whose internal `ref_path` matches their on-disk location are
+/// seeded: the runtime resolves bundle event heads by exact ref path, so a
+/// relocated head (e.g. an operator backup of retired state) can never be
+/// read again and must not anchor objects. Such heads are skipped with a
+/// warning instead of failing the traversal.
+fn collect_bundle_event_roots(refs_root: &Path, dir: &Path, roots: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| {
+        format!(
+            "failed to read bundle event refs directory {}",
+            dir.display()
+        )
+    })? {
+        let entry = entry.context("failed to read bundle event ref entry")?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .context("failed to inspect bundle event ref entry")?;
+        if file_type.is_dir() {
+            collect_bundle_event_roots(refs_root, &path, roots)?;
+            continue;
+        }
+        if !file_type.is_file() || entry.file_name() != "head" {
+            continue;
+        }
+        let signed_ref = match read_signed_ref(&path) {
+            Ok(signed_ref) => signed_ref,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "skipping unreadable bundle event head ref"
+                );
+                continue;
+            }
+        };
+        let rel = path
+            .strip_prefix(refs_root.join("generic"))
+            .context("bundle event head path escaped refs root")?;
+        let expected_ref_path = rel.to_string_lossy().replace('\\', "/");
+        if signed_ref.ref_path != expected_ref_path {
+            tracing::warn!(
+                path = %path.display(),
+                ref_path = %signed_ref.ref_path,
+                "skipping relocated bundle event head ref"
+            );
+            continue;
+        }
+        roots.push(signed_ref.target_hash);
+    }
+    Ok(())
 }
 
 /// Read the target hash from a signed ref file.
@@ -301,6 +364,95 @@ mod tests {
         assert!(set.object_hashes.contains(&cs_hash));
         assert!(set.object_hashes.contains(&snap_hash));
         assert_eq!(set.object_hashes.len(), 2);
+    }
+
+    #[test]
+    fn collect_reachable_bundle_event_chain() {
+        let (_tmp, cas_root, refs_root) = setup_cas_refs();
+
+        let first_hash = make_hash("be1");
+        let first = serde_json::json!({
+            "kind": "bundle_event",
+            "schema": 1,
+            "bundle_id": "ryeos-email",
+            "event_kind": "campaign_event",
+            "event_type": "campaign_created",
+            "schema_version": 1,
+            "chain_id": "camp_1",
+            "chain_seq": 1,
+            "prev_chain_event_hash": null,
+            "created_at": "2026-04-22T00:00:00Z",
+            "payload": {}
+        });
+        let head_hash = make_hash("be2");
+        let head = serde_json::json!({
+            "kind": "bundle_event",
+            "schema": 1,
+            "bundle_id": "ryeos-email",
+            "event_kind": "campaign_event",
+            "event_type": "campaign_updated",
+            "schema_version": 1,
+            "chain_id": "camp_1",
+            "chain_seq": 2,
+            "prev_chain_event_hash": first_hash,
+            "created_at": "2026-04-22T00:00:01Z",
+            "payload": {}
+        });
+        write_object(&cas_root, &first_hash, &first);
+        write_object(&cas_root, &head_hash, &head);
+
+        let head_path =
+            refs_root.join("generic/bundle_events/ryeos-email/campaign_event/chains/camp_1/head");
+        fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+        let ref_value = serde_json::json!({
+            "schema": 1,
+            "kind": "signed_ref",
+            "ref_path": "bundle_events/ryeos-email/campaign_event/chains/camp_1/head",
+            "target_hash": head_hash,
+            "updated_at": "2026-04-22T00:00:01Z",
+            "signer": "test",
+            "signature": "test"
+        });
+        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+
+        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        assert!(
+            set.object_hashes.contains(&head_hash),
+            "bundle event head must be reachable"
+        );
+        assert!(
+            set.object_hashes.contains(&first_hash),
+            "full bundle event chain history must be reachable"
+        );
+    }
+
+    #[test]
+    fn collect_reachable_skips_relocated_bundle_event_refs() {
+        let (_tmp, cas_root, refs_root) = setup_cas_refs();
+
+        // A head ref moved into an operator backup directory: its internal
+        // ref_path no longer matches its on-disk location and its target
+        // object no longer exists. It must be skipped, not walked or fatal.
+        let head_path = refs_root.join(
+            "generic/bundle_events/ryeos-email.broken-backup-20260610T021602Z/campaign_event/chains/camp_1/head",
+        );
+        fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+        let ref_value = serde_json::json!({
+            "schema": 1,
+            "kind": "signed_ref",
+            "ref_path": "bundle_events/ryeos-email/campaign_event/chains/camp_1/head",
+            "target_hash": make_hash("gone"),
+            "updated_at": "2026-04-22T00:00:00Z",
+            "signer": "test",
+            "signature": "test"
+        });
+        lillux::atomic_write(&head_path, lillux::canonical_json(&ref_value).as_bytes()).unwrap();
+
+        let set = collect_reachable(&cas_root, &refs_root).unwrap();
+        assert!(
+            set.object_hashes.is_empty(),
+            "relocated bundle event refs must not seed reachability roots"
+        );
     }
 
     #[test]

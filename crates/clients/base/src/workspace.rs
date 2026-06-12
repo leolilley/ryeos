@@ -1,9 +1,9 @@
 //! Workspace — layout tree, tile state, focus, input bar.
 
-use crate::ids::{ThreadId, TileId};
+use crate::ids::TileId;
 use crate::layout::{layout_rects, LayoutTree, Rect, SplitAxis};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -12,21 +12,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ViewSpec {
-    Thread { thread_id: Option<ThreadId> },
-    ThreadList,
-    Overview,
-    Remotes,
-    Services,
-    ItemInspector,
-    Schedules,
-    GcStatus,
-    Files,
-    Projects,
-    SpaceBrowser { project: Option<String> },
-    Trust,
-    Atlas,
+    /// A `view:` item-bound tile (views-as-content). Every product
+    /// concept renders through this — tiles are bindings, not code.
+    Bound { view_ref: String },
+    /// Engine ambient: 3D topology.
     Graph { graph_id: Option<String> },
-    EventInspector,
+    /// Engine ambient: 2D namespace atlas.
+    Atlas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,56 +36,12 @@ pub enum FocusDirection {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum ViewLocalState {
-    Thread(ThreadViewState),
-    ThreadList {
-        cursor: usize,
-        filter: String,
-    },
-    SpaceBrowser {
-        cursor: usize,
-        query: String,
-        kind: String,
-        #[serde(default)]
-        path: String,
-        scroll: usize,
-    },
-    Files {
-        root: String,
-        path: String,
-        cursor: usize,
-        scroll: usize,
-    },
     GenericList {
         cursor: usize,
         scroll: usize,
     },
     #[default]
     None,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreadViewState {
-    pub mode: ThreadViewMode,
-    pub timeline_cursor: usize,
-    pub timeline_scroll: usize,
-    pub expanded_turns: HashSet<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ThreadViewMode {
-    Timeline,
-    Detail,
-}
-
-impl Default for ThreadViewState {
-    fn default() -> Self {
-        Self {
-            mode: ThreadViewMode::Timeline,
-            timeline_cursor: 0,
-            timeline_scroll: 0,
-            expanded_turns: HashSet::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,108 +59,37 @@ pub enum InputCapability {
 impl ViewSpec {
     pub fn initial_local_state(&self) -> ViewLocalState {
         match self {
-            ViewSpec::Thread { .. } => ViewLocalState::Thread(ThreadViewState::default()),
-            ViewSpec::ThreadList => ViewLocalState::ThreadList {
-                cursor: 0,
-                filter: String::new(),
-            },
-            ViewSpec::SpaceBrowser { .. } => ViewLocalState::SpaceBrowser {
-                cursor: 0,
-                query: String::new(),
-                kind: String::new(),
-                path: String::new(),
-                scroll: 0,
-            },
-            ViewSpec::Files => ViewLocalState::Files {
-                root: "project".to_string(),
-                path: String::new(),
+            ViewSpec::Bound { .. } => ViewLocalState::GenericList {
                 cursor: 0,
                 scroll: 0,
             },
-            ViewSpec::Services
-            | ViewSpec::ItemInspector
-            | ViewSpec::Schedules
-            | ViewSpec::GcStatus
-            | ViewSpec::Projects
-            | ViewSpec::EventInspector => ViewLocalState::GenericList {
-                cursor: 0,
-                scroll: 0,
-            },
-            ViewSpec::Overview
-            | ViewSpec::Remotes
-            | ViewSpec::Trust
-            | ViewSpec::Atlas
-            | ViewSpec::Graph { .. } => ViewLocalState::None,
+            ViewSpec::Atlas | ViewSpec::Graph { .. } => ViewLocalState::None,
         }
     }
 
     pub fn input_capability(&self) -> InputCapability {
         match self {
-            ViewSpec::Thread { .. } => InputCapability::Prompt,
-            ViewSpec::ThreadList | ViewSpec::SpaceBrowser { .. } => InputCapability::Filter,
-            ViewSpec::EventInspector => InputCapability::Filter,
-            ViewSpec::Files => InputCapability::Filter,
-            ViewSpec::Overview
-            | ViewSpec::Remotes
-            | ViewSpec::Services
-            | ViewSpec::ItemInspector
-            | ViewSpec::Schedules
-            | ViewSpec::GcStatus
-            | ViewSpec::Projects
-            | ViewSpec::Trust
-            | ViewSpec::Atlas
-            | ViewSpec::Graph { .. } => InputCapability::None,
+            ViewSpec::Bound { .. } | ViewSpec::Atlas | ViewSpec::Graph { .. } => {
+                InputCapability::None
+            }
         }
     }
 
     /// Human-readable label for the input context hint.
     pub fn input_hint(&self) -> &'static str {
         match self {
-            ViewSpec::Thread { thread_id } => {
-                if thread_id.is_some() {
-                    "thread"
-                } else {
-                    "new thread"
-                }
-            }
-            ViewSpec::ThreadList => "threads filter",
-            ViewSpec::Overview => "overview",
-            ViewSpec::Remotes => "remotes",
-            ViewSpec::Services => "services",
-            ViewSpec::ItemInspector => "item inspector",
-            ViewSpec::Schedules => "schedules",
-            ViewSpec::GcStatus => "gc status",
-            ViewSpec::Files => "files",
-            ViewSpec::Projects => "projects",
-            ViewSpec::SpaceBrowser { .. } => "search items",
-            ViewSpec::Trust => "trust",
+            ViewSpec::Bound { .. } => "view",
             ViewSpec::Atlas => "atlas",
             ViewSpec::Graph { .. } => "graph",
-            ViewSpec::EventInspector => "events filter",
         }
     }
 
     /// Short title for tile header.
     pub fn title(&self) -> String {
         match self {
-            ViewSpec::Thread { thread_id } => {
-                if let Some(id) = thread_id {
-                    format!("Thread {}", id.0)
-                } else {
-                    "New Thread".into()
-                }
+            ViewSpec::Bound { view_ref } => {
+                view_ref.rsplit('/').next().unwrap_or(view_ref).to_string()
             }
-            ViewSpec::ThreadList => "Threads".into(),
-            ViewSpec::Overview => "Overview".into(),
-            ViewSpec::Remotes => "Remotes".into(),
-            ViewSpec::Services => "Services".into(),
-            ViewSpec::ItemInspector => "Item".into(),
-            ViewSpec::Schedules => "Schedules".into(),
-            ViewSpec::GcStatus => "GC".into(),
-            ViewSpec::Files => "Files".into(),
-            ViewSpec::Projects => "Projects".into(),
-            ViewSpec::SpaceBrowser { .. } => "Items".into(),
-            ViewSpec::Trust => "Trust".into(),
             ViewSpec::Atlas => "Atlas".into(),
             ViewSpec::Graph { graph_id } => {
                 if let Some(id) = graph_id {
@@ -221,7 +98,6 @@ impl ViewSpec {
                     "Graph".into()
                 }
             }
-            ViewSpec::EventInspector => "Events".into(),
         }
     }
 }
@@ -362,7 +238,11 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Create default 3-pane workspace.
+    /// Create default 3-pane workspace: home graph beside the
+    /// content-bound thread list and a thread transcript. Tiles are
+    /// bindings, not product code — the bound ref resolves from the
+    /// surface's embedded views (degrading to a placeholder when the
+    /// library lacks it).
     pub fn default_three_pane() -> Self {
         let list_id = TileId::new(1);
         let thread_id = TileId::new(2);
@@ -371,31 +251,31 @@ impl Workspace {
         let layout = LayoutTree::default_three_pane(list_id, thread_id, status_id);
 
         let mut tiles = HashMap::new();
+        let list_view = ViewSpec::Bound {
+            view_ref: "view:ryeos/threads/list".to_string(),
+        };
         tiles.insert(
             list_id,
             TileState {
-                view: ViewSpec::ThreadList,
-                local: ViewLocalState::ThreadList {
-                    cursor: 0,
-                    filter: String::new(),
-                },
+                local: list_view.initial_local_state(),
+                view: list_view,
             },
         );
+        let timeline_view = ViewSpec::Bound {
+            view_ref: "view:ryeos/chain/timeline".to_string(),
+        };
         tiles.insert(
             thread_id,
             TileState {
-                view: ViewSpec::Thread { thread_id: None },
-                local: ViewLocalState::Thread(ThreadViewState::default()),
+                local: timeline_view.initial_local_state(),
+                view: timeline_view,
             },
         );
         tiles.insert(
             status_id,
             TileState {
-                view: ViewSpec::Overview,
-                local: ViewLocalState::GenericList {
-                    cursor: 0,
-                    scroll: 0,
-                },
+                view: ViewSpec::Graph { graph_id: None },
+                local: ViewLocalState::None,
             },
         );
 
@@ -701,20 +581,8 @@ impl Workspace {
     pub fn cursor_up(&mut self) {
         if let Some(tile) = self.tiles.get_mut(&self.focused_tile) {
             match &mut tile.local {
-                ViewLocalState::ThreadList { cursor, .. } if *cursor > 0 => {
-                    *cursor -= 1;
-                }
-                ViewLocalState::SpaceBrowser { cursor, .. } if *cursor > 0 => {
-                    *cursor -= 1;
-                }
-                ViewLocalState::Files { cursor, .. } if *cursor > 0 => {
-                    *cursor -= 1;
-                }
                 ViewLocalState::GenericList { cursor, .. } if *cursor > 0 => {
                     *cursor -= 1;
-                }
-                ViewLocalState::Thread(state) if state.timeline_cursor > 0 => {
-                    state.timeline_cursor -= 1;
                 }
                 _ => {}
             }
@@ -728,28 +596,10 @@ impl Workspace {
                 return;
             }
             match &mut tile.local {
-                ViewLocalState::ThreadList { cursor, .. }
-                    if *cursor < total_items.saturating_sub(1) =>
-                {
-                    *cursor += 1;
-                }
-                ViewLocalState::SpaceBrowser { cursor, .. }
-                    if *cursor < total_items.saturating_sub(1) =>
-                {
-                    *cursor += 1;
-                }
-                ViewLocalState::Files { cursor, .. } if *cursor < total_items.saturating_sub(1) => {
-                    *cursor += 1;
-                }
                 ViewLocalState::GenericList { cursor, .. }
                     if *cursor < total_items.saturating_sub(1) =>
                 {
                     *cursor += 1;
-                }
-                ViewLocalState::Thread(state)
-                    if state.timeline_cursor < total_items.saturating_sub(1) =>
-                {
-                    state.timeline_cursor += 1;
                 }
                 _ => {}
             }
@@ -1093,14 +943,18 @@ mod tests {
         let new_id = ws
             .split_focused(
                 SplitAxis::Horizontal,
-                ViewSpec::SpaceBrowser { project: None },
+                ViewSpec::Bound {
+                    view_ref: "view:ryeos/items/space".to_string(),
+                },
             )
             .expect("split should succeed");
 
         assert!(matches!(
             ws.tiles.get(&new_id).map(|tile| &tile.local),
-            Some(ViewLocalState::SpaceBrowser { cursor: 0, query, kind, path, scroll: 0 })
-                if query.is_empty() && kind.is_empty() && path.is_empty()
+            Some(ViewLocalState::GenericList {
+                cursor: 0,
+                scroll: 0
+            })
         ));
     }
 
@@ -1196,7 +1050,12 @@ mod tests {
         let before = ws.tiles.len();
 
         assert!(ws
-            .split_focused(SplitAxis::Horizontal, ViewSpec::Services)
+            .split_focused(
+                SplitAxis::Horizontal,
+                ViewSpec::Bound {
+                    view_ref: "view:test/services".to_string()
+                }
+            )
             .is_none());
         assert_eq!(ws.tiles.len(), before);
         assert_eq!(

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-11T22:51:47Z:0378cd25b3c708a368c9245cc1b7b85f71a868dfff64a7737b8f9b36afe1b844:kHuor4uoottzm4rWX19t/dHGPjVpQCmP39IpLH27afzfC3Ihf2nf9I0YJpCpqWJLA3vDkudMZVrQXFXNLSMNCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: node-status
+version: "1.0.0"
+description: Node status detail (provenance first)
+
+widget: key_value
+source:
+  ref: service:system/status
+  params: {}
+projections:
+  detail:
+    - site_id
+    - version
+    - uptime
+    - bundles

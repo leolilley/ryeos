@@ -1,0 +1,28 @@
+# ryeos:signed:2026-06-12T03:17:52Z:6fb20bc9d9395c07d295174199a340e9be25de32dc58b7c8864be64c188bbcce:IM8y0Loabk3jP5T0HJIFi49C6e7DV0CdXpj2ZHX+cdhD6is93xtGjOKA8CG625SyGtYmlgYxVrlz8bxU8aZiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: items-space
+version: "1.0.0"
+description: The item space - signed content across system, user, and project
+
+widget: rows
+source:
+  ref: service:ui/studio/items/list
+  params:
+    limit: 500
+  collection: items
+projections:
+  primary: canonical_ref
+  meta: kind
+  tone:
+    field: trust
+    map:
+      trusted: good
+      untrusted: danger
+    default: neutral
+affordances:
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{canonical_ref}"

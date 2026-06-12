@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use lillux::cas::{sha256_hex, CasStore};
@@ -20,6 +22,15 @@ pub struct SnapshotStatusParams {
     pub project_path: PathBuf,
     #[serde(default)]
     pub include_unchanged: bool,
+    /// Worktree scan budget in milliseconds. `0` disables the cap.
+    /// When the budget is exhausted the report is returned with
+    /// partial results instead of blocking the caller.
+    #[serde(default = "default_status_budget_ms")]
+    pub time_budget_ms: u64,
+}
+
+fn default_status_budget_ms() -> u64 {
+    0
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +71,13 @@ pub struct SnapshotStatusReport {
     pub head_snapshot_hash: Option<String>,
     pub deployed_snapshot_hash: Option<String>,
     pub dirty: bool,
+    /// False when the worktree scan hit its time budget. Partial
+    /// reports only cover scanned files: added/modified counts are
+    /// lower bounds and deletions were not evaluated at all.
+    pub scan_complete: bool,
+    pub scan_elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub counts: ChangeCounts,
     pub changes: Vec<PathChange>,
 }
@@ -142,6 +160,10 @@ pub struct SnapshotShowReport {
 }
 
 pub fn run_status(params: SnapshotStatusParams) -> Result<SnapshotStatusReport> {
+    let started = Instant::now();
+    let deadline =
+        (params.time_budget_ms > 0).then(|| started + Duration::from_millis(params.time_budget_ms));
+
     let ctx = SnapshotContext::for_project(&params.project_path)?;
     let head_hash =
         refs::read_project_head_ref(&ctx.refs_root, &ctx.principal_key, &ctx.project_hash)?;
@@ -158,11 +180,17 @@ pub fn run_status(params: SnapshotStatusParams) -> Result<SnapshotStatusReport> 
         None => HashMap::new(),
     };
     let head_state = manifest_state_map(&ctx.cas, &head_items)?;
-    let worktree = build_worktree_state_map(&ctx.project_path, &ctx.ignore)?;
+    let scan = build_worktree_state_map(&ctx.project_path, &ctx.ignore, deadline)?;
+    let worktree = scan.states;
 
     let mut paths: BTreeSet<String> = BTreeSet::new();
-    paths.extend(head_items.keys().cloned());
     paths.extend(worktree.keys().cloned());
+    // Head-only paths surface as deletions; with a truncated scan a
+    // not-yet-visited file is indistinguishable from a deleted one,
+    // so deletions are only evaluated on a complete scan.
+    if scan.complete {
+        paths.extend(head_items.keys().cloned());
+    }
 
     let mut counts = ChangeCounts::default();
     let mut changes = Vec::new();
@@ -198,6 +226,16 @@ pub fn run_status(params: SnapshotStatusParams) -> Result<SnapshotStatusReport> 
         }
     }
 
+    let note = (!scan.complete).then(|| {
+        format!(
+            "worktree scan exceeded its {}ms budget after {} file(s); \
+             added/modified counts are partial and deletions were not evaluated. \
+             Re-run with params {{\"time_budget_ms\": 0}} for a full scan.",
+            params.time_budget_ms,
+            worktree.len(),
+        )
+    });
+
     Ok(SnapshotStatusReport {
         kind: "snapshot_status",
         project_path: ctx.project_path.display().to_string(),
@@ -207,6 +245,9 @@ pub fn run_status(params: SnapshotStatusParams) -> Result<SnapshotStatusReport> 
         head_snapshot_hash: head_hash,
         deployed_snapshot_hash: deployed_hash,
         dirty: counts.added > 0 || counts.modified > 0 || counts.deleted > 0,
+        scan_complete: scan.complete,
+        scan_elapsed_ms: started.elapsed().as_millis() as u64,
+        note,
         counts,
         changes,
     })
@@ -559,23 +600,36 @@ fn manifest_state_map(
     Ok(out)
 }
 
+struct WorktreeScan {
+    states: HashMap<String, FileState>,
+    /// False when the walk was cut short by `deadline`.
+    complete: bool,
+}
+
 fn build_worktree_state_map(
     root: &Path,
     ignore: &IgnoreMatcher,
-) -> Result<HashMap<String, FileState>> {
-    let mut out = HashMap::new();
-    walk_project_files(root, root, ignore, &mut |rel, path| {
+    deadline: Option<Instant>,
+) -> Result<WorktreeScan> {
+    let mut states = HashMap::new();
+    let outcome = walk_project_files(root, root, ignore, &mut |rel, path| {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(ControlFlow::Break(()));
+        }
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        out.insert(
+        states.insert(
             rel.to_string(),
             FileState {
                 integrity: sha256_hex(&bytes),
                 mode: unix_mode(path),
             },
         );
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     })?;
-    Ok(out)
+    Ok(WorktreeScan {
+        states,
+        complete: outcome.is_continue(),
+    })
 }
 
 fn build_manifest_into_cas(
@@ -584,7 +638,8 @@ fn build_manifest_into_cas(
     ignore: &IgnoreMatcher,
 ) -> Result<SourceManifest> {
     let mut items = BTreeMap::new();
-    walk_project_files(root, root, ignore, &mut |rel, path| {
+    // This closure never breaks, so the walk outcome carries no info.
+    let _ = walk_project_files(root, root, ignore, &mut |rel, path| {
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
         let blob_hash = cas.store_blob(&bytes)?;
         let item = ItemSource {
@@ -596,7 +651,7 @@ fn build_manifest_into_cas(
         };
         let item_hash = cas.store_object(&item.to_value())?;
         items.insert(rel.to_string(), item_hash);
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     })?;
     Ok(SourceManifest {
         item_source_hashes: items.into_iter().collect(),
@@ -607,8 +662,8 @@ fn walk_project_files(
     root: &Path,
     dir: &Path,
     ignore: &IgnoreMatcher,
-    f: &mut impl FnMut(&str, &Path) -> Result<()>,
-) -> Result<()> {
+    f: &mut impl FnMut(&str, &Path) -> Result<ControlFlow<()>>,
+) -> Result<ControlFlow<()>> {
     let mut entries = fs::read_dir(dir)
         .with_context(|| format!("read directory {}", dir.display()))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -625,12 +680,14 @@ fn walk_project_files(
         }
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            walk_project_files(root, &path, ignore, f)?;
-        } else if file_type.is_file() {
-            f(&rel, &path)?;
+            if walk_project_files(root, &path, ignore, f)?.is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+        } else if file_type.is_file() && f(&rel, &path)?.is_break() {
+            return Ok(ControlFlow::Break(()));
         }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 #[cfg(unix)]
@@ -645,4 +702,54 @@ fn unix_mode(path: &Path) -> Option<u32> {
 #[cfg(not(unix))]
 fn unix_mode(_path: &Path) -> Option<u32> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_project(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for (rel, contents) in files {
+            let path = dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("mkdir");
+            }
+            fs::write(path, contents).expect("write");
+        }
+        dir
+    }
+
+    #[test]
+    fn worktree_scan_without_deadline_is_complete() {
+        let dir = temp_project(&[("a.txt", "a"), ("sub/b.txt", "b")]);
+        let ignore = ryeos_state::ignore::matcher_from_builtins();
+        let scan = build_worktree_state_map(dir.path(), &ignore, None).expect("scan");
+        assert!(scan.complete);
+        assert_eq!(scan.states.len(), 2);
+    }
+
+    #[test]
+    fn worktree_scan_with_expired_deadline_reports_incomplete() {
+        let dir = temp_project(&[("a.txt", "a"), ("sub/b.txt", "b")]);
+        let ignore = ryeos_state::ignore::matcher_from_builtins();
+        let expired = Instant::now() - Duration::from_millis(1);
+        let scan = build_worktree_state_map(dir.path(), &ignore, Some(expired)).expect("scan");
+        assert!(!scan.complete);
+        // Nothing hashed: the deadline check precedes every file read.
+        assert!(scan.states.is_empty());
+    }
+
+    #[test]
+    fn status_params_default_budget_is_uncapped() {
+        let params: SnapshotStatusParams =
+            serde_json::from_value(serde_json::json!({ "project_path": "/tmp/x" }))
+                .expect("params");
+        assert_eq!(params.time_budget_ms, 0);
+        let params: SnapshotStatusParams = serde_json::from_value(
+            serde_json::json!({ "project_path": "/tmp/x", "time_budget_ms": 5_000 }),
+        )
+        .expect("params");
+        assert_eq!(params.time_budget_ms, 5_000);
+    }
 }

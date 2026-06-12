@@ -139,6 +139,16 @@ impl BrowserSessionStore {
     }
 
     /// Look up a session by ID. Returns `None` if not found or expired.
+    /// Snapshot of active session ids (hint fan-out).
+    pub fn session_ids(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .expect("sessions mutex poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     pub fn get_session(&self, session_id: &str) -> Option<BrowserSession> {
         let sessions = self.sessions.lock().unwrap();
         let session = sessions.get(session_id)?;

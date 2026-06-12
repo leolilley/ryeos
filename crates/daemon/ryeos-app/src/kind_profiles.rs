@@ -87,6 +87,17 @@ impl KindProfileRegistry {
                 supports_continuation: false,
             },
         );
+        // seat_session: the seat is itself a thread — braided, owned,
+        // replayable. Opened/settled via the seat services, never
+        // root-executed; reattach (continuation) arrives later.
+        profiles.insert(
+            "seat_session".to_string(),
+            ThreadKindProfile {
+                root_executable: false,
+                supports_interrupt: false,
+                supports_continuation: false,
+            },
+        );
     }
 
     /// Get profile for a thread kind. Returns None if unknown.

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T03:43:41Z:b88e6015cddf3b8eb495ba3409eda6ed682d85739362960433efa0ce25e013bd:BbOpkn2+eI3ic4PTNKb8EcnHNXWw8WCv9A8uCtfwlm1lnb9sZcooFYx4ATYEb4tfKFFUzwjYSE2Sv/HSocuyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T22:51:46Z:8b3a5dc425f15be230116430a943f47182958bf52f445c0df38851b385a24e50:C+sVrOO+omSZwKPLIqIBGGAN2ncBJKgnTUWoufcFtqEc0O4Evw22igzQprkcmVu/YBmJrEj6VQy2PBFYkMPNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -10,10 +10,29 @@ layout:
       type: pane
       view: graph
 
+home_view: view:ryeos/home/brand
+
+library:
+  - view:ryeos/threads/list
+  - view:ryeos/item/inspector
+  - view:ryeos/chain/timeline
+  - view:ryeos/remotes/list
+  - view:ryeos/schedules/list
+  - view:ryeos/commands/grammar
+  - view:ryeos/bundles/list
+  - view:ryeos/node/status
+  - view:ryeos/items/space
+  - view:ryeos/files/list
+  - view:ryeos/gc/status
+
+
 input:
   route:
-    type: directive
-    directive_ref: directive:rye/agent/core/base
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:rye/agent/core/base
 
 ambient:
   show_background: true

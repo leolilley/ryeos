@@ -1,0 +1,46 @@
+# ryeos:signed:2026-06-11T22:51:47Z:f73441dcf4abd848fbcdbcc03876d6900651027eeacda0e2a4ee826f960827ca:Rqmlz8xv5LJChDNo8cIW61XJhkLhClosKlk2Tr9UkyJQezqQ9tFlctDVjoUhP06OaAR0JhVWz2DZb2xJuTGIAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: threads-list
+version: "1.0.0"
+description: Thread list over the studio threads source
+
+widget: rows
+source:
+  ref: service:threads/list
+  params: {}
+  collection: threads
+projections:
+  primary: item_ref
+  meta: status
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      failed: danger
+      cancelled: warn
+      completed: good
+    default: neutral
+affordances:
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread: "{thread_id}"
+  - id: aim-input
+    label: Aim input here
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{thread_id}"
+  - id: cancel
+    label: Cancel
+    invoke:
+      plane: rye
+      tokens: [thread, cancel]
+      args:
+        thread_id: "{thread_id}"
+refresh:
+  on_hint: thread

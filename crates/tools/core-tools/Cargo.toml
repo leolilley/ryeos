@@ -8,36 +8,35 @@ name = "ryeos_tools"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-ryeos-tracing = { path = "../../support/ryeos-tracing" }
-clap = { version = "4", features = ["derive"] }
-base64 = "0.22"
-sha2 = "0.10"
-serde_yaml = "0.9"
-rmp-serde = "1"
-dirs = "5"
-glob = "0.3"
-rand = "0.8"
-toml = "0.8"
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+ryeos-tracing = { workspace = true }
+clap = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+serde_yaml = { workspace = true }
+rmp-serde = { workspace = true }
+dirs = { workspace = true }
+glob = { workspace = true }
+rand = { workspace = true }
+toml = { workspace = true }
 
 # Engine + state
-ryeos-engine = { path = "../../engine/ryeos-engine" }
-ryeos-state = { path = "../../state/ryeos-state" }
-ryeos-runtime = { path = "../../engine/ryeos-runtime" }
+ryeos-engine = { workspace = true }
+ryeos-state = { workspace = true }
+ryeos-runtime = { workspace = true }
 
 # Required for verify
-lillux = { path = "../../kernel/lillux" }
+lillux = { workspace = true }
 
-ryeos-vault = { path = "../../state/ryeos-vault" }
-ryeos-bundle = { path = "../../daemon/ryeos-bundle" }
-ryeos-app = { path = "../../daemon/ryeos-app" }
+ryeos-vault = { workspace = true }
+ryeos-bundle = { workspace = true }
+ryeos-app = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [features]
 default = []

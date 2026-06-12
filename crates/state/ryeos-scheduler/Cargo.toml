@@ -7,20 +7,20 @@ license = "MIT"
 repository = "https://github.com/leolilley/ryeos"
 
 [dependencies]
-anyhow = "1"
-chrono = "0.4"
-chrono-tz = "0.10"
-cron = "0.16"
-lillux = { path = "../../kernel/lillux" }
-ryeos-engine = { path = "../../engine/ryeos-engine" }
-ryeos-state = { path = "../ryeos-state" }
-rusqlite = { version = "0.31", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
+anyhow = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+cron = { workspace = true }
+lillux = { workspace = true }
+ryeos-engine = { workspace = true }
+ryeos-state = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-ryeos-engine = { path = "../../engine/ryeos-engine", features = ["test-support"] }
+tempfile = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }

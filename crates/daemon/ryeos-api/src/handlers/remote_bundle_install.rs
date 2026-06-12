@@ -108,17 +108,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     std::fs::create_dir_all(&local_target)
         .with_context(|| format!("create bundle dir {}", local_target.display()))?;
 
-    let materialize_result = materialize_files(&entries, &blob_data, &local_target);
-
     // If materialization failed, clean up partial directory.
-    if let Err(ref e) = materialize_result {
-        tracing::error!(error = %e, "bundle materialization failed, cleaning up partial dir");
-        let _ = std::fs::remove_dir_all(&local_target);
-        materialize_result?;
-        unreachable!()
-    }
-
-    let (files_installed, total_bytes) = materialize_result.unwrap();
+    let (files_installed, total_bytes) = match materialize_files(
+        &entries,
+        &blob_data,
+        &local_target,
+    ) {
+        Ok(counts) => counts,
+        Err(e) => {
+            tracing::error!(error = %e, "bundle materialization failed, cleaning up partial dir");
+            let _ = std::fs::remove_dir_all(&local_target);
+            return Err(e);
+        }
+    };
 
     // 5. Preflight verification — fail closed if bundle integrity is bad.
     if let Err(e) =

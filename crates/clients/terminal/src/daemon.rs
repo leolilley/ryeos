@@ -10,8 +10,6 @@ use hyper::Request;
 use ryeos_cli::transport::discovery::discover_audience;
 use ryeos_cli::transport::http::resolve_daemon_url;
 use ryeos_cli::transport::signing::{SignHeaders, Signer};
-use ryeos_client_base::ids::RemoteId;
-use ryeos_client_base::update::{PollSnapshot, RemoteSummary, ThreadSummary};
 
 use std::path::PathBuf;
 
@@ -277,26 +275,88 @@ impl DaemonClient {
         Ok(serde_json::from_slice(&body_bytes)?)
     }
 
-    /// Check if the daemon is reachable.
-    pub async fn is_alive(&self) -> bool {
-        self.get_json("/status").await.is_ok()
+    /// Tail a turn's chain braid live over SSE
+    /// (`GET /chains/{chain_root_id}/events/stream`). Each turn is its
+    /// own chain root; the chain tail covers the turn AND its child
+    /// threads (tools, composes). The conversation feed is the route
+    /// ratchet concatenating per-turn tails. The braid is the truth;
+    /// this stream is it arriving now.
+    pub async fn open_thread_events(&self, thread_id: &str) -> Result<SseStream, ClientError> {
+        let path = format!("/chains/{thread_id}/events/stream");
+        self.open_sse(&path).await
     }
 
-    /// Fetch threads list.
-    pub async fn get_threads(&self) -> Result<Vec<ThreadSummary>, ClientError> {
-        let value = self.get_json("/threads").await?;
-        Ok(parse_thread_summaries(&value))
+    /// Tail the UI session bus (transient hints — "look", never truth).
+    pub async fn open_session_events(&self) -> Result<SseStream, ClientError> {
+        let session_id = self.ui_session_id.clone().ok_or(ClientError::NoIdentity)?;
+        let path = format!("/ui/events/session/{session_id}");
+        self.open_sse(&path).await
     }
 
-    /// Fetch status.
-    pub async fn get_status(&self) -> Result<serde_json::Value, ClientError> {
-        self.get_json("/status").await
-    }
+    async fn open_sse(&self, path: &str) -> Result<SseStream, ClientError> {
+        let path = path.to_string();
+        let path = &path;
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        let headers = self.sign("GET", &path, b"")?;
 
-    /// Fetch remotes list.
-    pub async fn get_remotes(&self) -> Result<Vec<RemoteSummary>, ClientError> {
-        let value = self.get_json("/remote/list").await?;
-        Ok(parse_remote_summaries(&value))
+        let uri: hyper::Uri = url.parse().map_err(|e| ClientError::DaemonDown {
+            url: format!("invalid URL: {e}"),
+        })?;
+        let host = uri.host().unwrap_or("127.0.0.1");
+        let port = uri.port_u16().unwrap_or(80);
+        let bind = format!("{host}:{port}");
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri.to_string())
+            .header("accept", "text/event-stream")
+            .header("host", &bind)
+            .header("x-ryeos-key-id", &headers.key_id)
+            .header("x-ryeos-timestamp", &headers.timestamp)
+            .header("x-ryeos-nonce", &headers.nonce)
+            .header("x-ryeos-signature", &headers.signature)
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| ClientError::DaemonDown {
+                url: format!("build request: {e}"),
+            })?;
+
+        let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+            ClientError::Dispatch(ryeos_cli::error::CliDispatchError::Transport(
+                ryeos_cli::error::CliTransportError::Unreachable {
+                    bind: bind.clone(),
+                    detail: e.to_string(),
+                },
+            ))
+        })?;
+
+        let io = hyper_util::rt::TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| {
+                ClientError::Dispatch(ryeos_cli::error::CliDispatchError::Transport(
+                    ryeos_cli::error::CliTransportError::Unreachable {
+                        bind: bind.clone(),
+                        detail: format!("HTTP handshake: {e}"),
+                    },
+                ))
+            })?;
+
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                tracing::warn!("SSE connection error: {e}");
+            }
+        });
+
+        let resp = sender.send_request(req).await.map_err(|e| {
+            ClientError::Dispatch(ryeos_cli::error::CliDispatchError::Transport(
+                ryeos_cli::error::CliTransportError::Unreachable {
+                    bind,
+                    detail: format!("send request: {e}"),
+                },
+            ))
+        })?;
+
+        Ok(SseStream::new(resp.into_body()))
     }
 
     /// Execute an item via the daemon and return the SSE stream.
@@ -379,25 +439,33 @@ impl DaemonClient {
         Ok(SseStream::new(resp.into_body()))
     }
 
-    /// Execute an item via the daemon (non-streaming).
-    pub async fn execute(
+    /// Resolve an effective surface via the daemon's items.effective service.
+    /// Resolve any effective item by canonical ref (kind-agnostic; the
+    /// engine decides what the ref is).
+    pub async fn resolve_effective_item(
         &self,
-        item_ref: &str,
-        project_path: &str,
-        parameters: &serde_json::Value,
+        canonical_ref: &str,
+        expected_kind: &str,
+        project_path: Option<&str>,
     ) -> Result<serde_json::Value, ClientError> {
-        self.signed_post(
-            "/execute",
-            &serde_json::json!({
-                "item_ref": item_ref,
-                "project_path": project_path,
-                "parameters": parameters,
-            }),
-        )
-        .await
+        let mut params = serde_json::json!({
+            "canonical_ref": canonical_ref,
+            "expected_kind": expected_kind,
+        });
+        if let Some(pp) = project_path {
+            params["project_path"] = serde_json::Value::String(pp.to_string());
+        }
+        let mut body = serde_json::json!({
+            "item_ref": "service:items/effective",
+            "parameters": params,
+        });
+        if let Some(pp) = project_path {
+            body["project_path"] = serde_json::Value::String(pp.to_string());
+        }
+        let response = self.signed_post("/execute", &body).await?;
+        Ok(response.get("result").cloned().unwrap_or(response))
     }
 
-    /// Resolve an effective surface via the daemon's items.effective service.
     pub async fn resolve_effective_surface(
         &self,
         canonical_ref: &str,
@@ -424,20 +492,6 @@ impl DaemonClient {
         }
         let response = self.signed_post("/execute", &body).await?;
         Ok(response.get("result").cloned().unwrap_or(response))
-    }
-
-    /// Fetch a full poll snapshot (threads + remotes + status).
-    pub async fn poll_snapshot(&self) -> Result<PollSnapshot, ClientError> {
-        let threads = self.get_threads().await.unwrap_or_default();
-        let remotes = self.get_remotes().await.unwrap_or_default();
-        let alive = self.is_alive().await;
-
-        Ok(PollSnapshot {
-            threads,
-            remotes,
-            daemon_url: Some(self.base_url.clone()),
-            daemon_alive: alive,
-        })
     }
 }
 
@@ -520,63 +574,6 @@ impl SseStream {
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
-
-fn parse_thread_summaries(value: &serde_json::Value) -> Vec<ThreadSummary> {
-    let threads = match value.as_array() {
-        Some(arr) => arr,
-        None => match value.get("threads").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return Vec::new(),
-        },
-    };
-
-    threads
-        .iter()
-        .filter_map(|t| {
-            Some(ThreadSummary {
-                id: ryeos_client_base::ids::ThreadId::new(t.get("id")?.as_str()?.parse().ok()?),
-                daemon_id: t.get("id").and_then(|v| v.as_str()).map(String::from),
-                status: t
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                item_ref: t.get("item_id").and_then(|v| v.as_str()).map(String::from),
-                parent_id: t
-                    .get("parent_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse().ok())
-                    .map(ryeos_client_base::ids::ThreadId::new),
-                started_at_ms: t.get("started_at").and_then(|v| v.as_i64()),
-                duration_ms: t.get("duration_ms").and_then(|v| v.as_u64()),
-                cost_usd: t.get("cost_usd").and_then(|v| v.as_f64()),
-            })
-        })
-        .collect()
-}
-
-fn parse_remote_summaries(value: &serde_json::Value) -> Vec<RemoteSummary> {
-    let remotes = match value.as_array() {
-        Some(arr) => arr,
-        None => match value.get("remotes").and_then(|v| v.as_array()) {
-            Some(arr) => arr,
-            None => return Vec::new(),
-        },
-    };
-
-    remotes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            Some(RemoteSummary {
-                id: RemoteId::new(i as u64),
-                name: r.get("name")?.as_str()?.to_string(),
-                url: r.get("url")?.as_str()?.to_string(),
-                alive: r.get("alive").and_then(|v| v.as_bool()).unwrap_or(false),
-            })
-        })
-        .collect()
-}
 
 async fn collect_body(body: Incoming) -> Result<Vec<u8>, ryeos_cli::error::CliTransportError> {
     let mut bufs = Vec::new();

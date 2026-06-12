@@ -1,16 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+use super::content::{ProjectedRecord, TimelineRole};
 use super::event::StudioAction;
-use super::model::{
-    StudioCore, StudioDockContent, StudioDockEdge, StudioDockSlotState, StudioInputRoute,
-    StudioInspectorState,
-};
+use super::model::{StudioCore, StudioDockContent, StudioDockEdge, StudioDockSlotState};
 use super::scene_model::{build_scene_model, StudioSceneModel};
+use super::seat::InvokeTemplate;
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
 use crate::surface::{AmbientAtlasStyleSpec, SurfaceSpec};
 use crate::workspace::{TileState, ViewLocalState, ViewSpec};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioViewModel {
@@ -247,15 +245,9 @@ pub struct StudioDockTileVm {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioDockViewVm {
     Input(StudioInputVm),
-    Threads {
-        title: String,
-        hint: String,
-        rows: Vec<StudioRowVm>,
-    },
-    Inspector {
-        title: String,
-        hint: String,
-    },
+    /// A content-bound view in a dock slot: same VM the tile plane
+    /// renders, no dock-specific product shapes.
+    View(StudioViewVm),
     Placeholder {
         message: String,
     },
@@ -299,36 +291,24 @@ pub enum StudioSplitAxisVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioViewVm {
-    Overview {
-        metrics: Vec<StudioMetricVm>,
-        sections: Vec<StudioSectionVm>,
-    },
-    ThreadList {
-        rows: Vec<StudioRowVm>,
-    },
-    Thread {
-        thread_id: Option<String>,
-        sections: Vec<StudioSectionVm>,
-        code_blocks: Vec<StudioCodeBlockVm>,
-    },
-    Items {
-        filters: StudioPanelFiltersVm,
-        rows: Vec<StudioRowVm>,
-    },
-    Files {
-        root: String,
-        path: String,
-        rows: Vec<StudioRowVm>,
-        preview: Option<StudioFilePreviewVm>,
-    },
+    /// The generic content widget surface: every bound view renders
+    /// through rows (typed widget variants arrive with the render pass).
     Rows {
         title: String,
         columns: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<String>,
+        #[serde(default)]
+        affordance_hints: Vec<String>,
         rows: Vec<StudioRowVm>,
     },
-    Gc {
-        running: bool,
-        recent_events: Vec<serde_json::Value>,
+    Timeline {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<String>,
+        #[serde(default)]
+        affordance_hints: Vec<String>,
+        entries: Vec<StudioTimelineEntryVm>,
     },
     Map {
         scene: StudioSceneModel,
@@ -336,10 +316,34 @@ pub enum StudioViewVm {
     Atlas {
         scene: StudioSceneModel,
     },
-    Inspector(StudioInspectorVm),
     Placeholder {
         title: String,
         message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StudioTimelineEntryVm {
+    Block {
+        text: String,
+        tone: StudioTone,
+    },
+    Line {
+        primary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<String>,
+        tone: StudioTone,
+    },
+    Pair {
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<String>,
+        tone: StudioTone,
+        pending: bool,
+    },
+    Separator {
+        label: String,
     },
 }
 
@@ -382,13 +386,6 @@ pub struct StudioMetricVm {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioSectionVm {
-    pub title: String,
-    pub rows: Vec<(String, String)>,
-    pub action: Option<StudioAction>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioRowVm {
     pub id: String,
     pub primary: String,
@@ -424,23 +421,6 @@ pub struct StudioPanelFiltersVm {
 pub struct StudioFilterOptionVm {
     pub value: String,
     pub label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioInspectorVm {
-    pub title: String,
-    pub subtitle: Option<String>,
-    pub sections: Vec<StudioSectionVm>,
-    pub code_blocks: Vec<StudioCodeBlockVm>,
-    pub empty: bool,
-    pub empty_message: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioCodeBlockVm {
-    pub label: String,
-    pub language: Option<String>,
-    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -515,7 +495,7 @@ fn presentation_vm(
                 tone: StudioTone::Accent,
             },
         },
-        home: home_vm(),
+        home: home_vm(core),
         motion: core.ui.motion.clone(),
     }
 }
@@ -598,15 +578,9 @@ fn presentation_metrics_vm(
         .unwrap_or_default();
     let schedule_count = core
         .data
-        .schedules
+        .dimension
         .as_ref()
-        .map(|schedules| schedules.schedules.len())
-        .or_else(|| {
-            core.data
-                .dimension
-                .as_ref()
-                .map(|dimension| dimension.schedules.total)
-        })
+        .map(|dimension| dimension.schedules.total)
         .unwrap_or_default();
     let active_thread_count = core
         .data
@@ -753,35 +727,45 @@ fn status_bar_vm(
     }
 }
 
-fn home_vm() -> StudioHomeVm {
+fn home_vm(core: &StudioCore) -> StudioHomeVm {
+    // Home panel content comes from the surface-declared home view
+    // (`home_view: view:…`), never from client source. Absent content
+    // degrades to an empty panel.
+    let body = core
+        .data
+        .session
+        .as_ref()
+        .and_then(|session| session.effective_surface.as_ref())
+        .and_then(|surface| surface.get("home_view"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|home_ref| core.views.get(home_ref))
+        .map(|binding| binding.body.clone())
+        .unwrap_or(serde_json::Value::Null);
+    let text = |key: &str| {
+        body.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
     StudioHomeVm {
-        brand: "RYE OS".to_string(),
-        tagline: "portable operating system for ai".to_string(),
-        description: "Persistent, signed AI substrate that travels with you across spaces, machines, and models.".to_string(),
-        terminal_lines: vec![
-            "hashes for truth. signatures for agency. attestations for proof.",
-            "content-addressed. tamper-evident. verified by math.",
-            "identity is a keypair. trust is a pin. authority is local.",
-            "every item carries a chain of custody. every node verifies it.",
-            "descriptors are trust pins, not credentials.",
-            "wildcards rejected. capabilities attenuate. no escalation.",
-            "the CAS is the commitment. the attestation is the proof.",
-            "admission is proof of possession. not proof of account.",
-            "two nodes, zero prior relationship, shared verified state.",
-            "swap the model. swap the machine. the signatures hold.",
-            "no central authority. no bearer tokens. no provider in the loop.",
-            "closure complete, hashes verified, attestation signed.",
-            "staged. mirrored. accepted. every byte accounted for.",
-            "the hosting provider runs dns. the node runs authority.",
-            "convergence without consensus. trust without coordination.",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
-        primary_label: "OPEN".to_string(),
-        secondary_label: "GITHUB".to_string(),
-        secondary_url: "https://github.com/leolilley/ryeos".to_string(),
-        install_command: "pip install ryeos-mcp".to_string(),
+        brand: text("brand"),
+        tagline: text("tagline"),
+        description: text("description"),
+        terminal_lines: body
+            .get("terminal_lines")
+            .and_then(serde_json::Value::as_array)
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        primary_label: text("primary_label"),
+        secondary_label: text("secondary_label"),
+        secondary_url: text("secondary_url"),
+        install_command: text("install_command"),
     }
 }
 
@@ -812,32 +796,30 @@ fn dock_tile_vm(
     if !state.visible {
         return None;
     }
-    // Placeholder default dock contents for the first shared tile-plane slice.
-    // Real dock contents should become shared Studio state/surface config before
-    // the input, thread-listener, or inspector behavior deepens.
+    let edge_key = match edge {
+        StudioDockEdge::Top => "top",
+        StudioDockEdge::Bottom => "bottom",
+        StudioDockEdge::Left => "left",
+        StudioDockEdge::Right => "right",
+    };
     Some(StudioDockTileVm {
         edge,
-        title: match edge {
-            StudioDockEdge::Top => "Context".to_string(),
-            StudioDockEdge::Bottom => "RyeOS input".to_string(),
-            StudioDockEdge::Left => "Directive threads".to_string(),
-            StudioDockEdge::Right => "Inspector".to_string(),
+        title: match &state.content {
+            StudioDockContent::Input => "RyeOS input".to_string(),
+            StudioDockContent::View { view_ref } => {
+                view_ref.rsplit('/').next().unwrap_or(view_ref).to_string()
+            }
+            StudioDockContent::Placeholder { .. } => edge_key.to_string(),
         },
         size: state.size,
         view: match &state.content {
             StudioDockContent::Input => StudioDockViewVm::Input(input_vm(core)),
-            StudioDockContent::Threads => StudioDockViewVm::Threads {
-                title: "Directive threads".to_string(),
-                hint: "Recent directive runs and events.".to_string(),
-                rows: rows_for(core, &ViewSpec::ThreadList, None),
-            },
-            StudioDockContent::Inspector => StudioDockViewVm::Inspector {
-                title: "Selection".to_string(),
-                hint: "Selection-aware inspector dock placeholder.".to_string(),
-            },
-            StudioDockContent::Context => StudioDockViewVm::Placeholder {
-                message: "Context dock placeholder.".to_string(),
-            },
+            StudioDockContent::View { view_ref } => StudioDockViewVm::View(bound_view_vm_keyed(
+                core,
+                &format!("dock:{edge_key}"),
+                None,
+                view_ref,
+            )),
             StudioDockContent::Placeholder { message } => StudioDockViewVm::Placeholder {
                 message: message.clone(),
             },
@@ -845,17 +827,261 @@ fn dock_tile_vm(
     })
 }
 
-fn input_vm(core: &StudioCore) -> StudioInputVm {
-    StudioInputVm {
-        text: core.ui.input.text.clone(),
-        cursor: core.ui.input.cursor,
-        route_label: match core.ui.input.route {
-            StudioInputRoute::StudioContext => "target: current studio context".to_string(),
+/// Render a content-bound view: binding + source response -> widget VM.
+/// Pure projection; unknown widgets and missing data degrade honestly.
+fn bound_view_vm(core: &StudioCore, tile_id: TileId, view_ref: &str) -> StudioViewVm {
+    bound_view_vm_keyed(
+        core,
+        &tile_id.0.to_string(),
+        selected_cursor(core, tile_id),
+        view_ref,
+    )
+}
+
+fn bound_view_vm_keyed(
+    core: &StudioCore,
+    source_key: &str,
+    cursor: Option<usize>,
+    view_ref: &str,
+) -> StudioViewVm {
+    let Some(binding) = core.views.get(view_ref) else {
+        return StudioViewVm::Placeholder {
+            title: view_ref.to_string(),
+            message: format!("view {view_ref} is not embedded in the effective surface"),
+        };
+    };
+    let response = core.data.sources.get(source_key);
+    let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
+    match (binding.widget.as_str(), response) {
+        (_, None) => StudioViewVm::Placeholder {
+            title,
+            message: format!(
+                "loading {} …",
+                binding
+                    .source
+                    .as_ref()
+                    .map(|s| s.item_ref.as_str())
+                    .unwrap_or("(no source)")
+            ),
         },
-        placeholder: "type RyeOS input…".to_string(),
-        hint: "Shift+Enter submit · routed input surface, not a thread viewer".to_string(),
-        submit_enabled: !core.ui.input.text.trim().is_empty(),
+        ("rows", Some(response)) => {
+            // Rows act through the binding's first affordance — the
+            // content-declared default interaction.
+            let default_affordance = binding
+                .affordances
+                .first()
+                .and_then(|a| a.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let rows = super::content::project_records(binding, response)
+                .into_iter()
+                .enumerate()
+                .map(|(index, record)| StudioRowVm {
+                    id: format!("{view_ref}#{index}"),
+                    primary: record.primary,
+                    secondary: None,
+                    meta: record.meta,
+                    kind: None,
+                    action: default_affordance.as_ref().map(|affordance_id| {
+                        StudioAction::InvokeAffordance {
+                            view_ref: view_ref.to_string(),
+                            affordance_id: affordance_id.clone(),
+                            record: record.raw.clone(),
+                        }
+                    }),
+                    tone: tone_from_name(record.tone.as_deref()),
+                    selected: cursor == Some(index),
+                })
+                .collect();
+            StudioViewVm::Rows {
+                title,
+                columns: Vec::new(),
+                provenance: Some(view_ref.to_string()),
+                affordance_hints: affordance_hints(binding),
+                rows,
+            }
+        }
+        ("timeline", Some(response)) => StudioViewVm::Timeline {
+            title,
+            provenance: Some(view_ref.to_string()),
+            affordance_hints: affordance_hints(binding),
+            entries: timeline_entries(super::content::project_records(binding, response)),
+        },
+        ("key_value" | "text", Some(response)) => {
+            let rows = super::content::project_detail(binding, response)
+                .into_iter()
+                .map(|(key, value)| StudioRowVm {
+                    id: format!("{view_ref}#{key}"),
+                    primary: format!("{key}: {value}"),
+                    secondary: None,
+                    meta: None,
+                    kind: None,
+                    action: None,
+                    tone: StudioTone::Neutral,
+                    selected: false,
+                })
+                .collect();
+            StudioViewVm::Rows {
+                title,
+                columns: Vec::new(),
+                provenance: Some(view_ref.to_string()),
+                affordance_hints: affordance_hints(binding),
+                rows,
+            }
+        }
+        (other, Some(_)) => StudioViewVm::Placeholder {
+            title,
+            // Degradation: an unknown widget never crashes a renderer.
+            message: format!("widget `{other}` is not supported by this renderer"),
+        },
     }
+}
+
+fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
+    binding
+        .affordances
+        .iter()
+        .filter_map(|affordance| {
+            affordance
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| affordance.get("id").and_then(serde_json::Value::as_str))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimelineEntryVm> {
+    let mut entries = Vec::new();
+    let mut pending_flow: Option<(String, StudioTone)> = None;
+    let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
+
+    for record in records {
+        match record.role {
+            TimelineRole::Flow => {
+                let tone = tone_from_name(record.tone.as_deref());
+                if let Some((text, existing_tone)) = pending_flow.as_mut() {
+                    text.push_str(&record.primary);
+                    if *existing_tone == StudioTone::Neutral {
+                        *existing_tone = tone;
+                    }
+                } else {
+                    pending_flow = Some((record.primary, tone));
+                }
+            }
+            TimelineRole::Boundary => {
+                flush_flow(&mut pending_flow, &mut entries);
+                entries.push(StudioTimelineEntryVm::Separator {
+                    label: record.primary,
+                });
+            }
+            TimelineRole::PairOpen => {
+                flush_flow(&mut pending_flow, &mut entries);
+                let key = record.pair_key.unwrap_or_default();
+                let index = entries.len();
+                entries.push(StudioTimelineEntryVm::Pair {
+                    summary: record.primary,
+                    meta: record.meta,
+                    tone: tone_from_name(record.tone.as_deref()),
+                    pending: true,
+                });
+                pending_pairs.insert(key, index);
+            }
+            TimelineRole::PairClose => {
+                flush_flow(&mut pending_flow, &mut entries);
+                let Some(key) = record.pair_key.as_deref() else {
+                    entries.push(line_entry(record));
+                    continue;
+                };
+                if let Some(index) = pending_pairs.remove(key) {
+                    if let Some(StudioTimelineEntryVm::Pair {
+                        meta,
+                        tone,
+                        pending,
+                        ..
+                    }) = entries.get_mut(index)
+                    {
+                        *meta = record.meta;
+                        *tone = tone_from_name(record.tone.as_deref());
+                        *pending = false;
+                    }
+                } else {
+                    entries.push(line_entry(record));
+                }
+            }
+            TimelineRole::Line => {
+                flush_flow(&mut pending_flow, &mut entries);
+                entries.push(line_entry(record));
+            }
+        }
+    }
+    flush_flow(&mut pending_flow, &mut entries);
+    entries
+}
+
+fn flush_flow(
+    pending_flow: &mut Option<(String, StudioTone)>,
+    entries: &mut Vec<StudioTimelineEntryVm>,
+) {
+    if let Some((text, tone)) = pending_flow.take() {
+        entries.push(StudioTimelineEntryVm::Block { text, tone });
+    }
+}
+
+fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
+    StudioTimelineEntryVm::Line {
+        primary: record.primary,
+        meta: record.meta,
+        tone: tone_from_name(record.tone.as_deref()),
+    }
+}
+
+fn tone_from_name(name: Option<&str>) -> StudioTone {
+    match name {
+        Some("accent") => StudioTone::Accent,
+        Some("good") => StudioTone::Good,
+        Some("warn") => StudioTone::Warn,
+        Some("danger") => StudioTone::Danger,
+        _ => StudioTone::Neutral,
+    }
+}
+
+fn input_vm(core: &StudioCore) -> StudioInputVm {
+    // The label renders the route facet truthfully, phrased as execution,
+    // never presence.
+    let route = core.seat.fold().input_route();
+    let route_label = match (&route.invoke, &route.thread) {
+        (None, _) => "no target — surface declares no route".to_string(),
+        (Some(_), Some(thread)) => format!("→ chained on {thread}"),
+        (Some(InvokeTemplate::Service { item_ref }), None) => {
+            format!("→ {item_ref} (new chain)")
+        }
+        (Some(InvokeTemplate::Command { tokens }), None) => {
+            format!("→ /{} (new chain)", tokens.join(" "))
+        }
+        (Some(InvokeTemplate::UiFacet { key }), None) => format!("→ {key}"),
+    };
+    let text = core.ui.input.text.clone();
+    let hint = slash_completion_hint(core, &text).unwrap_or_else(|| {
+        "Shift+Enter submit · / for commands · routed input surface".to_string()
+    });
+    StudioInputVm {
+        cursor: core.ui.input.cursor,
+        route_label,
+        placeholder: "type RyeOS input…".to_string(),
+        hint,
+        submit_enabled: !text.trim().is_empty() && (text.starts_with('/') || route.has_target()),
+        text,
+    }
+}
+
+/// Completion derived purely from command records: when the buffer is in
+/// slash mode, show next-token candidates (invocable-only — the grammar
+/// shown is the grammar held). Pure projection over open JSON; the engine
+/// never types per-command knowledge.
+fn slash_completion_hint(core: &StudioCore, text: &str) -> Option<String> {
+    let records = core.data.commands.as_ref()?.get("commands")?.as_array()?;
+    super::tokenize::slash_completion_hint(records, text)
 }
 
 fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
@@ -903,77 +1129,12 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
 
 fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
     match &tile.view {
-        ViewSpec::Overview => overview(core),
-        ViewSpec::ThreadList => StudioViewVm::ThreadList {
-            rows: rows_for(core, &ViewSpec::ThreadList, Some(tile_id)),
-        },
-        ViewSpec::Thread { thread_id } => StudioViewVm::Thread {
-            thread_id: thread_id.map(|id| id.0.to_string()),
-            sections: Vec::new(),
-            code_blocks: Vec::new(),
-        },
-        ViewSpec::SpaceBrowser { .. } => StudioViewVm::Items {
-            filters: StudioPanelFiltersVm {
-                tile_id: tile_id_text(tile_id),
-                items_path: item_folder_state(tile),
-                items_query: item_filter_state(tile).0,
-                items_kind: item_filter_state(tile).1,
-                item_kind_options: item_kind_options(),
-            },
-            rows: rows_for(core, &tile.view, Some(tile_id)),
-        },
-        ViewSpec::Files => files(core, tile_id, tile),
-        ViewSpec::Services => StudioViewVm::Rows {
-            title: "Services".to_string(),
-            columns: vec!["Name".to_string(), "Detail".to_string()],
-            rows: rows_for(core, &tile.view, None),
-        },
-        ViewSpec::Remotes => StudioViewVm::Rows {
-            title: "Remotes".to_string(),
-            columns: vec!["Name".to_string(), "Detail".to_string()],
-            rows: rows_for(core, &tile.view, None),
-        },
-        ViewSpec::Schedules => StudioViewVm::Rows {
-            title: "Schedules".to_string(),
-            columns: vec!["Name".to_string(), "Detail".to_string()],
-            rows: rows_for(core, &tile.view, None),
-        },
-        ViewSpec::GcStatus => StudioViewVm::Gc {
-            running: core
-                .data
-                .gc_status
-                .as_ref()
-                .map(|gc| gc.running)
-                .unwrap_or(false),
-            recent_events: core
-                .data
-                .gc_status
-                .as_ref()
-                .map(|gc| gc.recent_events.clone())
-                .unwrap_or_default(),
-        },
+        ViewSpec::Bound { view_ref } => bound_view_vm(core, tile_id, view_ref),
         ViewSpec::Atlas => StudioViewVm::Atlas {
             scene: build_scene_model(core),
         },
         ViewSpec::Graph { .. } => StudioViewVm::Map {
             scene: build_scene_model(core),
-        },
-        ViewSpec::ItemInspector | ViewSpec::EventInspector => {
-            StudioViewVm::Inspector(inspector(core))
-        }
-        ViewSpec::Projects => StudioViewVm::Rows {
-            title: "Projects".to_string(),
-            columns: vec!["Name".to_string(), "Root".to_string(), "Status".to_string()],
-            rows: rows_for(core, &tile.view, Some(tile_id)),
-        },
-        ViewSpec::Trust => StudioViewVm::Rows {
-            title: "Trust".to_string(),
-            columns: vec![
-                "Scope".to_string(),
-                "Value".to_string(),
-                "Detail".to_string(),
-            ],
-            rows: rows_for(core, &tile.view, None),
         },
     }
 }
@@ -1049,23 +1210,52 @@ fn ambient_vm(core: &StudioCore) -> StudioAmbientVm {
     }
 }
 
-pub(crate) fn launcher_items() -> Vec<StudioLauncherItemVm> {
-    launcher_specs()
-        .into_iter()
-        .map(|(label, hint, view)| StudioLauncherItemVm {
-            label: label.to_string(),
-            hint: hint.to_string(),
+/// Launchable views: the surface's embedded content library plus the
+/// two engine ambient views (graph topology, atlas). Nothing here names
+/// a product concept — labels and hints come from the view items.
+pub(crate) fn launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let mut items: Vec<StudioLauncherItemVm> = [
+        (
+            "Graph",
+            "RyeOS topology",
+            ViewSpec::Graph { graph_id: None },
+        ),
+        ("Atlas", "2D namespace map", ViewSpec::Atlas),
+    ]
+    .into_iter()
+    .map(|(label, hint, view)| StudioLauncherItemVm {
+        label: label.to_string(),
+        hint: hint.to_string(),
+        action: StudioAction::OpenView { view: view.clone() },
+        secondary_action: Some(StudioAction::OpenNewView { view }),
+        enabled: true,
+    })
+    .collect();
+    for (view_ref, binding) in &core.views {
+        let view = ViewSpec::Bound {
+            view_ref: view_ref.clone(),
+        };
+        items.push(StudioLauncherItemVm {
+            label: view_ref
+                .strip_prefix("view:")
+                .unwrap_or(view_ref)
+                .to_string(),
+            hint: binding
+                .description
+                .clone()
+                .unwrap_or_else(|| binding.widget.clone()),
             action: StudioAction::OpenView { view: view.clone() },
             secondary_action: Some(StudioAction::OpenNewView { view }),
             enabled: true,
-        })
-        .collect()
+        });
+    }
+    items
 }
 
 pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = context_launcher_items(core);
     items.extend(dock_launcher_items(core));
-    items.extend(launcher_items());
+    items.extend(launcher_items(core));
     items
 }
 
@@ -1116,48 +1306,6 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
         });
     }
 
-    if let Some((canonical_ref, label)) = focused_executable_item(core) {
-        let parameters = serde_json::json!({});
-        let pending = core.has_pending_invoke(&canonical_ref, &parameters);
-        items.push(StudioLauncherItemVm {
-            label: if pending {
-                format!("Running {label}…")
-            } else {
-                format!("Run {label}")
-            },
-            hint: if pending {
-                format!("pending · {canonical_ref}")
-            } else {
-                canonical_ref.clone()
-            },
-            action: StudioAction::ExecuteItem {
-                item_ref: canonical_ref,
-                parameters,
-            },
-            secondary_action: None,
-            enabled: !session_vm(core).read_only && !pending,
-        });
-    }
-
-    if let Some((thread_id, status)) = focused_cancellable_thread(core) {
-        let pending = core.has_pending_cancel(&thread_id);
-        items.push(StudioLauncherItemVm {
-            label: if pending {
-                format!("Cancelling {thread_id}…")
-            } else {
-                format!("Cancel {thread_id}")
-            },
-            hint: if pending {
-                format!("pending · thread status: {status}")
-            } else {
-                format!("thread status: {status}")
-            },
-            action: StudioAction::CancelThread { thread_id },
-            secondary_action: None,
-            enabled: !session_vm(core).read_only && !pending,
-        });
-    }
-
     items
 }
 
@@ -1171,78 +1319,12 @@ fn inspect_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
     }
 }
 
-fn focused_executable_item(core: &StudioCore) -> Option<(String, String)> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
-    if !matches!(view, ViewSpec::SpaceBrowser { .. }) {
-        return None;
-    }
-    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let row_ref = rows_for(core, view, Some(tile_id)).get(cursor)?.id.clone();
-    let item = focused_item_set(core, tile_id)
-        .into_iter()
-        .find(|item| item.canonical_ref == row_ref && item.executable)?;
-    let label = item_leaf_label(&item.label, &item.bare_id, &item.bare_id);
-    Some((item.canonical_ref, label))
-}
-
-fn focused_item_set(core: &StudioCore, tile_id: TileId) -> Vec<super::dto::StudioItemDto> {
-    let tile_id_text = tile_id_text(tile_id);
-    core.data
-        .tile_items
-        .get(&tile_id_text)
-        .or(core.data.items.as_ref())
-        .map(|items| items.items.clone())
-        .unwrap_or_default()
-}
-
-fn focused_cancellable_thread(core: &StudioCore) -> Option<(String, String)> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
-    if !matches!(view, ViewSpec::ThreadList) {
-        return None;
-    }
-    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let thread = core.data.threads.as_ref()?.threads.get(cursor)?;
-    let thread_id = field_text(thread, &["thread_id", "id"])?;
-    let status = field_text(thread, &["status", "state"]).unwrap_or_else(|| "unknown".to_string());
-    is_cancellable_thread_status(&status).then_some((thread_id, status))
-}
-
-fn is_cancellable_thread_status(status: &str) -> bool {
-    matches!(status.to_ascii_lowercase().as_str(), "created" | "running")
-}
-
 fn focused_selection_hint(core: &StudioCore) -> Option<String> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
     let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let row = rows_for(core, view, Some(tile_id)).get(cursor)?.clone();
+    let row = focused_rows(core, view, tile_id).get(cursor)?.clone();
     Some(row.secondary.or(row.meta).unwrap_or(row.primary))
-}
-
-fn launcher_specs() -> [(&'static str, &'static str, ViewSpec); 11] {
-    [
-        (
-            "Graph",
-            "RyeOS topology",
-            ViewSpec::Graph { graph_id: None },
-        ),
-        ("Atlas", "2D namespace map", ViewSpec::Atlas),
-        (
-            "Items",
-            "RyeOS objects",
-            ViewSpec::SpaceBrowser { project: None },
-        ),
-        ("Projects", "Known local roots", ViewSpec::Projects),
-        ("Files", "Project files", ViewSpec::Files),
-        ("Threads", "Runs and events", ViewSpec::ThreadList),
-        ("Services", "Daemon endpoints", ViewSpec::Services),
-        ("Remotes", "Federated nodes", ViewSpec::Remotes),
-        ("Trust", "Principals and caps", ViewSpec::Trust),
-        ("Schedules", "Timed work", ViewSpec::Schedules),
-        ("GC", "State cleanup", ViewSpec::GcStatus),
-    ]
 }
 
 fn short_principal(value: &str) -> String {
@@ -1325,810 +1407,32 @@ fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
     actions
 }
 
-fn overview(core: &StudioCore) -> StudioViewVm {
-    let health = health_label(core);
-    StudioViewVm::Overview {
-        metrics: vec![
-            metric(
-                "Health",
-                &health,
-                "Local node",
-                tone_for_health(&health),
-                None,
-            ),
-            metric(
-                "Threads",
-                &core
-                    .data
-                    .threads
-                    .as_ref()
-                    .map(|x| x.threads.len())
-                    .unwrap_or(0)
-                    .to_string(),
-                "Recent runs",
-                StudioTone::Neutral,
-                Some(StudioAction::OpenView {
-                    view: ViewSpec::ThreadList,
-                }),
-            ),
-            metric(
-                "Items",
-                &core
-                    .data
-                    .items
-                    .as_ref()
-                    .map(|x| x.items.len())
-                    .unwrap_or(0)
-                    .to_string(),
-                "Loaded objects",
-                StudioTone::Neutral,
-                Some(StudioAction::OpenView {
-                    view: ViewSpec::SpaceBrowser { project: None },
-                }),
-            ),
-            metric(
-                "Projects",
-                &core
-                    .data
-                    .projects
-                    .as_ref()
-                    .map(|x| x.projects.len())
-                    .unwrap_or(0)
-                    .to_string(),
-                "Known local roots",
-                StudioTone::Neutral,
-                Some(StudioAction::OpenView {
-                    view: ViewSpec::Projects,
-                }),
-            ),
-            metric(
-                "Services",
-                &core
-                    .data
-                    .dimension
-                    .as_ref()
-                    .map(|x| x.local_node.services.len())
-                    .unwrap_or(0)
-                    .to_string(),
-                "Daemon endpoints",
-                StudioTone::Neutral,
-                Some(StudioAction::OpenView {
-                    view: ViewSpec::Services,
-                }),
-            ),
-        ],
-        sections: vec![StudioSectionVm {
-            title: "Project".to_string(),
-            rows: vec![
-                (
-                    "Path".to_string(),
-                    session_vm(core)
-                        .project_path
-                        .unwrap_or_else(|| "No project bound".to_string()),
-                ),
-                ("Mode".to_string(), "RyeOS".to_string()),
-            ],
-            action: Some(StudioAction::SelectDimension),
-        }],
-    }
-}
-
-fn project_rows(core: &StudioCore) -> Vec<StudioRowVm> {
-    let mut rows = Vec::new();
-    let current_project = session_vm(core).project_path;
-    if let Some(root) = current_project.as_ref().filter(|root| {
-        !core.data.projects.as_ref().is_some_and(|projects| {
-            projects
-                .projects
-                .iter()
-                .any(|project| project.root == **root)
-        })
-    }) {
-        rows.push(row(
-            "__add_current_project".to_string(),
-            "Register current project".to_string(),
-            Some(root.clone()),
-            Some("not registered".to_string()),
-            Some(StudioAction::AddCurrentProject),
-        ));
-    }
-    rows.extend(
-        core.data
-            .projects
-            .as_ref()
-            .map(|projects| projects.projects.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|project| {
-                let local_id = project.local_id.clone();
-                row(
-                    local_id.clone(),
-                    if project.name.is_empty() {
-                        project.root.clone()
-                    } else {
-                        project.name
-                    },
-                    Some(project.root),
-                    Some(
-                        if project.exists {
-                            "available"
-                        } else {
-                            "missing"
-                        }
-                        .to_string(),
-                    ),
-                    project
-                        .exists
-                        .then_some(StudioAction::OpenProject { local_id }),
-                )
-            }),
-    );
-    rows
-}
-
-fn trust_rows(core: &StudioCore) -> Vec<StudioRowVm> {
-    let session = session_vm(core);
-    let dimension = core.data.dimension.as_ref();
-    let mut rows = vec![
-        row(
-            "session_principal".to_string(),
-            "Session principal".to_string(),
-            session.user_principal_id.clone(),
-            Some(
-                if session.read_only {
-                    "read only"
-                } else {
-                    "writable"
-                }
-                .to_string(),
-            ),
-            Some(StudioAction::InspectSummary {
-                title: "Session trust".to_string(),
-                detail: serde_json::json!({
-                    "session_id": session.session_id,
-                    "surface_ref": session.surface_ref,
-                    "user_principal_id": session.user_principal_id,
-                    "read_only": session.read_only,
-                }),
-            }),
-        ),
-        row(
-            "local_node_principal".to_string(),
-            "Local node principal".to_string(),
-            dimension.map(|dimension| dimension.local_node.identity.principal_id.clone()),
-            dimension.map(|dimension| dimension.local_node.identity.fingerprint.clone()),
-            dimension.map(|dimension| StudioAction::InspectSummary {
-                title: "Local node identity".to_string(),
-                detail: serde_json::to_value(&dimension.local_node.identity).unwrap_or_default(),
-            }),
-        ),
-        row(
-            "surface".to_string(),
-            "Surface".to_string(),
-            Some(session.surface_ref),
-            Some("effective session surface".to_string()),
-            None,
-        ),
-    ];
-
-    let browser_caps = core
-        .data
-        .session
-        .as_ref()
-        .map(|session| session.granted_caps.clone())
-        .unwrap_or_default();
-    let granted_caps = dimension
-        .map(|dimension| dimension.session.granted_caps.clone())
-        .unwrap_or(browser_caps);
-    rows.extend(granted_caps.into_iter().enumerate().map(|(index, cap)| {
-        row(
-            format!("granted_cap:{index}"),
-            "Granted capability".to_string(),
-            Some(cap.clone()),
-            Some("session".to_string()),
-            Some(StudioAction::InspectSummary {
-                title: "Granted capability".to_string(),
-                detail: serde_json::json!({ "capability": cap }),
-            }),
-        )
-    }));
-
-    if let Some(dimension) = dimension {
-        rows.extend(dimension.local_node.services.iter().flat_map(|service| {
-            service.required_caps.iter().map(move |cap| {
-                row(
-                    format!("required_cap:{}:{cap}", service.endpoint),
-                    "Required capability".to_string(),
-                    Some(cap.clone()),
-                    Some(service.endpoint.clone()),
-                    Some(StudioAction::InspectSummary {
-                        title: service.endpoint.clone(),
-                        detail: serde_json::to_value(service).unwrap_or_default(),
-                    }),
-                )
-            })
-        }));
-    }
-
-    rows
-}
-
-fn rows_for(core: &StudioCore, view: &ViewSpec, tile_id: Option<TileId>) -> Vec<StudioRowVm> {
-    let mut rows: Vec<StudioRowVm> = match view {
-        ViewSpec::ThreadList | ViewSpec::Thread { .. } => core
-            .data
-            .threads
-            .as_ref()
-            .map(|x| x.threads.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                let id =
-                    field_text(&value, &["thread_id", "id"]).unwrap_or_else(|| index.to_string());
-                row(
-                    id.clone(),
-                    id.clone(),
-                    field_text(&value, &["item_ref", "item"]),
-                    field_text(&value, &["status", "state"]),
-                    Some(StudioAction::InspectThread { thread_id: id }),
-                )
-            })
-            .collect(),
-        ViewSpec::SpaceBrowser { .. } => {
-            tile_id.map_or_else(Vec::new, |tile_id| item_rows(core, tile_id))
-        }
-        ViewSpec::Schedules => core
-            .data
-            .schedules
-            .as_ref()
-            .map(|x| x.schedules.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                row(
-                    index.to_string(),
-                    field_text(&value, &["schedule_id", "id", "name"])
-                        .unwrap_or_else(|| "schedule".to_string()),
-                    field_text(&value, &["item_ref", "target"]),
-                    field_text(&value, &["enabled"]),
-                    Some(StudioAction::InspectSummary {
-                        title: "Schedule".to_string(),
-                        detail: value,
-                    }),
-                )
-            })
-            .collect(),
-        ViewSpec::Remotes => core
-            .data
-            .dimension
-            .as_ref()
-            .map(|x| x.remotes.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|remote| {
-                row(
-                    remote.name.clone(),
-                    remote.name.clone(),
-                    Some(remote.url.clone()),
-                    Some(remote.principal_id.clone()),
-                    Some(StudioAction::InspectSummary {
-                        title: remote.name.clone(),
-                        detail: serde_json::to_value(remote).unwrap_or_default(),
-                    }),
-                )
-            })
-            .collect(),
-        ViewSpec::Services => core
-            .data
-            .dimension
-            .as_ref()
-            .map(|x| x.local_node.services.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|service| {
-                row(
-                    service.endpoint.clone(),
-                    service.endpoint.clone(),
-                    Some(service.service_ref.clone()),
-                    Some(service.availability.clone()),
-                    Some(StudioAction::InspectSummary {
-                        title: service.endpoint.clone(),
-                        detail: serde_json::to_value(service).unwrap_or_default(),
-                    }),
-                )
-            })
-            .collect(),
-        ViewSpec::Projects => project_rows(core),
-        ViewSpec::Trust => trust_rows(core),
-        _ => Vec::new(),
-    };
-    if let Some(cursor) = tile_id.and_then(|tile_id| selected_cursor(core, tile_id)) {
-        if let Some(row) = rows.get_mut(cursor) {
-            row.selected = true;
-        }
-    }
-    rows
-}
-
-fn files(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
-    let tile_id_text = tile_id_text(tile_id);
-    let (root, path) = file_state(tile);
-    StudioViewVm::Files {
-        root: root.clone(),
-        path: path.clone(),
-        preview: file_preview_vm(core, tile, &root, &path),
-        rows: mark_selected(
-            core.data
-                .tile_files
-                .get(&tile_id_text)
-                .or(core.data.files.as_ref())
-                .as_ref()
-                .map(|x| x.entries.clone())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|entry| {
-                    let path = join_path(&path, &entry.name);
-                    let kind = if entry.is_dir { "directory" } else { "file" };
-                    let mut row = row(
-                        path.clone(),
-                        entry.name,
-                        if entry.is_dir {
-                            Some("directory".to_string())
-                        } else {
-                            None
-                        },
-                        entry.size.map(|size| size.to_string()),
-                        Some(if entry.is_dir {
-                            StudioAction::ListFiles {
-                                tile_id: tile_id_text.clone(),
-                                root: root.clone(),
-                                path,
-                            }
-                        } else {
-                            StudioAction::ReadFile {
-                                root: root.clone(),
-                                path,
-                            }
-                        }),
-                    );
-                    row.kind = Some(kind.to_string());
-                    row
-                })
-                .collect(),
-            selected_cursor(core, tile_id),
-        ),
-    }
-}
-
-fn file_preview_vm(
-    core: &StudioCore,
-    tile: &TileState,
-    root: &str,
-    path: &str,
-) -> Option<StudioFilePreviewVm> {
-    let files = core
-        .data
-        .tile_files
-        .values()
-        .find(|files| files.root == root && files.path == path)
-        .or_else(|| {
-            core.data
-                .files
-                .as_ref()
-                .filter(|files| files.root == root && files.path == path)
-        });
-    let selected = files.and_then(|files| {
-        let selected_index = match &tile.local {
-            ViewLocalState::Files { cursor, .. } => *cursor,
-            _ => 0,
-        };
-        files.entries.get(selected_index)
-    });
-
-    let Some(selected) = selected else {
-        return Some(StudioFilePreviewVm {
-            title: if path.is_empty() {
-                "/".to_string()
-            } else {
-                path.to_string()
-            },
-            subtitle: root.to_string(),
-            kind: "directory".to_string(),
-            size: None,
-            truncated: false,
-            content: None,
-            hint: "Select a file to preview or a directory to enter.".to_string(),
-        });
-    };
-
-    let selected_path = join_path(path, &selected.name);
-    if selected.is_dir {
-        return Some(StudioFilePreviewVm {
-            title: selected.name.clone(),
-            subtitle: selected_path,
-            kind: "directory".to_string(),
-            size: None,
-            truncated: false,
-            content: None,
-            hint: "Enter opens this directory.".to_string(),
-        });
-    }
-
-    let read = core
-        .data
-        .file_read
-        .as_ref()
-        .filter(|file| file.root == root && file.path == selected_path);
-    Some(StudioFilePreviewVm {
-        title: selected.name.clone(),
-        subtitle: selected_path,
-        kind: "file".to_string(),
-        size: read
-            .map(|file| file.size)
-            .or(selected.size.map(|size| size as usize)),
-        truncated: read.is_some_and(|file| file.truncated),
-        content: read.map(|file| file.content.clone()),
-        hint: if read.is_some() {
-            "Preview loaded from file read.".to_string()
-        } else {
-            "Enter reads this file into the preview.".to_string()
-        },
-    })
-}
-
 pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
     let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let rows = rows_for(core, view, Some(tile_id));
+    let rows = focused_rows(core, view, tile_id);
     rows.get(cursor).and_then(|row| row.action.clone())
+}
+
+/// Rows of the focused tile, regardless of how it is bound. Bound views
+/// project their fetched source; the thread view projects the threads
+/// DTO; ambient views have no rows.
+fn focused_rows(core: &StudioCore, view: &ViewSpec, tile_id: TileId) -> Vec<StudioRowVm> {
+    match view {
+        ViewSpec::Bound { view_ref } => match bound_view_vm(core, tile_id, view_ref) {
+            StudioViewVm::Rows { rows, .. } => rows,
+            _ => Vec::new(),
+        },
+        ViewSpec::Atlas | ViewSpec::Graph { .. } => Vec::new(),
+    }
 }
 
 fn selected_cursor(core: &StudioCore, tile_id: TileId) -> Option<usize> {
     let tile = core.workspace.tiles.get(&tile_id)?;
     match &tile.local {
-        ViewLocalState::ThreadList { cursor, .. }
-        | ViewLocalState::SpaceBrowser { cursor, .. }
-        | ViewLocalState::Files { cursor, .. }
-        | ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
-        ViewLocalState::Thread(state) => Some(state.timeline_cursor),
+        ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
         ViewLocalState::None => None,
-    }
-}
-
-fn mark_selected(mut rows: Vec<StudioRowVm>, cursor: Option<usize>) -> Vec<StudioRowVm> {
-    if let Some(row) = cursor.and_then(|cursor| rows.get_mut(cursor)) {
-        row.selected = true;
-    }
-    rows
-}
-
-fn item_filter_state(tile: &TileState) -> (String, String) {
-    match &tile.local {
-        ViewLocalState::SpaceBrowser { query, kind, .. } => (query.clone(), kind.clone()),
-        _ => (String::new(), String::new()),
-    }
-}
-
-fn item_folder_state(tile: &TileState) -> String {
-    match &tile.local {
-        ViewLocalState::SpaceBrowser { path, .. } => path.clone(),
-        _ => String::new(),
-    }
-}
-
-fn item_rows(core: &StudioCore, tile_id: TileId) -> Vec<StudioRowVm> {
-    let tile_id_text = tile_id_text(tile_id);
-    let folder = core
-        .workspace
-        .tiles
-        .get(&tile_id)
-        .map(item_folder_state)
-        .unwrap_or_default();
-    let folder_prefix = if folder.is_empty() {
-        String::new()
-    } else {
-        format!("{folder}/")
-    };
-    let items = core
-        .data
-        .tile_items
-        .get(&tile_id_text)
-        .or(core.data.items.as_ref())
-        .map(|x| x.items.clone())
-        .unwrap_or_default();
-    let mut dirs = BTreeSet::new();
-    let mut rows = Vec::new();
-
-    if !folder.is_empty() {
-        let parent = folder
-            .rsplit_once('/')
-            .map(|(parent, _)| parent.to_string())
-            .unwrap_or_default();
-        let mut up = row(
-            "..".to_string(),
-            "..".to_string(),
-            Some(parent.clone()),
-            Some("folder".to_string()),
-            Some(StudioAction::EnterItemFolder {
-                tile_id: tile_id_text.clone(),
-                path: parent,
-            }),
-        );
-        up.kind = Some("folder_up".to_string());
-        rows.push(up);
-    }
-
-    for item in items {
-        let item_path = item_path(&item);
-        let Some(remainder) = item_path.strip_prefix(&folder_prefix) else {
-            continue;
-        };
-        if remainder.is_empty() {
-            continue;
-        }
-        if let Some((dir, _)) = remainder.split_once('/') {
-            dirs.insert(dir.to_string());
-            continue;
-        }
-        let kind = item.item_kind.clone();
-        let display = item_leaf_label(&item.label, &item.bare_id, remainder);
-        let mut item_row = row(
-            item.canonical_ref.clone(),
-            display,
-            Some(item.canonical_ref.clone()),
-            Some(item.item_kind),
-            Some(StudioAction::InspectItem {
-                canonical_ref: item.canonical_ref,
-            }),
-        );
-        item_row.kind = Some(kind);
-        rows.push(item_row);
-    }
-
-    for dir in dirs.into_iter().rev() {
-        let path = join_item_path(&folder, &dir);
-        let mut dir_row = row(
-            format!("folder:{path}"),
-            dir,
-            Some(path.clone()),
-            Some("folder".to_string()),
-            Some(StudioAction::EnterItemFolder {
-                tile_id: tile_id_text.clone(),
-                path,
-            }),
-        );
-        dir_row.kind = Some("folder".to_string());
-        rows.insert(if folder.is_empty() { 0 } else { 1 }, dir_row);
-    }
-    rows
-}
-
-fn item_path(item: &super::dto::StudioItemDto) -> String {
-    item.namespace
-        .as_ref()
-        .filter(|namespace| !namespace.is_empty())
-        .map(|namespace| {
-            if item.bare_id.starts_with(&format!("{namespace}/")) {
-                item.bare_id.clone()
-            } else {
-                join_item_path(namespace, &item.bare_id)
-            }
-        })
-        .unwrap_or_else(|| item.bare_id.clone())
-}
-
-fn item_leaf_label(label: &str, bare_id: &str, fallback: &str) -> String {
-    if !label.is_empty() && label != bare_id {
-        label.to_string()
-    } else {
-        fallback.to_string()
-    }
-}
-
-fn join_item_path(parent: &str, child: &str) -> String {
-    if parent.is_empty() {
-        child.to_string()
-    } else if child.is_empty() {
-        parent.to_string()
-    } else {
-        format!("{parent}/{child}")
-    }
-}
-
-fn file_state(tile: &TileState) -> (String, String) {
-    match &tile.local {
-        ViewLocalState::Files { root, path, .. } => (root.clone(), path.clone()),
-        _ => ("project_ai".to_string(), String::new()),
-    }
-}
-
-fn inspector(core: &StudioCore) -> StudioInspectorVm {
-    match &core.ui.inspector {
-        StudioInspectorState::Dimension => StudioInspectorVm {
-            title: "RyeOS".to_string(),
-            subtitle: Some("Current project and local node state".to_string()),
-            sections: vec![StudioSectionVm {
-                title: "Project".to_string(),
-                rows: vec![
-                    (
-                        "Path".to_string(),
-                        session_vm(core)
-                            .project_path
-                            .unwrap_or_else(|| "No project bound".to_string()),
-                    ),
-                    ("Mode".to_string(), "RyeOS".to_string()),
-                    ("Health".to_string(), health_label(core)),
-                ],
-                action: None,
-            }],
-            code_blocks: Vec::new(),
-            empty: false,
-            empty_message: None,
-        },
-        StudioInspectorState::Summary { title, detail } => {
-            code_or_empty(title, None, serde_json::to_string_pretty(detail).ok(), None)
-        }
-        StudioInspectorState::Item { canonical_ref } => item_inspector(core, canonical_ref),
-        StudioInspectorState::Thread { thread_id } => thread_inspector(core, thread_id),
-        StudioInspectorState::File { root, path } => code_or_empty(
-            path,
-            Some(root),
-            core.data.file_read.as_ref().map(|x| x.content.clone()),
-            Some("Loading file…"),
-        ),
-        StudioInspectorState::Empty => StudioInspectorVm {
-            title: "RyeOS".to_string(),
-            subtitle: Some("Select an object to inspect it.".to_string()),
-            sections: Vec::new(),
-            code_blocks: Vec::new(),
-            empty: true,
-            empty_message: Some("Select an object to inspect it.".to_string()),
-        },
-    }
-}
-
-fn item_inspector(core: &StudioCore, canonical_ref: &str) -> StudioInspectorVm {
-    let inspection = core.data.item_inspection.as_ref();
-    let mut vm = code_or_empty(
-        canonical_ref,
-        Some("Item"),
-        inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
-        Some("Loading item details…"),
-    );
-    let parameters = serde_json::json!({});
-    let pending = core.has_pending_invoke(canonical_ref, &parameters);
-    if inspection.is_some_and(|x| x.item.executable) && !session_vm(core).read_only && !pending {
-        vm.sections.push(StudioSectionVm {
-            title: "Run item".to_string(),
-            rows: vec![
-                ("Action".to_string(), "Run".to_string()),
-                ("Target".to_string(), canonical_ref.to_string()),
-            ],
-            action: Some(StudioAction::ExecuteItem {
-                item_ref: canonical_ref.to_string(),
-                parameters,
-            }),
-        });
-    } else if inspection.is_some_and(|x| x.item.executable) && pending {
-        vm.sections.push(StudioSectionVm {
-            title: "Run item".to_string(),
-            rows: vec![
-                ("Action".to_string(), "Running".to_string()),
-                ("Target".to_string(), canonical_ref.to_string()),
-            ],
-            action: None,
-        });
-    }
-    vm
-}
-
-fn thread_inspector(core: &StudioCore, thread_id: &str) -> StudioInspectorVm {
-    let inspection = core.data.thread_inspection.as_ref();
-    let mut vm = code_or_empty(
-        thread_id,
-        Some("Thread"),
-        inspection.and_then(|x| serde_json::to_string_pretty(x).ok()),
-        Some("Loading thread details…"),
-    );
-    if inspection
-        .and_then(|x| field_text(&x.thread, &["status", "state"]))
-        .is_some_and(|status| is_cancellable_thread_status(&status))
-        && !session_vm(core).read_only
-    {
-        let pending = core.has_pending_cancel(thread_id);
-        vm.sections.push(StudioSectionVm {
-            title: "Cancel thread".to_string(),
-            rows: vec![
-                (
-                    "Action".to_string(),
-                    if pending { "Cancelling" } else { "Cancel" }.to_string(),
-                ),
-                ("Thread".to_string(), thread_id.to_string()),
-            ],
-            action: (!pending).then_some(StudioAction::CancelThread {
-                thread_id: thread_id.to_string(),
-            }),
-        });
-    }
-    vm
-}
-
-fn code_or_empty(
-    title: &str,
-    subtitle: Option<&str>,
-    content: Option<String>,
-    empty_message: Option<&str>,
-) -> StudioInspectorVm {
-    let empty = content.is_none();
-    StudioInspectorVm {
-        title: title.to_string(),
-        subtitle: subtitle.map(str::to_string),
-        sections: Vec::new(),
-        code_blocks: content
-            .map(|content| {
-                vec![StudioCodeBlockVm {
-                    label: "Detail".to_string(),
-                    language: Some("json".to_string()),
-                    content,
-                }]
-            })
-            .unwrap_or_default(),
-        empty,
-        empty_message: empty_message.map(str::to_string),
-    }
-}
-
-fn metric(
-    label: &str,
-    value: &str,
-    hint: &str,
-    tone: StudioTone,
-    action: Option<StudioAction>,
-) -> StudioMetricVm {
-    StudioMetricVm {
-        label: label.to_string(),
-        value: value.to_string(),
-        hint: Some(hint.to_string()),
-        tone,
-        action,
-    }
-}
-
-fn row(
-    id: String,
-    primary: String,
-    secondary: Option<String>,
-    meta: Option<String>,
-    action: Option<StudioAction>,
-) -> StudioRowVm {
-    StudioRowVm {
-        id,
-        primary,
-        secondary,
-        meta,
-        kind: None,
-        action,
-        tone: StudioTone::Neutral,
-        selected: false,
-    }
-}
-
-fn field_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| value.get(*key)).map(|v| {
-        v.as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| v.to_string())
-    })
-}
-
-fn join_path(base: &str, name: &str) -> String {
-    if base.is_empty() {
-        name.to_string()
-    } else {
-        format!("{base}/{name}")
     }
 }
 
@@ -2179,22 +1483,188 @@ fn subtitle(core: &StudioCore) -> String {
         .unwrap_or_else(|| "Tiled RyeOS workspace".to_string())
 }
 
-fn item_kind_options() -> Vec<StudioFilterOptionVm> {
-    [
-        ("", "All kinds"),
-        ("directive", "Directives"),
-        ("tool", "Tools"),
-        ("knowledge", "Knowledge"),
-        ("config", "Config"),
-    ]
-    .into_iter()
-    .map(|(value, label)| StudioFilterOptionVm {
-        value: value.to_string(),
-        label: label.to_string(),
-    })
-    .collect()
-}
-
 fn tile_id_text(id: TileId) -> String {
     id.0.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record(
+        primary: &str,
+        meta: Option<&str>,
+        tone: Option<&str>,
+        role: TimelineRole,
+        pair_key: Option<&str>,
+    ) -> ProjectedRecord {
+        ProjectedRecord {
+            primary: primary.to_string(),
+            meta: meta.map(str::to_string),
+            tone: tone.map(str::to_string),
+            role,
+            pair_key: pair_key.map(str::to_string),
+            raw: json!({ "primary": primary }),
+        }
+    }
+
+    #[test]
+    fn timeline_entries_merge_consecutive_flow_records() {
+        let entries = timeline_entries(vec![
+            record("hello ", None, None, TimelineRole::Flow, None),
+            record("world", None, Some("accent"), TimelineRole::Flow, None),
+        ]);
+
+        assert_eq!(
+            entries,
+            vec![StudioTimelineEntryVm::Block {
+                text: "hello world".to_string(),
+                tone: StudioTone::Accent,
+            }]
+        );
+    }
+
+    #[test]
+    fn timeline_entries_collapse_matching_pairs_in_open_position() {
+        let entries = timeline_entries(vec![
+            record(
+                "run tool",
+                None,
+                Some("accent"),
+                TimelineRole::PairOpen,
+                Some("call-1"),
+            ),
+            record("thinking", None, None, TimelineRole::Line, None),
+            record(
+                "ok",
+                Some("42ms"),
+                Some("good"),
+                TimelineRole::PairClose,
+                Some("call-1"),
+            ),
+        ]);
+
+        assert_eq!(
+            entries,
+            vec![
+                StudioTimelineEntryVm::Pair {
+                    summary: "run tool".to_string(),
+                    meta: Some("42ms".to_string()),
+                    tone: StudioTone::Good,
+                    pending: false,
+                },
+                StudioTimelineEntryVm::Line {
+                    primary: "thinking".to_string(),
+                    meta: None,
+                    tone: StudioTone::Neutral,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn timeline_entries_close_without_open_degrades_to_line() {
+        let entries = timeline_entries(vec![record(
+            "orphan close",
+            Some("done"),
+            Some("good"),
+            TimelineRole::PairClose,
+            Some("call-1"),
+        )]);
+
+        assert_eq!(
+            entries,
+            vec![StudioTimelineEntryVm::Line {
+                primary: "orphan close".to_string(),
+                meta: Some("done".to_string()),
+                tone: StudioTone::Good,
+            }]
+        );
+    }
+
+    #[test]
+    fn timeline_entries_open_without_close_stays_pending() {
+        let entries = timeline_entries(vec![record(
+            "run tool",
+            None,
+            Some("accent"),
+            TimelineRole::PairOpen,
+            Some("call-1"),
+        )]);
+
+        assert_eq!(
+            entries,
+            vec![StudioTimelineEntryVm::Pair {
+                summary: "run tool".to_string(),
+                meta: None,
+                tone: StudioTone::Accent,
+                pending: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn timeline_entries_boundary_becomes_separator() {
+        let entries = timeline_entries(vec![record(
+            "turn 2",
+            None,
+            None,
+            TimelineRole::Boundary,
+            None,
+        )]);
+
+        assert_eq!(
+            entries,
+            vec![StudioTimelineEntryVm::Separator {
+                label: "turn 2".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn timeline_entries_records_with_no_role_map_are_lines() {
+        let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
+            "widget": "timeline",
+            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "projections": { "default": { "primary": "event_type" } }
+        }))
+        .unwrap();
+        let records = super::super::content::project_records(
+            &binding,
+            &json!({ "events": [ { "event_type": "message" } ] }),
+        );
+
+        assert_eq!(
+            timeline_entries(records),
+            vec![StudioTimelineEntryVm::Line {
+                primary: "message".to_string(),
+                meta: None,
+                tone: StudioTone::Neutral,
+            }]
+        );
+    }
+
+    #[test]
+    fn timeline_entries_unknown_role_degrades_to_line() {
+        let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
+            "widget": "timeline",
+            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "projections": {
+                "event_kinds": { "message": { "primary": "event_type", "role": "unknown" } },
+                "default": { "primary": "event_type" }
+            }
+        }))
+        .unwrap();
+        let records = super::super::content::project_records(
+            &binding,
+            &json!({ "events": [ { "event_type": "message" } ] }),
+        );
+
+        assert_eq!(records[0].role, TimelineRole::Line);
+        assert!(matches!(
+            timeline_entries(records).as_slice(),
+            [StudioTimelineEntryVm::Line { primary, .. }] if primary == "message"
+        ));
+    }
 }

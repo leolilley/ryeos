@@ -45,29 +45,24 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         })
         .collect();
 
-    let (routes_available, fingerprint, routes) =
-        match state.extensions.get::<RouteDiagnostics>() {
-            Some(diags) => {
-                let entries = diags.entries();
-                let method_filter = req.method.as_deref().map(str::to_ascii_uppercase);
-                let filtered: Vec<Value> = entries
-                    .iter()
-                    .filter(|e| {
-                        req.path
-                            .as_deref()
-                            .is_none_or(|p| e.path.contains(p))
-                    })
-                    .filter(|e| {
-                        method_filter
-                            .as_deref()
-                            .is_none_or(|m| e.methods.iter().any(|rm| rm == m))
-                    })
-                    .map(|e| serde_json::to_value(e).expect("RouteDiagnosticEntry serializes"))
-                    .collect();
-                (true, diags.fingerprint().to_string(), filtered)
-            }
-            None => (false, String::new(), Vec::new()),
-        };
+    let (routes_available, fingerprint, routes) = match state.extensions.get::<RouteDiagnostics>() {
+        Some(diags) => {
+            let entries = diags.entries();
+            let method_filter = req.method.as_deref().map(str::to_ascii_uppercase);
+            let filtered: Vec<Value> = entries
+                .iter()
+                .filter(|e| req.path.as_deref().is_none_or(|p| e.path.contains(p)))
+                .filter(|e| {
+                    method_filter
+                        .as_deref()
+                        .is_none_or(|m| e.methods.iter().any(|rm| rm == m))
+                })
+                .map(|e| serde_json::to_value(e).expect("RouteDiagnosticEntry serializes"))
+                .collect();
+            (true, diags.fingerprint().to_string(), filtered)
+        }
+        None => (false, String::new(), Vec::new()),
+    };
 
     Ok(serde_json::json!({
         "routes_available": routes_available,

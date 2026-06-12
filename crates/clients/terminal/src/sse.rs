@@ -1,7 +1,5 @@
 //! SSE event parser — parses Server-Sent Events from the daemon stream.
 
-use ryeos_client_base::ids::ThreadId;
-use ryeos_client_base::update::DaemonEvent;
 use serde::Deserialize;
 
 /// Parsed SSE event from the daemon.
@@ -116,44 +114,6 @@ impl SseEvent {
             },
         }
     }
-
-    /// Convert an SSE event into a DaemonEvent for the given thread.
-    /// Returns `None` for events that don't map to a daemon event
-    /// (e.g. unknown events).
-    pub fn to_daemon_event(&self, thread_id: ThreadId) -> Option<DaemonEvent> {
-        match self {
-            SseEvent::TextDelta { text } => Some(DaemonEvent::TextDelta {
-                thread_id,
-                text: text.clone(),
-            }),
-            SseEvent::ToolCall { name, .. } => Some(DaemonEvent::ToolCallStart {
-                thread_id,
-                name: name.clone(),
-            }),
-            SseEvent::ToolResult {
-                name, duration_ms, ..
-            } => Some(DaemonEvent::ToolCallResult {
-                thread_id,
-                name: name.clone(),
-                duration_ms: *duration_ms,
-            }),
-            SseEvent::Done { status } => {
-                if status == "error" {
-                    Some(DaemonEvent::ThreadFailed {
-                        id: thread_id,
-                        error: "stream ended with error status".into(),
-                    })
-                } else {
-                    Some(DaemonEvent::ThreadCompleted { id: thread_id })
-                }
-            }
-            SseEvent::Error { message } => Some(DaemonEvent::ThreadFailed {
-                id: thread_id,
-                error: message.clone(),
-            }),
-            SseEvent::Unknown { .. } => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -195,53 +155,6 @@ mod tests {
         let unknown = SseEvent::parse("custom_event", r#"{"foo":"bar"}"#);
         assert!(
             matches!(unknown, SseEvent::Unknown { event_type, .. } if event_type == "custom_event")
-        );
-    }
-
-    #[test]
-    fn sse_to_daemon_event_text_delta() {
-        let event = SseEvent::parse("text_delta", r#"{"text":"hello world"}"#);
-        let daemon = event.to_daemon_event(ThreadId::new(99)).unwrap();
-        assert!(
-            matches!(daemon, DaemonEvent::TextDelta { thread_id, text } if thread_id.0 == 99 && text == "hello world")
-        );
-    }
-
-    #[test]
-    fn sse_to_daemon_event_done_completed() {
-        let event = SseEvent::parse("done", r#"{"status":"completed"}"#);
-        let daemon = event.to_daemon_event(ThreadId::new(42)).unwrap();
-        assert!(matches!(daemon, DaemonEvent::ThreadCompleted { id } if id.0 == 42));
-    }
-
-    #[test]
-    fn sse_to_daemon_event_done_error() {
-        let event = SseEvent::parse("done", r#"{"status":"error"}"#);
-        let daemon = event.to_daemon_event(ThreadId::new(42)).unwrap();
-        assert!(matches!(daemon, DaemonEvent::ThreadFailed { id, .. } if id.0 == 42));
-    }
-
-    #[test]
-    fn sse_to_daemon_event_error() {
-        let event = SseEvent::parse("error", r#"{"message":"timeout"}"#);
-        let daemon = event.to_daemon_event(ThreadId::new(7)).unwrap();
-        assert!(
-            matches!(daemon, DaemonEvent::ThreadFailed { id, error } if id.0 == 7 && error == "timeout")
-        );
-    }
-
-    #[test]
-    fn sse_to_daemon_event_unknown_returns_none() {
-        let event = SseEvent::parse("custom_event", r#"{"foo":"bar"}"#);
-        assert!(event.to_daemon_event(ThreadId::new(1)).is_none());
-    }
-
-    #[test]
-    fn sse_to_daemon_event_tool_call() {
-        let event = SseEvent::parse("tool_call", r#"{"name":"read","input":{}}"#);
-        let daemon = event.to_daemon_event(ThreadId::new(10)).unwrap();
-        assert!(
-            matches!(daemon, DaemonEvent::ToolCallStart { thread_id, name } if thread_id.0 == 10 && name == "read")
         );
     }
 }

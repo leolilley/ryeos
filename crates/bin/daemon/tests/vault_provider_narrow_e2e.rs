@@ -77,9 +77,7 @@ fn plant_model_routing_to(
     provider_id: &str,
     signer: &SigningKey,
 ) -> anyhow::Result<()> {
-    let dir = root
-        .join(ryeos_engine::AI_DIR)
-        .join("config/ryeos-runtime");
+    let dir = root.join(ryeos_engine::AI_DIR).join("config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"tiers:
@@ -410,8 +408,14 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
     // Project routing overrides the bundle's shipped zen routing so
     // tier `general` resolves to the no-auth mock provider.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_provider_config(project.path(), "noauth", &mock_url, None, &fixture.publisher)
-        .expect("plant provider");
+    plant_provider_config(
+        project.path(),
+        "noauth",
+        &mock_url,
+        None,
+        &fixture.publisher,
+    )
+    .expect("plant provider");
     plant_model_routing_to(project.path(), "noauth", &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/narrow_noauth", &fixture.publisher)
         .expect("plant directive");

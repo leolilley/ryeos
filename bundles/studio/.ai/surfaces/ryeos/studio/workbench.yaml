@@ -1,0 +1,53 @@
+# ryeos:signed:2026-06-11T22:51:46Z:019d4ed9d97773509309bec460d9908ed0ce388a2239c5c95b315babc50831a4:30265EtssMDMdvAsZGjBz5sg+rO3zDq5t/pgVnXuSlCN/3377kKj2j6V7lT3txf3QTpFqwQ1zwgJcAF1I2bZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: studio-workbench
+version: "1.0.0"
+description: Working seat - home pane beside a content-bound thread list
+
+layout:
+  root: split
+  nodes:
+    split:
+      type: split
+      axis: horizontal
+      ratio: 0.65
+      first: main
+      second: side
+    main:
+      type: pane
+      view: graph
+    side:
+      type: pane
+      view: view:ryeos/threads/list
+
+library:
+  - view:ryeos/threads/list
+  - view:ryeos/item/inspector
+  - view:ryeos/chain/timeline
+  - view:ryeos/remotes/list
+  - view:ryeos/schedules/list
+  - view:ryeos/commands/grammar
+  - view:ryeos/bundles/list
+  - view:ryeos/node/status
+  - view:ryeos/items/space
+  - view:ryeos/files/list
+  - view:ryeos/gc/status
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:rye/agent/core/base
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View

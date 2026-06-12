@@ -20,6 +20,7 @@ pub enum StudioKey {
     Enter,
     Escape,
     Backspace,
+    Tab,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -114,6 +115,9 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
         StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
             ui(StudioUiEvent::DeleteInputChar)
+        }
+        StudioKey::Tab if context.input_visible && event.modifiers.none() => {
+            ui(StudioUiEvent::CompleteInput)
         }
         StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
         StudioKey::Char(ch)
@@ -314,6 +318,12 @@ mod tests {
             studio_key_command(key(StudioKey::Backspace), context(false, true)),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::DeleteInputChar
+            }
+        ));
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CompleteInput
             }
         ));
         assert!(matches!(

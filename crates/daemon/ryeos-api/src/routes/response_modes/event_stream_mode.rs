@@ -79,6 +79,14 @@ impl StreamSourceCompiler for DispatchLaunchSource {
 
 struct ThreadEventsSource;
 
+struct ChainTailSource;
+
+impl StreamSourceCompiler for ChainTailSource {
+    fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
+        compile_chain_tail(raw)
+    }
+}
+
 impl StreamSourceCompiler for ThreadEventsSource {
     fn compile(&self, raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
         compile_subscription(raw)
@@ -102,6 +110,10 @@ impl Default for EventStreamMode {
         sources.insert(
             "thread_events".into(),
             Arc::new(ThreadEventsSource) as Arc<dyn StreamSourceCompiler>,
+        );
+        sources.insert(
+            "chain_tail".into(),
+            Arc::new(ChainTailSource) as Arc<dyn StreamSourceCompiler>,
         );
         Self { sources }
     }
@@ -281,6 +293,54 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
     Ok(EventStreamStrategy::PathCaptureInput {
         invoker,
         input_field: "thread_id".into(),
+        capture_name,
+    })
+}
+
+fn compile_chain_tail(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
+    if raw.auth != SUBSCRIPTION_REQUIRED_AUTH {
+        return Err(RouteConfigError::SourceAuthRequirement {
+            id: raw.id.clone(),
+            src: "chain_tail".into(),
+            required: SUBSCRIPTION_REQUIRED_AUTH.into(),
+            got: raw.auth.clone(),
+        });
+    }
+    let source_config = &raw.response.source_config;
+    let template = source_config
+        .get("chain_root_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
+            id: raw.id.clone(),
+            src: "chain_tail".into(),
+            reason: "missing 'chain_root_id' in source_config".into(),
+        })?;
+    let capture_name = validate_and_extract_path_capture(
+        template,
+        "chain_tail",
+        "chain_root_id",
+        &raw.id,
+        &raw.path,
+    )?;
+    let keep_alive_secs = source_config
+        .get("keep_alive_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(15);
+    if keep_alive_secs == 0 {
+        return Err(RouteConfigError::InvalidSourceConfig {
+            id: raw.id.clone(),
+            src: "chain_tail".into(),
+            reason: "keep_alive_secs must be > 0".into(),
+        });
+    }
+    let invoker = Arc::new(
+        crate::routes::invokers::chain_tail_invocation::CompiledChainTailInvocation {
+            keep_alive_secs,
+        },
+    );
+    Ok(EventStreamStrategy::PathCaptureInput {
+        invoker,
+        input_field: "chain_root_id".into(),
         capture_name,
     })
 }

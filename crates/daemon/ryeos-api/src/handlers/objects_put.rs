@@ -40,9 +40,14 @@ pub struct Request {
     pub objects: Vec<ObjectEntry>,
 }
 
+/// Per-blob decoded-size ceiling. Route body limits bound each request
+/// as a whole; this additionally keeps an `objects/put` grant from
+/// pushing a single oversized blob through any route configured with a
+/// generous body cap.
+pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let cas_root = state.state_store.cas_root()?;
-    let cas = lillux::cas::CasStore::new(cas_root);
+    let cas = state.cas_store()?;
 
     let _permit = state
         .write_barrier
@@ -51,6 +56,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
 
     let mut blob_hashes = Vec::with_capacity(req.blobs.len());
     for blob in &req.blobs {
+        // Cheap base64-length bound before decoding allocates anything.
+        if blob.data.len() / 4 * 3 > MAX_BLOB_BYTES {
+            anyhow::bail!("blob exceeds the {} byte per-blob limit", MAX_BLOB_BYTES);
+        }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&blob.data)
             .map_err(|e| anyhow::anyhow!("invalid base64 in blob data: {e}"))?;

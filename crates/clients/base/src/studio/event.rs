@@ -18,6 +18,15 @@ pub enum StudioFilterField {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioAction {
     Refresh,
+    /// Run a content-declared affordance against a projected row: the
+    /// ONE generic row interaction. The engine resolves the binding's
+    /// affordance, substitutes row fields, and applies its plane (ui
+    /// facet write or rye token dispatch). No product verbs in code.
+    InvokeAffordance {
+        view_ref: String,
+        affordance_id: String,
+        record: serde_json::Value,
+    },
     OpenView {
         view: ViewSpec,
     },
@@ -150,6 +159,7 @@ pub enum StudioUiEvent {
         text: String,
         cursor: usize,
     },
+    CompleteInput,
     SubmitInput,
     MoveLauncherSelection {
         delta: i32,

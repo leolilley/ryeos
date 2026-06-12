@@ -71,6 +71,9 @@ pub(crate) struct DispatchLaunchOptions {
     pub operation: Option<String>,
     /// Optional op-specific inputs.
     pub inputs: Option<Value>,
+    /// Chained-resume turn: daemon-internal callers only (the
+    /// thread-input service); never populated from raw HTTP bodies.
+    pub previous_thread_id: Option<String>,
 }
 
 impl Default for DispatchLaunchOptions {
@@ -83,6 +86,7 @@ impl Default for DispatchLaunchOptions {
             usage_subject_asserted_by: None,
             operation: None,
             inputs: None,
+            previous_thread_id: None,
         }
     }
 }
@@ -133,6 +137,7 @@ pub(crate) fn spawn_dispatch_launch(
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
     let operation = options.operation;
     let inputs = options.inputs;
+    let previous_thread_id = options.previous_thread_id;
 
     tokio::spawn(async move {
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
@@ -181,6 +186,7 @@ pub(crate) fn spawn_dispatch_launch(
             usage_subject_asserted_by,
             operation,
             inputs,
+            previous_thread_id,
         };
 
         match ryeos_executor::dispatch::dispatch(
@@ -240,6 +246,7 @@ mod tests {
             usage_subject_asserted_by: None,
             operation: Some("validate".to_string()),
             inputs: Some(serde_json::json!({"key": "val"})),
+            previous_thread_id: None,
         };
         assert_eq!(opts.launch_mode, "detached");
         assert_eq!(opts.target_site_id.as_deref(), Some("site:remote"));

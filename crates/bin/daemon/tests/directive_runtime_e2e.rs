@@ -305,8 +305,8 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
-        .await
-        .expect("start daemon");
+    .await
+    .expect("start daemon");
 
     let project = tempfile::tempdir().expect("project tempdir");
     plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");

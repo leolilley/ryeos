@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-11T21:03:06Z:48c08fa911518af13ba5dccd459898437edb705f3d7b177b2814d8bb457b3b47:vA+gbikVVXY/rum8PllaHbQ1k8N/7HYDNYJ/X7RPoU2wG4t/tKiHtwxedzB1T9/OGG/bNVI1YYy8m6Czs55iCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "commands"
+name: "dispatch"
+kind: service
+endpoint: commands.dispatch
+required_caps: ["ryeos.execute.service.commands/dispatch"]
+schema:
+  tokens: array
+  project_path: string?
+description: "Resolve command tokens against the verified registry, bind tail parameters server-side, and dispatch (the one daemon invocation path)"

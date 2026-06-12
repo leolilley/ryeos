@@ -29,6 +29,12 @@ pub struct PersistedEventRecord {
     pub event_type: String,
     pub storage_class: String,
     pub ts: String,
+    /// Hash links into the braid (truth chrome): present on durable rows,
+    /// absent on synthetic/ephemeral records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_chain_event_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_thread_event_hash: Option<String>,
     pub payload: Value,
 }
 
@@ -261,6 +267,8 @@ fn persisted_from_append(
             event_type: input.event_type.clone(),
             storage_class: input.storage_class.clone(),
             ts: stored.ts.clone(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
             payload: input.payload.clone(),
         })
         .collect()
@@ -280,8 +288,48 @@ fn ephemeral_record(
         event_type: event.event_type.clone(),
         storage_class: event.storage_class.clone(),
         ts: lillux::time::iso8601_now(),
+        prev_chain_event_hash: None,
+        prev_thread_event_hash: None,
         payload: event.payload.clone(),
     }
+}
+
+fn append_events_locked(
+    g: &Inner,
+    chain_root_id: &str,
+    thread_id: &str,
+    events: &[NewEventRecord],
+) -> Result<Vec<PersistedEventRecord>> {
+    let mut records: Vec<Option<PersistedEventRecord>> = vec![None; events.len()];
+    let mut durable_events = Vec::new();
+    let mut durable_indices = Vec::new();
+
+    for (idx, event) in events.iter().enumerate() {
+        if event.storage_class == "ephemeral" {
+            records[idx] = Some(ephemeral_record(chain_root_id, thread_id, event));
+        } else {
+            durable_indices.push(idx);
+            durable_events.push(event.clone());
+        }
+    }
+
+    if !durable_events.is_empty() {
+        let te = convert_events(&durable_events, chain_root_id, thread_id);
+        let result =
+            g.state_db
+                .append_events(chain_root_id, thread_id, te, vec![], g.signer.as_ref())?;
+        for (idx, record) in durable_indices
+            .into_iter()
+            .zip(persisted_from_append(&result, &durable_events))
+        {
+            records[idx] = Some(record);
+        }
+    }
+
+    records
+        .into_iter()
+        .map(|record| record.ok_or_else(|| anyhow!("append event record missing")))
+        .collect()
 }
 
 impl StateStore {
@@ -1184,40 +1232,41 @@ impl StateStore {
             None
         };
         let g = self.lock()?;
-        let mut records: Vec<Option<PersistedEventRecord>> = vec![None; events.len()];
-        let mut durable_events = Vec::new();
-        let mut durable_indices = Vec::new();
+        append_events_locked(&g, chain_root_id, thread_id, events)
+    }
 
-        for (idx, event) in events.iter().enumerate() {
-            if event.storage_class == "ephemeral" {
-                records[idx] = Some(ephemeral_record(chain_root_id, thread_id, event));
-            } else {
-                durable_indices.push(idx);
-                durable_events.push(event.clone());
-            }
+    #[tracing::instrument(
+        name = "state:append_events_if_thread_running",
+        skip(self, events),
+        fields(
+            thread_id = %thread_id,
+            chain_root_id = %chain_root_id,
+            event_count = events.len(),
+        )
+    )]
+    pub fn append_events_if_thread_running(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+    ) -> Result<Option<Vec<PersistedEventRecord>>> {
+        let has_cas_events = events
+            .iter()
+            .any(|event| event.storage_class != "ephemeral");
+        let _permit = if has_cas_events {
+            Some(self.acquire_write_permit()?)
+        } else {
+            None
+        };
+        let g = self.lock()?;
+        let Some(thread) = g.state_db.get_thread(thread_id)? else {
+            return Ok(None);
+        };
+        if thread.status != "running" {
+            return Ok(None);
         }
 
-        if !durable_events.is_empty() {
-            let te = convert_events(&durable_events, chain_root_id, thread_id);
-            let result = g.state_db.append_events(
-                chain_root_id,
-                thread_id,
-                te,
-                vec![],
-                g.signer.as_ref(),
-            )?;
-            for (idx, record) in durable_indices
-                .into_iter()
-                .zip(persisted_from_append(&result, &durable_events))
-            {
-                records[idx] = Some(record);
-            }
-        }
-
-        records
-            .into_iter()
-            .map(|record| record.ok_or_else(|| anyhow!("append event record missing")))
-            .collect()
+        append_events_locked(&g, chain_root_id, thread_id, events).map(Some)
     }
 
     pub fn replay_events(
@@ -1253,6 +1302,8 @@ impl StateStore {
                     event_type: row.event_type,
                     storage_class: row.durability,
                     ts: row.ts,
+                    prev_chain_event_hash: row.prev_chain_event_hash,
+                    prev_thread_event_hash: row.prev_thread_event_hash,
                     payload,
                 })
             })
@@ -1284,6 +1335,8 @@ impl StateStore {
                     event_type: row.event_type,
                     storage_class: row.durability,
                     ts: row.ts,
+                    prev_chain_event_hash: row.prev_chain_event_hash,
+                    prev_thread_event_hash: row.prev_thread_event_hash,
                     payload,
                 })
             })

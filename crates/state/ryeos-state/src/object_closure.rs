@@ -335,6 +335,9 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
             push_optional_hash(value, "prev_thread_event_hash", &mut links.object_hashes)?;
         }
+        "bundle_event" => {
+            push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
+        }
         "project_snapshot" => {
             push_required_hash(value, "project_manifest_hash", &mut links.object_hashes)?;
             push_optional_hash(value, "user_manifest_hash", &mut links.object_hashes)?;

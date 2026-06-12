@@ -66,6 +66,19 @@ pub struct SurfaceSpec {
     pub layout: SurfaceLayoutSpec,
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+    /// Resolved `view:` bindings embedded at session/load time, keyed by
+    /// ref (views-as-content; populated by the resolver, never authored
+    /// inline — surfaces reference views, they do not define them).
+    #[serde(default)]
+    pub views: Option<serde_json::Value>,
+    /// Optional home-panel view ref (content for the home dimension's
+    /// brand/idle state; absent = no panel, renderers degrade).
+    #[serde(default)]
+    pub home_view: Option<String>,
+    /// Launchable view refs (the surface's library): resolved and
+    /// embedded alongside pane refs; the launcher derives from these.
+    #[serde(default)]
+    pub library: Vec<String>,
     #[serde(default)]
     pub ambient: Option<AmbientSpec>,
     #[serde(default)]
@@ -121,76 +134,68 @@ fn default_ratio() -> f32 {
     0.5
 }
 
-/// Supported view kinds for surface panes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Supported view kinds for surface panes. `Bound` carries a `view:` item
+/// ref — views-as-content; the remaining named kinds are sanctioned
+/// structural views.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ViewKindSpec {
-    ThreadList,
-    Thread,
-    Overview,
-    Remotes,
-    Services,
-    ItemInspector,
-    Schedules,
-    GcStatus,
-    Files,
-    Projects,
-    SpaceBrowser,
-    Trust,
     Atlas,
     Graph,
-    EventInspector,
+    /// A `view:` item reference (views-as-content).
+    Bound(String),
+}
+
+const VIEW_KIND_NAMES: &[(&str, fn() -> ViewKindSpec)] = &[
+    ("atlas", || ViewKindSpec::Atlas),
+    ("graph", || ViewKindSpec::Graph),
+];
+
+impl Serialize for ViewKindSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let ViewKindSpec::Bound(view_ref) = self {
+            return serializer.serialize_str(view_ref);
+        }
+        for (name, make) in VIEW_KIND_NAMES {
+            if make() == *self {
+                return serializer.serialize_str(name);
+            }
+        }
+        unreachable!("every non-Bound view kind has a name")
+    }
+}
+
+impl<'de> Deserialize<'de> for ViewKindSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        for (name, make) in VIEW_KIND_NAMES {
+            if *name == raw {
+                return Ok(make());
+            }
+        }
+        if raw.starts_with("view:") {
+            return Ok(ViewKindSpec::Bound(raw));
+        }
+        Err(serde::de::Error::custom(format!(
+            "unknown pane view `{raw}` (named kind or view: ref expected)"
+        )))
+    }
 }
 
 impl ViewKindSpec {
     /// Convert to a ViewSpec with no ID binding.
     pub fn to_view_spec(&self) -> ViewSpec {
         match self {
-            ViewKindSpec::ThreadList => ViewSpec::ThreadList,
-            ViewKindSpec::Thread => ViewSpec::Thread { thread_id: None },
-            ViewKindSpec::Overview => ViewSpec::Overview,
-            ViewKindSpec::Remotes => ViewSpec::Remotes,
-            ViewKindSpec::Services => ViewSpec::Services,
-            ViewKindSpec::ItemInspector => ViewSpec::ItemInspector,
-            ViewKindSpec::Schedules => ViewSpec::Schedules,
-            ViewKindSpec::GcStatus => ViewSpec::GcStatus,
-            ViewKindSpec::Files => ViewSpec::Files,
-            ViewKindSpec::Projects => ViewSpec::Projects,
-            ViewKindSpec::SpaceBrowser => ViewSpec::SpaceBrowser { project: None },
-            ViewKindSpec::Trust => ViewSpec::Trust,
             ViewKindSpec::Atlas => ViewSpec::Atlas,
             ViewKindSpec::Graph => ViewSpec::Graph { graph_id: None },
-            ViewKindSpec::EventInspector => ViewSpec::EventInspector,
+            ViewKindSpec::Bound(view_ref) => ViewSpec::Bound {
+                view_ref: view_ref.clone(),
+            },
         }
     }
 
     /// Create the appropriate initial local state for this view kind.
     pub fn initial_local_state(&self) -> ViewLocalState {
-        match self {
-            ViewKindSpec::ThreadList => ViewLocalState::ThreadList {
-                cursor: 0,
-                filter: String::new(),
-            },
-            ViewKindSpec::Thread => ViewLocalState::Thread(Default::default()),
-            ViewKindSpec::SpaceBrowser => ViewLocalState::SpaceBrowser {
-                cursor: 0,
-                query: String::new(),
-                kind: String::new(),
-                path: String::new(),
-                scroll: 0,
-            },
-            ViewKindSpec::Overview
-            | ViewKindSpec::Services
-            | ViewKindSpec::ItemInspector
-            | ViewKindSpec::Schedules
-            | ViewKindSpec::GcStatus
-            | ViewKindSpec::Files
-            | ViewKindSpec::EventInspector => ViewLocalState::GenericList {
-                cursor: 0,
-                scroll: 0,
-            },
-            _ => ViewLocalState::None,
-        }
+        self.to_view_spec().initial_local_state()
     }
 }
 
@@ -275,7 +280,10 @@ pub struct SurfaceCommandSpec {
     #[serde(default)]
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invoke: Option<crate::commands::InvocationSpec>,
+    /// Invocation spec — open content (planes/grammar), never a typed
+    /// client enum. Renderers dispatch it through the shared invocation
+    /// system.
+    pub invoke: Option<serde_json::Value>,
     #[serde(default)]
     pub requires_capabilities: Vec<String>,
 }
@@ -525,7 +533,7 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
 /// The built-in default Studio surface — mission-control layout.
 ///
 /// Data-equivalent to `surface:ryeos/studio/base`.
-/// Three-pane: thread list (left 25%) | thread (right-top 85%) + status (right-bottom).
+/// Three-pane: thread list (left 25%) | chain timeline (right-top 85%) + status (right-bottom).
 pub fn builtin_default() -> SurfaceSpec {
     let mut nodes = std::collections::HashMap::new();
 
@@ -541,7 +549,7 @@ pub fn builtin_default() -> SurfaceSpec {
     nodes.insert(
         "thread_list".into(),
         LayoutNodeSpec::Pane {
-            view: ViewKindSpec::ThreadList,
+            view: ViewKindSpec::Bound("view:ryeos/threads/list".into()),
         },
     );
     nodes.insert(
@@ -556,13 +564,13 @@ pub fn builtin_default() -> SurfaceSpec {
     nodes.insert(
         "thread".into(),
         LayoutNodeSpec::Pane {
-            view: ViewKindSpec::Thread,
+            view: ViewKindSpec::Bound("view:ryeos/chain/timeline".into()),
         },
     );
     nodes.insert(
         "status".into(),
         LayoutNodeSpec::Pane {
-            view: ViewKindSpec::Overview,
+            view: ViewKindSpec::Bound("view:ryeos/node/status".into()),
         },
     );
 
@@ -576,6 +584,9 @@ pub fn builtin_default() -> SurfaceSpec {
             nodes,
         },
         input: None,
+        views: None,
+        home_view: None,
+        library: Vec::new(),
         ambient: None,
         affordances: Vec::new(),
         instruments: Vec::new(),
@@ -978,15 +989,14 @@ mod tests {
     fn workspace_initializes_correct_local_state() {
         let spec = builtin_default();
         let ws = spec.to_workspace();
-        // Thread list tile should have ThreadList local state
-        let thread_list_tile = ws
-            .tiles
-            .values()
-            .find(|t| matches!(t.view, ViewSpec::ThreadList));
+        // Bound list tile should carry generic list local state
+        let thread_list_tile = ws.tiles.values().find(|t| {
+            matches!(&t.view, ViewSpec::Bound { view_ref } if view_ref == "view:ryeos/threads/list")
+        });
         assert!(thread_list_tile.is_some());
         assert!(matches!(
             thread_list_tile.unwrap().local,
-            ViewLocalState::ThreadList { .. }
+            ViewLocalState::GenericList { .. }
         ));
     }
 
@@ -1002,6 +1012,9 @@ mod tests {
                 nodes: std::collections::HashMap::new(),
             },
             input: None,
+            views: None,
+            home_view: None,
+            library: Vec::new(),
             ambient: None,
             affordances: Vec::new(),
             instruments: Vec::new(),
@@ -1042,6 +1055,9 @@ mod tests {
                 nodes,
             },
             input: None,
+            views: None,
+            home_view: None,
+            library: Vec::new(),
             ambient: None,
             affordances: Vec::new(),
             instruments: Vec::new(),
@@ -1083,7 +1099,7 @@ root = "main"
 
 [layout.nodes.main]
 type = "pane"
-view = "thread_list"
+view = "view:ryeos/threads/list"
 "#,
         )
         .unwrap();
@@ -1139,19 +1155,11 @@ view = "thread_list"
     #[test]
     fn view_kind_initial_local_state() {
         assert!(matches!(
-            ViewKindSpec::ThreadList.initial_local_state(),
-            ViewLocalState::ThreadList { .. }
+            ViewKindSpec::Bound("view:test/x".into()).initial_local_state(),
+            ViewLocalState::GenericList { .. }
         ));
         assert!(matches!(
-            ViewKindSpec::Thread.initial_local_state(),
-            ViewLocalState::Thread(_)
-        ));
-        assert!(matches!(
-            ViewKindSpec::SpaceBrowser.initial_local_state(),
-            ViewLocalState::SpaceBrowser { .. }
-        ));
-        assert!(matches!(
-            ViewKindSpec::Trust.initial_local_state(),
+            ViewKindSpec::Atlas.initial_local_state(),
             ViewLocalState::None
         ));
     }
@@ -1184,12 +1192,8 @@ view = "thread_list"
     #[test]
     fn view_kind_to_view_spec_roundtrip() {
         assert!(matches!(
-            ViewKindSpec::ThreadList.to_view_spec(),
-            ViewSpec::ThreadList
-        ));
-        assert!(matches!(
-            ViewKindSpec::Thread.to_view_spec(),
-            ViewSpec::Thread { .. }
+            ViewKindSpec::Bound("view:test/x".into()).to_view_spec(),
+            ViewSpec::Bound { .. }
         ));
         assert!(matches!(
             ViewKindSpec::Graph.to_view_spec(),
@@ -1208,7 +1212,7 @@ view = "thread_list"
             .unwrap_or_else(|e| panic!("failed to parse bundled base surface: {}", e));
         assert_eq!(spec.name, "studio-base");
         assert!(!spec.affordances.is_empty());
-        assert!(spec.layout.nodes.contains_key("main"));
+        assert!(spec.layout.nodes.contains_key("home"));
         let warnings = validate_surface(&spec);
         assert!(
             warnings.is_empty(),
@@ -1216,20 +1220,60 @@ view = "thread_list"
             warnings
         );
         let ws = spec.to_workspace();
-        assert_eq!(ws.tiles.len(), 3);
+        assert_eq!(ws.tiles.len(), 1);
     }
 
     #[test]
-    fn bundled_graph_surface_loads() {
+    fn legacy_product_pane_names_are_rejected() {
+        // The named-kind vocabulary is engine-only; product concepts
+        // arrive as `view:` refs. Old names must fail loudly, never
+        // silently map.
+        for legacy in [
+            "thread_list",
+            "overview",
+            "remotes",
+            "services",
+            "item_inspector",
+            "schedules",
+            "gc_status",
+            "files",
+            "projects",
+            "space_browser",
+            "trust",
+            "event_inspector",
+            "thread",
+        ] {
+            let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{legacy}\""));
+            assert!(
+                parsed.is_err(),
+                "legacy pane name `{legacy}` must be rejected"
+            );
+        }
+        for kept in ["atlas", "graph", "view:ryeos/threads/list"] {
+            let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{kept}\""));
+            assert!(parsed.is_ok(), "pane name `{kept}` must parse");
+        }
+    }
+
+    #[test]
+    fn bundled_workbench_surface_loads_with_bound_view() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/studio/.ai/surfaces/ryeos/studio/graph.yaml");
-        assert!(path.exists(), "bundled graph surface missing at {path:?}");
+            .join("bundles/studio/.ai/surfaces/ryeos/studio/workbench.yaml");
+        assert!(
+            path.exists(),
+            "bundled workbench surface missing at {path:?}"
+        );
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
-            .unwrap_or_else(|e| panic!("failed to parse bundled graph surface: {}", e));
-        assert_eq!(spec.name, "graph-operator");
-        assert_eq!(spec.extends.as_deref(), Some("surface:ryeos/studio/base"));
+            .unwrap_or_else(|e| panic!("failed to parse bundled workbench surface: {}", e));
+        assert_eq!(spec.name, "studio-workbench");
+        // Views-as-content: the side pane references a view item.
+        let bound = spec.layout.nodes.values().any(|node| {
+            matches!(node, LayoutNodeSpec::Pane { view: ViewKindSpec::Bound(view_ref) }
+                if view_ref == "view:ryeos/threads/list")
+        });
+        assert!(bound, "workbench must bind the threads view by ref");
     }
 
     #[test]
@@ -1270,7 +1314,7 @@ layout:
   nodes:
     main:
       type: pane
-      view: thread_list
+      view: "view:ryeos/threads/list"
 "#,
         )
         .unwrap();
@@ -1312,7 +1356,7 @@ root = "main"
 
 [layout.nodes.main]
 type = "pane"
-view = "thread_list"
+view = "view:ryeos/threads/list"
 
 [capabilities]
 allow_execute = true
@@ -1360,7 +1404,7 @@ id = "test"
                 "layout": {
                     "root": "sidebar",
                     "nodes": {
-                        "sidebar": { "type": "pane", "view": "thread" }
+                        "sidebar": { "type": "pane", "view": "view:ryeos/chain/timeline" }
                     }
                 },
                 "affordances": [
@@ -1481,7 +1525,7 @@ id = "test"
                 "layout": {
                     "root": "main",
                     "nodes": {
-                        "main": { "type": "pane", "view": "thread" }
+                        "main": { "type": "pane", "view": "view:ryeos/chain/timeline" }
                     }
                 },
                 "commands": []
@@ -1516,7 +1560,7 @@ id = "test"
                 "layout": {
                     "root": "main",
                     "nodes": {
-                        "main": { "type": "pane", "view": "thread" }
+                        "main": { "type": "pane", "view": "view:ryeos/chain/timeline" }
                     }
                 },
                 "affordances": []
@@ -1555,7 +1599,7 @@ id = "test"
                 "layout": {
                     "root": "main",
                     "nodes": {
-                        "main": { "type": "pane", "view": "thread" }
+                        "main": { "type": "pane", "view": "view:ryeos/chain/timeline" }
                     }
                 },
                 "affordances": []

@@ -6,8 +6,8 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::{
-    StudioCodeBlockVm, StudioDockTileVm, StudioDockViewVm, StudioFrameModeVm, StudioLayoutNodeVm,
-    StudioRowVm, StudioSectionVm, StudioTone, StudioViewModel, StudioViewVm,
+    StudioDockTileVm, StudioDockViewVm, StudioFrameModeVm, StudioInputVm, StudioLayoutNodeVm,
+    StudioRowVm, StudioTimelineEntryVm, StudioTone, StudioViewModel, StudioViewVm,
 };
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
 
@@ -15,14 +15,14 @@ use crate::render_text;
 
 const BG: Color = Color::Rgb(0x1d, 0x20, 0x21);
 const PANEL: Color = Color::Rgb(0x28, 0x28, 0x28);
-const PANEL_2: Color = Color::Rgb(0x32, 0x30, 0x2f);
+const PANEL_2: Color = Color::Rgb(0x3c, 0x38, 0x36);
 const SHADOW: Color = Color::Rgb(0x50, 0x49, 0x45);
 const FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
 const FG_SOFT: Color = Color::Rgb(0xd5, 0xc4, 0xa1);
 const MUTED: Color = Color::Rgb(0xa8, 0x99, 0x84);
 const ACCENT: Color = Color::Rgb(0xd6, 0x5d, 0x0e);
 const WARN: Color = Color::Rgb(0xfa, 0xbd, 0x2f);
-const GOOD: Color = Color::Rgb(0xb8, 0xbb, 0x26);
+const GOOD: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
 const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
 
 pub struct StudioTerminalRenderer {
@@ -105,25 +105,49 @@ fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
 }
 
 fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
-    let mut parts = Vec::new();
-    for segment in &vm.presentation.chrome.status_bar.segments {
-        let value = match &segment.label {
-            Some(label) => format!("{label}:{}", segment.value),
-            None => segment.value.clone(),
-        };
-        parts.push(value);
-    }
-    let text = format!(
-        " {}  ·  {} ",
-        parts.join("  "),
-        vm.presentation.chrome.status_bar.key_hint
-    );
     let y = surface.height.saturating_sub(1);
-    draw_bar(surface, y, &text, MUTED);
+    fill_line(
+        surface,
+        0,
+        y,
+        surface.width,
+        Style::new().fg(MUTED).bg(PANEL),
+    );
+    let mut x = 1usize;
+    for segment in &vm.presentation.chrome.status_bar.segments {
+        if x >= surface.width {
+            return;
+        }
+        if let Some(label) = &segment.label {
+            let label = format!("{}:", letterspace(label));
+            surface.draw_text(x, y, &truncate(&label, surface.width - x), style_muted());
+            x = x.saturating_add(label.chars().count());
+        }
+        surface.draw_text(
+            x,
+            y,
+            &truncate(&segment.value, surface.width.saturating_sub(x)),
+            tone_style(segment.tone),
+        );
+        x = x.saturating_add(segment.value.chars().count() + 2);
+    }
+    if x + 3 < surface.width {
+        surface.draw_text(x, y, "·", style_muted());
+        x += 2;
+        surface.draw_text(
+            x,
+            y,
+            &truncate(
+                &vm.presentation.chrome.status_bar.key_hint,
+                surface.width - x,
+            ),
+            style_muted(),
+        );
+    }
 }
 
 fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
-    surface.fill_rect(0, y, surface.width, 1, ' ', Style::new().fg(fg).bg(PANEL));
+    fill_line(surface, 0, y, surface.width, Style::new().fg(fg).bg(PANEL));
     surface.draw_text(
         0,
         y,
@@ -213,34 +237,101 @@ fn draw_dock_tile(surface: &mut TextSurface, rect: Rect, dock: &StudioDockTileVm
 }
 
 fn draw_dock_view(surface: &mut TextSurface, rect: Rect, view: &StudioDockViewVm) {
+    if let StudioDockViewVm::Input(input) = view {
+        draw_input_dock(surface, rect, input);
+        return;
+    }
     let lines = match view {
-        StudioDockViewVm::Input(input) => {
-            let text = if input.text.is_empty() {
-                input.placeholder.as_str()
-            } else {
-                input.text.as_str()
-            };
-            vec![
-                input.route_label.clone(),
-                format!("$ {text}{}", if input.text.is_empty() { "" } else { "▎" }),
-                input.hint.clone(),
-            ]
-        }
-        StudioDockViewVm::Threads { title, hint, rows } => {
-            let mut lines = vec![title.clone(), hint.clone()];
-            for row in rows.iter().take(rect.h.saturating_sub(3) as usize) {
-                lines.push(format!(
-                    "▶ {} {}",
-                    row.primary,
-                    row.meta.clone().unwrap_or_default()
-                ));
+        StudioDockViewVm::Input(_) => unreachable!("input docks return above"),
+        StudioDockViewVm::View(view) => match view {
+            StudioViewVm::Rows { title, rows, .. } => {
+                let mut lines = vec![title.clone()];
+                for row in rows.iter().take(rect.h.saturating_sub(2) as usize) {
+                    lines.push(format!(
+                        "{} {} {}",
+                        if row.selected { "▶" } else { " " },
+                        row.primary,
+                        row.meta.clone().unwrap_or_default()
+                    ));
+                }
+                lines
             }
-            lines
-        }
-        StudioDockViewVm::Inspector { title, hint } => vec![title.clone(), hint.clone()],
+            StudioViewVm::Timeline { title, entries, .. } => {
+                let mut lines = vec![title.clone()];
+                push_timeline_lines(&mut lines, entries, rect.w as usize);
+                lines
+            }
+            StudioViewVm::Placeholder { title, message } => {
+                vec![title.clone(), message.clone()]
+            }
+            _ => vec!["unsupported dock view".to_string()],
+        },
         StudioDockViewVm::Placeholder { message } => vec![message.clone()],
     };
     draw_lines(surface, rect, &lines);
+}
+
+fn draw_input_dock(surface: &mut TextSurface, rect: Rect, input: &StudioInputVm) {
+    let width = rect.w as usize;
+    let height = rect.h as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let route_style = Style::new().fg(FG).bg(PANEL_2).bold();
+    fill_line(
+        surface,
+        rect.x as usize,
+        rect.y as usize,
+        width,
+        route_style,
+    );
+    surface.draw_text(
+        rect.x as usize,
+        rect.y as usize,
+        &truncate(&input.route_label, width),
+        route_style,
+    );
+
+    if height < 2 {
+        return;
+    }
+    let prompt_y = rect.y as usize + 1;
+    let text = if input.text.is_empty() {
+        input.placeholder.as_str()
+    } else {
+        input.text.as_str()
+    };
+    surface.draw_text(
+        rect.x as usize,
+        prompt_y,
+        "$ ",
+        Style::new().fg(ACCENT).bg(PANEL).bold(),
+    );
+    let text_x = rect.x as usize + 2;
+    let visible = truncate(text, width.saturating_sub(2));
+    let text_style = if input.text.is_empty() {
+        style_muted()
+    } else {
+        style_fg()
+    };
+    surface.draw_text(text_x, prompt_y, &visible, text_style);
+    let cursor_x = text_x
+        + input
+            .text
+            .chars()
+            .take(input.cursor)
+            .count()
+            .min(width.saturating_sub(3));
+    surface.draw_char(cursor_x, prompt_y, ' ', Style::new().fg(PANEL).bg(ACCENT));
+
+    if height >= 3 {
+        surface.draw_text(
+            rect.x as usize,
+            rect.y as usize + 2,
+            &truncate(&input.hint, width),
+            style_muted(),
+        );
+    }
 }
 
 fn draw_layout_node(surface: &mut TextSurface, rect: Rect, node: &StudioLayoutNodeVm) {
@@ -324,12 +415,11 @@ fn draw_tile(
             border_style,
         );
         if h > 3 {
-            surface.fill_rect(
+            fill_line(
+                surface,
                 rect.x as usize + 1,
                 rect.y as usize + 1,
                 w.saturating_sub(2),
-                1,
-                ' ',
                 Style::new().fg(FG).bg(PANEL_2),
             );
             for x in (rect.x as usize + 1)..(rect.x as usize + w.saturating_sub(1)) {
@@ -352,18 +442,47 @@ fn draw_tile(
             rect.y as usize + 1,
             &truncate(&label, w.saturating_sub(4)),
             if focused {
-                Style::new().fg(WARN).bg(PANEL_2).bold()
+                style_selected().bold()
             } else {
                 Style::new().fg(MUTED).bg(PANEL_2)
             },
         );
+        if focused {
+            draw_corner_marks(surface, rect);
+        }
+    }
+    let footer = view_chrome(view);
+    if h > 5 {
+        let footer_y = rect.y as usize + h - 2;
+        fill_line(
+            surface,
+            rect.x as usize + 1,
+            footer_y,
+            w.saturating_sub(2),
+            Style::new().fg(MUTED).bg(PANEL),
+        );
+        if let Some((provenance, affordances)) = footer {
+            surface.draw_text(
+                rect.x as usize + 2,
+                footer_y,
+                &truncate(provenance, w.saturating_sub(4)),
+                style_muted(),
+            );
+            if !affordances.is_empty() && w > 10 {
+                let right = affordances.join(" · ");
+                let right = truncate(&right, w.saturating_sub(4));
+                let right_w = right.chars().count();
+                let x = rect.x as usize + w.saturating_sub(right_w + 2);
+                surface.draw_text(x, footer_y, &right, style_muted());
+            }
+        }
     }
     let inner = if rect.h > 4 {
         Rect::new(
             rect.x + 1,
             rect.y + 3,
             rect.w.saturating_sub(2),
-            rect.h.saturating_sub(4),
+            rect.h.saturating_sub(if h > 5 { 5 } else { 4 }),
         )
     } else {
         Rect::new(
@@ -377,77 +496,21 @@ fn draw_tile(
 }
 
 fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
+    if let StudioViewVm::Timeline { entries, .. } = view {
+        draw_timeline(surface, rect, entries);
+        return;
+    }
+    if let StudioViewVm::Rows { columns, rows, .. } = view {
+        draw_rows(surface, rect, columns, rows);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
-        StudioViewVm::Overview { metrics, sections } => {
-            lines.push("overview".to_string());
-            lines.push(String::new());
-            lines.extend(
-                metrics
-                    .iter()
-                    .map(|metric| format!("{:>10}  {}", metric.label, metric.value)),
-            );
-            push_sections(&mut lines, sections);
-        }
-        StudioViewVm::ThreadList { rows }
-        | StudioViewVm::Rows { rows, .. }
-        | StudioViewVm::Items { rows, .. } => push_rows(&mut lines, rows),
-        StudioViewVm::Files {
-            root,
-            path,
-            rows,
-            preview,
-        } => {
-            lines.push(format!("{root}:/{path}"));
-            lines.push(String::new());
-            push_rows(&mut lines, rows);
-            if let Some(preview) = preview {
-                lines.push(String::new());
-                lines.push(format!("preview: {} · {}", preview.title, preview.hint));
-                if let Some(content) = &preview.content {
-                    lines.extend(content.lines().take(8).map(|line| format!("  {line}")));
-                }
-            }
-        }
-        StudioViewVm::Inspector(inspector) => {
-            lines.push(inspector.title.clone());
-            if let Some(subtitle) = &inspector.subtitle {
-                lines.push(subtitle.clone());
-            }
-            push_sections(&mut lines, &inspector.sections);
-            push_code_blocks(&mut lines, &inspector.code_blocks);
-            if inspector.empty {
-                lines.push(
-                    inspector
-                        .empty_message
-                        .clone()
-                        .unwrap_or_else(|| "empty".into()),
-                );
-            }
-        }
-        StudioViewVm::Thread {
-            thread_id,
-            sections,
-            code_blocks,
-        } => {
-            lines.push(format!(
-                "thread {}",
-                thread_id.as_deref().unwrap_or("selection")
-            ));
-            push_sections(&mut lines, sections);
-            push_code_blocks(&mut lines, code_blocks);
-        }
+        StudioViewVm::Rows { .. } => unreachable!("rows views return above"),
+        StudioViewVm::Timeline { .. } => unreachable!("timeline views return above"),
         StudioViewVm::Map { scene } | StudioViewVm::Atlas { scene } => {
             lines.push(format!("scene objects: {}", scene.objects.len()));
-            lines
-                .push("terminal atlas renderer pending; use rows/inspector for interaction".into());
-        }
-        StudioViewVm::Gc {
-            running,
-            recent_events,
-        } => {
-            lines.push(format!("gc running: {running}"));
-            lines.extend(recent_events.iter().take(20).map(|value| value.to_string()));
+            lines.push("terminal atlas renderer pending; use rows for interaction".into());
         }
         StudioViewVm::Placeholder { title, message } => {
             lines.push(title.clone());
@@ -457,14 +520,104 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
     draw_lines(surface, rect, &lines);
 }
 
+fn draw_rows(surface: &mut TextSurface, rect: Rect, columns: &[String], rows: &[StudioRowVm]) {
+    let width = rect.w as usize;
+    let height = rect.h as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut y = rect.y as usize;
+    let bottom = rect.y as usize + height;
+    if !columns.is_empty() && y < bottom {
+        let header = letterspace(&columns.join(" · "));
+        surface.draw_text(rect.x as usize, y, &truncate(&header, width), style_muted());
+        y += 1;
+    }
+    if rows.is_empty() && y < bottom {
+        surface.draw_text(rect.x as usize, y, "no rows loaded", style_muted());
+        return;
+    }
+    for row in rows.iter().take(bottom.saturating_sub(y)) {
+        let style = if row.selected {
+            style_selected()
+        } else {
+            style_fg()
+        };
+        fill_line(surface, rect.x as usize, y, width, style);
+        let glyph_style = if row.selected {
+            style
+        } else {
+            tone_style(row.tone)
+        };
+        surface.draw_text(rect.x as usize, y, tone_glyph(row.tone), glyph_style);
+
+        let meta = row.meta.as_deref().unwrap_or_default();
+        let meta_width = if meta.is_empty() {
+            0
+        } else {
+            meta.chars().count().min(width / 3)
+        };
+        let primary_width = width.saturating_sub(3 + meta_width + usize::from(meta_width > 0));
+        let mut primary = row.primary.clone();
+        if let Some(secondary) = &row.secondary {
+            primary.push_str("  ");
+            primary.push_str(secondary);
+        }
+        surface.draw_text(
+            rect.x as usize + 2,
+            y,
+            &truncate(&primary, primary_width),
+            style,
+        );
+        if meta_width > 0 {
+            let meta_text = truncate(meta, meta_width);
+            let meta_x = rect.x as usize + width.saturating_sub(meta_text.chars().count());
+            let meta_style = if row.selected { style } else { style_muted() };
+            surface.draw_text(meta_x, y, &meta_text, meta_style);
+        }
+        y += 1;
+    }
+}
+
+fn draw_timeline(surface: &mut TextSurface, rect: Rect, entries: &[StudioTimelineEntryVm]) {
+    let width = rect.w as usize;
+    let height = rect.h as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
+    let mut lines = Vec::new();
+    push_timeline_lines(&mut lines, entries, width);
+    let visible = lines.len().min(height);
+    let start = lines.len().saturating_sub(visible);
+    for (row, line) in lines.iter().skip(start).take(visible).enumerate() {
+        let style = if line.starts_with('─') {
+            style_muted()
+        } else if line.starts_with('✓') {
+            tone_style(StudioTone::Good)
+        } else if line.starts_with('✗') {
+            tone_style(StudioTone::Danger)
+        } else if line.starts_with('▸') {
+            tone_style(StudioTone::Accent)
+        } else {
+            style_fg()
+        };
+        surface.draw_text(
+            rect.x as usize,
+            rect.y as usize + row,
+            &truncate(line, width),
+            style,
+        );
+    }
+}
+
 fn draw_home(surface: &mut TextSurface, rect: Rect, vm: &StudioViewModel) {
     let home = &vm.presentation.home;
     let w = rect.w as usize;
     let h = rect.h as usize;
-    let tile_w = w.min(74).max(24);
-    let tile_h = h.min(18).max(8);
+    let tile_w = w.min(82).max(28);
+    let tile_h = h.min(20).max(10);
     let x = rect.x as usize + w.saturating_sub(tile_w) / 2;
-    let y = rect.y as usize + h.saturating_sub(tile_h) / 2;
+    let y = rect.y as usize + h.saturating_sub(tile_h) / 3;
     let panel = Rect::new(x as u16, y as u16, tile_w as u16, tile_h as u16);
     draw_shadow(surface, panel);
     fill_rect(surface, panel, Style::new().fg(FG).bg(PANEL));
@@ -476,31 +629,96 @@ fn draw_home(surface: &mut TextSurface, rect: Rect, vm: &StudioViewModel) {
         Border::Sharp,
         Style::new().fg(FG).bg(PANEL),
     );
-    let lines = vec![
-        home.brand.clone(),
-        home.tagline.clone(),
-        String::new(),
-        home.description.clone(),
-        String::new(),
-        "> content-addressed. tamper-evident. verified".to_string(),
-        String::new(),
-        format!(
-            "[enter] {}    [g] {}",
-            home.primary_label, home.secondary_label
-        ),
-        String::new(),
-        format!("$ {}", home.install_command),
-        "alt+k launcher · ctrl+c quit".to_string(),
-    ];
-    draw_lines(
+    let inner_x = x + 2;
+    let inner_w = tile_w.saturating_sub(4);
+    draw_centered(
         surface,
-        Rect::new(
-            (x + 2) as u16,
-            (y + 1) as u16,
-            tile_w.saturating_sub(4) as u16,
-            tile_h.saturating_sub(2) as u16,
-        ),
-        &lines,
+        inner_x,
+        y + 2,
+        inner_w,
+        &letterspace(&home.brand),
+        Style::new().fg(WARN).bg(PANEL).bold(),
+    );
+    draw_centered(
+        surface,
+        inner_x,
+        y + 4,
+        inner_w,
+        &home.tagline,
+        style_muted(),
+    );
+
+    let description_y = y + 6;
+    for (offset, line) in wrap_words(&home.description, inner_w)
+        .into_iter()
+        .take(3)
+        .enumerate()
+    {
+        draw_centered(
+            surface,
+            inner_x,
+            description_y + offset,
+            inner_w,
+            &line,
+            style_fg(),
+        );
+    }
+
+    let ticker = home
+        .terminal_lines
+        .get((vm.generation as usize).wrapping_div(24) % home.terminal_lines.len().max(1))
+        .cloned()
+        .unwrap_or_else(|| "content-addressed. tamper-evident. verified.".to_string());
+    if tile_h > 12 {
+        let ticker_y = y + tile_h.saturating_sub(7);
+        fill_line(
+            surface,
+            inner_x,
+            ticker_y,
+            inner_w,
+            Style::new().fg(FG).bg(PANEL_2),
+        );
+        surface.draw_text(
+            inner_x,
+            ticker_y,
+            &truncate(&format!("› {ticker}"), inner_w),
+            Style::new().fg(FG).bg(PANEL_2),
+        );
+    }
+
+    let cta_y = y + tile_h.saturating_sub(5);
+    if cta_y > y && cta_y < y + tile_h - 1 {
+        draw_centered(
+            surface,
+            inner_x,
+            cta_y,
+            inner_w,
+            &format!(
+                "ENTER {}  ·  G {}",
+                home.primary_label, home.secondary_label
+            ),
+            tone_style(StudioTone::Accent),
+        );
+    }
+
+    let command_y = y + tile_h.saturating_sub(3);
+    if command_y > y && command_y < y + tile_h - 1 {
+        draw_centered(
+            surface,
+            inner_x,
+            command_y,
+            inner_w,
+            &format!("$ {}", home.install_command),
+            style_muted(),
+        );
+    }
+
+    let status = letterspace("alt+k launcher · ctrl+c quit");
+    surface.draw_text(
+        inner_x,
+        y + tile_h - 2,
+        &truncate(&status, inner_w),
+        style_muted(),
     );
 }
 
@@ -554,53 +772,126 @@ fn draw_launcher(surface: &mut TextSurface, vm: &StudioViewModel) {
     }
 }
 
-fn push_rows(lines: &mut Vec<String>, rows: &[StudioRowVm]) {
-    if rows.is_empty() {
-        lines.push("no rows loaded".to_string());
+fn push_timeline_lines(lines: &mut Vec<String>, entries: &[StudioTimelineEntryVm], width: usize) {
+    if entries.is_empty() {
+        lines.push("no timeline events loaded".to_string());
+        return;
     }
-    for row in rows {
-        let marker = if row.selected { "›" } else { " " };
-        let mut line = format!("{marker} {}", row.primary);
-        if let Some(secondary) = &row.secondary {
-            line.push_str(&format!("  {secondary}"));
+    for entry in entries {
+        match entry {
+            StudioTimelineEntryVm::Block { text, .. } => {
+                for wrapped in wrap_words(text, width) {
+                    lines.push(wrapped);
+                }
+                lines.push(String::new());
+            }
+            StudioTimelineEntryVm::Line { primary, meta, .. } => {
+                lines.push(join_with_right_meta("•", primary, meta.as_deref(), width));
+            }
+            StudioTimelineEntryVm::Pair {
+                summary,
+                meta,
+                tone,
+                pending,
+            } => {
+                let glyph = if *pending {
+                    "▸"
+                } else if *tone == StudioTone::Danger {
+                    "✗"
+                } else {
+                    "✓"
+                };
+                lines.push(join_with_right_meta(glyph, summary, meta.as_deref(), width));
+            }
+            StudioTimelineEntryVm::Separator { label } => {
+                let label = format!(" {label} ");
+                let rule_len = width.saturating_sub(label.chars().count());
+                let left = rule_len / 2;
+                let right = rule_len.saturating_sub(left);
+                lines.push(format!(
+                    "{}{}{}",
+                    "─".repeat(left),
+                    label,
+                    "─".repeat(right)
+                ));
+            }
         }
-        if let Some(meta) = &row.meta {
-            line.push_str(&format!("  · {meta}"));
-        }
-        lines.push(line);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
     }
 }
 
-fn push_sections(lines: &mut Vec<String>, sections: &[StudioSectionVm]) {
-    for section in sections {
-        lines.push(String::new());
-        lines.push(section.title.clone());
-        for (key, value) in &section.rows {
-            lines.push(format!("  {key}: {value}"));
-        }
+fn join_with_right_meta(prefix: &str, primary: &str, meta: Option<&str>, width: usize) -> String {
+    let left = format!("{prefix} {primary}");
+    let Some(meta) = meta.filter(|m| !m.is_empty()) else {
+        return left;
+    };
+    let left_w = left.chars().count();
+    let meta_w = meta.chars().count();
+    if left_w + meta_w + 2 >= width {
+        format!("{left} · {meta}")
+    } else {
+        format!("{left}{}{}", " ".repeat(width - left_w - meta_w), meta)
     }
 }
 
-fn push_code_blocks(lines: &mut Vec<String>, blocks: &[StudioCodeBlockVm]) {
-    for block in blocks {
-        lines.push(String::new());
-        lines.push(format!(
-            "{}{}",
-            block.label,
-            block
-                .language
-                .as_deref()
-                .map(|l| format!(" ({l})"))
-                .unwrap_or_default()
-        ));
-        lines.extend(
-            block
-                .content
-                .lines()
-                .take(24)
-                .map(|line| format!("  {line}")),
-        );
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let line_w = line.chars().count();
+        let word_w = word.chars().count();
+        if line_w > 0 && line_w + 1 + word_w > width {
+            out.push(line);
+            line = String::new();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
     }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
+    match view {
+        StudioViewVm::Rows {
+            provenance,
+            affordance_hints,
+            ..
+        }
+        | StudioViewVm::Timeline {
+            provenance,
+            affordance_hints,
+            ..
+        } => provenance
+            .as_deref()
+            .map(|provenance| (provenance, affordance_hints.as_slice())),
+        _ => None,
+    }
+}
+
+fn draw_corner_marks(surface: &mut TextSurface, rect: Rect) {
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    if w < 2 || h < 2 {
+        return;
+    }
+    let style = Style::new().fg(ACCENT).bg(PANEL).bold();
+    surface.draw_char(x, y, '╔', style);
+    surface.draw_char(x + w - 1, y, '╗', style);
+    surface.draw_char(x, y + h - 1, '╚', style);
+    surface.draw_char(x + w - 1, y + h - 1, '╝', style);
 }
 
 fn draw_lines(surface: &mut TextSurface, rect: Rect, lines: &[String]) {
@@ -627,14 +918,21 @@ fn draw_lines(surface: &mut TextSurface, rect: Rect, lines: &[String]) {
 }
 
 fn fill_rect(surface: &mut TextSurface, rect: Rect, style: Style) {
-    surface.fill_rect(
-        rect.x as usize,
-        rect.y as usize,
-        rect.w as usize,
-        rect.h as usize,
-        ' ',
-        style,
-    );
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    surface.fill_rect(x, y, x + w - 1, y + h - 1, ' ', style);
+}
+
+fn fill_line(surface: &mut TextSurface, x: usize, y: usize, width: usize, style: Style) {
+    if width == 0 {
+        return;
+    }
+    surface.fill_rect(x, y, x + width - 1, y, ' ', style);
 }
 
 fn draw_shadow(surface: &mut TextSurface, rect: Rect) {
@@ -660,6 +958,33 @@ fn tone_style(tone: StudioTone) -> Style {
     }
 }
 
+fn tone_glyph(tone: StudioTone) -> &'static str {
+    match tone {
+        StudioTone::Good => "✓",
+        StudioTone::Warn => "!",
+        StudioTone::Danger => "✗",
+        StudioTone::Accent => "›",
+        StudioTone::Neutral => "•",
+    }
+}
+
+fn draw_centered(
+    surface: &mut TextSurface,
+    x: usize,
+    y: usize,
+    width: usize,
+    text: &str,
+    style: Style,
+) {
+    if width == 0 {
+        return;
+    }
+    let text = truncate(text, width);
+    let text_w = text.chars().count();
+    let offset = width.saturating_sub(text_w) / 2;
+    surface.draw_text(x + offset, y, &text, style);
+}
+
 fn style_fg() -> Style {
     Style::new().fg(FG_SOFT).bg(PANEL)
 }
@@ -670,6 +995,15 @@ fn style_muted() -> Style {
 
 fn style_selected() -> Style {
     Style::new().fg(FG).bg(ACCENT)
+}
+
+fn letterspace(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| [ch.to_ascii_uppercase(), ' '])
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {

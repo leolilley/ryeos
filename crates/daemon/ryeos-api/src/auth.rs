@@ -28,6 +28,12 @@ pub struct Principal {
 // Replay guard
 // ---------------------------------------------------------------------------
 
+/// Ceiling on remembered nonces per fingerprint. Legitimate callers sit
+/// far below this within the replay window; hitting it means abuse or a
+/// runaway client, and requests are rejected (fail closed) rather than
+/// evicting older nonces, which would re-open the replay window.
+const MAX_NONCES_PER_FINGERPRINT: usize = 4096;
+
 struct ReplayGuard {
     seen: HashMap<String, Vec<(String, Instant)>>,
     max_age: Duration,
@@ -43,13 +49,25 @@ impl ReplayGuard {
 
     fn check_and_record(&mut self, fingerprint: &str, nonce: &str) -> bool {
         let now = Instant::now();
-        let entries = self.seen.entry(fingerprint.to_string()).or_default();
+        // Drop fingerprints whose nonces have all expired so the map
+        // doesn't grow with every principal ever seen.
+        self.seen.retain(|_, entries| {
+            entries.retain(|(_, ts)| now.duration_since(*ts) < self.max_age);
+            !entries.is_empty()
+        });
 
-        // Prune expired entries
-        entries.retain(|(_, ts)| now.duration_since(*ts) < self.max_age);
+        let entries = self.seen.entry(fingerprint.to_string()).or_default();
 
         // Check for replay
         if entries.iter().any(|(n, _)| n == nonce) {
+            return false;
+        }
+
+        if entries.len() >= MAX_NONCES_PER_FINGERPRINT {
+            tracing::warn!(
+                fingerprint = %fingerprint,
+                "replay guard nonce ceiling reached; rejecting request"
+            );
             return false;
         }
 
@@ -575,6 +593,342 @@ mod tests {
         assert_eq!(
             loaded.scopes,
             vec!["ryeos.execute.service.vault/list".to_string()]
+        );
+    }
+
+    /// A legitimately node-signed key file whose BODY is modified after
+    /// signing (here: an extra scope spliced into the array) must be
+    /// rejected by the content-hash check — the original signature
+    /// header no longer matches the body.
+    #[test]
+    fn authorized_key_rejects_tampered_body() {
+        let subject = SigningKey::from_bytes(&[11u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[12u8; 32]);
+
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+
+        let vk = subject.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+
+        // Write a valid node-signed key file via the canonical writer.
+        let file_path = ryeos_app::identity::write_authorized_key_toml(
+            &auth_dir,
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.vault/list".to_string()],
+            "victim",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            &node_signer,
+            ryeos_app::identity::WildcardPolicy::Reject,
+        )
+        .unwrap();
+
+        // Sanity: the untampered file loads.
+        load_authorized_key(&fp, &auth_dir, &node_identity)
+            .expect("untampered canonical file must load");
+
+        // Tamper: keep the original signature header, but escalate the
+        // scopes in the body.
+        let raw = std::fs::read_to_string(&file_path).unwrap();
+        let (sig_line, body) = raw.split_once('\n').unwrap();
+        let tampered_body = body.replace(
+            "\"ryeos.execute.service.vault/list\"",
+            "\"ryeos.execute.service.vault/list\", \"ryeos.execute.service.bundle/install\"",
+        );
+        assert_ne!(body, tampered_body, "tamper must actually change the body");
+        std::fs::write(&file_path, format!("{sig_line}\n{tampered_body}")).unwrap();
+
+        let err = load_authorized_key(&fp, &auth_dir, &node_identity)
+            .expect_err("body tampered after signing must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tampered"),
+            "error message should mention tampering, got: {msg}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // verify_request: full request-verification path
+    // ------------------------------------------------------------------
+
+    /// Build a minimal AppState for verify_request tests. Mirrors the
+    /// build_test_state helper in routes/invokers/none_invocation.rs.
+    fn build_test_state() -> (TempDir, ryeos_app::state::AppState) {
+        use std::sync::Arc;
+
+        std::env::set_var("HOSTNAME", "testhost");
+        let tmpdir = TempDir::new().unwrap();
+        let runtime_state_dir = tmpdir.path().join(".ai").join("state");
+        let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
+        let key_path = tmpdir.path().join("identity").join("node-key.pem");
+        let config = ryeos_app::config::Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            db_path: runtime_db_path.clone(),
+            uds_path: tmpdir.path().join("test.sock"),
+            app_root: tmpdir.path().to_path_buf(),
+            node_signing_key_path: key_path.clone(),
+            operator_signing_key_path: tmpdir.path().join("user-key.pem"),
+            require_auth: false,
+            authorized_keys_dir: tmpdir.path().join("auth"),
+            tool_env_passthrough: Vec::new(),
+        };
+        let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
+        let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
+            &identity,
+        ));
+        let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
+        let state_store = Arc::new(
+            ryeos_app::state_store::StateStore::new(
+                runtime_state_dir,
+                runtime_db_path,
+                signer,
+                write_barrier.clone(),
+            )
+            .unwrap(),
+        );
+        let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
+        let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
+            state_store.clone(),
+        ));
+        let threads = Arc::new(
+            ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
+                state_store.clone(),
+                kind_profiles.clone(),
+                events.clone(),
+            )
+            .expect("HOSTNAME not set in test environment"),
+        );
+        let commands = Arc::new(ryeos_app::command_service::CommandService::new(
+            state_store.clone(),
+            kind_profiles,
+            events.clone(),
+        ));
+        let engine = ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        );
+        let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
+            bundles: vec![],
+            routes: vec![],
+            commands: vec![],
+            hosted_node_policies: vec![],
+            command_registration_policy: Default::default(),
+        };
+        let test_command_registry = Arc::new(
+            ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
+        );
+        let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
+        let state = ryeos_app::state::AppState {
+            config: Arc::new(config),
+            state_store,
+            engine: Arc::new(engine),
+            engine_cache: ryeos_app::engine_cache::EngineCache::new(
+                ryeos_app::engine_cache::EngineCacheConfig::default(),
+            ),
+            identity: Arc::new(identity),
+            threads,
+            events,
+            event_streams: Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
+            commands,
+            callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
+            thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
+            extensions: Arc::new(ryeos_app::extension_state::ExtensionState::new()),
+            write_barrier: Arc::new(write_barrier),
+            started_at: std::time::Instant::now(),
+            started_at_iso: String::new(),
+            catalog_health: ryeos_app::state::CatalogHealth {
+                status: "ok".into(),
+                missing_services: vec![],
+            },
+            services: Arc::new(crate::registry::build_service_registry()),
+            service_descriptors: crate::handlers::ALL,
+            node_config: Arc::new(snapshot.clone()),
+            vault: Arc::new(ryeos_app::vault::EmptyVault),
+            command_registry: test_command_registry,
+            authorizer: test_auth,
+            scheduler_db: Arc::new(ryeos_scheduler::db::SchedulerDb::new_in_memory().unwrap()),
+            scheduler_runtime_gate: Arc::new(tokio::sync::RwLock::new(())),
+            scheduler_reload_tx: None,
+            ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
+            vault_fingerprint: None,
+        };
+        (tmpdir, state)
+    }
+
+    /// Register `client_key` as an authorized principal via the
+    /// canonical writer (signed by the node's own identity). Returns the
+    /// client fingerprint.
+    fn register_client_key(state: &ryeos_app::state::AppState, client_key: &SigningKey) -> String {
+        let vk = client_key.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        ryeos_app::identity::write_authorized_key_toml(
+            &state.config.authorized_keys_dir,
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.vault/list".to_string()],
+            "test-client",
+            "test-granter",
+            "2026-01-01T00:00:00Z",
+            state.identity.signing_key(),
+            ryeos_app::identity::WildcardPolicy::Reject,
+        )
+        .unwrap();
+        fp
+    }
+
+    /// Client-side signing mirroring remote/client.rs `sign_request`:
+    /// Signature = Ed25519(sk, sha256(canonical_string).as_bytes()).
+    /// The canonical string is computed over `signed_uri`, which may
+    /// differ from the URI later presented to verify_request.
+    #[allow(clippy::too_many_arguments)]
+    fn signed_headers(
+        client_key: &SigningKey,
+        fingerprint: &str,
+        method: &str,
+        signed_uri: &axum::http::Uri,
+        body: &[u8],
+        timestamp: u64,
+        nonce: &str,
+        audience: &str,
+    ) -> axum::http::HeaderMap {
+        let body_hash = lillux::cas::sha256_hex(body);
+        let canon = canonical_path(signed_uri);
+        let string_to_sign = format!(
+            "ryeos-request-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+            method.to_uppercase(),
+            canon,
+            body_hash,
+            timestamp,
+            nonce,
+            audience,
+        );
+        let content_hash = lillux::cas::sha256_hex(string_to_sign.as_bytes());
+        let sig = lillux::crypto::Signer::sign(client_key, content_hash.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-ryeos-key-id",
+            format!("fp:{fingerprint}").parse().unwrap(),
+        );
+        headers.insert("x-ryeos-timestamp", timestamp.to_string().parse().unwrap());
+        headers.insert("x-ryeos-nonce", nonce.parse().unwrap());
+        headers.insert("x-ryeos-signature", sig_b64.parse().unwrap());
+        headers
+    }
+
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// A request whose timestamp is older than TIMESTAMP_MAX_AGE_SECS
+    /// is rejected as expired; an otherwise-identical fresh request
+    /// passes (positive control).
+    #[test]
+    fn replay_guard_rejects_stale_timestamp() {
+        let (_tmp, state) = build_test_state();
+        let client_key = SigningKey::from_bytes(&[21u8; 32]);
+        let fp = register_client_key(&state, &client_key);
+        let audience = state.identity.principal_id();
+        let uri: axum::http::Uri = "/api/v1/status".parse().unwrap();
+
+        // Stale: just past the freshness window.
+        let stale_ts = unix_now() - (TIMESTAMP_MAX_AGE_SECS + 5);
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "GET",
+            &uri,
+            b"",
+            stale_ts,
+            "nonce-stale-timestamp-test",
+            &audience,
+        );
+        let err = verify_request(&state, "GET", &uri, &headers, b"")
+            .expect_err("stale timestamp must be rejected");
+        assert!(
+            err.contains("expired"),
+            "stale-timestamp rejection should say expired, got: {err}"
+        );
+
+        // Fresh positive control: same key, same URI, current timestamp.
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "GET",
+            &uri,
+            b"",
+            unix_now(),
+            "nonce-fresh-timestamp-test",
+            &audience,
+        );
+        let principal =
+            verify_request(&state, "GET", &uri, &headers, b"").expect("fresh request must verify");
+        assert_eq!(principal.fingerprint, fp);
+    }
+
+    /// Canonicalization sorts query params, so a signature computed
+    /// over the sorted form verifies a request whose params arrive in
+    /// a different textual order — while changing an actual param
+    /// VALUE breaks the signature.
+    #[test]
+    fn signature_binds_query_param_order() {
+        let (_tmp, state) = build_test_state();
+        let client_key = SigningKey::from_bytes(&[22u8; 32]);
+        let fp = register_client_key(&state, &client_key);
+        let audience = state.identity.principal_id();
+
+        let signed_uri: axum::http::Uri = "/api/v1/items?alpha=1&beta=2".parse().unwrap();
+        let reordered_uri: axum::http::Uri = "/api/v1/items?beta=2&alpha=1".parse().unwrap();
+
+        // Both spellings canonicalize identically.
+        assert_eq!(canonical_path(&signed_uri), canonical_path(&reordered_uri));
+
+        // Sign over the sorted form, present the reordered form: passes.
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "GET",
+            &signed_uri,
+            b"",
+            unix_now(),
+            "nonce-query-order-pass",
+            &audience,
+        );
+        let principal = verify_request(&state, "GET", &reordered_uri, &headers, b"")
+            .expect("reordered query params must still verify");
+        assert_eq!(principal.fingerprint, fp);
+
+        // Same signature, but an actually different param value: fails.
+        let altered_uri: axum::http::Uri = "/api/v1/items?beta=3&alpha=1".parse().unwrap();
+        let headers = signed_headers(
+            &client_key,
+            &fp,
+            "GET",
+            &signed_uri,
+            b"",
+            unix_now(),
+            "nonce-query-order-fail",
+            &audience,
+        );
+        let err = verify_request(&state, "GET", &altered_uri, &headers, b"")
+            .expect_err("altered query param value must fail verification");
+        assert!(
+            err.contains("invalid signature"),
+            "value change should break the signature, got: {err}"
         );
     }
 }

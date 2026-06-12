@@ -8,7 +8,6 @@ pub mod launch;
 pub mod limits;
 pub mod matcher;
 pub mod parsed_ref;
-pub mod reload;
 pub mod response_modes;
 pub mod stream_envelope;
 pub mod webhook_dedupe;
@@ -73,10 +72,8 @@ impl RouteTable {
 }
 
 /// Project a built route table into the diagnostic snapshot shape
-/// published into `AppState::extensions` (see
-/// `ryeos_app::route_diagnostics`). Called by the composition root at
-/// boot and by the reload handler, so `service:system/routes` always
-/// reflects the live table.
+/// published into `AppState::extensions` at boot (see
+/// `ryeos_app::route_diagnostics`) for `service:system/routes`.
 pub fn route_diagnostic_entries(
     table: &RouteTable,
 ) -> Vec<ryeos_app::route_diagnostics::RouteDiagnosticEntry> {

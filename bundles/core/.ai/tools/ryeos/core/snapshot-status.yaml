@@ -1,10 +1,10 @@
-# ryeos:signed:2026-06-07T05:18:56Z:608097f763be21ee7f691396c2dbf37562e40e7a93abaffefc859af3e1f9c534:ouieMlsiJX84qGTF4nDTXrw0LX6GF9aydG6bX8Nv8+ILIAzoTA2qj+2JdDk40GDj74+j9NkO8BIwlARi/IrMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T21:47:38Z:ca3681cdcc0fb1b2d3b9a63c352e9c491bfc746db49d4eaed11ecdd7158679f9:HBluVWK9PSkcQU2IrGbezy/roHQ6J2dyr2K3yKE5EtZeYf0cEXh00tpRYMsy3oFAH3sRki2pibkpNE7MxS5OBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
 name: "snapshot-status"
 required_caps: ["project.read"]
-description: "Compare the project worktree with the principal's local snapshot head."
+description: "Compare the project worktree with the principal's local snapshot head. The worktree scan is timeboxed by default and returns partial results (scan_complete: false) instead of blocking."
 
 config:
   command: "bin:ryeos-core-tools"
@@ -25,4 +25,9 @@ config_schema:
       type: boolean
       description: "Include unchanged files in the changes list"
       default: false
+    time_budget_ms:
+      type: integer
+      description: "Worktree scan budget in milliseconds; 0 disables the cap and scans the full worktree"
+      default: 5000
+      minimum: 0
   required: [project_path]

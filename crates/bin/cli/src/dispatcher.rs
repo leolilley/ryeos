@@ -52,15 +52,23 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // Load the verified node-config snapshot once per invocation; help,
+    // offline dispatch, and daemon resolution all reuse it instead of
+    // re-reading and re-verifying node config from disk. Local verbs
+    // above must not need it so `ryeos init` works before any node
+    // config exists. Help degrades gracefully on load failure; dispatch
+    // paths fail hard below.
+    let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);
+
     // 4. No verb = help
     if cli.rest.is_empty() {
-        crate::help::print_help(std::io::stdout())?;
+        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
         return Ok(());
     }
 
     // `ryeos help` → top-level help
     if cli.rest == ["help"] {
-        crate::help::print_help(std::io::stdout())?;
+        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
         return Ok(());
     }
 
@@ -70,6 +78,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
             &cli.rest[1..],
             &app_root,
             body_project_path.as_deref().unwrap_or("."),
+            &snapshot,
         )
         .await?;
         return Ok(());
@@ -81,17 +90,28 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     if let Some(help_idx) = cli.rest.iter().position(|t| t == "--help" || t == "-h") {
         let verb_tokens = &cli.rest[..help_idx];
         if verb_tokens.is_empty() {
-            crate::help::print_help(std::io::stdout())?;
+            crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
         } else {
             crate::help::print_verb_help(
                 verb_tokens,
                 &app_root,
                 body_project_path.as_deref().unwrap_or("."),
+                &snapshot,
             )
             .await?;
         }
         return Ok(());
     }
+
+    // Past help: offline and daemon dispatch require verified node config.
+    let snapshot = match &snapshot {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return Err(CliError::Local {
+                detail: format!("load verified node config: {err:#}"),
+            });
+        }
+    };
 
     // 5. Descriptor-driven offline dispatch.
     //    For commands whose service descriptor declares availability: offline,
@@ -100,6 +120,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         &cli.rest,
         &app_root,
         body_project_path.as_deref().unwrap_or("."),
+        snapshot,
     )? {
         if let crate::offline_dispatch::OfflineDispatchOutcome::Json(result) = outcome {
             print_result(result);
@@ -117,7 +138,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    service-schema `project` field, while global `-p/--project` before
     //    the verb remains supported by clap above.
 
-    let resolved = resolve_command_for_daemon(&cli.rest, &app_root, cli.project.as_deref())?;
+    let resolved = resolve_command_for_daemon(&cli.rest, snapshot, cli.project.as_deref())?;
 
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
@@ -149,10 +170,9 @@ struct CliResolvedExecute {
 
 fn resolve_command_for_daemon(
     rest: &[String],
-    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     default_project: Option<&Path>,
 ) -> Result<CliResolvedExecute, CliError> {
-    let snapshot = load_verified_snapshot(app_root)?;
     resolve_command_for_daemon_with_commands(
         rest,
         &snapshot.commands,
@@ -225,7 +245,7 @@ fn resolve_command_for_daemon_with_commands(
         _ => &tail,
     };
     let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
-    let project_path = apply_project_policy(&matched.command, &mut parameters)?;
+    let project_path = apply_project_policy(&matched.command, &mut parameters, default_project)?;
     Ok(CliResolvedExecute {
         item_ref,
         parameters,
@@ -259,21 +279,25 @@ fn bind_command_parameters_for_daemon(
     tail: &[String],
     command: &CommandDef,
 ) -> Result<Value, CliError> {
+    let direct_command;
+    let command = if matches!(
+        command.dispatch,
+        CommandDispatch::DirectExecuteItemRef { .. }
+    ) {
+        direct_command = CommandDef {
+            forms: Vec::new(),
+            ..command.clone()
+        };
+        &direct_command
+    } else {
+        command
+    };
+
+    if let Some(params) = crate::arg_bind::bind_declared_shortcuts(tail, command)? {
+        return Ok(params);
+    }
+
     let binding = command.parameter_binding.as_ref();
-    if binding.is_some_and(|binding| binding.input_flag.is_some()) {
-        if let Some(input) = crate::arg_bind::parse_input_arg(tail)? {
-            return Ok(input);
-        }
-    }
-
-    if binding.is_some_and(|binding| binding.single_json_object_arg) && tail.len() == 1 {
-        if let Ok(value) = serde_json::from_str::<Value>(&tail[0]) {
-            if value.is_object() {
-                return Ok(value);
-            }
-        }
-    }
-
     match binding.map(|binding| binding.mode).unwrap_or_default() {
         CommandParameterBindingMode::None
         | CommandParameterBindingMode::TailObject
@@ -287,6 +311,7 @@ fn bind_command_parameters_for_daemon(
 fn apply_project_policy(
     command: &CommandDef,
     parameters: &mut Value,
+    default_project: Option<&Path>,
 ) -> Result<Option<PathBuf>, CliError> {
     let Some(project) = command.project.as_ref() else {
         return Ok(None);
@@ -309,7 +334,21 @@ fn apply_project_policy(
     let mut project_path = obj
         .remove("project")
         .and_then(|value| value.as_str().map(PathBuf::from));
-    if project_path.is_none() && project.default == CommandProjectDefault::DiscoverUpwardAi {
+    if no_project && project_path.is_some() {
+        return Err(CliError::ProjectResolution(
+            "cannot pass both --no-project and --project: choose one".into(),
+        ));
+    }
+    if project_path.is_none() && !no_project {
+        project_path = default_project.map(PathBuf::from);
+    }
+    if let Some(path) = project_path.take() {
+        project_path = Some(canonicalize_project_path(&path)?);
+    }
+    if project_path.is_none()
+        && !no_project
+        && project.default == CommandProjectDefault::DiscoverUpwardAi
+    {
         project_path = discover_upward_ai_project()?;
     }
 
@@ -329,7 +368,7 @@ fn apply_project_policy(
             Value::String(path.to_string_lossy().into_owned()),
         );
     }
-    if no_project && project.bind_parameter.is_none() {
+    if no_project && project.bind_parameter.is_none() && !project.request_project_path {
         obj.insert("no_project".to_string(), Value::Bool(true));
     }
 
@@ -338,6 +377,23 @@ fn apply_project_policy(
     } else {
         Ok(None)
     }
+}
+
+fn canonicalize_project_path(path: &Path) -> Result<PathBuf, CliError> {
+    let cwd =
+        std::env::current_dir().map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    abs.canonicalize().map_err(|e| {
+        CliError::ProjectResolution(format!(
+            "cannot canonicalize project path '{}': {e}. \
+             Ensure the path exists and is accessible.",
+            abs.display()
+        ))
+    })
 }
 
 fn discover_upward_ai_project() -> Result<Option<PathBuf>, CliError> {
@@ -469,14 +525,6 @@ fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
             });
         }
     }
-}
-
-fn load_verified_snapshot(
-    app_root: &std::path::Path,
-) -> Result<ryeos_app::node_config::NodeConfigSnapshot, CliError> {
-    crate::node_descriptors::load_verified_snapshot(app_root).map_err(|error| CliError::Local {
-        detail: format!("load verified node commands: {error:#}"),
-    })
 }
 
 /// POST a JSON body to a daemon execute route and return the response.
@@ -619,6 +667,23 @@ mod tests {
         }
     }
 
+    /// Guard: `--input` must NOT short-circuit binding unless the
+    /// command's parameter_binding declares an input flag. The old
+    /// offline path honored it unconditionally; both paths now share
+    /// `arg_bind::bind_declared_shortcuts`, which is descriptor-gated.
+    #[test]
+    fn undeclared_input_flag_does_not_short_circuit_binding() {
+        let cmd = command(&["custom"], vec![], CommandProjectResolution::None);
+        assert!(cmd.parameter_binding.is_none());
+        let tail = s(&["--input", "/nonexistent/params.json"]);
+        let result = crate::arg_bind::bind_declared_shortcuts(&tail, &cmd)
+            .expect("undeclared --input must not be parsed at all");
+        assert!(
+            result.is_none(),
+            "--input short-circuited without a declared input flag"
+        );
+    }
+
     fn direct_execute_command() -> CommandDef {
         CommandDef {
             category: "commands".into(),
@@ -644,9 +709,9 @@ mod tests {
             }),
             project: Some(ryeos_runtime::CommandProjectPolicy {
                 resolution: ryeos_runtime::CommandProjectResolution::Optional,
-                default: ryeos_runtime::CommandProjectDefault::None,
+                default: ryeos_runtime::CommandProjectDefault::DiscoverUpwardAi,
                 no_project_flag: true,
-                request_project_path: false,
+                request_project_path: true,
                 bind_parameter: None,
             }),
             dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
@@ -706,6 +771,175 @@ mod tests {
         assert!(!resolved.async_launch);
         assert_eq!(resolved.item_ref, "tool:test/run");
         assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+    }
+
+    #[test]
+    fn direct_execute_uses_global_project_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "tool:test/run"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(tmp.path()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.item_ref, "tool:test/run");
+        assert_eq!(resolved.project_path.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn direct_execute_canonicalizes_relative_global_project_default() {
+        let _g = crate::test_env::lock();
+        let saved = std::env::current_dir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&["execute", "tool:test/run"]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(Path::new(".")),
+        )
+        .unwrap();
+        std::env::set_current_dir(saved).unwrap();
+
+        assert_eq!(
+            resolved.project_path,
+            Some(tmp.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn direct_execute_tail_project_wins_over_global_project_default() {
+        let global = tempfile::tempdir().unwrap();
+        let tail = tempfile::tempdir().unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--project",
+                &tail.path().to_string_lossy(),
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(global.path()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.project_path.as_deref(), Some(tail.path()));
+    }
+
+    #[test]
+    fn direct_execute_input_preserves_tail_project_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("params.json");
+        std::fs::write(&input, r#"{"provider":"zen"}"#).unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--project",
+                &dir.path().to_string_lossy(),
+                "--input",
+                &input.to_string_lossy(),
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.project_path.as_deref(), Some(dir.path()));
+        assert_eq!(resolved.parameters["provider"], serde_json::json!("zen"));
+        assert!(resolved.parameters.get("project").is_none());
+    }
+
+    #[test]
+    fn direct_execute_input_canonicalizes_relative_tail_project_flag() {
+        let _g = crate::test_env::lock();
+        let saved = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let input = dir.path().join("params.json");
+        std::fs::write(&input, r#"{"provider":"zen"}"#).unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--project",
+                ".",
+                "--input",
+                &input.to_string_lossy(),
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        )
+        .unwrap();
+        std::env::set_current_dir(saved).unwrap();
+
+        assert_eq!(
+            resolved.project_path,
+            Some(dir.path().canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn direct_execute_input_rejects_tail_project_without_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("params.json");
+        std::fs::write(&input, r#"{"provider":"zen"}"#).unwrap();
+        let commands = vec![direct_execute_command()];
+        let result = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--input",
+                &input.to_string_lossy(),
+                "--project",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            None,
+        );
+        let Err(err) = result else {
+            panic!("expected --project without value to fail");
+        };
+
+        assert!(format!("{err}").contains("--project requires a value"));
+    }
+
+    #[test]
+    fn direct_execute_input_no_project_suppresses_global_project_default() {
+        let global = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("params.json");
+        std::fs::write(&input, r#"{"provider":"zen"}"#).unwrap();
+        let commands = vec![direct_execute_command()];
+        let resolved = resolve_command_for_daemon_with_commands(
+            &s(&[
+                "execute",
+                "tool:test/run",
+                "--input",
+                &input.to_string_lossy(),
+                "--no-project",
+            ]),
+            &commands,
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+            Some(global.path()),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.project_path, None);
+        assert!(
+            resolved.parameters.get("no_project").is_none(),
+            "--no-project is execute control data, not a service parameter"
+        );
     }
 
     #[test]

@@ -10,11 +10,11 @@ default = []
 test-harness = []
 
 [dependencies]
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
 
 [dev-dependencies]
-tempfile = "3"
-serde_json = "1"
-ryeos-tracing = { path = ".", features = ["test-harness"] }
-ryeos-node = { path = "../../daemon/ryeos-node" }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }
+ryeos-node = { workspace = true }

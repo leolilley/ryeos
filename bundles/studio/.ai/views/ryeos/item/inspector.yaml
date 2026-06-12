@@ -1,0 +1,21 @@
+# ryeos:signed:2026-06-11T22:51:47Z:455f61890ba4da80a5b10531c3794224f8920f540981c64f6f9c01eb17a884f9:fvoNXYfH8/CDpKfh2+9pktGXAWzIdrMk+r4x94Ziy8bGpfaClYy/IWq1MtHsJ73BjJKZyHEOhIptgBuhsn1LCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: item-inspector
+version: "1.0.0"
+description: Key-value inspection of the selected item, provenance first
+
+widget: key_value
+source:
+  ref: service:ui/studio/item/inspect
+  params:
+    canonical_ref: "@facet:selection.item"
+    include_raw: false
+    include_effective: true
+projections:
+  detail:
+    - canonical_ref
+    - kind
+    - signer
+    - version
+    - description
+refresh:
+  on_facet: selection

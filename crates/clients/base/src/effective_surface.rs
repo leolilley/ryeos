@@ -145,7 +145,7 @@ mod tests {
                 "layout": {
                     "root": "main",
                     "nodes": {
-                        "main": { "type": "pane", "view": "thread_list" }
+                        "main": { "type": "pane", "view": "view:ryeos/threads/list" }
                     }
                 }
             },

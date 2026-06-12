@@ -72,7 +72,7 @@ impl LayoutTree {
         }
     }
 
-    /// Default 3-pane layout: thread list (left) | thread (right-top) + status (right-bottom).
+    /// Default 3-pane layout: primary list (left) | timeline (right-top) + status (right-bottom).
     pub fn default_three_pane(list_id: TileId, thread_id: TileId, status_id: TileId) -> Self {
         LayoutTree::Split {
             axis: SplitAxis::Horizontal,

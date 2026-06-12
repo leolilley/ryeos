@@ -437,7 +437,7 @@ pub fn verify_manifest_signature(
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
-            return Err(e).with_context(|| format!("stat manifest {}", manifest_path.display()))
+            return Err(e).with_context(|| format!("stat manifest {}", manifest_path.display()));
         }
     };
     if !manifest_meta.file_type().is_file() {
@@ -467,6 +467,29 @@ pub fn verify_manifest_signature(
             sig_header.signer_fingerprint,
             sig_header.signer_fingerprint
         );
+    }
+    let publisher_trust_path = source_path.join("PUBLISHER_TRUST.toml");
+    if publisher_trust_path.is_file() {
+        let raw_trust_doc = fs::read_to_string(&publisher_trust_path)
+            .with_context(|| format!("read {}", publisher_trust_path.display()))?;
+        let trust_doc = ryeos_engine::trust::PublisherTrustDoc::parse(&raw_trust_doc)
+            .map_err(|err| anyhow::anyhow!("invalid {}: {err}", publisher_trust_path.display()))?;
+        if trust_doc.fingerprint == sig_header.signer_fingerprint {
+            if let Some(store_owner) = trust_store
+                .get(&sig_header.signer_fingerprint)
+                .and_then(|signer| signer.label.as_deref())
+            {
+                if store_owner != trust_doc.owner {
+                    bail!(
+                        "publisher trust owner mismatch for fingerprint {}: \
+                         PUBLISHER_TRUST.toml says '{}', operator trust store says '{}'",
+                        sig_header.signer_fingerprint,
+                        trust_doc.owner,
+                        store_owner
+                    );
+                }
+            }
+        }
     }
 
     ryeos_engine::trust::verify_item_signature(&raw, &sig_header, &envelope, trust_store)
@@ -514,7 +537,7 @@ pub fn verify_manifest_signature(
         Err(e) => {
             return Err(e).with_context(|| {
                 format!("stat manifest source {}", source_manifest_path.display())
-            })
+            });
         }
     };
     if let Some(source_meta) = source_meta {
@@ -1391,6 +1414,7 @@ fn is_valid_command_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
     use std::os::unix::fs::PermissionsExt;
@@ -1460,6 +1484,17 @@ mod tests {
 
         fn write_unsigned_manifest(&self, body: &str) {
             fs::write(self.ai_dir.join("manifest.yaml"), body).unwrap();
+        }
+
+        fn write_publisher_trust_doc(&self, owner: &str) {
+            let vk = self.signing_key.verifying_key();
+            let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+            let doc = ryeos_engine::trust::PublisherTrustDoc {
+                public_key: format!("ed25519:{key_b64}"),
+                fingerprint: ryeos_engine::trust::compute_fingerprint(&vk),
+                owner: owner.to_string(),
+            };
+            fs::write(self.source.join("PUBLISHER_TRUST.toml"), doc.to_toml()).unwrap();
         }
 
         fn write_tampered_manifest(&self, original_body: &str) {
@@ -1699,6 +1734,26 @@ description: "fixed parser handler for preflight tests"
         assert!(
             msg.contains("not in operator trust store"),
             "should reject untrusted signer: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_manifest_rejects_publisher_trust_owner_mismatch() {
+        let layout = BundleLayout::new("test-bundle");
+        layout.add_kind_schema("mykind");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - mykind\nrequires_kinds: []\n",
+        );
+        layout.write_publisher_trust_doc("local-dev");
+        let ts = layout.trust_store();
+
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("publisher trust owner mismatch")
+                && msg.contains("local-dev")
+                && msg.contains("test-publisher"),
+            "should reject owner mismatch: {msg}"
         );
     }
 

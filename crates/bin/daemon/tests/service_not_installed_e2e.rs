@@ -25,7 +25,11 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
 
     let project = harness.state_path.display().to_string();
     let (status, body) = harness
-        .post_execute("service:scheduler/register", &project, serde_json::json!({}))
+        .post_execute(
+            "service:scheduler/register",
+            &project,
+            serde_json::json!({}),
+        )
         .await?;
 
     assert_eq!(
@@ -76,11 +80,8 @@ async fn execute_missing_service_returns_service_not_installed() -> anyhow::Resu
 /// `EngineError::ItemNotFound` only).
 #[tokio::test]
 async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()> {
-    let (harness, _fixture) = DaemonHarness::start_fast_with(
-        |_state_path, _user_space, _fixture| Ok(()),
-        |_| {},
-    )
-    .await?;
+    let (harness, _fixture) =
+        DaemonHarness::start_fast_with(|_state_path, _user_space, _fixture| Ok(()), |_| {}).await?;
 
     let project = harness.state_path.display().to_string();
     // bundle.list ships in core and takes no params — must succeed.
@@ -105,11 +106,8 @@ async fn installed_service_does_not_map_to_not_installed() -> anyhow::Result<()>
 /// registered bundles with their installed paths.
 #[tokio::test]
 async fn system_routes_reports_routes_and_bundles() -> anyhow::Result<()> {
-    let (harness, _fixture) = DaemonHarness::start_fast_with(
-        |_state_path, _user_space, _fixture| Ok(()),
-        |_| {},
-    )
-    .await?;
+    let (harness, _fixture) =
+        DaemonHarness::start_fast_with(|_state_path, _user_space, _fixture| Ok(()), |_| {}).await?;
 
     let project = harness.state_path.display().to_string();
     let (status, body) = harness
@@ -166,9 +164,10 @@ async fn system_routes_reports_routes_and_bundles() -> anyhow::Result<()> {
     assert_eq!(status, reqwest::StatusCode::OK);
     let filtered = body["result"]["routes"].as_array().unwrap();
     assert!(
-        !filtered.is_empty() && filtered.iter().all(|r| r["path"]
-            .as_str()
-            .is_some_and(|p| p.contains("/execute"))),
+        !filtered.is_empty()
+            && filtered
+                .iter()
+                .all(|r| r["path"].as_str().is_some_and(|p| p.contains("/execute"))),
         "path filter must narrow to /execute routes, got: {filtered:?}"
     );
 

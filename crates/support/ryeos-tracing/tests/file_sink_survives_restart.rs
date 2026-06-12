@@ -9,9 +9,7 @@ use std::process::Command;
 
 /// Build the ryeosd binary if needed, then initialize a temp app root.
 /// Returns (app_root, trace_path).
-fn init_node_once(
-    tmp: &tempfile::TempDir,
-) -> (std::path::PathBuf, std::path::PathBuf) {
+fn init_node_once(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let state_dir = tmp.path().to_path_buf();
     let trace_path = state_dir
         .join(".ai")

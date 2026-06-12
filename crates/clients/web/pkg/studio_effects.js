@@ -19,10 +19,14 @@ export async function runEffect(effect) {
         query: kind.query,
         kind: kind.kind,
       })));
-    case "fetch_schedules":
-      return result(effect, "schedules", await getJson("/ui/api/studio/schedules/list"));
-    case "fetch_gc_status":
-      return result(effect, "gc_status", await getJson("/ui/api/studio/gc/status"));
+    case "fetch_source": {
+      const resp = await postJson("/ui/api/actions/invoke", { command_id: kind.source_ref, args: kind.params ?? {} });
+      return result(effect, "source_data", resp?.result?.result ?? resp?.result ?? resp);
+    }
+    case "fetch_commands": {
+      const resp = await postJson("/ui/api/actions/invoke", { command_id: "service:commands/list", args: {} });
+      return result(effect, "commands", resp?.result?.result ?? resp?.result ?? resp);
+    }
     case "list_files":
       return result(effect, "files_list", await fileJson("/ui/api/studio/files/list", kind));
     case "fetch_file_space":
@@ -34,17 +38,6 @@ export async function runEffect(effect) {
       }));
     case "read_file":
       return result(effect, "file_read", await fileJson("/ui/api/studio/files/read", kind));
-    case "inspect_item":
-      return result(effect, "item_inspection", await postJson("/ui/api/studio/item/inspect", {
-        canonical_ref: kind.canonical_ref,
-        include_raw: kind.include_raw,
-        include_effective: kind.include_effective,
-      }));
-    case "inspect_thread":
-      return result(effect, "thread_inspection", await postJson("/ui/api/studio/thread/inspect", {
-        thread_id: kind.thread_id,
-        event_limit: kind.event_limit,
-      }));
     case "invoke_action":
       return result(effect, "action_invocation", await postJson("/ui/api/actions/invoke", {
         command_id: kind.command_id,
@@ -54,8 +47,19 @@ export async function runEffect(effect) {
       return result(effect, "thread_cancelled", await postJson("/ui/api/studio/thread/cancel", {
         thread_id: kind.thread_id,
       }));
-    case "submit_input":
-      return result(effect, "input_submitted", { route: kind.route, text: kind.text });
+    case "invoke": {
+      // One daemon path, session-authed: refs and tokens both dispatch
+      // through actions/invoke (read_only + caps enforced server-side).
+      const target = kind.target || {};
+      const body =
+        target.form === "tokens"
+          ? { command_id: "service:commands/dispatch", args: { tokens: target.tokens, ...(kind.params ?? {}) } }
+          : { command_id: target.item_ref, args: kind.params ?? {} };
+      const resp = await postJson("/ui/api/actions/invoke", body);
+      // execute envelope: resp.result = { thread: {...}, result: <contract> }
+      const inner = resp?.result?.result ?? resp?.result ?? resp;
+      return result(effect, "invoked", inner);
+    }
     case "set_location_hash":
       location.hash = kind.hash;
       return result(effect, "browser_only", null);
@@ -66,7 +70,9 @@ export async function runEffect(effect) {
       window.open(kind.url, "_blank", "noopener,noreferrer");
       return result(effect, "browser_only", null);
     default:
-      throw new Error(`Unhandled RyeOS effect: ${kind.type}`);
+      // Degradation discipline: unknown effects fail soft. Throwing here
+      // would let one new effect kind take down the whole renderer.
+      return failedResultFor(effect, new Error(`unhandled effect: ${kind.type}`));
   }
 }
 
@@ -126,16 +132,12 @@ function resultKindFor(effect) {
   if (type === "open_project") return "project_opened";
   if (type === "fetch_threads") return "threads";
   if (type === "fetch_items") return "items";
-  if (type === "fetch_schedules") return "schedules";
-  if (type === "fetch_gc_status") return "gc_status";
   if (type === "list_files") return "files_list";
   if (type === "fetch_file_space") return "file_space";
   if (type === "read_file") return "file_read";
-  if (type === "inspect_item") return "item_inspection";
-  if (type === "inspect_thread") return "thread_inspection";
   if (type === "invoke_action") return "action_invocation";
   if (type === "cancel_thread") return "thread_cancelled";
-  if (type === "submit_input") return "input_submitted";
+  if (type === "invoke") return "invoked";
   return "browser_only";
 }
 

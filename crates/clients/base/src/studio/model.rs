@@ -2,16 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::dto::{
-    StudioDimensionDto, StudioFileReadDto, StudioFileSpaceDto, StudioFilesDto, StudioGcStatusDto,
-    StudioItemInspectionDto, StudioItemsDto, StudioProjectsDto, StudioSchedulesDto,
-    StudioThreadInspectionDto, StudioThreadsDto, StudioTopologyDto,
+    StudioDimensionDto, StudioFileReadDto, StudioFileSpaceDto, StudioFilesDto, StudioItemsDto,
+    StudioProjectsDto, StudioThreadsDto, StudioTopologyDto,
 };
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
 use super::view_model::{StudioMotionEventVm, StudioNoticeVm, StudioTone, StudioViewModel};
 use crate::atlas::AtlasUiStateVm;
 use crate::surface::{LayoutNodeSpec, SurfaceLayoutSpec, SurfaceSpec, ViewKindSpec};
-use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
+use crate::workspace::{ViewSpec, Workspace};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,32 +82,6 @@ impl Default for StudioFilesState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum StudioInspectorState {
-    Empty,
-    Dimension,
-    Summary {
-        title: String,
-        detail: serde_json::Value,
-    },
-    Item {
-        canonical_ref: String,
-    },
-    Thread {
-        thread_id: String,
-    },
-    File {
-        root: String,
-        path: String,
-    },
-}
-
-impl Default for StudioInspectorState {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioNotice {
     pub id: String,
     pub message: String,
@@ -122,27 +95,13 @@ pub struct StudioLauncherState {
     pub selected: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Buffer state only — ephemera, never braided. Where text LANDS is the
+/// `input.route` facet on the seat braid (`studio::seat`), not a field
+/// here.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StudioInputState {
     pub text: String,
     pub cursor: usize,
-    pub route: StudioInputRoute,
-}
-
-impl Default for StudioInputState {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            cursor: 0,
-            route: StudioInputRoute::StudioContext,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StudioInputRoute {
-    StudioContext,
 }
 
 impl StudioInputState {
@@ -222,11 +181,16 @@ impl StudioDockSlotState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioDockContent {
+    /// The input chrome (engine widget, never content-targetable).
     Input,
-    Threads,
-    Inspector,
-    Context,
-    Placeholder { message: String },
+    /// A content-bound view in a dock slot — docks are tiles with an
+    /// edge; the same bindings render in both.
+    View {
+        view_ref: String,
+    },
+    Placeholder {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,10 +204,25 @@ pub struct StudioDockState {
 impl Default for StudioDockState {
     fn default() -> Self {
         Self {
-            top: StudioDockSlotState::hidden(4, StudioDockContent::Context),
+            top: StudioDockSlotState::hidden(
+                4,
+                StudioDockContent::Placeholder {
+                    message: "context".to_string(),
+                },
+            ),
             bottom: StudioDockSlotState::visible(4, StudioDockContent::Input),
-            left: StudioDockSlotState::hidden(28, StudioDockContent::Threads),
-            right: StudioDockSlotState::hidden(34, StudioDockContent::Inspector),
+            left: StudioDockSlotState::hidden(
+                28,
+                StudioDockContent::View {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                },
+            ),
+            right: StudioDockSlotState::hidden(
+                34,
+                StudioDockContent::View {
+                    view_ref: "view:ryeos/item/inspector".to_string(),
+                },
+            ),
         }
     }
 }
@@ -258,7 +237,6 @@ impl StudioDockState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioUiState {
-    pub inspector: StudioInspectorState,
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
@@ -281,7 +259,6 @@ pub struct StudioUiState {
 impl Default for StudioUiState {
     fn default() -> Self {
         Self {
-            inspector: StudioInspectorState::default(),
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
             launcher: StudioLauncherState::default(),
@@ -311,14 +288,18 @@ pub struct StudioDataState {
     pub threads: Option<StudioThreadsDto>,
     pub items: Option<StudioItemsDto>,
     pub tile_items: HashMap<String, StudioItemsDto>,
-    pub schedules: Option<StudioSchedulesDto>,
-    pub gc_status: Option<StudioGcStatusDto>,
     pub files: Option<StudioFilesDto>,
     pub file_space: Option<StudioFileSpaceDto>,
     pub tile_files: HashMap<String, StudioFilesDto>,
     pub file_read: Option<StudioFileReadDto>,
-    pub item_inspection: Option<StudioItemInspectionDto>,
-    pub thread_inspection: Option<StudioThreadInspectionDto>,
+    /// Command records from `service:commands/list` (completion data;
+    /// open JSON — projected, never typed per-command).
+    #[serde(default)]
+    pub commands: Option<serde_json::Value>,
+    /// Bound-view source responses, keyed by tile id (the generic data
+    /// system: open JSON, projected through view bindings).
+    #[serde(default)]
+    pub sources: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -339,7 +320,16 @@ impl Default for StudioRuntimeState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudioCore {
     pub data: StudioDataState,
+    /// Resolved `view:` bindings embedded in the effective surface
+    /// (views-as-content; every binding remains an addressable item).
+    #[serde(default)]
+    pub views: std::collections::BTreeMap<String, super::content::ViewBinding>,
     pub ui: StudioUiState,
+    /// Seat braid (engine-local log while the engine holds append
+    /// authority; see `studio::seat`). Seat truth — route, selection —
+    /// folds from here, never from renderer state.
+    #[serde(default)]
+    pub seat: super::seat::SeatLog,
     pub workspace: Workspace,
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
@@ -357,11 +347,23 @@ impl StudioCore {
             .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
             .map(|surface| surface.to_workspace())
             .unwrap_or_else(|| studio_default_surface().to_workspace());
+        let input_route = session
+            .effective_surface
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+            .and_then(|surface| {
+                super::seat::InputRoute::from_surface_input(surface.input.as_ref())
+            });
         let mut core = Self::default();
+        core.views = super::content::views_from_surface(session.effective_surface.as_ref());
         core.data.session = Some(session);
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
-        core.ui.inspector = StudioInspectorState::Dimension;
+        if let Some(route) = input_route {
+            if let Ok(value) = serde_json::to_value(&route) {
+                core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+            }
+        }
         core.workspace = workspace;
         core.workspaces = vec![studio_default_surface().to_workspace(); 9];
         core.workspaces[0] = core.workspace.clone();
@@ -404,23 +406,20 @@ impl StudioCore {
     }
 
     pub fn initial_effects(&mut self) -> Vec<StudioEffect> {
-        let mut needs_threads = false;
-        let mut needs_schedules = false;
-        let mut needs_gc = false;
         let needs_atlas = self.surface_uses_atlas_ambient();
         let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
         let mut needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
         let mut needs_topology = false;
-        let mut item_tiles = Vec::new();
-        let mut file_tiles = Vec::new();
+        let mut bound_tiles: Vec<(crate::ids::TileId, String)> = Vec::new();
 
         for tile_id in self.workspace.layout.tile_ids() {
             let Some(tile) = self.workspace.tiles.get(&tile_id) else {
                 continue;
             };
-            match tile.view {
-                ViewSpec::Thread { .. } | ViewSpec::ThreadList => needs_threads = true,
-                ViewSpec::SpaceBrowser { .. } => item_tiles.push((tile_id, tile.local.clone())),
+            match &tile.view {
+                ViewSpec::Bound { view_ref } => {
+                    bound_tiles.push((tile_id, view_ref.clone()));
+                }
                 ViewSpec::Atlas => {
                     match self.ui.atlas.active_projection {
                         crate::atlas::AtlasProjectionVm::AiSpace => needs_atlas_items = true,
@@ -428,38 +427,24 @@ impl StudioCore {
                     }
                     needs_topology = true;
                 }
-                ViewSpec::Schedules => needs_schedules = true,
-                ViewSpec::GcStatus => needs_gc = true,
-                ViewSpec::Files => file_tiles.push((tile_id, tile.local.clone())),
                 ViewSpec::Graph { .. } => needs_topology = true,
-                ViewSpec::Overview
-                | ViewSpec::Remotes
-                | ViewSpec::Services
-                | ViewSpec::ItemInspector
-                | ViewSpec::Projects
-                | ViewSpec::Trust
-                | ViewSpec::EventInspector => {}
             }
         }
 
         let mut effects = vec![
             self.emit(StudioEffectKind::FetchDimension),
             self.emit(StudioEffectKind::FetchProjects),
+            self.emit(StudioEffectKind::FetchCommands),
         ];
-        if needs_threads {
-            effects.push(self.emit(StudioEffectKind::FetchThreads { limit: 200 }));
+        for (tile_id, view_ref) in bound_tiles {
+            if let Some(effect) = self.emit_fetch_source(tile_id, &view_ref) {
+                effects.push(effect);
+            }
         }
-        for (tile_id, local) in item_tiles {
-            let (query, kind) = match local {
-                ViewLocalState::SpaceBrowser { query, kind, .. } => (query, kind),
-                _ => (String::new(), String::new()),
-            };
-            effects.push(self.emit(StudioEffectKind::FetchItems {
-                tile_id: Some(tile_id.0.to_string()),
-                query: non_empty(query),
-                kind: non_empty(kind),
-                limit: 1000,
-            }));
+        for (key, view_ref) in self.visible_dock_views() {
+            if let Some(effect) = self.emit_fetch_source_keyed(key, &view_ref) {
+                effects.push(effect);
+            }
         }
         if needs_atlas_items {
             effects.push(self.emit(StudioEffectKind::FetchItems {
@@ -480,27 +465,76 @@ impl StudioCore {
         if needs_topology {
             effects.push(self.emit(StudioEffectKind::FetchTopology));
         }
-        if needs_schedules {
-            effects.push(self.emit(StudioEffectKind::FetchSchedules));
-        }
-        if needs_gc {
-            effects.push(self.emit(StudioEffectKind::FetchGcStatus));
-        }
-        for (tile_id, local) in file_tiles {
-            let (root, path) = match local {
-                ViewLocalState::Files { root, path, .. } => (root, path),
-                _ => ("project".to_string(), String::new()),
-            };
-            if !self.has_project_bound() && file_root_requires_project(&root) {
-                continue;
-            }
-            effects.push(self.emit(StudioEffectKind::ListFiles {
-                tile_id: Some(tile_id.0.to_string()),
-                root,
-                path,
-            }));
-        }
         effects
+    }
+
+    /// Hint arrival: refetch every bound tile whose binding declares
+    /// `refresh.on_hint: <kind>` (content decides its own liveness).
+    pub fn effects_for_hint(&mut self, kind: &str) -> Vec<StudioEffect> {
+        let targets: Vec<(crate::ids::TileId, String)> = self
+            .workspace
+            .layout
+            .tile_ids()
+            .into_iter()
+            .filter_map(|tile_id| {
+                let tile = self.workspace.tiles.get(&tile_id)?;
+                let ViewSpec::Bound { view_ref } = &tile.view else {
+                    return None;
+                };
+                let binding = self.views.get(view_ref)?;
+                (binding.refresh.get("on_hint").and_then(|v| v.as_str()) == Some(kind))
+                    .then(|| (tile_id, view_ref.clone()))
+            })
+            .collect();
+        targets
+            .into_iter()
+            .filter_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .collect()
+    }
+
+    /// Emit the generic source fetch for a bound view tile, resolving
+    /// `@facet:` params against the seat fold (explicit references only).
+    pub fn emit_fetch_source(
+        &mut self,
+        tile_id: crate::ids::TileId,
+        view_ref: &str,
+    ) -> Option<StudioEffect> {
+        self.emit_fetch_source_keyed(tile_id.0.to_string(), view_ref)
+    }
+
+    /// Keyed variant: docks and other non-tile hosts subscribe with
+    /// stable string keys (e.g. `dock:left`).
+    pub fn emit_fetch_source_keyed(
+        &mut self,
+        source_key: String,
+        view_ref: &str,
+    ) -> Option<StudioEffect> {
+        let binding = self.views.get(view_ref)?;
+        let source = binding.source.clone()?;
+        let fold = self.seat.fold();
+        let params = super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
+        Some(self.emit(StudioEffectKind::FetchSource {
+            tile_id: source_key,
+            source_ref: source.item_ref,
+            params,
+        }))
+    }
+
+    /// Visible content-bound dock slots, keyed for source fetches.
+    pub fn visible_dock_views(&self) -> Vec<(String, String)> {
+        [
+            ("dock:top", &self.ui.docks.top),
+            ("dock:bottom", &self.ui.docks.bottom),
+            ("dock:left", &self.ui.docks.left),
+            ("dock:right", &self.ui.docks.right),
+        ]
+        .into_iter()
+        .filter(|(_, slot)| slot.visible)
+        .filter_map(|(key, slot)| match &slot.content {
+            StudioDockContent::View { view_ref } => Some((key.to_string(), view_ref.clone())),
+            _ => None,
+        })
+        .collect()
     }
 
     fn surface_uses_atlas_ambient(&self) -> bool {
@@ -555,18 +589,6 @@ impl StudioCore {
     }
 }
 
-fn file_root_requires_project(root: &str) -> bool {
-    matches!(root, "project" | "project_ai")
-}
-
-fn non_empty(value: String) -> Option<String> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
 fn studio_default_surface() -> SurfaceSpec {
     let mut nodes = HashMap::new();
     nodes.insert(
@@ -586,6 +608,9 @@ fn studio_default_surface() -> SurfaceSpec {
             nodes,
         },
         input: None,
+        views: None,
+        home_view: None,
+        library: Vec::new(),
         ambient: None,
         affordances: Vec::new(),
         instruments: Vec::new(),
@@ -600,7 +625,9 @@ impl Default for StudioCore {
         workspaces[0] = workspace.clone();
         Self {
             data: StudioDataState::default(),
+            views: std::collections::BTreeMap::new(),
             ui: StudioUiState::default(),
+            seat: super::seat::SeatLog::default(),
             workspace,
             workspaces,
             active_workspace: 0,
@@ -621,7 +648,6 @@ mod tests {
         let mut input = StudioInputState {
             text: "é".to_string(),
             cursor: 1,
-            route: StudioInputRoute::StudioContext,
         };
         input.insert_char('x');
         assert_eq!(input.text, "xé");
@@ -635,6 +661,36 @@ mod tests {
     }
 
     #[test]
+    fn bound_view_tiles_emit_generic_source_fetch() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "layout": { "root": "main", "nodes": { "main": { "type": "pane", "view": "view:ryeos/threads/list" } } },
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "rows",
+                        "source": { "ref": "service:ui/studio/threads", "params": { "limit": 5 }, "collection": "threads" },
+                        "projections": { "primary": "item_ref" }
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let effects = core.initial_effects();
+        let fetch = effects.iter().find_map(|effect| match &effect.kind {
+            StudioEffectKind::FetchSource {
+                source_ref, params, ..
+            } => Some((source_ref.clone(), params.clone())),
+            _ => None,
+        });
+        let (source_ref, params) = fetch.expect("bound tile emits FetchSource");
+        assert_eq!(source_ref, "service:ui/studio/threads");
+        assert_eq!(params["limit"], 5);
+    }
+
+    #[test]
     fn studio_dock_defaults_keep_input_visible_only() {
         let docks = StudioDockState::default();
         assert!(!docks.top.visible);
@@ -642,9 +698,14 @@ mod tests {
         assert!(!docks.left.visible);
         assert!(!docks.right.visible);
         assert_eq!(docks.bottom.content, StudioDockContent::Input);
-        assert_eq!(docks.left.content, StudioDockContent::Threads);
-        assert_eq!(docks.right.content, StudioDockContent::Inspector);
-        assert_eq!(docks.top.content, StudioDockContent::Context);
+        assert!(matches!(
+            &docks.left.content,
+            StudioDockContent::View { view_ref } if view_ref == "view:ryeos/threads/list"
+        ));
+        assert!(matches!(
+            &docks.right.content,
+            StudioDockContent::View { view_ref } if view_ref == "view:ryeos/item/inspector"
+        ));
         assert!(docks.has_visible_input());
     }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-27T06:45:50Z:1f307af85004089dcad4ac0e162f9d0567b2508f93a46e68e1f6ce70fc849360:EKWIE8r+yN0n1/2r6dBaHQVx5T6mVI78Dw9G04OV8j13b54c97Hroe/ARykgx/4zM4fLTVGh3JRDeLviAvn1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T21:03:05Z:1f307af85004089dcad4ac0e162f9d0567b2508f93a46e68e1f6ce70fc849360:EKWIE8r+yN0n1/2r6dBaHQVx5T6mVI78Dw9G04OV8j13b54c97Hroe/ARykgx/4zM4fLTVGh3JRDeLviAvn1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://openrouter.ai/api/v1"

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-04T02:13:35Z:b60e24e02e52f26cd8f801c092f0d2a13dea0b9ddc9e939cf9f938ecaaf8a2cb:h/i9mVtoNY46cXU73280nyTeBcnV+W8J+9dBWcrDAlEOOoC4aX1KY4wLROEu1aEUEikCHiDwjqtqiztqV2S7DA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-11T23:10:37Z:7c6ac7b1bbfa0c3e90002918378e0e7f007a18696d79173b9f46ddefc307c13a:fkcSEskxhlycmK86BU/puO0HC1X7pHgNm4AE8xW7pHr1TQWRcqgWNOvjRIwJgU0ejCM3LsRsuXm1+6axKK95CQ==:d1184d41372333a4c8dfe854f355fcc74cf82b7a831698b705004536e4700414 -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -129,10 +129,13 @@ explicit adoption path is implemented. Removing a project-managed declaration
 removes the active node schedule spec and DB projection while preserving fire
 history under `.ai/state/schedules`.
 
-The scheduler runtime gate in `AppState` serializes project/scheduler mutations
-against timer and recovery dispatch. Mutation services take the write side;
-timer/recovery dispatch take the read side and skip/wait while a deploy is in
-progress.
+The scheduler runtime gate in `AppState` serializes the deploy mutation window
+against timer and recovery dispatch. Mutation services take the write side for
+plan -> prepare-commit -> ref-advance (plus rollbacks); timer/recovery dispatch
+take the read side and skip/wait while that window is held. Request validation,
+CAS reads, and staging materialization run before the gate, so dispatch is not
+blocked behind work that scales with project size (per-project serialization is
+the apply lock's job).
 
 ## Where to change things
 

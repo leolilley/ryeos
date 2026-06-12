@@ -51,7 +51,9 @@ impl SignSource {
                 "source `system` is rejected — bundle items are signed by their \
                  author key during bundle authoring, not re-signed in place"
             ),
-            "operator" => bail!("source `operator` is rejected — app-root config is not an item source"),
+            "operator" => {
+                bail!("source `operator` is rejected — app-root config is not an item source")
+            }
             other => bail!("unknown source `{other}` (expected: project)"),
         }
     }

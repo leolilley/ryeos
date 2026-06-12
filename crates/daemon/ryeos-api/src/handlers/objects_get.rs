@@ -24,8 +24,7 @@ pub struct Request {
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let cas_root = state.state_store.cas_root()?;
-    let cas = lillux::cas::CasStore::new(cas_root);
+    let cas = state.cas_store()?;
 
     let mut entries = Vec::with_capacity(req.hashes.len());
 
