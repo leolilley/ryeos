@@ -2,7 +2,7 @@
 //!
 //! Commands whose service descriptor declares `availability: offline` (or `both`)
 //! run locally without a daemon. Client and tool descriptors are also dispatchable
-//! offline when the verb's `execute` field targets them directly.
+//! offline when the command's `execute` field targets them directly.
 //!
 //! The engine resolves items (tools, services, clients) through the same pipeline
 //! the daemon uses: kind-agnostic resolution, trust verification, composition.
@@ -577,9 +577,6 @@ fn dispatch_service(
 
     // Bind params with service schema
     let mut params = bind_params_with_schema(tail, command, &service_schema, project_path)?;
-    if let Some(obj) = params.as_object_mut() {
-        obj.insert("_verb".to_string(), Value::String(command.name.clone()));
-    }
 
     // Strip internal routing fields before passing to the subprocess tool.
     if let Some(obj) = params.as_object_mut() {

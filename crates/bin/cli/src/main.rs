@@ -5,7 +5,7 @@ mod dispatcher;
 mod error;
 mod exit;
 mod help;
-mod local_verbs;
+mod lifecycle_commands;
 mod node_descriptors;
 mod offline_dispatch;
 mod project_resolve;

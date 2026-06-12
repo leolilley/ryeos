@@ -1,6 +1,6 @@
-//! Hardcoded CLI verbs that run LOCALLY without dispatching to the daemon.
+//! Hardcoded CLI commands that run LOCALLY without dispatching to the daemon.
 //!
-//! Only lifecycle verbs live here — the absolute minimum needed to manage
+//! Only lifecycle commands live here — the absolute minimum needed to manage
 //! the local node before the daemon exists or is reachable:
 //!
 //!   - `ryeos init`   — bootstrap operator keys, trust store, and bundles
@@ -15,6 +15,7 @@
 //! descriptor-driven and dispatched through the offline/dual path
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -24,33 +25,35 @@ use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv, StopOp
 
 use crate::error::CliError;
 
-/// Returns `Ok(true)` if the argv was handled by a local verb, `Ok(false)`
-/// if no match (caller should fall through to verb-table dispatch).
+/// Returns `Ok(true)` if the argv was handled by a lifecycle command, `Ok(false)`
+/// if no lifecycle command matched.
 ///
-/// Errors from a matched local verb propagate as `CliError::Local`.
+/// Errors from a matched lifecycle command propagate as `CliError::Local`.
 pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
     if argv.is_empty() {
         return Ok(false);
     }
     match argv[0].as_str() {
         "identity" => {
-            run_identity_verb(&argv[1..]).map_err(map_local_err)?;
+            run_identity_command(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
         "init" => {
-            run_init_verb(&argv[1..]).map_err(map_local_err)?;
+            run_init_command(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
         "node" | "system" if argv.get(1).map(String::as_str) == Some("status") => {
-            run_status_verb(&argv[2..]).await.map_err(map_local_err)?;
+            run_status_command(&argv[2..])
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         "start" => {
-            run_start_verb(&argv[1..]).await.map_err(map_local_err)?;
+            run_start_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
         "stop" => {
-            run_stop_verb(&argv[1..]).await.map_err(map_local_err)?;
+            run_stop_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -77,7 +80,7 @@ struct IdentityArgs {
     app_root: Option<PathBuf>,
 }
 
-fn run_identity_verb(argv: &[String]) -> Result<()> {
+fn run_identity_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<IdentityArgs>(argv)?;
     let report = ryeos_tools::actions::inspect::identity::run_identity(
         ryeos_tools::actions::inspect::identity::IdentityParams {
@@ -118,7 +121,7 @@ struct InitArgs {
     trust_files: Vec<PathBuf>,
 }
 
-fn run_init_verb(argv: &[String]) -> Result<()> {
+fn run_init_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<InitArgs>(argv)?;
     let app_root = args.app_root.unwrap_or_else(default_app_root);
 
@@ -151,7 +154,7 @@ struct StatusArgs {
     json: bool,
 }
 
-async fn run_status_verb(argv: &[String]) -> Result<()> {
+async fn run_status_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StatusArgs>(argv)?;
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let status = controller
@@ -176,11 +179,23 @@ struct StartArgs {
     /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
     #[arg(long)]
     app_root: Option<PathBuf>,
+
+    /// TCP bind address for ryeosd, e.g. 127.0.0.1:17400.
+    /// Overrides stored config for this start invocation.
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+
+    /// Lifecycle/control Unix socket path for ryeosd.
+    /// Useful when running a second local daemon alongside the default node.
+    #[arg(long)]
+    uds_path: Option<PathBuf>,
 }
 
-async fn run_start_verb(argv: &[String]) -> Result<()> {
+async fn run_start_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StartArgs>(argv)?;
-    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let env =
+        LocalLifecycleEnv::load_with_overrides(args.app_root, args.bind, args.uds_path, true)?;
+    let controller = LifecycleController::from_env(env);
     let report = controller.start().await.context("ryeos start failed")?;
     if report.already_running {
         println!("running");
@@ -209,7 +224,7 @@ struct StopArgs {
     force: bool,
 }
 
-async fn run_stop_verb(argv: &[String]) -> Result<()> {
+async fn run_stop_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<StopArgs>(argv)?;
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
     let report = controller

@@ -7,7 +7,7 @@ use ryeos_runtime::{
 use serde_json::Value;
 
 use crate::error::CliError;
-use crate::local_verbs;
+use crate::lifecycle_commands;
 
 /// CLI struct for clap argument parsing.
 #[derive(clap::Parser)]
@@ -27,7 +27,7 @@ pub struct Cli {
     #[arg(long)]
     pub debug: bool,
 
-    /// Verb tokens + tail (everything after globals).
+    /// Command tokens + tail (everything after globals).
     #[arg(trailing_var_arg = true)]
     pub rest: Vec<String>,
 }
@@ -43,16 +43,16 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 2. App root
     let app_root = discover_app_root();
 
-    // 3. Hardcoded LOCAL verbs (must work before daemon exists):
+    // 3. Hardcoded lifecycle/bootstrap commands (must work before daemon exists):
+    //      ryeos identity                   — print local node identity
     //      ryeos init                       — bootstrap operator state
-    //      ryeos trust pin --from <trust>   — pin a publisher key
-    //      ryeos publish <src>              — bundle author publish dance
-    //      ryeos vault {put,list,remove,rewrap} — sealed secret management
-    if local_verbs::try_dispatch(&cli.rest).await? {
+    //      ryeos start/stop                 — manage the local daemon
+    //      ryeos node status                — inspect lifecycle state
+    if lifecycle_commands::try_dispatch(&cli.rest).await? {
         return Ok(());
     }
 
-    // 4. No verb = help
+    // 4. No command = help
     if cli.rest.is_empty() {
         crate::help::print_help(std::io::stdout())?;
         return Ok(());
@@ -64,9 +64,9 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // `ryeos help <verb...>` → verb help (queries daemon for alias info)
+    // `ryeos help <command...>` → command help (queries daemon for alias info)
     if cli.rest.len() > 1 && cli.rest[0] == "help" {
-        crate::help::print_verb_help(
+        crate::help::print_command_help(
             &cli.rest[1..],
             &app_root,
             body_project_path.as_deref().unwrap_or("."),
@@ -75,16 +75,16 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // `ryeos <verb...> --help` / `-h` should feel like a normal CLI.
+    // `ryeos <command...> --help` / `-h` should feel like a normal CLI.
     // Without this guard the trailing help flag is bound as service
     // input and strict service schemas return noisy "unknown field help".
     if let Some(help_idx) = cli.rest.iter().position(|t| t == "--help" || t == "-h") {
-        let verb_tokens = &cli.rest[..help_idx];
-        if verb_tokens.is_empty() {
+        let command_tokens = &cli.rest[..help_idx];
+        if command_tokens.is_empty() {
             crate::help::print_help(std::io::stdout())?;
         } else {
-            crate::help::print_verb_help(
-                verb_tokens,
+            crate::help::print_command_help(
+                command_tokens,
                 &app_root,
                 body_project_path.as_deref().unwrap_or("."),
             )
@@ -110,12 +110,12 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // 6. Token dispatch — send tokens to daemon, it resolves the command
     //    registry and binds tail parameters server-side.
     //
-    //    For remote verbs that take a project root, CLI-side rewrite injects a canonical
+    //    For remote commands that take a project root, CLI-side rewrite injects a canonical
     //    `--project <abs>` or `--no-project` into the tail. The daemon
     //    cannot do this — its cwd is irrelevant to the caller. Accepting
     //    `--project` here is deliberate: project-aware aliases expose a
     //    service-schema `project` field, while global `-p/--project` before
-    //    the verb remains supported by clap above.
+    //    the command remains supported by clap above.
 
     let resolved = resolve_command_for_daemon(&cli.rest, &app_root, cli.project.as_deref())?;
 
@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_bind_project_accepts_project_after_verb() {
+    fn remote_bind_project_accepts_project_after_command() {
         let tmp = tempfile::tempdir().unwrap();
         let commands = vec![command(
             &["remote", "bind-project"],
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_doctor_accepts_optional_project_after_verb() {
+    fn remote_doctor_accepts_optional_project_after_command() {
         with_app_root(|| {
             let tmp = tempfile::tempdir().unwrap();
             let commands = vec![command(

@@ -1,15 +1,15 @@
-//! Operator-side vault verbs — `ryeos vault {put,list,remove,rewrap}`.
+//! Operator-side vault commands — `ryeos vault {put,list,remove,rewrap}`.
 //!
-//! These verbs operate directly on the daemon's on-disk vault key
+//! These commands operate directly on the daemon's on-disk vault key
 //! (`<state>/.ai/node/vault/private_key.pem`) and the sealed
 //! secret-store (`<state>/.ai/state/secrets/store.enc`). They run
 //! locally without the daemon so rotation works even when the daemon
 //! is down — that's why this module sits in `ryeos-tools` and is
-//! invoked through `crates/bin/cli/src/local_verbs.rs`.
+//! invoked through `crates/bin/cli/src/lifecycle_commands.rs`.
 //!
 //! The library functions (policy, paths, sealed I/O, dotenv) are now
 //! owned by the `ryeos-vault` crate. This module re-exports them and
-//! adds the CLI verb structs + `run_*()` implementations.
+//! adds the CLI command structs + `run_*()` implementations.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +22,7 @@ pub use ryeos_vault::paths::{
 pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
 pub use ryeos_vault::sealed::{read_sealed_secrets, write_sealed_secrets};
 
-// ── Verb options + reports ───────────────────────────────────────────
+// ── Command options + reports ────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct PutOptions {
@@ -75,7 +75,7 @@ pub struct RewrapReport {
     pub keys_rewrapped: usize,
 }
 
-// ── Verb implementations ─────────────────────────────────────────────
+// ── Command implementations ──────────────────────────────────────────
 
 pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
     if opts.entries.is_empty() {

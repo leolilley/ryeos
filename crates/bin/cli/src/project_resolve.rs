@@ -1,6 +1,6 @@
 //! Client-side project-path resolution.
 //!
-//! Remote project-bearing verbs need a project root, and the daemon
+//! Remote project-bearing commands need a project root, and the daemon
 //! CANNOT do auto-discovery — its cwd is irrelevant to the caller.
 //! So the CLI is responsible for:
 //!
@@ -26,7 +26,7 @@ pub enum ResolvedProjectSpec {
     Explicit(PathBuf),
 }
 
-/// Process the tail of a project-bearing verb, returning a rewritten
+/// Process the tail of a project-bearing command, returning a rewritten
 /// tail where `--project` and `--no-project` are in their canonical
 /// daemon-friendly form (absolute paths, no `-p`/`--project=foo`
 /// syntactic noise).
@@ -41,7 +41,7 @@ fn rewrite_project_tail(tail: &[String]) -> Result<Vec<String>, CliError> {
 /// Rewrite a project-bearing tail, using `default_project` when the tail
 /// does not contain either `--project` or `--no-project`. This is how
 /// the CLI preserves global `-p/--project` support while still accepting
-/// service-field `--project` after the verb.
+/// service-field `--project` after the command.
 pub fn rewrite_project_tail_with_default(
     tail: &[String],
     default_project: Option<&std::path::Path>,
