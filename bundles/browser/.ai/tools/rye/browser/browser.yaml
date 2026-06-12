@@ -1,0 +1,43 @@
+# ryeos:signed:2026-06-12T06:51:48Z:75b6dd9d89ac7b1ee1b2a940bc476097c236944d5863ecebb18c0023bd602f02:hTlKL7Dl6UcZQwtmVycmRELUGsMl8grL43rXL4tnm+KJRfX+tx8BTyMtjYRHcRsN/3g+gce/uZnHAaBNZ7PqCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "rye/browser"
+version: "1.0.0"
+tool_type: "subprocess"
+executor_id: "@subprocess"
+description: "Browser automation facade backed by Node and Playwright. Actual browser execution is gated by RYEOS_BROWSER_INTEGRATION=1; otherwise the tool validates inputs and returns diagnostics. Runtime defaults are read from .ai/config/browser/browser.yaml."
+
+config:
+  command: "bin:ryeos-browser-tools"
+  args:
+    - "browser"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 120
+
+config_schema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: ["navigate", "snapshot", "screenshot", "click", "type", "close_session"]
+    url:
+      type: string
+      description: "URL for navigate. Must start with http:// or https://"
+    session_id:
+      type: string
+      pattern: "^[A-Za-z0-9_.-]{1,80}$"
+      default: "default"
+    selector:
+      type: string
+    text:
+      type: string
+    timeout_ms:
+      type: integer
+      minimum: 1000
+      maximum: 100000
+      default: 30000
+    max_output_chars:
+      type: integer
+      minimum: 1000
+      maximum: 200000
+      default: 50000
+  required: [action]

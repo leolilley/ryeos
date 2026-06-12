@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-26T06:36:57Z:cffa20a05ff74ef50a9f69521174bc9a2c3f23ab37578274347ed9f4c54cc215:zblyBlH/7na4FG8Rmw/eUZ29IvgxPwFNKE65bTqLqUi8zb3GFSEc32ZQb4hOFQ1KoXoyVPyxoRLfhgZQoalAAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-12T06:51:48Z:22e10b85cc1637fdd0765eb726eb33c83fa2d4e641c0389051e5d5c97c4f1807:Z5XcPBr9oIUgvAglxIh327/Jca01Ic3BNKPL9WU047xb44XHD7FoKH0uGmrABmM1KTrsPp39nur0DkDW0t9RCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
@@ -25,5 +25,10 @@ config_schema:
       minimum: 1
       maximum: 20
       default: 10
-      description: "Maximum number of DuckDuckGo results to return"
+      description: "Maximum number of results to return"
+    provider:
+      type: string
+      enum: ["auto", "bing_web_rss", "duckduckgo", "google_news_rss", "bing_news_rss"]
+      default: "auto"
+      description: "Search provider. auto uses the built-in fallback chain."
   required: [query]

@@ -1,0 +1,6 @@
+name: browser
+version: "0.1.0"
+description: "Optional browser automation tools for agents"
+requires_kinds:
+  - tool
+uses_kinds: []

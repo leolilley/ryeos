@@ -13,7 +13,7 @@
 #   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|standard|hosted-node|hosted-workflow]
 #
 # Bundle sets:
-#   full            core + standard + web + studio + hosted-node (default)
+#   full            core + standard + web + browser + studio + hosted-node (default)
 #   standard        core + standard — scheduler/graph/directive standard node
 #   hosted-node     core + hosted-node — lean remote-admission control plane
 #   hosted-workflow core + standard + hosted-node — hosted node that also
@@ -141,6 +141,7 @@ echo "[populate-bundles] target dir: $TARGET"
 CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
 WEB="$ROOT/bundles/web"
+BROWSER="$ROOT/bundles/browser"
 STUDIO="$ROOT/bundles/studio"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
@@ -150,7 +151,7 @@ PUBLISHER_FP="$(publisher_fingerprint)"
 
 case "$BUNDLE_SET" in
   full)
-    BUNDLE_DIRS=("$CORE" "$STD" "$WEB" "$STUDIO" "$HOSTED_NODE")
+    BUNDLE_DIRS=("$CORE" "$STD" "$WEB" "$BROWSER" "$STUDIO" "$HOSTED_NODE")
     ;;
   standard)
     BUNDLE_DIRS=("$CORE" "$STD")
@@ -177,12 +178,13 @@ done
 CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
+BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
 STUDIO_BIN="$STUDIO/.ai/bin/$TRIPLE"
 HOSTED_NODE_BIN="$HOSTED_NODE/.ai/bin/$TRIPLE"
 
 case "$BUNDLE_SET" in
   full)
-    mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$STUDIO_BIN" "$HOSTED_NODE_BIN"
+    mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$BROWSER_BIN" "$STUDIO_BIN" "$HOSTED_NODE_BIN"
     ;;
   standard)
     mkdir -p "$CORE_BIN" "$STD_BIN"
@@ -209,6 +211,7 @@ case "$BUNDLE_SET" in
       -p ryeos-cli \
       -p ryeos-tools \
       -p ryeos-web-tools \
+      -p ryeos-browser-tools \
       -p ryeos-ui-terminal \
       -p ryeos-ui-web
     ;;
@@ -277,6 +280,11 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
   install -m 0755 \
     "$TARGET/release/ryeos-web-tools" \
     "$WEB_BIN/"
+
+  echo "[populate-bundles] installing browser bundle binaries → $BROWSER_BIN"
+  install -m 0755 \
+    "$TARGET/release/ryeos-browser-tools" \
+    "$BROWSER_BIN/"
 fi
 
 # ── Publish ──────────────────────────────────────────────────────────
@@ -324,6 +332,11 @@ fi
 if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] publishing web bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
+    --registry-root "$CORE" \
+    --owner "$OWNER" >/dev/null
+
+  echo "[populate-bundles] publishing browser bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 

@@ -23,6 +23,7 @@ members = [
     "crates/state/ryeos-state",
     "crates/tools/core-tools",
     "crates/tools/web-tools",
+    "crates/tools/browser-tools",
     "crates/support/ryeos-tracing",
     "crates/state/ryeos-vault",
 ]
