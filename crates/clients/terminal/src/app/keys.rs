@@ -79,6 +79,9 @@ fn key_context(core: &StudioCore) -> StudioKeyContext {
         // Input follows the focused view instance: printable keys edit a
         // buffer only when the focused instance declares `input`.
         input_visible: core.has_focused_input(),
+        input_has_text: core
+            .focused_input_buffer()
+            .is_some_and(|buf| !buf.text.is_empty()),
     }
 }
 

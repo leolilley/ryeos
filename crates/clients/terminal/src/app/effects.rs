@@ -69,16 +69,20 @@ async fn effect_data(
         }
         StudioEffectKind::FetchSource { source_ref, params, .. } => {
             // ONE generic source mechanism: any service ref through the
-            // same execute path; result keyed to the subscribing tile.
-            // Project-scoped sources get the seat's project context
-            // unless the binding already pinned one.
+            // same execute path; result keyed to the subscribing tile. A
+            // view OPTS INTO project scoping by declaring an (empty)
+            // `project_path` param — the executor fills it with the seat's
+            // project. Sources that don't declare it never receive it, so
+            // substrate ops that reject the field don't break.
             let mut params = params.clone();
-            if params.get("project_path").is_none() {
-                if let (Some(project), Some(map)) = (project_path, params.as_object_mut()) {
-                    map.insert(
-                        "project_path".to_string(),
-                        serde_json::Value::String(project.to_string()),
-                    );
+            if let (Some(project), Some(slot)) = (
+                project_path,
+                params
+                    .as_object_mut()
+                    .and_then(|map| map.get_mut("project_path")),
+            ) {
+                if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
+                    *slot = serde_json::Value::String(project.to_string());
                 }
             }
             let body = serde_json::json!({ "item_ref": source_ref, "parameters": params });

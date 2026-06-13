@@ -1,4 +1,3 @@
-# ryeos:signed:2026-06-13T05:38:46Z:b595b699feaea5adda57510bd302f8aa9263a8dcbf68085dc29f49313fc4f6e8:VKnvt0EVuuuV7Y1TAHm17w7+vZYXiFXXtlSWKem+M78zB0Tw+Y7poDjAbRCqHIky4D4yvjUyXGnUOfnFvvvvAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: items-space
 version: "1.0.0"
 description: The item space - signed content across system, user, and project
@@ -8,6 +7,7 @@ source:
   ref: service:ui/studio/items/list
   params:
     limit: 500
+    project_path: ""
   collection: items
 projections:
   primary: canonical_ref
