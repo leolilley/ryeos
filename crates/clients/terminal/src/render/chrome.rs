@@ -4,7 +4,7 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::{
-    StudioDockTileVm, StudioInputVm, StudioViewModel, StudioViewVm,
+    StudioDockPlaneVm, StudioDockTileVm, StudioInputVm, StudioViewModel, StudioViewVm,
 };
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
 
@@ -76,16 +76,33 @@ fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
 }
 
 pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -> Rect {
-    let mut center = body;
-    let docks = &vm.workspace.docks;
     let border = border_for(&vm.presentation.chrome.border);
     let project_path = vm.session.project_path.as_deref();
+    let (dock_rects, center) = carve_docks(body, &vm.workspace.docks);
+    for (dock, rect) in dock_rects {
+        draw_dock_tile(surface, rect, dock, project_path, border);
+    }
+    center
+}
+
+/// Carve the edge docks out of `body` and return each dock's rect plus the
+/// remaining center — pure geometry, separated from drawing so it can be
+/// tested (Phase A of the layout-plan roadmap). The carving order is
+/// left → right → top → bottom, each taking from the running center with a
+/// 1-cell gap; left/right are bounded so the center keeps ≥ 8 cells wide,
+/// top/bottom so it keeps ≥ 6 tall. This encodes the CURRENT terminal
+/// policy verbatim.
+fn carve_docks<'a>(
+    body: Rect,
+    docks: &'a StudioDockPlaneVm,
+) -> (Vec<(&'a StudioDockTileVm, Rect)>, Rect) {
+    let mut center = body;
+    let mut out = Vec::new();
 
     if let Some(left) = &docks.left {
         let w = left.size.min(center.w.saturating_sub(8));
         if w > 0 {
-            let rect = Rect::new(center.x, center.y, w, center.h);
-            draw_dock_tile(surface, rect, left, project_path, border);
+            out.push((left, Rect::new(center.x, center.y, w, center.h)));
             center.x = center.x.saturating_add(w.saturating_add(1));
             center.w = center.w.saturating_sub(w.saturating_add(1));
         }
@@ -95,8 +112,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
         let w = right.size.min(center.w.saturating_sub(8));
         if w > 0 {
             let x = center.x.saturating_add(center.w.saturating_sub(w));
-            let rect = Rect::new(x, center.y, w, center.h);
-            draw_dock_tile(surface, rect, right, project_path, border);
+            out.push((right, Rect::new(x, center.y, w, center.h)));
             center.w = center.w.saturating_sub(w.saturating_add(1));
         }
     }
@@ -104,8 +120,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
     if let Some(top) = &docks.top {
         let h = top.size.min(center.h.saturating_sub(6));
         if h > 0 {
-            let rect = Rect::new(center.x, center.y, center.w, h);
-            draw_dock_tile(surface, rect, top, project_path, border);
+            out.push((top, Rect::new(center.x, center.y, center.w, h)));
             center.y = center.y.saturating_add(h.saturating_add(1));
             center.h = center.h.saturating_sub(h.saturating_add(1));
         }
@@ -115,13 +130,12 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
         let h = bottom.size.min(center.h.saturating_sub(6));
         if h > 0 {
             let y = center.y.saturating_add(center.h.saturating_sub(h));
-            let rect = Rect::new(center.x, y, center.w, h);
-            draw_dock_tile(surface, rect, bottom, project_path, border);
+            out.push((bottom, Rect::new(center.x, y, center.w, h)));
             center.h = center.h.saturating_sub(h.saturating_add(1));
         }
     }
 
-    center
+    (out, center)
 }
 
 fn draw_dock_tile(
@@ -365,4 +379,78 @@ fn draw_corner_marks(surface: &mut TextSurface, rect: Rect) {
     surface.draw_char(x + w - 1, y, '╗', style);
     surface.draw_char(x, y + h - 1, '╚', style);
     surface.draw_char(x + w - 1, y + h - 1, '╝', style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_client_base::studio::model::StudioDockEdge;
+
+    fn dock(edge: StudioDockEdge, size: u16) -> StudioDockTileVm {
+        StudioDockTileVm {
+            edge,
+            title: "t".into(),
+            size,
+            view: StudioViewVm::Placeholder {
+                title: "t".into(),
+                message: "m".into(),
+            },
+            input: None,
+        }
+    }
+
+    #[test]
+    fn carve_docks_bottom_leaves_center_above_and_preserves_bounds() {
+        let docks = StudioDockPlaneVm {
+            bottom: Some(dock(StudioDockEdge::Bottom, 7)),
+            ..Default::default()
+        };
+        let body = Rect::new(0, 0, 100, 30);
+        let (rects, center) = carve_docks(body, &docks);
+        assert_eq!(rects.len(), 1);
+        let (_, bottom) = rects[0];
+        // The bottom dock is 7 tall, anchored at the bottom of the body.
+        assert_eq!((bottom.y, bottom.h), (23, 7));
+        // The center sits above it, minus the 1-cell gap, never overlapping.
+        assert_eq!(center.y, 0);
+        assert_eq!(center.h, 22);
+        assert!(center.y + center.h < bottom.y, "center is above the dock");
+        assert!(
+            bottom.y + bottom.h <= body.y + body.h,
+            "dock stays in bounds"
+        );
+    }
+
+    #[test]
+    fn carve_docks_left_and_right_keep_center_in_bounds() {
+        let docks = StudioDockPlaneVm {
+            left: Some(dock(StudioDockEdge::Left, 20)),
+            right: Some(dock(StudioDockEdge::Right, 20)),
+            ..Default::default()
+        };
+        let body = Rect::new(0, 0, 100, 30);
+        let (rects, center) = carve_docks(body, &docks);
+        assert_eq!(rects.len(), 2);
+        assert!(
+            center.x > 0 && center.x + center.w <= 100,
+            "center within body"
+        );
+        // Order is left then right.
+        assert_eq!(rects[0].1.x, 0);
+        assert!(rects[1].1.x > center.x);
+    }
+
+    #[test]
+    fn carve_docks_tiny_body_drops_docks_that_would_starve_center() {
+        // A left dock can't take so much that the center drops below 8 wide.
+        let docks = StudioDockPlaneVm {
+            left: Some(dock(StudioDockEdge::Left, 50)),
+            ..Default::default()
+        };
+        let body = Rect::new(0, 0, 10, 6);
+        let (rects, center) = carve_docks(body, &docks);
+        // size 50 clamped to w-8 = 2.
+        assert_eq!(rects[0].1.w, 2);
+        assert!(center.w >= 7, "center keeps room");
+    }
 }

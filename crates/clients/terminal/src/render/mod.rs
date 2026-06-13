@@ -142,48 +142,46 @@ fn draw_layout_node(
             ratio,
             first,
             second,
-        } => match axis {
-            StudioSplitAxisVm::Horizontal => {
-                let first_w = ((rect.w as f32 * ratio).round() as u16)
-                    .clamp(1, rect.w.saturating_sub(1).max(1));
-                let gap = u16::from(rect.w > 4);
-                let second_w = rect.w.saturating_sub(first_w + gap);
-                draw_layout_node(
-                    surface,
-                    Rect::new(rect.x, rect.y, first_w, rect.h),
-                    first,
-                    border,
-                );
-                if second_w > 0 {
-                    draw_layout_node(
-                        surface,
-                        Rect::new(rect.x + first_w + gap, rect.y, second_w, rect.h),
-                        second,
-                        border,
-                    );
-                }
+        } => {
+            let (first_rect, second_rect) = split_rect(rect, *axis, *ratio);
+            draw_layout_node(surface, first_rect, first, border);
+            if let Some(second_rect) = second_rect {
+                draw_layout_node(surface, second_rect, second, border);
             }
-            StudioSplitAxisVm::Vertical => {
-                let first_h = ((rect.h as f32 * ratio).round() as u16)
-                    .clamp(1, rect.h.saturating_sub(1).max(1));
-                let gap = u16::from(rect.h > 4);
-                let second_h = rect.h.saturating_sub(first_h + gap);
-                draw_layout_node(
-                    surface,
-                    Rect::new(rect.x, rect.y, rect.w, first_h),
-                    first,
-                    border,
-                );
-                if second_h > 0 {
-                    draw_layout_node(
-                        surface,
-                        Rect::new(rect.x, rect.y + first_h + gap, rect.w, second_h),
-                        second,
-                        border,
-                    );
-                }
-            }
-        },
+        }
+    }
+}
+
+/// Terminal split geometry — the concrete cell math for one split, pulled
+/// out of `draw_layout_node` so it is pure and testable (Phase A of the
+/// layout-plan roadmap). Returns the first child rect and the second
+/// (`None` when it would be zero-sized). This encodes the CURRENT terminal
+/// policy verbatim: round the split, a 1-cell gap once the axis dimension
+/// exceeds 4, and the first child clamped to at least 1. The shared,
+/// policy-parameterized resolver (Phase B) replaces this with this exact
+/// behavior under a `GridPolicy` — these tests are its guard.
+fn split_rect(rect: Rect, axis: StudioSplitAxisVm, ratio: f32) -> (Rect, Option<Rect>) {
+    match axis {
+        StudioSplitAxisVm::Horizontal => {
+            let first_w =
+                ((rect.w as f32 * ratio).round() as u16).clamp(1, rect.w.saturating_sub(1).max(1));
+            let gap = u16::from(rect.w > 4);
+            let second_w = rect.w.saturating_sub(first_w + gap);
+            let first = Rect::new(rect.x, rect.y, first_w, rect.h);
+            let second =
+                (second_w > 0).then(|| Rect::new(rect.x + first_w + gap, rect.y, second_w, rect.h));
+            (first, second)
+        }
+        StudioSplitAxisVm::Vertical => {
+            let first_h =
+                ((rect.h as f32 * ratio).round() as u16).clamp(1, rect.h.saturating_sub(1).max(1));
+            let gap = u16::from(rect.h > 4);
+            let second_h = rect.h.saturating_sub(first_h + gap);
+            let first = Rect::new(rect.x, rect.y, rect.w, first_h);
+            let second =
+                (second_h > 0).then(|| Rect::new(rect.x, rect.y + first_h + gap, rect.w, second_h));
+            (first, second)
+        }
     }
 }
 
@@ -223,6 +221,53 @@ mod tests {
     use ryeos_client_base::studio::model::{BrowserSession, BrowserViewport, StudioCore};
     use ryeos_client_base::studio::view_model::build_view_model;
     use serde_json::json;
+
+    // Characterization tests: these pin the CURRENT terminal split policy
+    // so Phase B (the shared resolver) cannot silently change the TUI.
+    #[test]
+    fn split_rect_horizontal_rounds_with_one_cell_gap() {
+        let (first, second) =
+            split_rect(Rect::new(0, 0, 100, 10), StudioSplitAxisVm::Horizontal, 0.6);
+        // round(100 * 0.6) = 60; gap = 1 (w > 4); second = 100 - 60 - 1 = 39.
+        assert_eq!((first.x, first.w), (0, 60));
+        let second = second.expect("second child present");
+        assert_eq!((second.x, second.w), (61, 39));
+        // The pair plus the gap exactly fills the parent.
+        assert_eq!(first.w + 1 + second.w, 100);
+    }
+
+    #[test]
+    fn split_rect_vertical_rounds_with_one_cell_gap() {
+        let (first, second) = split_rect(Rect::new(0, 0, 20, 30), StudioSplitAxisVm::Vertical, 0.5);
+        assert_eq!((first.y, first.h), (0, 15));
+        let second = second.expect("second child present");
+        assert_eq!((second.y, second.h), (16, 14));
+    }
+
+    #[test]
+    fn split_rect_tiny_widths_do_not_overflow_or_drop_first() {
+        for w in 1u16..=5 {
+            let (first, second) =
+                split_rect(Rect::new(0, 0, w, 4), StudioSplitAxisVm::Horizontal, 0.6);
+            assert!(
+                first.w >= 1,
+                "first child is always at least one cell (w={w})"
+            );
+            // No child escapes the parent bounds.
+            assert!(first.x + first.w <= w);
+            if let Some(second) = second {
+                assert!(second.x + second.w <= w, "second stays in bounds (w={w})");
+            }
+        }
+    }
+
+    #[test]
+    fn split_rect_drops_second_when_it_would_be_zero() {
+        // w = 2: first_w = round(2*0.6)=1, gap=0 (w<=4), second = 2-1-0 = 1.
+        // w = 1: first_w clamped to 1, gap=0, second = 1-1 = 0 -> None.
+        let (_, second) = split_rect(Rect::new(0, 0, 1, 4), StudioSplitAxisVm::Horizontal, 0.6);
+        assert!(second.is_none(), "no zero-width second child");
+    }
 
     fn surface_text(surface: &TextSurface) -> String {
         let mut out = String::new();

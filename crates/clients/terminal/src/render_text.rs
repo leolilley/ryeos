@@ -10,7 +10,7 @@ use crossterm::{
     },
     terminal::{Clear, ClearType},
 };
-use ryeos_client_base::text_surface::{Cell, Color as CoreColor, TextSurface};
+use ryeos_client_base::text_surface::{Attr, Cell, Color as CoreColor, TextSurface};
 use std::io::Write;
 
 /// Render a complete text surface to the terminal using diff painting.
@@ -76,15 +76,39 @@ pub fn render_text_surface(
     Ok(())
 }
 
-/// Last emitted fg/bg, so runs of same-styled cells emit color codes
-/// once instead of per cell.
+/// Last emitted fg/bg/attr, so runs of same-styled cells emit codes once
+/// instead of per cell.
 #[derive(Default)]
 struct Brush {
     fg: Option<CoreColor>,
     bg: Option<CoreColor>,
+    attr: Option<Attr>,
 }
 
 fn paint_cell(stdout: &mut impl Write, cell: Cell, brush: &mut Brush) -> std::io::Result<()> {
+    // Attributes first: changing them means `SetAttribute(Reset)`, which
+    // also clears colors — so on an attr change we re-emit fg/bg. Without
+    // this, bold/italic/underline/reverse set by draw sites never reach
+    // the terminal at all.
+    if brush.attr != Some(cell.attr) {
+        queue!(stdout, SetAttribute(Attribute::Reset))?;
+        if cell.attr.contains(Attr::BOLD) {
+            queue!(stdout, SetAttribute(Attribute::Bold))?;
+        }
+        if cell.attr.contains(Attr::ITALIC) {
+            queue!(stdout, SetAttribute(Attribute::Italic))?;
+        }
+        if cell.attr.contains(Attr::UNDERLINE) {
+            queue!(stdout, SetAttribute(Attribute::Underlined))?;
+        }
+        if cell.attr.contains(Attr::REVERSE) {
+            queue!(stdout, SetAttribute(Attribute::Reverse))?;
+        }
+        brush.attr = Some(cell.attr);
+        // Reset cleared the colors — force them to re-emit below.
+        brush.fg = None;
+        brush.bg = None;
+    }
     if brush.fg != Some(cell.fg) {
         match cell.fg {
             CoreColor::Default => queue!(stdout, SetForegroundColor(Color::Reset))?,
@@ -134,5 +158,22 @@ mod tests {
             to_crossterm_color(CoreColor::Rgb(1, 2, 3)),
             Color::Rgb { .. }
         ));
+    }
+
+    #[test]
+    fn bold_attribute_is_emitted_to_the_terminal() {
+        // Regression: the painter previously tracked only fg/bg, so a bold
+        // draw produced no SGR bold sequence and rendered at normal weight.
+        use ryeos_client_base::text_surface::Style;
+        let mut surface = TextSurface::new(4, 1);
+        surface.draw_text(0, 0, "Hi", Style::new().bold());
+        let mut out: Vec<u8> = Vec::new();
+        let mut prev = None;
+        render_text_surface(&mut out, &surface, &mut prev, 0, 0).unwrap();
+        // crossterm encodes SetAttribute(Bold) as ESC[1m.
+        assert!(
+            String::from_utf8_lossy(&out).contains("\x1b[1m"),
+            "the bold SGR sequence reaches the terminal"
+        );
     }
 }
