@@ -9,7 +9,9 @@ use super::effect::{StudioEffect, StudioEffectKind};
 use super::scene_model::StudioSceneModel;
 use super::view_model::{StudioMotionEventVm, StudioNoticeVm, StudioTone, StudioViewModel};
 use crate::atlas::AtlasUiStateVm;
-use crate::surface::{LayoutNodeSpec, SurfaceLayoutSpec, SurfaceSpec, ViewKindSpec};
+use crate::surface::{
+    builtin_default, SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec,
+};
 use crate::workspace::{ViewSpec, Workspace};
 use std::collections::HashMap;
 
@@ -161,19 +163,16 @@ pub struct StudioDockSlotState {
 }
 
 impl StudioDockSlotState {
-    fn visible(size: u16, content: StudioDockContent) -> Self {
+    fn from_slot(slot: &SlotSpec) -> Self {
         Self {
-            visible: true,
-            size,
-            content,
-        }
-    }
-
-    fn hidden(size: u16, content: StudioDockContent) -> Self {
-        Self {
-            visible: false,
-            size,
-            content,
+            visible: slot.open,
+            size: slot.size,
+            content: match &slot.content {
+                SlotContentSpec::Input => StudioDockContent::Input,
+                SlotContentSpec::View(view_ref) => StudioDockContent::View {
+                    view_ref: view_ref.clone(),
+                },
+            },
         }
     }
 }
@@ -185,52 +184,59 @@ pub enum StudioDockContent {
     Input,
     /// A content-bound view in a dock slot — docks are tiles with an
     /// edge; the same bindings render in both.
-    View {
-        view_ref: String,
-    },
-    Placeholder {
-        message: String,
-    },
+    View { view_ref: String },
 }
 
+/// Edge slot state, initialized FROM the surface `slots` block. An
+/// absent edge has no slot; a closed slot keeps its content but frees
+/// its space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioDockState {
-    pub top: StudioDockSlotState,
-    pub bottom: StudioDockSlotState,
-    pub left: StudioDockSlotState,
-    pub right: StudioDockSlotState,
+    pub top: Option<StudioDockSlotState>,
+    pub bottom: Option<StudioDockSlotState>,
+    pub left: Option<StudioDockSlotState>,
+    pub right: Option<StudioDockSlotState>,
 }
 
 impl Default for StudioDockState {
     fn default() -> Self {
-        Self {
-            top: StudioDockSlotState::hidden(
-                4,
-                StudioDockContent::Placeholder {
-                    message: "context".to_string(),
-                },
-            ),
-            bottom: StudioDockSlotState::visible(4, StudioDockContent::Input),
-            left: StudioDockSlotState::hidden(
-                28,
-                StudioDockContent::View {
-                    view_ref: "view:ryeos/threads/list".to_string(),
-                },
-            ),
-            right: StudioDockSlotState::hidden(
-                34,
-                StudioDockContent::View {
-                    view_ref: "view:ryeos/item/inspector".to_string(),
-                },
-            ),
-        }
+        // The fallback surface's slots block is the only default source.
+        Self::from_slots(&SlotsSpec::default())
     }
 }
 
 impl StudioDockState {
+    pub fn from_slots(slots: &SlotsSpec) -> Self {
+        Self {
+            top: slots.top.as_ref().map(StudioDockSlotState::from_slot),
+            bottom: slots.bottom.as_ref().map(StudioDockSlotState::from_slot),
+            left: slots.left.as_ref().map(StudioDockSlotState::from_slot),
+            right: slots.right.as_ref().map(StudioDockSlotState::from_slot),
+        }
+    }
+
+    pub fn slot(&self, edge: StudioDockEdge) -> Option<&StudioDockSlotState> {
+        match edge {
+            StudioDockEdge::Top => self.top.as_ref(),
+            StudioDockEdge::Bottom => self.bottom.as_ref(),
+            StudioDockEdge::Left => self.left.as_ref(),
+            StudioDockEdge::Right => self.right.as_ref(),
+        }
+    }
+
+    pub fn slot_mut(&mut self, edge: StudioDockEdge) -> Option<&mut StudioDockSlotState> {
+        match edge {
+            StudioDockEdge::Top => self.top.as_mut(),
+            StudioDockEdge::Bottom => self.bottom.as_mut(),
+            StudioDockEdge::Left => self.left.as_mut(),
+            StudioDockEdge::Right => self.right.as_mut(),
+        }
+    }
+
     pub fn has_visible_input(&self) -> bool {
         [&self.top, &self.bottom, &self.left, &self.right]
             .iter()
+            .filter_map(|slot| slot.as_ref())
             .any(|slot| slot.visible && matches!(slot.content, StudioDockContent::Input))
     }
 }
@@ -330,6 +336,9 @@ pub struct StudioCore {
     /// folds from here, never from renderer state.
     #[serde(default)]
     pub seat: super::seat::SeatLog,
+    /// Surface-declared chrome style (border treatment).
+    #[serde(default)]
+    pub style: SurfaceStyleSpec,
     pub workspace: Workspace,
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
@@ -341,19 +350,12 @@ pub struct StudioCore {
 
 impl StudioCore {
     pub fn new(session: BrowserSession, viewport: BrowserViewport, now_ms: u64) -> Self {
-        let workspace = session
+        let surface = session
             .effective_surface
             .as_ref()
             .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
-            .map(|surface| surface.to_workspace())
-            .unwrap_or_else(|| studio_default_surface().to_workspace());
-        let input_route = session
-            .effective_surface
-            .as_ref()
-            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
-            .and_then(|surface| {
-                super::seat::InputRoute::from_surface_input(surface.input.as_ref())
-            });
+            .unwrap_or_else(builtin_default);
+        let input_route = super::seat::InputRoute::from_surface_input(surface.input.as_ref());
         let mut core = Self::default();
         core.views = super::content::views_from_surface(session.effective_surface.as_ref());
         core.data.session = Some(session);
@@ -364,8 +366,13 @@ impl StudioCore {
                 core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
             }
         }
-        core.workspace = workspace;
-        core.workspaces = vec![studio_default_surface().to_workspace(); 9];
+        // Edge slots initialize FROM the surface slots block; the
+        // fallback surface's slots are the only default source.
+        core.ui.docks = StudioDockState::from_slots(&surface.slots);
+        core.style = surface.style;
+        core.workspace = surface.to_workspace();
+        let blank = Workspace::from_tiling(surface.tiling.clone(), Vec::new());
+        core.workspaces = vec![blank; 9];
         core.workspaces[0] = core.workspace.clone();
         core.active_workspace = 0;
         core
@@ -409,10 +416,11 @@ impl StudioCore {
         let needs_atlas = self.surface_uses_atlas_ambient();
         let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
         let mut needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
-        let mut needs_topology = false;
+        // Home (empty center) renders the ambient topology background.
+        let mut needs_topology = self.workspace.is_home();
         let mut bound_tiles: Vec<(crate::ids::TileId, String)> = Vec::new();
 
-        for tile_id in self.workspace.layout.tile_ids() {
+        for tile_id in self.workspace.tile_ids() {
             let Some(tile) = self.workspace.tiles.get(&tile_id) else {
                 continue;
             };
@@ -473,7 +481,6 @@ impl StudioCore {
     pub fn effects_for_hint(&mut self, kind: &str) -> Vec<StudioEffect> {
         let targets: Vec<(crate::ids::TileId, String)> = self
             .workspace
-            .layout
             .tile_ids()
             .into_iter()
             .filter_map(|tile_id| {
@@ -529,6 +536,7 @@ impl StudioCore {
             ("dock:right", &self.ui.docks.right),
         ]
         .into_iter()
+        .filter_map(|(key, slot)| slot.as_ref().map(|slot| (key, slot)))
         .filter(|(_, slot)| slot.visible)
         .filter_map(|(key, slot)| match &slot.content {
             StudioDockContent::View { view_ref } => Some((key.to_string(), view_ref.clone())),
@@ -589,45 +597,17 @@ impl StudioCore {
     }
 }
 
-fn studio_default_surface() -> SurfaceSpec {
-    let mut nodes = HashMap::new();
-    nodes.insert(
-        "root".to_string(),
-        LayoutNodeSpec::Pane {
-            view: ViewKindSpec::Graph,
-        },
-    );
-
-    SurfaceSpec {
-        name: "studio-base".to_string(),
-        version: "1".to_string(),
-        extends: None,
-        description: Some("RyeOS home space".to_string()),
-        layout: SurfaceLayoutSpec {
-            root: "root".to_string(),
-            nodes,
-        },
-        input: None,
-        views: None,
-        home_view: None,
-        library: Vec::new(),
-        ambient: None,
-        affordances: Vec::new(),
-        instruments: Vec::new(),
-        capabilities: None,
-    }
-}
-
 impl Default for StudioCore {
     fn default() -> Self {
-        let workspace = studio_default_surface().to_workspace();
-        let mut workspaces = vec![workspace.clone(); 9];
-        workspaces[0] = workspace.clone();
+        let surface = builtin_default();
+        let workspace = surface.to_workspace();
+        let workspaces = vec![workspace.clone(); 9];
         Self {
             data: StudioDataState::default(),
             views: std::collections::BTreeMap::new(),
             ui: StudioUiState::default(),
             seat: super::seat::SeatLog::default(),
+            style: surface.style,
             workspace,
             workspaces,
             active_workspace: 0,
@@ -665,7 +645,7 @@ mod tests {
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
                 "name": "t",
-                "layout": { "root": "main", "nodes": { "main": { "type": "pane", "view": "view:ryeos/threads/list" } } },
+                "tiles": ["view:ryeos/threads/list"],
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "rows",
@@ -691,19 +671,26 @@ mod tests {
     }
 
     #[test]
-    fn studio_dock_defaults_keep_input_visible_only() {
+    fn studio_dock_defaults_come_from_fallback_surface_slots() {
         let docks = StudioDockState::default();
-        assert!(!docks.top.visible);
-        assert!(docks.bottom.visible);
-        assert!(!docks.left.visible);
-        assert!(!docks.right.visible);
-        assert_eq!(docks.bottom.content, StudioDockContent::Input);
+        // The fallback surface declares no top slot at all.
+        assert!(docks.top.is_none());
+        let bottom = docks.bottom.as_ref().expect("bottom slot");
+        assert!(bottom.visible);
+        assert_eq!(bottom.size, 7);
+        assert_eq!(bottom.content, StudioDockContent::Input);
+        let left = docks.left.as_ref().expect("left slot");
+        assert!(!left.visible);
+        assert_eq!(left.size, 32);
         assert!(matches!(
-            &docks.left.content,
+            &left.content,
             StudioDockContent::View { view_ref } if view_ref == "view:ryeos/threads/list"
         ));
+        let right = docks.right.as_ref().expect("right slot");
+        assert!(!right.visible);
+        assert_eq!(right.size, 40);
         assert!(matches!(
-            &docks.right.content,
+            &right.content,
             StudioDockContent::View { view_ref } if view_ref == "view:ryeos/item/inspector"
         ));
         assert!(docks.has_visible_input());
@@ -712,12 +699,46 @@ mod tests {
     #[test]
     fn studio_docks_detect_input_on_any_visible_edge() {
         let mut docks = StudioDockState::default();
-        docks.bottom.visible = false;
+        docks.bottom.as_mut().unwrap().visible = false;
         assert!(!docks.has_visible_input());
 
-        docks.top.visible = true;
-        docks.top.content = StudioDockContent::Input;
+        docks.top = Some(StudioDockSlotState {
+            visible: true,
+            size: 4,
+            content: StudioDockContent::Input,
+        });
         assert!(docks.has_visible_input());
+    }
+
+    #[test]
+    fn studio_core_initializes_docks_from_surface_slots() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "custom-slots",
+                "slots": {
+                    "left": { "content": "view:custom/list", "open": true, "size": 20 },
+                    "bottom": { "content": "input", "open": false, "size": 5 }
+                },
+                "style": { "border": "thick" }
+            })),
+            ..Default::default()
+        };
+        let core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let left = core.ui.docks.left.as_ref().expect("left slot");
+        assert!(left.visible);
+        assert_eq!(left.size, 20);
+        assert!(matches!(
+            &left.content,
+            StudioDockContent::View { view_ref } if view_ref == "view:custom/list"
+        ));
+        let bottom = core.ui.docks.bottom.as_ref().expect("bottom slot");
+        assert!(!bottom.visible);
+        assert_eq!(bottom.size, 5);
+        // Edges the surface does not declare have no slot.
+        assert!(core.ui.docks.right.is_none());
+        assert!(core.ui.docks.top.is_none());
+        // Style flows from the surface, too.
+        assert_eq!(core.style.border, crate::surface::BorderStyleSpec::Thick);
     }
 
     #[test]
@@ -733,7 +754,7 @@ mod tests {
     #[test]
     fn hidden_input_ignores_stale_input_events() {
         let mut core = StudioCore::default();
-        core.ui.docks.bottom.visible = false;
+        core.ui.docks.bottom.as_mut().unwrap().visible = false;
 
         let effects = core.dispatch(super::super::event::StudioEvent::Ui {
             event: super::super::event::StudioUiEvent::InsertInputChar { ch: 'x' },

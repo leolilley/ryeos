@@ -3,12 +3,11 @@
 //! A tiled workspace for AI agent operations: thread management,
 //! execution, state inspection, remotes, and trust.
 
-mod daemon;
+mod app;
+mod render;
 mod render_text;
-mod sse;
-mod studio_app;
-mod studio_render;
 mod terminal;
+mod transport;
 
 fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnostic) -> &str {
     match diag {
@@ -103,7 +102,7 @@ fn main() {
         // If --surface was given, resolve through daemon.
         // --surface always means daemon resolution, not local preview.
         let loaded: ryeos_client_base::surface::LoadedSurface = if surface_name.is_some() {
-            match daemon::DaemonClient::try_connect().await {
+            match transport::daemon::DaemonClient::try_connect().await {
                 Ok(client) => {
                     let ref_str = surface_name.as_deref().unwrap();
                     eprintln!("info: resolving {} via daemon...", ref_str);
@@ -222,7 +221,7 @@ fn main() {
             }
         }
 
-        let result = studio_app::run(&project_path, read_only, loaded).await;
+        let result = app::run(&project_path, read_only, loaded).await;
 
         if let Err(e) = result {
             eprintln!("ryeos-tui error: {}", e);

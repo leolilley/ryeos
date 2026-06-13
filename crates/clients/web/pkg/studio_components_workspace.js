@@ -1,4 +1,4 @@
-import { code, el, textEl } from "/ui/assets/studio_components_primitives.js";
+import { el, textEl } from "/ui/assets/studio_components_primitives.js";
 
 const atlasViewport = {
   panX: 0,
@@ -10,12 +10,13 @@ const utf8Encoder = new TextEncoder();
 
 export function studioWorkspace(vm, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
-  if (!vm?.root) {
-    main.append(textEl("p", "No workspace loaded."));
+  // Home is an empty center: the ambient background owns the frame.
+  if (vm?.is_home) {
+    main.classList.add("home-space");
     return main;
   }
-  if (vm.is_home) {
-    main.classList.add("home-space");
+  if (!vm) {
+    main.append(textEl("p", "No workspace loaded."));
     return main;
   }
   main.append(workspacePlane(vm, dispatchUi, motion));
@@ -52,7 +53,8 @@ function workspacePlane(vm, dispatchUi, motion) {
   if (top) plane.append(top);
 
   const stack = el("section", "studio-workspace-stack");
-  stack.append(layoutNode(vm.root, dispatchUi, motion));
+  // No computed tree (empty center in workspace mode): background fill.
+  if (vm.root) stack.append(layoutNode(vm.root, dispatchUi, motion));
   plane.append(stack);
 
   if (bottom) plane.append(bottom);
@@ -79,9 +81,6 @@ function dockView(viewVm, dispatchUi) {
     case "view":
       body.append(view(viewVm.view || {}, "", dispatchUi));
       break;
-    case "placeholder":
-      body.append(textEl("p", viewVm.message || "Not connected yet."));
-      break;
     default:
       body.append(textEl("p", "Unknown dock view."));
   }
@@ -91,7 +90,11 @@ function dockView(viewVm, dispatchUi) {
 function inputDock(inputVm, dispatchUi) {
   const wrap = el("section", "studio-input-dock");
   const meta = el("div", "studio-input-meta");
-  meta.append(textEl("span", inputVm.route_label || "target: studio"), textEl("small", inputVm.hint || ""));
+  meta.append(
+    textEl("span", "→", "studio-input-arrow"),
+    textEl("strong", inputVm.route_label || "target: studio"),
+    textEl("small", inputVm.hint || ""),
+  );
 
   const row = el("div", "studio-input-row");
   const prompt = textEl("span", "$", "studio-input-prompt");
@@ -210,7 +213,7 @@ function viewFooter(viewVm) {
 
 function timeline(viewVm) {
   const wrap = el("section", "studio-timeline");
-  wrap.append(listHeader(viewVm.title || "timeline", viewVm.provenance || ""));
+  wrap.append(listHeader(viewVm.title || "timeline", ""));
   const entries = el("div", "studio-timeline-entries");
   for (const entry of viewVm.entries || []) {
     entries.append(timelineEntry(entry));
@@ -453,6 +456,11 @@ function rows(items, tileId, kind, dispatchUi) {
 }
 
 function rowGlyph(item) {
-  return toneGlyph(item.tone || "neutral");
+  switch (item.tone || "neutral") {
+    case "good": return "✓";
+    case "warn": return "!";
+    case "danger": return "✗";
+    case "accent": return "›";
+    default: return "•";
+  }
 }
-

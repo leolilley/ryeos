@@ -37,8 +37,32 @@ pub enum ClientError {
     #[error("daemon not running at {url}")]
     DaemonDown { url: String },
 
+    /// The daemon answered but with a non-2xx status. Carries the
+    /// daemon's own error message so callers don't misreport a
+    /// composition/validation failure as "daemon down".
+    #[error("daemon returned {status} for {path}: {message}")]
+    DaemonError {
+        path: String,
+        status: u16,
+        message: String,
+    },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Pull the daemon's `{code, error}` envelope into a readable line,
+/// falling back to the raw body.
+fn daemon_error_message(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +217,11 @@ impl DaemonClient {
         let body_bytes = collect_body(resp.into_body()).await?;
 
         if !status.is_success() {
-            return Err(ClientError::DaemonDown { url });
+            return Err(ClientError::DaemonError {
+                path: path.to_string(),
+                status: status.as_u16(),
+                message: daemon_error_message(&body_bytes),
+            });
         }
 
         let value: serde_json::Value = serde_json::from_slice(&body_bytes)?;
@@ -270,7 +298,11 @@ impl DaemonClient {
         let status = resp.status();
         let body_bytes = collect_body(resp.into_body()).await?;
         if !status.is_success() {
-            return Err(ClientError::DaemonDown { url });
+            return Err(ClientError::DaemonError {
+                path: path.to_string(),
+                status: status.as_u16(),
+                message: daemon_error_message(&body_bytes),
+            });
         }
         Ok(serde_json::from_slice(&body_bytes)?)
     }
@@ -517,7 +549,7 @@ impl SseStream {
     }
 
     /// Poll for the next SSE event. Returns None when the stream is done.
-    pub async fn next_event(&mut self) -> Option<crate::sse::SseEvent> {
+    pub async fn next_event(&mut self) -> Option<crate::transport::sse::SseEvent> {
         if self.done {
             return None;
         }
@@ -543,7 +575,7 @@ impl SseStream {
         }
     }
 
-    fn try_parse_event(&mut self) -> Option<crate::sse::SseEvent> {
+    fn try_parse_event(&mut self) -> Option<crate::transport::sse::SseEvent> {
         // Look for double newline (event boundary)
         let event_end = self.buffer.find("\n\n")?;
         let event_text = self.buffer[..event_end].to_string();
@@ -567,7 +599,7 @@ impl SseStream {
             return None;
         }
 
-        Some(crate::sse::SseEvent::parse(event_type, &data))
+        Some(crate::transport::sse::SseEvent::parse(event_type, &data))
     }
 }
 

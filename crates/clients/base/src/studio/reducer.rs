@@ -11,7 +11,7 @@ use super::view_model::{
     action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
 };
 use crate::ids::TileId;
-use crate::layout::SplitAxis;
+use crate::surface::ArrangeSpec;
 use crate::workspace::{ViewLocalState, ViewSpec};
 
 impl StudioCore {
@@ -369,34 +369,7 @@ impl StudioCore {
                 effects
             }
             StudioAction::OpenNewView { view } => {
-                let effects = self.add_slave_tile(view);
-                self.bump_generation();
-                effects
-            }
-            StudioAction::SplitFocused { axis } => {
-                let view = self
-                    .workspace
-                    .focused_view()
-                    .cloned()
-                    .unwrap_or(ViewSpec::Graph { graph_id: None });
-                let effects = self.split_focused_tile(axis, view);
-                self.bump_generation();
-                effects
-            }
-            StudioAction::SplitTile { tile_id, axis } => {
-                let Some(tile_id) = parse_tile_id(&tile_id) else {
-                    return Vec::new();
-                };
-                if !self.workspace.layout.tile_ids().contains(&tile_id) {
-                    return Vec::new();
-                }
-                self.workspace.focused_tile = tile_id;
-                let view = self
-                    .workspace
-                    .focused_view()
-                    .cloned()
-                    .unwrap_or(ViewSpec::Graph { graph_id: None });
-                let effects = self.split_focused_tile(axis, view);
+                let effects = self.add_center_tile(view);
                 self.bump_generation();
                 effects
             }
@@ -416,7 +389,7 @@ impl StudioCore {
                 Vec::new()
             }
             StudioAction::ToggleFocusedMaster => {
-                if self.workspace.toggle_focused_master() {
+                if self.workspace.zoom_focused() {
                     self.push_motion(StudioMotionEventVm::FocusChanged {
                         tile_id: self.workspace.focused_tile.0.to_string(),
                     });
@@ -450,11 +423,10 @@ impl StudioCore {
                 Vec::new()
             }
             StudioAction::ToggleDock { edge } => {
-                let slot = match edge {
-                    super::model::StudioDockEdge::Top => &mut self.ui.docks.top,
-                    super::model::StudioDockEdge::Bottom => &mut self.ui.docks.bottom,
-                    super::model::StudioDockEdge::Left => &mut self.ui.docks.left,
-                    super::model::StudioDockEdge::Right => &mut self.ui.docks.right,
+                // Toggling flips a surface-declared slot open/closed; a
+                // closed slot frees its space. Absent edges have no slot.
+                let Some(slot) = self.ui.docks.slot_mut(edge) else {
+                    return Vec::new();
                 };
                 slot.visible = !slot.visible;
                 let shown_view = if slot.visible {
@@ -483,7 +455,7 @@ impl StudioCore {
                     .collect()
             }
             StudioAction::ResizeFocused { direction } => {
-                if self.workspace.resize_focused(direction) {
+                if self.workspace.resize_master(direction) {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -683,46 +655,23 @@ impl StudioCore {
     }
 
     fn ensure_inspector_tile(&mut self) {
-        if let Some(tile_id) = self
-            .workspace
-            .layout
-            .tile_ids()
-            .into_iter()
-            .find(|tile_id| {
-                self.workspace.tiles.get(tile_id).is_some_and(|tile| {
-                    matches!(
-                        &tile.view,
-                        ViewSpec::Bound { view_ref } if view_ref == "view:ryeos/item/inspector"
-                    )
-                })
+        if let Some(tile_id) = self.workspace.tile_ids().into_iter().find(|tile_id| {
+            self.workspace.tiles.get(tile_id).is_some_and(|tile| {
+                matches!(
+                    &tile.view,
+                    ViewSpec::Bound { view_ref } if view_ref == "view:ryeos/item/inspector"
+                )
             })
-        {
+        }) {
             self.workspace.focused_tile = tile_id;
             self.push_motion(StudioMotionEventVm::FocusChanged {
                 tile_id: tile_id.0.to_string(),
             });
             return;
         }
-        let previous_focus = self.workspace.focused_tile;
-        let prior_tile_count = self.workspace.layout.tile_ids().len();
-        if let Some(tile_id) = self.workspace.add_master_stack_tile(ViewSpec::Bound {
+        self.add_tile_motions(ViewSpec::Bound {
             view_ref: "view:ryeos/item/inspector".to_string(),
-        }) {
-            self.workspace.focused_tile = tile_id;
-            self.push_motion(StudioMotionEventVm::TileSplit {
-                source_tile_id: previous_focus.0.to_string(),
-                new_tile_id: tile_id.0.to_string(),
-                axis: split_axis_vm(
-                    master_stack_added_axis(prior_tile_count).unwrap_or(SplitAxis::Horizontal),
-                ),
-            });
-            self.push_motion(StudioMotionEventVm::TileEnter {
-                tile_id: tile_id.0.to_string(),
-            });
-            self.push_motion(StudioMotionEventVm::FocusChanged {
-                tile_id: tile_id.0.to_string(),
-            });
-        }
+        });
     }
 
     fn set_tile_cursor(&mut self, tile_id: TileId, index: usize) -> bool {
@@ -742,22 +691,9 @@ impl StudioCore {
     }
 
     fn open_view(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
-        if self.workspace.is_home() && !is_home_view(&view) {
-            if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
-                self.push_motion(StudioMotionEventVm::HomeExit);
-                self.push_motion(StudioMotionEventVm::TileEnter {
-                    tile_id: tile_id.0.to_string(),
-                });
-                self.push_motion(StudioMotionEventVm::FocusChanged {
-                    tile_id: tile_id.0.to_string(),
-                });
-            }
-            self.bump_generation();
-            return self.effects_for_view(&view);
-        }
         if is_home_view(&view) {
             if !self.workspace.is_home() {
-                for tile_id in self.workspace.layout.tile_ids() {
+                for tile_id in self.workspace.tile_ids() {
                     self.push_motion(StudioMotionEventVm::TileExit {
                         tile_id: tile_id.0.to_string(),
                     });
@@ -768,7 +704,7 @@ impl StudioCore {
             self.bump_generation();
             return self.effects_for_view(&view);
         }
-        for tile_id in self.workspace.layout.tile_ids() {
+        for tile_id in self.workspace.tile_ids() {
             if self
                 .workspace
                 .tiles
@@ -784,13 +720,13 @@ impl StudioCore {
             }
         }
 
-        let effects = self.add_slave_tile(view);
+        let effects = self.add_center_tile(view);
         self.bump_generation();
         effects
     }
 
     fn close_tile_or_home(&mut self, tile_id: TileId) -> bool {
-        if self.workspace.layout.tile_ids().len() <= 1 {
+        if self.workspace.tile_ids().len() <= 1 {
             if self.workspace.is_home() || !self.workspace.tiles.contains_key(&tile_id) {
                 return false;
             }
@@ -801,7 +737,7 @@ impl StudioCore {
             self.workspace.reset_to_home();
             return true;
         }
-        if self.workspace.close_tile_master_stack(tile_id) {
+        if self.workspace.close_tile(tile_id) {
             self.push_motion(StudioMotionEventVm::TileExit {
                 tile_id: tile_id.0.to_string(),
             });
@@ -814,61 +750,41 @@ impl StudioCore {
         }
     }
 
-    fn split_focused_tile(&mut self, axis: SplitAxis, view: ViewSpec) -> Vec<StudioEffect> {
+    /// Add a center tile through the tiling algorithm (insert: end) and
+    /// emit the motions a renderer needs. Returns the new tile id.
+    fn add_tile_motions(&mut self, view: ViewSpec) -> TileId {
+        let was_home = self.workspace.is_home();
         let source_tile_id = self.workspace.focused_tile;
-        if let Some(tile_id) = self.workspace.split_focused(axis, view) {
-            self.workspace.focused_tile = tile_id;
+        let tile_id = self.workspace.add_tile(view);
+        if was_home {
+            self.push_motion(StudioMotionEventVm::HomeExit);
+        } else {
+            // New tiles land in the stack region; the motion axis is
+            // the stack arrangement.
             self.push_motion(StudioMotionEventVm::TileSplit {
                 source_tile_id: source_tile_id.0.to_string(),
                 new_tile_id: tile_id.0.to_string(),
-                axis: split_axis_vm(axis),
+                axis: arrange_axis_vm(self.workspace.tiling.stack.arrange),
             });
-            self.push_motion(StudioMotionEventVm::TileEnter {
-                tile_id: tile_id.0.to_string(),
-            });
-            self.push_motion(StudioMotionEventVm::FocusChanged {
-                tile_id: tile_id.0.to_string(),
-            });
-            let view = self
-                .workspace
-                .tiles
-                .get(&tile_id)
-                .map(|tile| tile.view.clone())
-                .unwrap_or(ViewSpec::Graph { graph_id: None });
-            self.effects_for_view(&view)
-        } else {
-            Vec::new()
         }
+        self.push_motion(StudioMotionEventVm::TileEnter {
+            tile_id: tile_id.0.to_string(),
+        });
+        self.push_motion(StudioMotionEventVm::FocusChanged {
+            tile_id: tile_id.0.to_string(),
+        });
+        tile_id
     }
 
-    fn add_slave_tile(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
-        let source_tile_id = self.workspace.focused_tile;
-        let prior_tile_count = self.workspace.layout.tile_ids().len();
-        if let Some(tile_id) = self.workspace.add_master_stack_tile(view) {
-            self.workspace.focused_tile = tile_id;
-            self.push_motion(StudioMotionEventVm::TileSplit {
-                source_tile_id: source_tile_id.0.to_string(),
-                new_tile_id: tile_id.0.to_string(),
-                axis: split_axis_vm(
-                    master_stack_added_axis(prior_tile_count).unwrap_or(SplitAxis::Horizontal),
-                ),
-            });
-            self.push_motion(StudioMotionEventVm::TileEnter {
-                tile_id: tile_id.0.to_string(),
-            });
-            self.push_motion(StudioMotionEventVm::FocusChanged {
-                tile_id: tile_id.0.to_string(),
-            });
-            let view = self
-                .workspace
-                .tiles
-                .get(&tile_id)
-                .map(|tile| tile.view.clone())
-                .unwrap_or(ViewSpec::Graph { graph_id: None });
-            self.effects_for_view(&view)
-        } else {
-            Vec::new()
-        }
+    fn add_center_tile(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
+        let tile_id = self.add_tile_motions(view);
+        let view = self
+            .workspace
+            .tiles
+            .get(&tile_id)
+            .map(|tile| tile.view.clone())
+            .unwrap_or(ViewSpec::Graph { graph_id: None });
+        self.effects_for_view(&view)
     }
 
     fn push_motion(&mut self, motion: StudioMotionEventVm) {
@@ -942,7 +858,6 @@ impl StudioCore {
     pub fn effects_for_facet(&mut self, facet: &str) -> Vec<StudioEffect> {
         let targets: Vec<(crate::ids::TileId, String)> = self
             .workspace
-            .layout
             .tile_ids()
             .into_iter()
             .filter_map(|tile_id| {
@@ -1304,18 +1219,10 @@ fn parse_tile_id(tile_id: &str) -> Option<crate::ids::TileId> {
     tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)
 }
 
-fn split_axis_vm(axis: SplitAxis) -> StudioSplitAxisVm {
-    match axis {
-        SplitAxis::Horizontal => StudioSplitAxisVm::Horizontal,
-        SplitAxis::Vertical => StudioSplitAxisVm::Vertical,
-    }
-}
-
-fn master_stack_added_axis(prior_tile_count: usize) -> Option<SplitAxis> {
-    match prior_tile_count {
-        0 => None,
-        1 => Some(SplitAxis::Horizontal),
-        _ => Some(SplitAxis::Vertical),
+fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
+    match arrange {
+        ArrangeSpec::Horizontal => StudioSplitAxisVm::Horizontal,
+        ArrangeSpec::Vertical => StudioSplitAxisVm::Vertical,
     }
 }
 
@@ -1635,12 +1542,7 @@ mod tests {
             effective_surface: Some(serde_json::json!({
                 "name": "studio-atlas",
                 "version": "1.0.0",
-                "layout": {
-                    "root": "main",
-                    "nodes": {
-                        "main": { "type": "pane", "view": "graph" }
-                    }
-                },
+                "tiles": [],
                 "ambient": {
                     "show_background": true,
                     "opacity": 1.0,
@@ -1699,10 +1601,13 @@ mod tests {
                 }
             }),
         );
-        let tile_id = core.workspace.focused_tile.0.to_string();
-        core.workspace.replace_focused_view(ViewSpec::Bound {
-            view_ref: "view:test/inspector".to_string(),
-        });
+        let tile_id = core
+            .workspace
+            .add_tile(ViewSpec::Bound {
+                view_ref: "view:test/inspector".to_string(),
+            })
+            .0
+            .to_string();
 
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -1977,7 +1882,7 @@ mod tests {
         let vm = build_view_model(&core);
 
         assert!(vm.launcher.items.iter().any(|item| {
-            item.label == "Hide input dock"
+            item.label == "Hide bottom slot"
                 && matches!(
                     item.action,
                     StudioAction::ToggleDock {
@@ -1986,7 +1891,7 @@ mod tests {
                 )
         }));
         assert!(vm.launcher.items.iter().any(|item| {
-            item.label == "Show directive threads dock"
+            item.label == "Show left slot"
                 && matches!(
                     item.action,
                     StudioAction::ToggleDock {
@@ -1994,6 +1899,13 @@ mod tests {
                     }
                 )
         }));
+        // No surface-declared top slot → nothing to toggle there.
+        assert!(!vm.launcher.items.iter().any(|item| matches!(
+            item.action,
+            StudioAction::ToggleDock {
+                edge: crate::studio::model::StudioDockEdge::Top
+            }
+        )));
     }
 
     #[test]
@@ -2026,9 +1938,43 @@ mod tests {
     }
 
     #[test]
+    fn toggling_open_slot_closes_it_and_frees_its_space() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // The bottom input slot starts open.
+        assert!(build_view_model(&core).workspace.docks.bottom.is_some());
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ToggleDock {
+                    edge: crate::studio::model::StudioDockEdge::Bottom,
+                },
+            },
+        });
+
+        // Closed slots vanish from the dock plane: renderers reserve no
+        // space for them. Content and size are retained for reopening.
+        assert!(build_view_model(&core).workspace.docks.bottom.is_none());
+        let bottom = core.ui.docks.bottom.as_ref().expect("slot retained");
+        assert!(!bottom.visible);
+        assert_eq!(bottom.size, 7);
+
+        // Toggling an absent edge is a no-op (no slot declared).
+        assert!(core.ui.docks.top.is_none());
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::ToggleDock {
+                    edge: crate::studio::model::StudioDockEdge::Top,
+                },
+            },
+        });
+        assert!(effects.is_empty());
+        assert!(core.ui.docks.top.is_none());
+    }
+
+    #[test]
     fn directive_threads_dock_renders_bound_view_rows() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.ui.docks.left.visible = true;
+        core.ui.docks.left.as_mut().unwrap().visible = true;
         seed_view_value(
             &mut core,
             "view:ryeos/threads/list",
@@ -2792,7 +2738,7 @@ mod tests {
                 },
             },
         });
-        let before = core.workspace.layout.tile_ids().len();
+        let before = core.workspace.tile_ids().len();
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
@@ -2803,7 +2749,7 @@ mod tests {
             },
         });
 
-        assert_eq!(core.workspace.layout.tile_ids().len(), before + 1);
+        assert_eq!(core.workspace.tile_ids().len(), before + 1);
         assert!(matches!(
             core.workspace.focused_view(),
             Some(ViewSpec::Bound { view_ref }) if view_ref == "view:test/services"
@@ -2836,7 +2782,7 @@ mod tests {
                 },
             },
         });
-        let before = core.workspace.layout.tile_ids().len();
+        let before = core.workspace.tile_ids().len();
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
@@ -2855,7 +2801,7 @@ mod tests {
                 matches!(&tile.view, ViewSpec::Bound { view_ref } if view_ref == "view:ryeos/items/space")
             })
             .count();
-        assert_eq!(core.workspace.layout.tile_ids().len(), before + 1);
+        assert_eq!(core.workspace.tile_ids().len(), before + 1);
         assert_eq!(item_tile_count, 2);
         assert!(core
             .ui
@@ -2889,7 +2835,7 @@ mod tests {
                 },
             },
         });
-        let tile_id = core.workspace.layout.tile_ids()[1];
+        let tile_id = core.workspace.tile_ids()[1];
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::CloseTile {
@@ -2899,7 +2845,7 @@ mod tests {
         });
 
         assert!(!core.workspace.tiles.contains_key(&tile_id));
-        assert!(!core.workspace.layout.tile_ids().contains(&tile_id));
+        assert!(!core.workspace.tile_ids().contains(&tile_id));
         assert!(core.ui.motion.iter().any(|event| matches!(
             event,
             StudioMotionEventVm::TileExit { tile_id: closed } if closed == &tile_id.0.to_string()
@@ -2984,7 +2930,8 @@ mod tests {
                 },
             },
         });
-        let left = core.workspace.focused_tile;
+        // First tile is the master (right side under the default tiling).
+        let master = core.workspace.focused_tile;
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
@@ -2994,20 +2941,21 @@ mod tests {
                 },
             },
         });
-        let right = core.workspace.focused_tile;
-        assert_ne!(left, right);
+        // The new tile lands in the stack region on the left.
+        let stacked = core.workspace.focused_tile;
+        assert_ne!(master, stacked);
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::FocusDirection {
-                direction: FocusDirection::Left,
+                direction: FocusDirection::Right,
             },
         });
 
-        assert_eq!(core.workspace.focused_tile, left);
+        assert_eq!(core.workspace.focused_tile, master);
     }
 
     #[test]
-    fn master_stack_places_master_left_and_slaves_right() {
+    fn master_stack_places_master_right_and_stack_left() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -3037,21 +2985,26 @@ mod tests {
             },
         });
 
-        let crate::layout::LayoutTree::Split {
+        let Some(crate::layout::LayoutTree::Split {
             axis,
             first,
             second,
             ..
-        } = &core.workspace.layout
+        }) = core.workspace.layout()
         else {
             panic!("master stack should split root");
         };
-        assert_eq!(*axis, SplitAxis::Horizontal);
-        assert!(matches!(first.as_ref(), crate::layout::LayoutTree::Leaf(_)));
-        let crate::layout::LayoutTree::Split { axis, .. } = second.as_ref() else {
-            panic!("slave stack should split stack");
+        assert_eq!(axis, crate::layout::SplitAxis::Horizontal);
+        // The first tile opened is the single master on the RIGHT; the
+        // two later tiles sit side-by-side in the stack on the left.
+        assert!(matches!(
+            second.as_ref(),
+            crate::layout::LayoutTree::Leaf(_)
+        ));
+        let crate::layout::LayoutTree::Split { axis, .. } = first.as_ref() else {
+            panic!("stack region should split");
         };
-        assert_eq!(*axis, SplitAxis::Vertical);
+        assert_eq!(*axis, crate::layout::SplitAxis::Horizontal);
     }
 
     #[test]
@@ -3077,7 +3030,7 @@ mod tests {
                 },
             },
         });
-        let first_tab_tiles = core.workspace.layout.tile_ids().len();
+        let first_tab_tiles = core.workspace.tile_ids().len();
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -3086,7 +3039,8 @@ mod tests {
         });
 
         assert_eq!(core.active_workspace, 1);
-        assert_eq!(core.workspace.layout.tile_ids().len(), 1);
+        // Fresh tabs start at home: an empty center.
+        assert_eq!(core.workspace.tile_ids().len(), 0);
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -3120,7 +3074,7 @@ mod tests {
         });
 
         assert_eq!(core.active_workspace, 1);
-        assert_eq!(core.workspaces[0].layout.tile_ids().len(), first_tab_tiles);
+        assert_eq!(core.workspaces[0].tile_ids().len(), first_tab_tiles);
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchSource { .. })));
@@ -3129,8 +3083,18 @@ mod tests {
     #[test]
     fn invalid_close_tile_does_not_close_focused_tile() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/services");
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec::Bound {
+                        view_ref: "view:test/services".to_string(),
+                    },
+                },
+            },
+        });
         let focused = core.workspace.focused_tile;
-        let count = core.workspace.layout.tile_ids().len();
+        let count = core.workspace.tile_ids().len();
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -3141,7 +3105,7 @@ mod tests {
         });
 
         assert_eq!(core.workspace.focused_tile, focused);
-        assert_eq!(core.workspace.layout.tile_ids().len(), count);
+        assert_eq!(core.workspace.tile_ids().len(), count);
         assert!(core.workspace.tiles.contains_key(&focused));
     }
 

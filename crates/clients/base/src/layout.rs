@@ -71,21 +71,6 @@ impl LayoutTree {
             }
         }
     }
-
-    /// Default 3-pane layout: primary list (left) | timeline (right-top) + status (right-bottom).
-    pub fn default_three_pane(list_id: TileId, thread_id: TileId, status_id: TileId) -> Self {
-        LayoutTree::Split {
-            axis: SplitAxis::Horizontal,
-            ratio: 0.25,
-            first: Box::new(LayoutTree::Leaf(list_id)),
-            second: Box::new(LayoutTree::Split {
-                axis: SplitAxis::Vertical,
-                ratio: 0.85,
-                first: Box::new(LayoutTree::Leaf(thread_id)),
-                second: Box::new(LayoutTree::Leaf(status_id)),
-            }),
-        }
-    }
 }
 
 /// Compute positioned rectangles for each tile in the tree.
@@ -145,10 +130,23 @@ fn layout_rects_recursive(tree: &LayoutTree, rect: Rect, out: &mut HashMap<TileI
 mod tests {
     use super::*;
 
+    fn three_pane() -> LayoutTree {
+        LayoutTree::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.25,
+            first: Box::new(LayoutTree::Leaf(TileId::new(1))),
+            second: Box::new(LayoutTree::Split {
+                axis: SplitAxis::Vertical,
+                ratio: 0.85,
+                first: Box::new(LayoutTree::Leaf(TileId::new(2))),
+                second: Box::new(LayoutTree::Leaf(TileId::new(3))),
+            }),
+        }
+    }
+
     #[test]
-    fn layout_default_workspace_has_expected_tiles() {
-        let tree = LayoutTree::default_three_pane(TileId::new(1), TileId::new(2), TileId::new(3));
-        let ids = tree.tile_ids();
+    fn layout_tree_collects_tile_ids() {
+        let ids = three_pane().tile_ids();
         assert_eq!(ids.len(), 3);
         assert!(ids.contains(&TileId::new(1)));
         assert!(ids.contains(&TileId::new(2)));
@@ -157,7 +155,7 @@ mod tests {
 
     #[test]
     fn layout_split_rects_sum_to_viewport() {
-        let tree = LayoutTree::default_three_pane(TileId::new(1), TileId::new(2), TileId::new(3));
+        let tree = three_pane();
         let vp = Rect::new(0, 0, 200, 60);
         let rects = layout_rects(&tree, vp);
 

@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 dirs = { workspace = true }
 notify = "7"
 tracing = { workspace = true }
+unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

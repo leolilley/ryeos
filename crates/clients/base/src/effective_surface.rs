@@ -142,12 +142,7 @@ mod tests {
             "provenance": {},
             "composed_value": {
                 "name": "test",
-                "layout": {
-                    "root": "main",
-                    "nodes": {
-                        "main": { "type": "pane", "view": "view:ryeos/threads/list" }
-                    }
-                }
+                "tiles": ["view:ryeos/threads/list"]
             },
             "derived": {},
             "policy_facts": {},

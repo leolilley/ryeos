@@ -8,11 +8,18 @@ use crossterm::{
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
+    terminal::{Clear, ClearType},
 };
 use ryeos_client_base::text_surface::{Cell, Color as CoreColor, TextSurface};
 use std::io::Write;
 
 /// Render a complete text surface to the terminal using diff painting.
+///
+/// Full redraws (first frame, resize) clear the screen first — the
+/// emulator reflows the previous frame during a resize and absolute
+/// repaints don't cover the displaced junk — and dedupe color codes
+/// across runs of same-styled cells, which keeps resize storms cheap
+/// enough to repaint per event.
 #[allow(dead_code)]
 pub fn render_text_surface(
     stdout: &mut impl Write,
@@ -26,28 +33,22 @@ pub fn render_text_surface(
         || prev.as_ref().unwrap().height != new.height;
 
     if full_redraw {
+        queue!(
+            stdout,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::All),
+        )?;
+        let mut brush = Brush::default();
         for y in 0..new.height {
-            queue!(
-                stdout,
-                MoveTo(offset_x, offset_y + y as u16),
-                ResetColor,
-                SetAttribute(Attribute::Reset),
-            )?;
+            queue!(stdout, MoveTo(offset_x, offset_y + y as u16))?;
             for x in 0..new.width {
-                let cell = new.get(x, y);
-                paint_cell_inline(stdout, cell)?;
+                paint_cell(stdout, new.get(x, y), &mut brush)?;
             }
         }
     } else {
         let prev_surf = prev.as_ref().unwrap();
         for y in 0..new.height {
-            // Quick row check: hash first and last cells as heuristic
-            let _first_new = new.get(0, y);
-            let _last_new = new.get(new.width.saturating_sub(1), y);
-            let _first_old = prev_surf.get(0, y);
-            let _last_old = prev_surf.get(prev_surf.width.saturating_sub(1), y);
-
-            // Always scan full row for correctness
             let mut row_changed = false;
             for x in 0..new.width {
                 if new.get(x, y) != prev_surf.get(x, y) {
@@ -57,17 +58,13 @@ pub fn render_text_surface(
             }
 
             if row_changed {
+                let mut brush = Brush::default();
                 for x in 0..new.width {
                     let new_cell = new.get(x, y);
                     let old_cell = prev_surf.get(x, y);
                     if new_cell != old_cell {
-                        queue!(
-                            stdout,
-                            MoveTo(offset_x + x as u16, offset_y + y as u16),
-                            ResetColor,
-                            SetAttribute(Attribute::Reset),
-                        )?;
-                        paint_cell_inline(stdout, new_cell)?;
+                        queue!(stdout, MoveTo(offset_x + x as u16, offset_y + y as u16))?;
+                        paint_cell(stdout, new_cell, &mut brush)?;
                     }
                 }
             }
@@ -79,12 +76,28 @@ pub fn render_text_surface(
     Ok(())
 }
 
-fn paint_cell_inline(stdout: &mut impl Write, cell: Cell) -> std::io::Result<()> {
-    if cell.fg != CoreColor::Default {
-        queue!(stdout, SetForegroundColor(to_crossterm_color(cell.fg)))?;
+/// Last emitted fg/bg, so runs of same-styled cells emit color codes
+/// once instead of per cell.
+#[derive(Default)]
+struct Brush {
+    fg: Option<CoreColor>,
+    bg: Option<CoreColor>,
+}
+
+fn paint_cell(stdout: &mut impl Write, cell: Cell, brush: &mut Brush) -> std::io::Result<()> {
+    if brush.fg != Some(cell.fg) {
+        match cell.fg {
+            CoreColor::Default => queue!(stdout, SetForegroundColor(Color::Reset))?,
+            fg => queue!(stdout, SetForegroundColor(to_crossterm_color(fg)))?,
+        }
+        brush.fg = Some(cell.fg);
     }
-    if cell.bg != CoreColor::Default {
-        queue!(stdout, SetBackgroundColor(to_crossterm_color(cell.bg)))?;
+    if brush.bg != Some(cell.bg) {
+        match cell.bg {
+            CoreColor::Default => queue!(stdout, SetBackgroundColor(Color::Reset))?,
+            bg => queue!(stdout, SetBackgroundColor(to_crossterm_color(bg)))?,
+        }
+        brush.bg = Some(cell.bg);
     }
     if cell.rune == '\u{0}' {
         // continuation cell for wide char — skip

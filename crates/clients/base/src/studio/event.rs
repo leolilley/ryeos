@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::effect::StudioEffectResult;
 use super::model::{BrowserSession, BrowserViewport, StudioDockEdge};
 use crate::atlas::{AtlasItemKind, AtlasLensVm, AtlasProjectionVm};
-use crate::layout::SplitAxis;
 use crate::workspace::{FocusDirection, ViewSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,13 +31,6 @@ pub enum StudioAction {
     },
     OpenNewView {
         view: ViewSpec,
-    },
-    SplitFocused {
-        axis: SplitAxis,
-    },
-    SplitTile {
-        tile_id: String,
-        axis: SplitAxis,
     },
     CloseFocused,
     CloseTile {

@@ -123,6 +123,10 @@ pub struct StudioThemeVm {
 pub struct StudioPresentationChromeVm {
     pub title: String,
     pub version_label: String,
+    /// Surface-declared border treatment for tiles, dock tiles, and
+    /// panels: thick | thin | hidden | none. Renderers map the name to
+    /// local glyphs/pixels — content declares, renderers map.
+    pub border: String,
     pub top_bar: StudioTopBarVm,
     pub status_bar: StudioStatusBarVm,
 }
@@ -217,7 +221,10 @@ pub enum StudioMotionEventVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioWorkspaceVm {
-    pub root: StudioLayoutNodeVm,
+    /// The computed layout tree. None when the center is empty (home /
+    /// background fill) — the engine computes this from the ordered
+    /// tile list and the tiling algorithm; it is never authored.
+    pub root: Option<StudioLayoutNodeVm>,
     pub focused_tile: String,
     pub is_home: bool,
     pub tile_count: usize,
@@ -248,9 +255,6 @@ pub enum StudioDockViewVm {
     /// A content-bound view in a dock slot: same VM the tile plane
     /// renders, no dock-specific product shapes.
     View(StudioViewVm),
-    Placeholder {
-        message: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -377,15 +381,6 @@ pub struct StudioTileActionVm {
 pub enum StudioOverlayVm {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioMetricVm {
-    pub label: String,
-    pub value: String,
-    pub hint: Option<String>,
-    pub tone: StudioTone,
-    pub action: Option<StudioAction>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioRowVm {
     pub id: String,
     pub primary: String,
@@ -395,32 +390,6 @@ pub struct StudioRowVm {
     pub action: Option<StudioAction>,
     pub tone: StudioTone,
     pub selected: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioFilePreviewVm {
-    pub title: String,
-    pub subtitle: String,
-    pub kind: String,
-    pub size: Option<usize>,
-    pub truncated: bool,
-    pub content: Option<String>,
-    pub hint: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioPanelFiltersVm {
-    pub tile_id: String,
-    pub items_path: String,
-    pub items_query: String,
-    pub items_kind: String,
-    pub item_kind_options: Vec<StudioFilterOptionVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioFilterOptionVm {
-    pub value: String,
-    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -480,6 +449,7 @@ fn presentation_vm(
         chrome: StudioPresentationChromeVm {
             title: "Rye OS".to_string(),
             version_label: format!("RYE OS - {version}"),
+            border: core.style.border.name().to_string(),
             top_bar: top_bar_vm(core),
             status_bar: status_bar_vm(session, chrome, workspace, core, &version),
         },
@@ -512,9 +482,9 @@ fn top_bar_vm(core: &StudioCore) -> StudioTopBarVm {
                 number: index + 1,
                 active: index == core.active_workspace,
                 tile_count: if index == core.active_workspace {
-                    core.workspace.layout.tile_ids().len()
+                    core.workspace.tile_ids().len()
                 } else {
-                    workspace.layout.tile_ids().len()
+                    workspace.tile_ids().len()
                 },
             })
             .collect(),
@@ -532,13 +502,9 @@ fn focused_tile_title(core: &StudioCore) -> String {
 }
 
 fn layout_symbol(core: &StudioCore) -> String {
-    let master = core.workspace.master_tiles.len().max(1);
-    let slave = core
-        .workspace
-        .layout
-        .tile_ids()
-        .len()
-        .saturating_sub(master);
+    let total = core.workspace.tile_ids().len();
+    let master = core.workspace.tiling.master.count.min(total);
+    let slave = total.saturating_sub(master);
     format!("M{master}│S{slave}")
 }
 
@@ -730,17 +696,32 @@ fn status_bar_vm(
 fn home_vm(core: &StudioCore) -> StudioHomeVm {
     // Home panel content comes from the surface-declared home view
     // (`home_view: view:…`), never from client source. Absent content
-    // degrades to an empty panel.
-    let body = core
+    // degrades visibly so missing content is never hidden by an empty shell.
+    let home_ref = core
         .data
         .session
         .as_ref()
         .and_then(|session| session.effective_surface.as_ref())
         .and_then(|surface| surface.get("home_view"))
-        .and_then(serde_json::Value::as_str)
+        .and_then(serde_json::Value::as_str);
+    let body = home_ref
         .and_then(|home_ref| core.views.get(home_ref))
         .map(|binding| binding.body.clone())
-        .unwrap_or(serde_json::Value::Null);
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "brand": "RYE OS",
+                "tagline": "home view unavailable",
+                "description": format!(
+                    "home view missing: {}",
+                    home_ref.unwrap_or("<none>")
+                ),
+                "terminal_lines": [],
+                "primary_label": "OPEN",
+                "secondary_label": "",
+                "secondary_url": "",
+                "install_command": ""
+            })
+        });
     let text = |key: &str| {
         body.get(key)
             .and_then(serde_json::Value::as_str)
@@ -771,28 +752,32 @@ fn home_vm(core: &StudioCore) -> StudioHomeVm {
 
 fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
     StudioWorkspaceVm {
-        root: layout_node_vm(&core.workspace.layout, core),
+        root: core
+            .workspace
+            .layout()
+            .map(|layout| layout_node_vm(&layout, core)),
         focused_tile: tile_id_text(core.workspace.focused_tile),
         is_home: core.workspace.is_home(),
-        tile_count: core.workspace.layout.tile_ids().len(),
+        tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
     }
 }
 
 fn dock_plane_vm(core: &StudioCore) -> StudioDockPlaneVm {
     StudioDockPlaneVm {
-        top: dock_tile_vm(core, StudioDockEdge::Top, &core.ui.docks.top),
-        bottom: dock_tile_vm(core, StudioDockEdge::Bottom, &core.ui.docks.bottom),
-        left: dock_tile_vm(core, StudioDockEdge::Left, &core.ui.docks.left),
-        right: dock_tile_vm(core, StudioDockEdge::Right, &core.ui.docks.right),
+        top: dock_tile_vm(core, StudioDockEdge::Top, core.ui.docks.top.as_ref()),
+        bottom: dock_tile_vm(core, StudioDockEdge::Bottom, core.ui.docks.bottom.as_ref()),
+        left: dock_tile_vm(core, StudioDockEdge::Left, core.ui.docks.left.as_ref()),
+        right: dock_tile_vm(core, StudioDockEdge::Right, core.ui.docks.right.as_ref()),
     }
 }
 
 fn dock_tile_vm(
     core: &StudioCore,
     edge: StudioDockEdge,
-    state: &StudioDockSlotState,
+    state: Option<&StudioDockSlotState>,
 ) -> Option<StudioDockTileVm> {
+    let state = state?;
     if !state.visible {
         return None;
     }
@@ -809,7 +794,6 @@ fn dock_tile_vm(
             StudioDockContent::View { view_ref } => {
                 view_ref.rsplit('/').next().unwrap_or(view_ref).to_string()
             }
-            StudioDockContent::Placeholder { .. } => edge_key.to_string(),
         },
         size: state.size,
         view: match &state.content {
@@ -820,9 +804,6 @@ fn dock_tile_vm(
                 None,
                 view_ref,
             )),
-            StudioDockContent::Placeholder { message } => StudioDockViewVm::Placeholder {
-                message: message.clone(),
-            },
         },
     })
 }
@@ -959,6 +940,9 @@ fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimelineEntryVm>
     for record in records {
         match record.role {
             TimelineRole::Flow => {
+                if record.primary.is_empty() {
+                    continue;
+                }
                 let tone = tone_from_name(record.tone.as_deref());
                 if let Some((text, existing_tone)) = pending_flow.as_mut() {
                     text.push_str(&record.primary);
@@ -1260,32 +1244,23 @@ pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm>
 }
 
 fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    // Only surface-declared slots are toggleable; absent edges have no
+    // slot and offer nothing. Labels stay mechanism words (edge names).
     [
         (
             StudioDockEdge::Bottom,
-            "input dock",
-            core.ui.docks.bottom.visible,
+            "bottom",
+            core.ui.docks.bottom.as_ref(),
         ),
-        (
-            StudioDockEdge::Left,
-            "directive threads dock",
-            core.ui.docks.left.visible,
-        ),
-        (
-            StudioDockEdge::Right,
-            "inspector dock",
-            core.ui.docks.right.visible,
-        ),
-        (
-            StudioDockEdge::Top,
-            "context dock",
-            core.ui.docks.top.visible,
-        ),
+        (StudioDockEdge::Left, "left", core.ui.docks.left.as_ref()),
+        (StudioDockEdge::Right, "right", core.ui.docks.right.as_ref()),
+        (StudioDockEdge::Top, "top", core.ui.docks.top.as_ref()),
     ]
     .into_iter()
-    .map(|(edge, label, visible)| StudioLauncherItemVm {
-        label: format!("{} {label}", if visible { "Hide" } else { "Show" }),
-        hint: "toggle Studio dock tile".to_string(),
+    .filter_map(|(edge, name, slot)| slot.map(|slot| (edge, name, slot.visible)))
+    .map(|(edge, name, visible)| StudioLauncherItemVm {
+        label: format!("{} {name} slot", if visible { "Hide" } else { "Show" }),
+        hint: "toggle edge slot".to_string(),
         action: StudioAction::ToggleDock { edge },
         secondary_action: None,
         enabled: true,
@@ -1378,33 +1353,15 @@ fn launcher(core: &StudioCore) -> StudioLauncherVm {
 }
 
 fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
+    // Dynamic tiling: the algorithm owns the tree; tiles offer no
+    // manual splits. Closing the last tile returns home.
+    let _ = core;
     let tile_id = tile_id_text(tile_id);
-    let mut actions = vec![
-        StudioTileActionVm {
-            label: "↔".to_string(),
-            title: "Split right".to_string(),
-            action: StudioAction::SplitTile {
-                tile_id: tile_id.clone(),
-                axis: SplitAxis::Horizontal,
-            },
-        },
-        StudioTileActionVm {
-            label: "↕".to_string(),
-            title: "Split down".to_string(),
-            action: StudioAction::SplitTile {
-                tile_id: tile_id.clone(),
-                axis: SplitAxis::Vertical,
-            },
-        },
-    ];
-    if core.workspace.layout.tile_ids().len() > 1 {
-        actions.push(StudioTileActionVm {
-            label: "×".to_string(),
-            title: "Close tile".to_string(),
-            action: StudioAction::CloseTile { tile_id },
-        });
-    }
-    actions
+    vec![StudioTileActionVm {
+        label: "×".to_string(),
+        title: "Close tile".to_string(),
+        action: StudioAction::CloseTile { tile_id },
+    }]
 }
 
 pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
@@ -1526,6 +1483,88 @@ mod tests {
     }
 
     #[test]
+    fn home_vm_uses_embedded_home_view_body() {
+        let session = crate::studio::model::BrowserSession {
+            session_id: "S-home".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            effective_surface: Some(json!({
+                "name": "studio-base",
+                "version": "1.0.0",
+                "home_view": "view:ryeos/home/brand",
+                "views": {
+                    "view:ryeos/home/brand": {
+                        "widget": "text",
+                        "body": {
+                            "brand": "TEST OS",
+                            "tagline": "portable substrate",
+                            "description": "signed content",
+                            "terminal_lines": ["verified by math"],
+                            "primary_label": "OPEN",
+                            "secondary_label": "DOCS",
+                            "secondary_url": "https://example.invalid",
+                            "install_command": "install test"
+                        }
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        let core = StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0);
+
+        let home = home_vm(&core);
+
+        assert_eq!(home.brand, "TEST OS");
+        assert_eq!(home.tagline, "portable substrate");
+        assert_eq!(home.description, "signed content");
+        assert_eq!(home.terminal_lines, vec!["verified by math"]);
+        assert_eq!(home.primary_label, "OPEN");
+        assert_eq!(home.secondary_label, "DOCS");
+        assert_eq!(home.install_command, "install test");
+    }
+
+    #[test]
+    fn surface_style_border_flows_into_presentation_chrome() {
+        let session = crate::studio::model::BrowserSession {
+            session_id: "S-border".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            effective_surface: Some(json!({
+                "name": "studio-base",
+                "style": { "border": "thick" }
+            })),
+            ..Default::default()
+        };
+        let core = StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0);
+        let vm = build_view_model(&core);
+        assert_eq!(vm.presentation.chrome.border, "thick");
+
+        // Absent style defaults to thin.
+        let default_vm = build_view_model(&StudioCore::default());
+        assert_eq!(default_vm.presentation.chrome.border, "thin");
+    }
+
+    #[test]
+    fn home_vm_missing_home_view_degrades_visibly() {
+        let session = crate::studio::model::BrowserSession {
+            session_id: "S-home".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            effective_surface: Some(json!({
+                "name": "studio-base",
+                "version": "1.0.0",
+                "home_view": "view:ryeos/home/brand",
+                "views": {}
+            })),
+            ..Default::default()
+        };
+        let core = StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0);
+
+        let home = home_vm(&core);
+
+        assert_eq!(home.brand, "RYE OS");
+        assert_eq!(home.tagline, "home view unavailable");
+        assert_eq!(home.description, "home view missing: view:ryeos/home/brand");
+    }
+
+    #[test]
     fn timeline_entries_collapse_matching_pairs_in_open_position() {
         let entries = timeline_entries(vec![
             record(
@@ -1643,6 +1682,57 @@ mod tests {
                 tone: StudioTone::Neutral,
             }]
         );
+    }
+
+    #[test]
+    fn timeline_entries_skip_flow_records_without_primary() {
+        let entries = timeline_entries(vec![
+            record("", None, None, TimelineRole::Flow, None),
+            record("durable", None, None, TimelineRole::Flow, None),
+        ]);
+
+        assert_eq!(
+            entries.as_slice(),
+            &[StudioTimelineEntryVm::Block {
+                text: "durable".into(),
+                tone: StudioTone::Neutral,
+            }]
+        );
+    }
+
+    #[test]
+    fn actual_chain_timeline_binding_projects_replay_shapes() {
+        let binding: super::super::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/chain/timeline.yaml"
+        ))
+        .unwrap();
+        let records = super::super::content::project_records(
+            &binding,
+            &json!({ "events": [
+                { "event_type": "cognition_in", "payload": { "turn": 1 } },
+                { "event_type": "cognition_out", "payload": { "content": "answer", "turn": 1 } },
+                { "event_type": "cognition_out", "payload": { "delta": "live-only" } },
+                { "event_type": "tool_call_start", "payload": { "tool": "tool:demo", "call_id": "call-1" } },
+                { "event_type": "tool_call_result", "payload": { "tool": "tool:demo", "call_id": "call-1", "result_size_bytes": 42 } }
+            ] }),
+        );
+
+        let entries = timeline_entries(records);
+        assert!(entries.iter().any(
+            |entry| matches!(entry, StudioTimelineEntryVm::Block { text, .. } if text == "answer")
+        ));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            StudioTimelineEntryVm::Separator { label } if label == "1"
+        )));
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            StudioTimelineEntryVm::Pair { summary, tone: StudioTone::Good, pending: false, .. } if summary == "tool:demo"
+        )));
+        assert!(!entries.iter().any(|entry| matches!(
+            entry,
+            StudioTimelineEntryVm::Line { primary, .. } if primary.contains("live-only")
+        )));
     }
 
     #[test]
