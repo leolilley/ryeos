@@ -679,7 +679,7 @@ fn status_bar_vm(
                 grow: true,
             },
         ],
-        key_hint: "alt+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string(),
+        key_hint: "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string(),
     }
 }
 

@@ -71,7 +71,14 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
     }
 
     match event.key {
-        StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'k') => {
+        // Ctrl+K is the reliable launcher binding: a control char that
+        // terminals and tmux pass straight through. Alt+K is kept for
+        // environments that deliver it, but Alt/ESC combos are eaten by
+        // tmux, so Ctrl+K is what we advertise.
+        StudioKey::Char(c)
+            if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
+                && c.eq_ignore_ascii_case(&'k') =>
+        {
             ui(StudioUiEvent::OpenLauncher)
         }
         StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'q') => {
@@ -238,6 +245,27 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    fn ctrl(ch: char) -> StudioKeyEvent {
+        StudioKeyEvent {
+            key: StudioKey::Char(ch),
+            modifiers: StudioKeyModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn ctrl_k_opens_the_launcher() {
+        // The reliable launcher binding — Alt/ESC combos are eaten by tmux.
+        assert!(matches!(
+            studio_key_command(ctrl('k'), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::OpenLauncher
+            }
+        ));
     }
 
     fn ctrl_arrow(key: StudioKey) -> StudioKeyEvent {

@@ -128,7 +128,7 @@ export function statusLine(vm, shell) {
       textEl("span", health, `tone-${vm.chrome?.health_tone || "neutral"}`),
       textEl("span", mode),
       textEl("span", project, "grow"),
-      textEl("span", "alt+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move", "keys"),
+      textEl("span", "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move", "keys"),
     );
     return line;
   }
