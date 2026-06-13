@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-12T07:42:44Z:a9b2969fee1f6c8f2d999c4074dd63a67ed2b4fe41f88878d2a1a11b977d22ad:NWETknQTDKA8kKRF/WDOUQ3f3ide/nN+YP/l/x3EdFvAJGdiI+MW5YAYJ4V3FhPQ0eysOW3nho1pdShj0MNwBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-13T05:38:45Z:a09114df686f7e957fd851ebd1ef8fde2e8164951754d821f64efb5fecf30cda:Brid6EUCMJ4mZ4XN2GcoyQ2mzc36h6nmDP58bfQhpWnYz96GbmdsCe70U1DBPdaDvg0SOctED7d5HYDGEAshAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/studio"
 name: "frame-v1"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:47Z:c2e0748de6a1b5bc9330ded04ee72ad5a728e93c807b6843b7ea56ff566d0c5b:BrbTiU485uTzO7KbJqpxXmoersUTcyeKY599ioGiVC+1cVWwaLEu+ePEmO/EA1ZLAIQautDS2/Pxe9roMcN2CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T05:38:46Z:e5414ba589d411a0373d7771d6d8f2aa1df8b9e9b9633eb5ac83d4ea87fb4d86:kuyvbkVbIfJ40swoSYe3gCBrmgfpNapnxz4/qlKb+6/fFvWaBoMLevRdXoecjKRRo5U2+D+A1CvNl0WIcoDvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: remotes-list
 version: "1.0.0"
 description: Configured remote nodes (the mesh as reach)

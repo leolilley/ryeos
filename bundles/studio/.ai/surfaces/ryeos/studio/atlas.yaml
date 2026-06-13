@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T01:49:32Z:38c1cfb0800549c24887a82903e4a825bfb2d84d159c67abdb1a36c72ecbf6e1:GiuRnSKQ6jTIWLo5uSNErUbFfo1coSd+r50cgXHWvF0l91XZbguChJrGzvJ0AIqDwgx1GSq/Ypw6NrjZa30TDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T05:38:46Z:3aaf3c714b0330f74ecac3fb246272d921c93bb38c42f50f585b2d816e351b1e:LDhGAEyptbJyjnk14yDTAs3h7oOfJYYlmdd48Qfvg8c5ZXrrx3m6+/o08ES81Frj4V4PVdDyJ2E8Xq/ix+HLCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-atlas
 version: "1.0.0"
 description: RyeOS Studio with a Three.js 2D namespace atlas background
