@@ -298,6 +298,15 @@ mod tests {
                     "view:ryeos/input": {
                         "widget": "text",
                         "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+                    },
+                    "view:ryeos/backdrop/shard": {
+                        "widget": "scene",
+                        "body": { "objects": [
+                            { "kind": "particle", "position": [0.0, 6.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
+                            { "kind": "particle", "position": [-9.0, -3.5], "scale": 0.6, "color": "#8ec07c", "tone": "good" },
+                            { "kind": "particle", "position": [10.0, 3.4], "scale": 0.5, "color": "#a89984", "tone": "neutral" },
+                            { "kind": "text", "position": [0.0, -8.2], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
+                        ] }
                     }
                 }
             })),

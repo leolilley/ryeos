@@ -425,118 +425,83 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
 ///
 /// Scene space: x ∈ roughly [-16, 16], y ∈ roughly [-7, 7], origin at the
 /// shard's centre. The renderer fits this to the target rect; +y is up.
-pub fn build_shard_scene(generation: u64) -> StudioSceneModel {
+/// Build a scene from a `widget: scene` view's body — the generic,
+/// content-driven path. The body declares `objects: [...]`, each a
+/// particle or text object with a position, scale, color, tone, opacity,
+/// and (for text) a label. The renderer draws them generically, so the
+/// background is content with no per-art Rust; `generation` carries the
+/// frame clock so the renderer can animate (the backdrop twinkle).
+pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioSceneModel {
     let mut scene = StudioSceneModel {
         generation,
         ..StudioSceneModel::default()
     };
-
-    // The shard silhouette: a vertical bipyramid (kite) traced as accent
-    // particles. Ported from the ASCII facet mark in the old
-    // `render/ambient.rs` — the strokes become a ring of points so the
-    // generic point renderer draws the outline.
-    let silhouette: &[[f32; 2]] = &[
-        // top apex down the right edge
-        [0.0, 6.0],
-        [1.6, 4.2],
-        [2.6, 2.4],
-        [3.2, 0.6],
-        [3.4, 0.0],
-        // table line (mid)
-        [-3.4, 0.0],
-        [-1.7, 0.0],
-        [1.7, 0.0],
-        // lower right edge down to the bottom apex
-        [3.0, -1.2],
-        [2.2, -2.8],
-        [1.2, -4.4],
-        [0.0, -6.0],
-        // lower left edge back up
-        [-1.2, -4.4],
-        [-2.2, -2.8],
-        [-3.0, -1.2],
-        // upper left edge back to apex
-        [-3.4, 0.0],
-        [-3.2, 0.6],
-        [-2.6, 2.4],
-        [-1.6, 4.2],
-    ];
-    for (index, [x, y]) in silhouette.iter().enumerate() {
-        let mut object = scene_object(
-            &format!("backdrop:shard:{index}"),
-            StudioSceneObjectKind::Particle,
-            [*x, *y, 0.0],
-            [0.9, 0.9, 0.9],
-            "#d65d0e",
-            None,
-            StudioTone::Accent,
-        );
-        object.opacity = 0.95;
+    let Some(objects) = body.get("objects").and_then(serde_json::Value::as_array) else {
+        return scene;
+    };
+    for (index, obj) in objects.iter().enumerate() {
+        let kind = match obj.get("kind").and_then(serde_json::Value::as_str) {
+            Some("text") => StudioSceneObjectKind::Text,
+            _ => StudioSceneObjectKind::Particle,
+        };
+        let position = read_position(obj.get("position"));
+        let scale = read_scale(obj.get("scale"));
+        let color = obj
+            .get("color")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("#ebdbb2")
+            .to_string();
+        let tone = scene_tone(obj.get("tone").and_then(serde_json::Value::as_str));
+        let label = obj
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let opacity = obj
+            .get("opacity")
+            .and_then(serde_json::Value::as_f64)
+            .map(|o| o as f32)
+            .unwrap_or(1.0);
+        let id = obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("backdrop:{index}"));
+        let mut object = scene_object(&id, kind, position, scale, &color, label, tone);
+        object.opacity = opacity;
         scene.objects.push(object);
     }
-
-    // Orbiting motes: scattered around the shard at varied radii / sizes.
-    // These are the particles that twinkle — the renderer varies their
-    // glyph/opacity by `generation` with a per-object phase from the id.
-    let motes: &[([f32; 2], f32, &str, StudioTone)] = &[
-        ([-11.0, 4.0], 0.4, "#a89984", StudioTone::Neutral),
-        ([10.0, 3.4], 0.5, "#d5c4a1", StudioTone::Neutral),
-        ([-9.0, -3.5], 0.7, "#8ec07c", StudioTone::Good),
-        ([9.5, -3.0], 0.5, "#a89984", StudioTone::Neutral),
-        ([-13.0, 0.5], 0.4, "#d5c4a1", StudioTone::Neutral),
-        ([12.5, -0.5], 0.6, "#8ec07c", StudioTone::Good),
-        ([-6.5, 5.5], 0.4, "#a89984", StudioTone::Neutral),
-        ([6.0, 5.2], 0.5, "#d5c4a1", StudioTone::Neutral),
-        ([-7.5, -5.5], 0.6, "#a89984", StudioTone::Neutral),
-        ([7.0, -5.4], 0.4, "#8ec07c", StudioTone::Good),
-        ([0.0, 7.0], 0.5, "#d5c4a1", StudioTone::Neutral),
-        ([-14.0, -2.0], 0.4, "#a89984", StudioTone::Neutral),
-        ([13.5, 2.0], 0.5, "#d5c4a1", StudioTone::Neutral),
-    ];
-    for (index, ([x, y], size, color, tone)) in motes.iter().enumerate() {
-        let mut object = scene_object(
-            &format!("backdrop:mote:{index}"),
-            StudioSceneObjectKind::Particle,
-            [*x, *y, 0.0],
-            [*size, *size, *size],
-            color,
-            None,
-            *tone,
-        );
-        object.opacity = 0.7;
-        scene.objects.push(object);
-    }
-
-    // The brand + welcome + hint lines as text objects (positioned,
-    // toned, animatable later) — not a hardcoded welcome block.
-    let texts: &[(&str, [f32; 2], &str, StudioTone)] = &[
-        ("RYE OS", [0.0, -8.2], "#d65d0e", StudioTone::Accent),
-        (
-            "portable operating system for ai",
-            [0.0, -9.6],
-            "#a89984",
-            StudioTone::Neutral,
-        ),
-        (
-            "alt+k launcher · ctrl+c quit",
-            [0.0, -11.0],
-            "#a89984",
-            StudioTone::Neutral,
-        ),
-    ];
-    for (index, (label, [x, y], color, tone)) in texts.iter().enumerate() {
-        scene.objects.push(scene_object(
-            &format!("backdrop:text:{index}"),
-            StudioSceneObjectKind::Text,
-            [*x, *y, 0.0],
-            [1.0, 1.0, 1.0],
-            color,
-            Some((*label).to_string()),
-            *tone,
-        ));
-    }
-
     scene
+}
+
+/// `[x, y]` or `[x, y, z]` -> `[x, y, z]` (z defaults 0).
+fn read_position(v: Option<&serde_json::Value>) -> [f32; 3] {
+    let arr = v.and_then(serde_json::Value::as_array);
+    let get = |i: usize| {
+        arr.and_then(|a| a.get(i))
+            .and_then(serde_json::Value::as_f64)
+            .map(|f| f as f32)
+            .unwrap_or(0.0)
+    };
+    [get(0), get(1), get(2)]
+}
+
+/// A scalar scale -> uniform `[s, s, s]`.
+fn read_scale(v: Option<&serde_json::Value>) -> [f32; 3] {
+    let s = v
+        .and_then(serde_json::Value::as_f64)
+        .map(|f| f as f32)
+        .unwrap_or(1.0);
+    [s, s, s]
+}
+
+fn scene_tone(name: Option<&str>) -> StudioTone {
+    match name {
+        Some("accent") => StudioTone::Accent,
+        Some("good") => StudioTone::Good,
+        Some("warn") => StudioTone::Warn,
+        Some("danger") => StudioTone::Danger,
+        _ => StudioTone::Neutral,
+    }
 }
 
 fn scene_object(
@@ -658,27 +623,37 @@ mod tests {
     };
 
     #[test]
-    fn shard_scene_has_particles_and_text_objects() {
-        let scene = build_shard_scene(7);
+    fn scene_from_body_reads_objects_as_content() {
+        // The background is content: particle + text objects come from the
+        // view body, not Rust. generation rides through for animation.
+        let body = serde_json::json!({
+            "objects": [
+                { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent", "opacity": 0.95 },
+                { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
+            ]
+        });
+        let scene = scene_from_body(&body, 7);
         assert_eq!(scene.generation, 7);
-        let particles = scene
+        let particle = scene
             .objects
             .iter()
-            .filter(|o| o.kind == StudioSceneObjectKind::Particle)
-            .count();
-        assert!(particles > 10, "shard silhouette + motes are particles");
-        // The brand / welcome / hints are text objects with labels.
+            .find(|o| o.kind == StudioSceneObjectKind::Particle)
+            .expect("particle from body");
+        assert_eq!(particle.position, [1.0, 2.0, 0.0]);
+        assert_eq!(particle.scale, [0.9, 0.9, 0.9]);
+        assert!((particle.opacity - 0.95).abs() < 1e-6);
         let brand = scene
             .objects
             .iter()
             .find(|o| o.kind == StudioSceneObjectKind::Text && o.label.as_deref() == Some("RYE OS"))
-            .expect("RYE OS text object");
+            .expect("RYE OS text object from body");
         assert_eq!(brand.tone, StudioTone::Accent);
-        assert!(scene
-            .objects
-            .iter()
-            .any(|o| o.kind == StudioSceneObjectKind::Text
-                && o.label.as_deref() == Some("alt+k launcher · ctrl+c quit")));
+    }
+
+    #[test]
+    fn scene_from_body_empty_is_empty() {
+        let scene = scene_from_body(&serde_json::json!({}), 0);
+        assert!(scene.objects.is_empty());
     }
 
     #[test]

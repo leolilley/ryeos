@@ -714,10 +714,17 @@ fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
         .and_then(|session| session.effective_surface.as_ref())
         .and_then(|surface| surface.get("backdrop"))
         .and_then(serde_json::Value::as_str)?;
-    if !backdrop_ref.starts_with("view:") {
+    // The backdrop is content: read the embedded backdrop VIEW's body and
+    // build its scene generically. The surface names which view; the view
+    // declares the objects. Swap the ref → swap the background, no Rust.
+    let binding = core.views.get(backdrop_ref)?;
+    if binding.widget != "scene" {
         return None;
     }
-    Some(super::scene_model::build_shard_scene(core.generation))
+    Some(super::scene_model::scene_from_body(
+        &binding.body,
+        core.generation,
+    ))
 }
 
 fn dock_plane_vm(core: &StudioCore) -> StudioDockPlaneVm {
@@ -1580,7 +1587,17 @@ mod tests {
                 "name": "studio-base",
                 "version": "1.0.0",
                 "backdrop": "view:ryeos/backdrop/shard",
-                "views": {}
+                // The backdrop is content: its scene objects live in the
+                // embedded view's body, not in Rust.
+                "views": {
+                    "view:ryeos/backdrop/shard": {
+                        "widget": "scene",
+                        "body": { "objects": [
+                            { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
+                            { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
+                        ] }
+                    }
+                }
             })),
             ..Default::default()
         };
@@ -1592,7 +1609,7 @@ mod tests {
             .workspace
             .backdrop
             .expect("backdrop scene on empty center");
-        // The shard scene resolves to objects, including text labels.
+        // The scene resolves from the view body — objects incl. text labels.
         assert!(!backdrop.objects.is_empty());
         assert!(backdrop
             .objects

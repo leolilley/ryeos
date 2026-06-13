@@ -216,11 +216,22 @@ impl Bounds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::scene_model::build_shard_scene;
+    use ryeos_client_base::studio::scene_model::scene_from_body;
 
     fn render(generation: u64, w: u16, h: u16) -> TextSurface {
+        // A content-shaped scene (particles + a brand text object), the
+        // same path the backdrop view uses.
+        let body = serde_json::json!({
+            "objects": [
+                { "kind": "particle", "position": [0.0, 6.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
+                { "kind": "particle", "position": [3.0, -1.2], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
+                { "kind": "particle", "position": [-9.0, -3.5], "scale": 0.6, "color": "#8ec07c", "tone": "good" },
+                { "kind": "particle", "position": [10.0, 3.4], "scale": 0.5, "color": "#a89984", "tone": "neutral" },
+                { "kind": "text", "position": [0.0, -8.2], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
+            ]
+        });
         let mut surface = TextSurface::new(w as usize, h as usize);
-        let scene = build_shard_scene(generation);
+        let scene = scene_from_body(&body, generation);
         draw_scene(&mut surface, Rect::new(0, 0, w, h), &scene);
         surface
     }
