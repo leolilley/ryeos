@@ -3022,6 +3022,7 @@ name = "ryeos-web-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "encoding_rs",
  "regex",
  "reqwest",
  "scraper",

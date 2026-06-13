@@ -79,6 +79,7 @@ struct FetchResponse {
     final_url: Url,
     status: u16,
     content_type: String,
+    charset: Option<String>,
     body: Vec<u8>,
     body_truncated: bool,
 }
@@ -115,7 +116,7 @@ fn execute(params: FetchParams) -> anyhow::Result<FetchEnvelope> {
         max_bytes,
         block_private_networks,
     )?;
-    let content = String::from_utf8_lossy(&response.body).into_owned();
+    let content = decode_body(&response.body, response.charset.as_deref());
     let is_html =
         response.content_type.contains("html") || content.to_ascii_lowercase().contains("<html");
     let converted = match (format, is_html) {
@@ -178,16 +179,19 @@ fn fetch_url(
             parse_http_url(current.as_str())?;
             continue;
         }
-        let content_type = response
+        let raw_content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
+            .to_string();
+        let content_type = raw_content_type
             .split(';')
             .next()
             .unwrap_or("")
             .trim()
             .to_string();
+        let charset = extract_charset(&raw_content_type);
         let mut body = Vec::new();
         let mut limited = response.by_ref().take((max_bytes + 1) as u64);
         limited
@@ -199,6 +203,7 @@ fn fetch_url(
             final_url: current,
             status: status.as_u16(),
             content_type,
+            charset,
             body,
             body_truncated,
         });
@@ -292,6 +297,29 @@ fn fetch_config_path() -> anyhow::Result<Option<PathBuf>> {
     Ok(Some(app_root.join(Path::new(".ai/config/web/fetch.yaml"))))
 }
 
+/// Extract a `charset` label from a raw `Content-Type` header value, if present.
+fn extract_charset(content_type: &str) -> Option<String> {
+    content_type.split(';').skip(1).find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        if key.trim().eq_ignore_ascii_case("charset") {
+            Some(value.trim().trim_matches('"').to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Decode a response body using the declared charset, falling back to UTF-8.
+fn decode_body(bytes: &[u8], charset: Option<&str>) -> String {
+    if let Some(encoding) =
+        charset.and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+    {
+        let (decoded, _, _) = encoding.decode(bytes);
+        return decoded.into_owned();
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 fn html_to_text(html: &str) -> String {
     let doc = Html::parse_document(html);
     doc.root_element()
@@ -303,6 +331,8 @@ fn html_to_text(html: &str) -> String {
         .join(" ")
 }
 
+const BLOCK_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre"];
+
 fn html_to_markdown(html: &str) -> String {
     let doc = Html::parse_document(html);
     let mut blocks = Vec::new();
@@ -310,28 +340,47 @@ fn html_to_markdown(html: &str) -> String {
         return html_to_text(html);
     };
     for node in doc.select(&sel) {
-        let text = normalized_text(&node);
-        if text.is_empty() {
+        // Skip elements nested inside another block element (e.g. a <p>
+        // inside an <li>); the enclosing block renders their text, so
+        // emitting them separately would duplicate content.
+        if has_block_ancestor(&node) {
             continue;
         }
-        let block = match node.value().name() {
-            "h1" => format!("# {text}"),
-            "h2" => format!("## {text}"),
-            "h3" => format!("### {text}"),
-            "h4" => format!("#### {text}"),
-            "h5" => format!("##### {text}"),
-            "h6" => format!("###### {text}"),
-            "li" => format!("- {text}"),
-            "pre" => format!("```\n{}\n```", node.text().collect::<Vec<_>>().join("")),
-            _ => render_links(node.html()).unwrap_or(text),
+        let name = node.value().name();
+        let content = if name == "pre" {
+            node.text().collect::<Vec<_>>().join("")
+        } else {
+            render_inline(&node)
         };
-        blocks.push(block);
+        if content.trim().is_empty() {
+            continue;
+        }
+        blocks.push(match name {
+            "h1" => format!("# {content}"),
+            "h2" => format!("## {content}"),
+            "h3" => format!("### {content}"),
+            "h4" => format!("#### {content}"),
+            "h5" => format!("##### {content}"),
+            "h6" => format!("###### {content}"),
+            "li" => format!("- {content}"),
+            "pre" => format!("```\n{content}\n```"),
+            _ => content,
+        });
     }
     if blocks.is_empty() {
         html_to_text(html)
     } else {
         blocks.join("\n\n")
     }
+}
+
+fn has_block_ancestor(node: &scraper::ElementRef<'_>) -> bool {
+    node.ancestors().any(|ancestor| {
+        ancestor
+            .value()
+            .as_element()
+            .is_some_and(|el| BLOCK_TAGS.contains(&el.name()))
+    })
 }
 
 fn normalized_text(node: &scraper::ElementRef<'_>) -> String {
@@ -343,33 +392,37 @@ fn normalized_text(node: &scraper::ElementRef<'_>) -> String {
         .join(" ")
 }
 
-fn render_links(html: String) -> Option<String> {
-    let doc = Html::parse_fragment(&html);
-    let link_sel = scraper::Selector::parse("a").ok()?;
-    let mut text = doc
-        .root_element()
-        .text()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    for link in doc.select(&link_sel) {
-        let label = link
-            .text()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let Some(href) = link.value().attr("href") else {
-            continue;
-        };
-        if !label.is_empty() {
-            text = text.replace(&label, &format!("[{label}]({href})"));
+/// Serialize an element's inline content in document order, converting
+/// `<a href>` descendants to markdown links. Walks the node tree rather
+/// than string-replacing labels, so repeated or substring labels are safe.
+fn render_inline(node: &scraper::ElementRef<'_>) -> String {
+    let mut out = String::new();
+    write_inline(node, &mut out);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn write_inline(node: &scraper::ElementRef<'_>, out: &mut String) {
+    for child in node.children() {
+        match child.value() {
+            scraper::node::Node::Text(text) => out.push_str(text),
+            scraper::node::Node::Element(el) => {
+                let Some(child_ref) = scraper::ElementRef::wrap(child) else {
+                    continue;
+                };
+                if el.name() == "a" {
+                    if let Some(href) = el.attr("href") {
+                        let label = normalized_text(&child_ref);
+                        if !label.is_empty() {
+                            out.push_str(&format!(" [{label}]({href}) "));
+                            continue;
+                        }
+                    }
+                }
+                write_inline(&child_ref, out);
+            }
+            _ => {}
         }
     }
-    Some(text)
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
@@ -407,6 +460,29 @@ println!("{x}");</code></pre><p>Done</p><ul><li>Last</li></ul></body></html>"#,
             md,
             "# Title\n\nIntro\n\n#### Details\n\n```\nlet x = 1;\nprintln!(\"{x}\");\n```\n\nDone\n\n- Last"
         );
+    }
+    #[test]
+    fn does_not_duplicate_block_nested_in_list_item() {
+        let md = html_to_markdown("<html><body><ul><li><p>Item one</p></li></ul></body></html>");
+        assert_eq!(md, "- Item one");
+    }
+    #[test]
+    fn renders_repeated_link_label_without_mangling() {
+        let md = html_to_markdown(
+            r#"<html><body><p>go go <a href="https://example.com">go</a></p></body></html>"#,
+        );
+        assert_eq!(md, "go go [go](https://example.com)");
+    }
+    #[test]
+    fn extracts_and_decodes_declared_charset() {
+        assert_eq!(
+            extract_charset("text/html; charset=ISO-8859-1").as_deref(),
+            Some("ISO-8859-1")
+        );
+        assert_eq!(extract_charset("text/html").as_deref(), None);
+        // 0xE9 is 'é' in latin1; UTF-8 lossy would mangle it.
+        assert_eq!(decode_body(&[b'c', b'a', b'f', 0xE9], Some("ISO-8859-1")), "café");
+        assert_eq!(decode_body("café".as_bytes(), None), "café");
     }
     #[test]
     fn truncates_by_chars() {
