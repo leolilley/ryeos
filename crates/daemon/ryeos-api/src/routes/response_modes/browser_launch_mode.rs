@@ -224,11 +224,13 @@ mod tests {
 
     #[test]
     fn cookie_header_formats_browser_session_cookie() {
+        // Mirrors the production envelope from `service:ui/launch`,
+        // which sets SameSite=Strict.
         let header = cookie_header(&serde_json::json!({
             "name": "ryeos_session",
             "value": "abc",
             "path": "/ui",
-            "same_site": "Lax",
+            "same_site": "Strict",
             "http_only": true,
             "secure": true,
         }))
@@ -236,7 +238,7 @@ mod tests {
 
         assert_eq!(
             header,
-            "ryeos_session=abc; Path=/ui; SameSite=Lax; HttpOnly; Secure"
+            "ryeos_session=abc; Path=/ui; SameSite=Strict; HttpOnly; Secure"
         );
     }
 }

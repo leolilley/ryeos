@@ -1,4 +1,4 @@
-import { code, el, textEl } from "/ui/assets/studio_components_primitives.js";
+import { el, textEl } from "/ui/assets/studio_components_primitives.js";
 
 const atlasViewport = {
   panX: 0,
@@ -10,14 +10,14 @@ const utf8Encoder = new TextEncoder();
 
 export function studioWorkspace(vm, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
-  if (!vm?.root) {
+  // There is no "home" mode. The plane (docks incl. the real bottom input
+  // slot) renders in every state; the only branch is backdrop-vs-tiles in
+  // the center, handled inside workspacePlane.
+  if (!vm) {
     main.append(textEl("p", "No workspace loaded."));
     return main;
   }
-  if (vm.is_home) {
-    main.classList.add("home-space");
-    return main;
-  }
+  if (vm.center_is_empty) main.classList.add("empty-center");
   main.append(workspacePlane(vm, dispatchUi, motion));
   return main;
 }
@@ -52,7 +52,13 @@ function workspacePlane(vm, dispatchUi, motion) {
   if (top) plane.append(top);
 
   const stack = el("section", "studio-workspace-stack");
-  stack.append(layoutNode(vm.root, dispatchUi, motion));
+  if (vm.root) {
+    stack.append(layoutNode(vm.root, dispatchUi, motion));
+  } else if (vm.backdrop) {
+    // Empty center: the backdrop is content — drawn through the same
+    // generic scene path. The background is a scene, never a renderer enum.
+    stack.append(backdropScene(vm.backdrop, dispatchUi));
+  }
   plane.append(stack);
 
   if (bottom) plane.append(bottom);
@@ -66,46 +72,31 @@ function dockTile(dockVm, dispatchUi) {
   tile.__dockSize = dockVm.size;
   const chrome = el("header", "studio-dock-chrome");
   chrome.append(textEl("strong", dockVm.title || edge), textEl("small", edge));
-  tile.append(chrome, dockView(dockVm.view || {}, dispatchUi));
+  tile.append(chrome, dockView(dockVm, dispatchUi));
   return tile;
 }
 
-function dockView(viewVm, dispatchUi) {
+// A view instance that declares `input` renders as the prompt (input is an
+// orthogonal capability, not a dock-content variant). Otherwise the bound
+// widget renders.
+function dockView(instanceVm, dispatchUi) {
   const body = el("div", "studio-dock-body");
-  switch (viewVm.type) {
-    case "input":
-      body.append(inputDock(viewVm, dispatchUi));
-      break;
-    case "threads":
-      body.append(dockRows(viewVm, "threads", dispatchUi));
-      break;
-    case "inspector":
-      body.append(textEl("strong", viewVm.title || viewVm.type), textEl("p", viewVm.hint || "Not connected yet."));
-      break;
-    case "placeholder":
-      body.append(textEl("p", viewVm.message || "Not connected yet."));
-      break;
-    default:
-      body.append(textEl("p", "Unknown dock view."));
+  if (instanceVm.input) {
+    body.append(inputDock(instanceVm.input, dispatchUi));
+  } else {
+    body.append(view(instanceVm.view || {}, dispatchUi));
   }
   return body;
-}
-
-function dockRows(viewVm, kind, dispatchUi) {
-  const wrap = el("section", "studio-dock-list");
-  wrap.append(textEl("strong", viewVm.title || "dock"), textEl("p", viewVm.hint || ""));
-  if ((viewVm.rows || []).length > 0) {
-    wrap.append(rows(viewVm.rows, "", kind, dispatchUi));
-  } else {
-    wrap.append(textEl("p", "No rows loaded."));
-  }
-  return wrap;
 }
 
 function inputDock(inputVm, dispatchUi) {
   const wrap = el("section", "studio-input-dock");
   const meta = el("div", "studio-input-meta");
-  meta.append(textEl("span", inputVm.route_label || "target: studio"), textEl("small", inputVm.hint || ""));
+  meta.append(
+    textEl("span", "→", "studio-input-arrow"),
+    textEl("strong", inputVm.route_label || "target: studio"),
+    textEl("small", inputVm.hint || ""),
+  );
 
   const row = el("div", "studio-input-row");
   const prompt = textEl("span", "$", "studio-input-prompt");
@@ -123,6 +114,9 @@ function inputDock(inputVm, dispatchUi) {
     if (event.key === "Enter" && event.shiftKey) {
       event.preventDefault();
       dispatchUi({ type: "submit_input" });
+    } else if (event.key === "Tab" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      dispatchUi({ type: "complete_input" });
     }
   });
   const submit = el("button", "studio-input-submit");
@@ -132,6 +126,16 @@ function inputDock(inputVm, dispatchUi) {
   submit.addEventListener("click", () => dispatchUi({ type: "submit_input" }));
   row.append(prompt, input, submit);
   wrap.append(meta, row);
+
+  // Completion suggestions from the input's `completion` source.
+  const suggestions = inputVm.completion || [];
+  if (suggestions.length) {
+    const completion = el("div", "studio-input-completion");
+    for (const suggestion of suggestions) {
+      completion.append(textEl("small", suggestion, "studio-input-suggestion"));
+    }
+    wrap.append(completion);
+  }
   return wrap;
 }
 
@@ -166,7 +170,14 @@ function layoutNode(node, dispatchUi, motion = []) {
     if (node.focused) return;
     dispatchUi({ type: "focus_changed", target: node.tile_id || null });
   });
-  tile.append(view(node.view || {}, node.tile_id || "", dispatchUi));
+  const chrome = el("header", "studio-tile-chrome");
+  chrome.append(textEl("strong", node.title || "tile"), textEl("small", node.tile_id || ""));
+  // A tile whose view declares `input` renders as the prompt.
+  if (node.input) {
+    tile.append(chrome, inputDock(node.input, dispatchUi));
+  } else {
+    tile.append(chrome, view(node.view || {}, dispatchUi), viewFooter(node.view || {}));
+  }
   return tile;
 }
 
@@ -179,9 +190,8 @@ function motionForTile(node, motion) {
   return "";
 }
 
-function view(viewVm, tileId, dispatchUi) {
+function view(viewVm, dispatchUi) {
   const body = el("div", "studio-tile-body");
-  const listKind = listKindForView(viewVm);
   switch (viewVm.type) {
     case "map":
       body.append(sceneMap(viewVm.scene, dispatchUi));
@@ -189,32 +199,11 @@ function view(viewVm, tileId, dispatchUi) {
     case "atlas":
       body.append(atlasTile(viewVm.scene, dispatchUi));
       break;
-    case "overview":
-      body.append(metrics(viewVm.metrics || [], dispatchUi));
-      for (const block of viewVm.sections || []) body.append(sectionBlock(block, dispatchUi));
-      break;
-    case "items":
-      body.append(itemsToolbar(viewVm.filters || {}, tileId, dispatchUi), rows(viewVm.rows || [], tileId, listKind, dispatchUi));
-      break;
-    case "files":
-      body.append(fileBrowser(viewVm, tileId, dispatchUi));
-      break;
-    case "thread_list":
-      body.append(listHeader("threads", "runs and events"), rows(viewVm.rows || [], tileId, listKind, dispatchUi));
-      break;
-    case "thread":
-      body.append(textEl("h2", viewVm.thread_id ? `Thread ${viewVm.thread_id}` : "New Thread"));
-      for (const block of viewVm.sections || []) body.append(sectionBlock(block, dispatchUi));
-      for (const block of viewVm.code_blocks || []) body.append(textEl("h3", block.label), code(block.content));
-      break;
     case "rows":
-      body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], tileId, listKind, dispatchUi));
+      body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], "rows", dispatchUi));
       break;
-    case "gc":
-      body.append(textEl("h2", viewVm.running ? "GC running" : "GC idle"), code(JSON.stringify(viewVm.recent_events || [], null, 2)));
-      break;
-    case "inspector":
-      body.append(inspector(viewVm, dispatchUi));
+    case "timeline":
+      body.append(timeline(viewVm));
       break;
     case "placeholder":
       body.append(textEl("h2", viewVm.title), textEl("p", viewVm.message));
@@ -225,96 +214,118 @@ function view(viewVm, tileId, dispatchUi) {
   return body;
 }
 
-function listKindForView(viewVm) {
-  switch (viewVm?.type) {
-    case "items":
-      return "items";
-    case "files":
-      return "files";
-    case "thread_list":
-      return "threads";
-    default:
-      return "rows";
-  }
-}
-
 function listHeader(title, detail) {
   const header = el("div", "studio-list-header");
   header.append(textEl("strong", title || "list"), textEl("span", detail || ""));
   return header;
 }
 
-function fileBrowser(viewVm, tileId, dispatchUi) {
-  const wrap = el("section", "studio-file-browser");
-  const nav = el("div", "studio-file-nav");
-  nav.append(
-    textEl("strong", viewVm.root || "files"),
-    textEl("span", `/${viewVm.path || ""}`),
-  );
+function viewFooter(viewVm) {
+  const footer = el("footer", "studio-tile-footer");
+  const provenance = viewVm.provenance || "";
+  const hints = (viewVm.affordance_hints || []).join(" · ");
+  footer.append(textEl("span", provenance), textEl("small", hints));
+  return footer;
+}
 
-  const panes = el("div", "studio-file-panes");
-  const listPane = el("div", "studio-file-list-pane");
-  const fileRows = rows(viewVm.rows || [], tileId, "files", dispatchUi);
-  fileRows.dataset.scrollKey = `file-list-${tileId}`;
-  listPane.append(fileRows);
-  panes.append(listPane, filePreview(viewVm.preview, viewVm.rows || []));
-  wrap.append(nav, panes);
+function timeline(viewVm) {
+  const wrap = el("section", "studio-timeline");
+  wrap.append(listHeader(viewVm.title || "timeline", ""));
+  const entries = el("div", "studio-timeline-entries");
+  for (const entry of viewVm.entries || []) {
+    entries.append(timelineEntry(entry));
+  }
+  if (!(viewVm.entries || []).length) entries.append(textEl("p", "No timeline events loaded."));
+  wrap.append(entries);
   return wrap;
 }
 
-function filePreview(preview, rowsVm) {
-  const selected = rowsVm.find((row) => row.selected) || rowsVm[0] || null;
-  const data = preview || {
-    title: selected?.primary || "No file selected",
-    subtitle: selected?.secondary || "",
-    kind: selected?.kind || "empty",
-    content: null,
-    hint: "Select a file or directory.",
-  };
-  const pane = el("aside", `studio-file-preview ${data.kind || "unknown"}`);
-  const head = el("div", "studio-file-preview-head");
-  head.append(
-    textEl("strong", data.title || "preview"),
-    textEl("span", data.subtitle || ""),
-    textEl("small", previewMeta(data)),
-  );
-  pane.append(head);
-  if (data.content) {
-    const pre = code(data.content);
-    pre.classList.add("studio-file-preview-code");
-    pane.append(pre);
-  } else {
-    const empty = el("div", "studio-file-preview-empty");
-    empty.append(textEl("strong", data.kind === "directory" ? "directory" : "preview"), textEl("span", data.hint || "No preview loaded."));
-    pane.append(empty);
+function timelineEntry(entry) {
+  switch (entry.type) {
+    case "block":
+      return textEl("p", entry.text || "", `studio-timeline-block ${entry.tone || "neutral"}`);
+    case "pair": {
+      const row = el("div", `studio-timeline-pair ${entry.tone || "neutral"}${entry.pending ? " pending" : ""}`);
+      row.append(textEl("span", entry.pending ? "▸" : entry.tone === "danger" ? "✗" : "✓"), textEl("strong", entry.summary || "tool"), textEl("small", entry.meta || ""));
+      return row;
+    }
+    case "separator":
+      return textEl("div", entry.label || "turn", "studio-timeline-separator");
+    case "line":
+    default: {
+      const row = el("div", `studio-timeline-line ${entry.tone || "neutral"}`);
+      row.append(textEl("span", "•"), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
+      return row;
+    }
   }
-  return pane;
 }
 
-function previewMeta(preview) {
-  const parts = [preview.kind || "file"];
-  if (preview.size !== undefined && preview.size !== null) parts.push(formatBytes(preview.size));
-  if (preview.truncated) parts.push("truncated");
-  return parts.join(" · ");
-}
+// The generic backdrop scene renderer (web parity with the terminal's
+// widgets/scene.rs): the same StudioSceneModel drives both. Objects are
+// orthographically projected into the stage; particles twinkle by a
+// function of the scene's `generation` (CSS/JS opacity + glyph size),
+// with a per-object phase so they don't pulse in unison. No per-art code,
+// no `ambient` enum — new backgrounds are new scene content.
+const TWINKLE_GLYPHS = ["·", "•", "●"];
 
-function formatBytes(value) {
-  if (value < 1024) return `${value}b`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}kb`;
-  return `${(value / (1024 * 1024)).toFixed(1)}mb`;
-}
-
-function metrics(items, dispatchUi) {
-  const wrap = el("div", "studio-metrics");
-  for (const metric of items) {
-    const card = el("button", `studio-metric ${metric.tone || "neutral"}`);
-    card.type = "button";
-    card.disabled = !metric.action;
-    card.append(textEl("span", metric.label), textEl("strong", metric.value), textEl("small", metric.hint || ""));
-    if (metric.action) card.addEventListener("click", () => dispatchUi({ type: "activate", action: metric.action }));
-    wrap.append(card);
-  }
+function backdropScene(scene, _dispatchUi) {
+  const wrap = el("section", "studio-backdrop studio-scene");
+  const stage = el("div", "studio-backdrop-stage studio-scene-stage");
+  const generation = Number(scene?.generation || 0);
+  const objects = scene?.objects || [];
+  // Fit the object cloud to the stage (orthographic; +y up → top flips).
+  const xs = objects.map((o) => o.position?.[0] || 0);
+  const ys = objects.map((o) => o.position?.[1] || 0);
+  const minX = Math.min(...xs, -1), maxX = Math.max(...xs, 1);
+  const minY = Math.min(...ys, -1), maxY = Math.max(...ys, 1);
+  const spanX = Math.max(0.001, maxX - minX);
+  const spanY = Math.max(0.001, maxY - minY);
+  objects.forEach((object, index) => {
+    const px = object.position || [0, 0, 0];
+    const left = 6 + ((px[0] - minX) / spanX) * 88;
+    const top = 6 + (1 - (px[1] - minY) / spanY) * 88;
+    if (object.kind === "text" || object.kind === "label_anchor") {
+      const label = textEl("div", object.label || "", `studio-backdrop-text ${object.tone || "neutral"}`);
+      label.style.left = `${left}%`;
+      label.style.top = `${top}%`;
+      label.style.setProperty("--node-color", object.color || "#d65d0e");
+      stage.append(label);
+      return;
+    }
+    const dot = el("span", `studio-backdrop-dot ${object.tone || "neutral"}`);
+    dot.style.left = `${left}%`;
+    dot.style.top = `${top}%`;
+    dot.style.setProperty("--node-color", object.color || "#a89984");
+    if (object.kind === "particle") {
+      const phase = phaseFor(object.id || "", index);
+      const step = (generation + phase) % 4;
+      const base = sizeIndex(object.scale?.[0] ?? 0.5);
+      const delta = step === 1 ? 1 : step === 3 ? -1 : 0;
+      const idx = Math.max(0, Math.min(TWINKLE_GLYPHS.length - 1, base + delta));
+      dot.textContent = TWINKLE_GLYPHS[idx];
+      dot.style.opacity = String(step === 3 ? 0.4 : (object.opacity ?? 0.8));
+    } else {
+      dot.textContent = TWINKLE_GLYPHS[sizeIndex(object.scale?.[0] ?? 0.5)];
+      dot.style.opacity = String(object.opacity ?? 1);
+    }
+    stage.append(dot);
+  });
+  wrap.append(stage);
   return wrap;
+}
+
+function sizeIndex(scale) {
+  if (scale >= 0.85) return 2;
+  if (scale >= 0.5) return 1;
+  return 0;
+}
+
+function phaseFor(id, index) {
+  let hash = index >>> 0;
+  for (let i = 0; i < id.length; i += 1) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  }
+  return hash % 4;
 }
 
 function sceneMap(scene, dispatchUi) {
@@ -510,108 +521,7 @@ function atlasItemVisible(atlas, item) {
   return true;
 }
 
-function atlasDirectiveList(nodes, dispatchUi) {
-  const directives = [];
-  for (const node of nodes || []) {
-    for (const item of node.stack || []) {
-      if (item.kind === "directive") directives.push({ node, item });
-    }
-  }
-  if (!directives.length) return null;
-  directives.sort((a, b) => (a.item.canonical_ref || "").localeCompare(b.item.canonical_ref || ""));
-  const aside = el("aside", "studio-atlas-directives");
-  aside.append(textEl("strong", "Directives"), textEl("span", "select to reveal context"));
-  const list = el("div", "studio-atlas-directive-list");
-  for (const { node, item } of directives.slice(0, 120)) {
-    const button = el("button", `studio-atlas-directive${node.state?.selected ? " selected" : ""}${node.state?.highlighted ? " highlighted" : ""}`);
-    button.type = "button";
-    button.append(textEl("strong", item.label || node.label || item.canonical_ref), textEl("small", item.canonical_ref || node.namespace_key));
-    button.addEventListener("click", () => {
-      if (!item.canonical_ref) return;
-      dispatchUi({ type: "activate", action: { type: "inspect_item", canonical_ref: item.canonical_ref } });
-    });
-    list.append(button);
-  }
-  aside.append(list);
-  return aside;
-}
-
-function atlasGlyph(kind) {
-  switch (kind) {
-    case "directive": return "◆";
-    case "tool": return "⚙";
-    case "knowledge": return "◈";
-    case "config": return "◇";
-    default: return "●";
-  }
-}
-
-function itemsToolbar(filters, tileId, dispatchUi) {
-  const targetTile = filters.tile_id || tileId || "";
-  const toolbar = el("div", "studio-toolbar");
-  const crumb = el("button", "studio-folder-crumb");
-  crumb.type = "button";
-  crumb.textContent = filters.items_path ? `items / ${filters.items_path}` : "items /";
-  crumb.title = "Back to item root";
-  crumb.addEventListener("click", () => dispatchUi({ type: "activate", action: { type: "enter_item_folder", tile_id: targetTile, path: "" } }));
-  const query = document.createElement("input");
-  query.type = "search";
-  query.placeholder = "Filter items";
-  query.autocomplete = "off";
-  query.setAttribute("data-focus-key", `items-query-${targetTile}`);
-  query.value = filters.items_query || "";
-  query.addEventListener("input", () => dispatchUi({ type: "set_filter", tile_id: targetTile, field: "items_query", value: query.value }));
-  const kind = document.createElement("select");
-  kind.setAttribute("data-focus-key", `items-kind-${targetTile}`);
-  for (const { value, label } of filters.item_kind_options || []) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    option.selected = value === (filters.items_kind || "");
-    kind.append(option);
-  }
-  kind.addEventListener("change", () => dispatchUi({ type: "set_filter", tile_id: targetTile, field: "items_kind", value: kind.value }));
-  toolbar.append(crumb, query, kind);
-  return toolbar;
-}
-
-function sectionBlock(block, dispatchUi) {
-  const section = el("section", "studio-section");
-  section.append(textEl("h2", block.title));
-  const dl = el("dl");
-  for (const [key, value] of block.rows || []) dl.append(textEl("dt", key), textEl("dd", value));
-  section.append(dl);
-  if (block.action && dispatchUi) {
-    const button = el("button", "studio-section-action");
-    button.type = "button";
-    button.textContent = sectionActionLabel(block);
-    button.addEventListener("click", (event) => {
-      event.stopPropagation();
-      dispatchUi({ type: "activate", action: block.action });
-    });
-    section.append(button);
-  }
-  return section;
-}
-
-function sectionActionLabel(block) {
-  const explicit = (block.rows || []).find(([key]) => key === "Action")?.[1];
-  if (explicit) return explicit;
-  switch (block.action?.type) {
-    case "execute_item":
-      return "Run";
-    case "cancel_thread":
-      return "Cancel";
-    case "select_dimension":
-      return "Inspect";
-    case "open_view":
-      return "Open";
-    default:
-      return "Open";
-  }
-}
-
-function rows(items, tileId, kind, dispatchUi) {
+function rows(items, kind, dispatchUi) {
   const list = el("div", `studio-rows lf ${kind || "rows"}`);
   items.forEach((item, index) => {
     const row = el("button", `studio-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
@@ -630,28 +540,12 @@ function rows(items, tileId, kind, dispatchUi) {
   return list;
 }
 
-function rowGlyph(item, kind) {
-  const rowKind = item.kind || "";
-  if (kind === "files") return rowKind === "directory" ? "▸" : "·";
-  if (kind === "items") {
-    if (rowKind === "folder_up") return "↩";
-    if (rowKind === "folder") return "▸";
-    if (rowKind === "tool") return "⚙";
-    if (rowKind === "directive") return "◆";
-    if (rowKind === "knowledge") return "◈";
-    if (rowKind === "config") return "◇";
-    return "•";
+function rowGlyph(item) {
+  switch (item.tone || "neutral") {
+    case "good": return "✓";
+    case "warn": return "!";
+    case "danger": return "✗";
+    case "accent": return "›";
+    default: return "•";
   }
-  if (kind === "threads") return "▶";
-  return "•";
-}
-
-function inspector(vm, dispatchUi) {
-  const wrap = el("div", "studio-inspector-view");
-  wrap.append(textEl("h2", vm.title));
-  if (vm.subtitle) wrap.append(textEl("p", vm.subtitle));
-  if (vm.empty) wrap.append(textEl("p", vm.empty_message || "Select an object to inspect it."));
-  for (const section of vm.sections || []) wrap.append(sectionBlock(section, dispatchUi));
-  for (const block of vm.code_blocks || []) wrap.append(textEl("h3", block.label), code(block.content));
-  return wrap;
 }

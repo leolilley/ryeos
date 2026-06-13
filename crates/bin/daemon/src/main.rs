@@ -249,6 +249,7 @@ async fn main() -> Result<()> {
 
     // Build UI state (browser sessions + session bus).
     let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
+    let ui_state_for_hints = ui_state.clone();
 
     // Build the route table from the node-config snapshot.
     let route_table = {
@@ -259,8 +260,7 @@ async fn main() -> Result<()> {
     tracing::info!(routes = route_table.load().all.len(), "route table built");
 
     // Publish the route diagnostics snapshot consumed by
-    // `service:system/routes`. Re-published on reload by
-    // `routes::reload::handle_routes_reload`.
+    // `service:system/routes`.
     let route_diagnostics = Arc::new(ryeos_app::route_diagnostics::RouteDiagnostics::new());
     {
         let table = route_table.load();
@@ -408,6 +408,45 @@ async fn main() -> Result<()> {
         },
     };
     let webhook_dedupe = Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
+
+    // Session hints: thread lifecycle events fan out to every live UI
+    // session as transient `thread.hint` notices (never persisted —
+    // hints say "look", the braid says what happened).
+    {
+        let hub = app_state.event_streams.clone();
+        let ui = ui_state_for_hints.clone();
+        tokio::spawn(async move {
+            let mut rx = hub.subscribe_all();
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let lifecycle = event.event_type == "thread_created"
+                            || event.event_type == "thread_running"
+                            || ryeos_api::routes::invokers::stream_helpers::is_terminal(
+                                &event.event_type,
+                            );
+                        if !lifecycle {
+                            continue;
+                        }
+                        for session_id in ui.browser_sessions.session_ids() {
+                            ui.session_bus.publish(
+                                &session_id,
+                                "thread.hint",
+                                serde_json::json!({
+                                    "kind": "thread",
+                                    "thread_id": event.thread_id,
+                                    "chain_root_id": event.chain_root_id,
+                                    "event_type": event.event_type,
+                                }),
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 
     // Reconcile threads from the previous run BEFORE binding listeners,
     // but DO NOT dispatch the resume intents yet — a resumed subprocess

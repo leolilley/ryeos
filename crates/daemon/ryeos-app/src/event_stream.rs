@@ -31,31 +31,55 @@ use tokio::sync::broadcast;
 
 use crate::state_store::PersistedEventRecord;
 
-/// Capacity of each per-thread broadcast channel. The runtime emits
-/// roughly one callback per LLM turn boundary plus per tool dispatch;
-/// 256 absorbs short bursts without dropping under typical load.
-/// Lagged subscribers recover via event-store replay so this is a
-/// latency knob, not a correctness boundary.
+/// Capacity of live broadcast channels. Per-thread lanes emit roughly
+/// one callback per LLM turn boundary plus per tool dispatch; the
+/// firehose lane carries all threads and feeds lossy session-hint
+/// bridges. 256 absorbs short bursts under typical local load. Lagged
+/// per-thread tails recover via event-store replay; firehose consumers
+/// are expected to treat hints as "look again" signals.
 pub const DEFAULT_EVENT_STREAM_CAPACITY: usize = 256;
 
 pub struct ThreadEventHub {
     inner: Mutex<HashMap<String, broadcast::Sender<PersistedEventRecord>>>,
+    /// Firehose lane: every published event, regardless of thread.
+    /// Feeds cross-cutting bridges (session hints); per-thread tails
+    /// keep using the keyed lanes.
+    all: broadcast::Sender<PersistedEventRecord>,
     capacity: usize,
 }
 
 impl ThreadEventHub {
     pub fn new(capacity: usize) -> Self {
+        let (all, _rx) = broadcast::channel(capacity);
         Self {
             inner: Mutex::new(HashMap::new()),
+            all,
             capacity,
         }
+    }
+
+    /// Subscribe to every published event (the firehose lane).
+    pub fn subscribe_all(&self) -> broadcast::Receiver<PersistedEventRecord> {
+        self.all.subscribe()
+    }
+
+    /// Recover from poisoning instead of panicking: the map only
+    /// holds broadcast senders, and the event store — not this hub —
+    /// is the durable source of truth, so a half-updated map after a
+    /// panicked publisher is benign.
+    fn lock_inner(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, broadcast::Sender<PersistedEventRecord>>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Subscribe to a thread's live event stream. Lazily allocates
     /// the sender so SSE handlers can subscribe before the runtime
     /// has emitted anything.
     pub fn subscribe(&self, thread_id: &str) -> broadcast::Receiver<PersistedEventRecord> {
-        let mut guard = self.inner.lock().expect("ThreadEventHub mutex poisoned");
+        let mut guard = self.lock_inner();
         guard
             .entry(thread_id.to_owned())
             .or_insert_with(|| {
@@ -70,11 +94,12 @@ impl ThreadEventHub {
     /// returns `Err(SendError)` and we drop — the event has already
     /// been persisted by the caller.
     pub fn publish(&self, thread_id: &str, event: PersistedEventRecord) {
-        let mut guard = self.inner.lock().expect("ThreadEventHub mutex poisoned");
+        let mut guard = self.lock_inner();
         let sender = guard.entry(thread_id.to_owned()).or_insert_with(|| {
             let (tx, _rx) = broadcast::channel(self.capacity);
             tx
         });
+        let _ = self.all.send(event.clone());
         let _ = sender.send(event);
         let receiver_count = sender.receiver_count();
         if receiver_count == 0 {
@@ -92,12 +117,13 @@ impl ThreadEventHub {
         if events.is_empty() {
             return;
         }
-        let mut guard = self.inner.lock().expect("ThreadEventHub mutex poisoned");
+        let mut guard = self.lock_inner();
         let sender = guard.entry(thread_id.to_owned()).or_insert_with(|| {
             let (tx, _rx) = broadcast::channel(self.capacity);
             tx
         });
         for ev in events {
+            let _ = self.all.send(ev.clone());
             let _ = sender.send(ev.clone());
         }
         let receiver_count = sender.receiver_count();
@@ -112,7 +138,7 @@ impl ThreadEventHub {
     /// daemon doesn't accumulate zombie channels for completed
     /// threads.
     pub fn remove_if_idle(&self, thread_id: &str) {
-        let mut guard = self.inner.lock().expect("ThreadEventHub mutex poisoned");
+        let mut guard = self.lock_inner();
         if let Some(sender) = guard.get(thread_id) {
             if sender.receiver_count() == 0 {
                 guard.remove(thread_id);
@@ -146,6 +172,8 @@ mod tests {
             event_type: event_type.to_owned(),
             storage_class: "hot".to_owned(),
             ts: "2026-04-27T00:00:00Z".to_owned(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
             payload: json!({"i": seq}),
         }
     }

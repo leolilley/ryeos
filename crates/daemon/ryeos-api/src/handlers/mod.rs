@@ -21,6 +21,8 @@ pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_remove;
+pub mod commands_dispatch;
+pub mod commands_list;
 pub mod commands_submit;
 pub mod events_chain_replay;
 pub mod events_replay;
@@ -70,6 +72,7 @@ pub mod scheduler_pause;
 pub mod scheduler_register;
 pub mod scheduler_resume;
 pub mod scheduler_show_fires;
+pub mod seat;
 pub mod sync_jobs_inspect;
 pub mod sync_jobs_list;
 pub mod system_routes;
@@ -78,6 +81,7 @@ pub mod threads_cancel;
 pub mod threads_chain;
 pub mod threads_children;
 pub mod threads_get;
+pub mod threads_input;
 pub mod threads_list;
 pub mod usage_summary;
 pub mod vault_delete;
@@ -115,7 +119,13 @@ pub const ALL: &[ServiceDescriptor] = &[
     threads_get::DESCRIPTOR,
     threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
+    commands_dispatch::DESCRIPTOR,
+    commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
+    seat::OPEN_DESCRIPTOR,
+    seat::APPEND_DESCRIPTOR,
+    seat::CLOSE_DESCRIPTOR,
+    threads_input::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,

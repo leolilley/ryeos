@@ -79,3 +79,88 @@ fn toml_quote(s: &str) -> String {
             .to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::vault::VaultSecretKey;
+
+    fn sample_secrets() -> HashMap<String, String> {
+        let mut secrets = HashMap::new();
+        secrets.insert("API_TOKEN".to_string(), "hunter2".to_string());
+        secrets.insert("DB_PASSWORD".to_string(), "p@ss word".to_string());
+        secrets
+    }
+
+    /// An envelope sealed to vault key A must not open with vault key
+    /// B's secret key. lillux's open() refuses on the
+    /// vault_pubkey_fingerprint mismatch with a rewrap hint.
+    #[test]
+    fn open_rejects_wrong_vault_key() {
+        let key_a = VaultSecretKey::generate();
+        let key_b = VaultSecretKey::generate();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tmp.path().join("vault").join("secrets.toml");
+
+        write_sealed_secrets(&store, &key_a.public_key(), &sample_secrets()).unwrap();
+
+        // Positive control: the matching secret key opens the store.
+        let opened = read_sealed_secrets(&store, &key_a).expect("matching key must open");
+        assert_eq!(opened, sample_secrets());
+
+        // Wrong key: refused, with fingerprint mismatch + rewrap hint.
+        let err = read_sealed_secrets(&store, &key_b)
+            .expect_err("wrong vault key must not open the store");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("fingerprint"),
+            "error should mention the fingerprint mismatch, got: {msg}"
+        );
+        assert!(
+            msg.contains("rewrap"),
+            "error should hint at `ryeos vault rewrap`, got: {msg}"
+        );
+    }
+
+    /// A corrupted persisted envelope (truncated nonce or ciphertext
+    /// base64) must fail with an error, never panic or yield garbage.
+    #[test]
+    fn open_rejects_corrupted_envelope() {
+        let key = VaultSecretKey::generate();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tmp.path().join("secrets.toml");
+
+        write_sealed_secrets(&store, &key.public_key(), &sample_secrets()).unwrap();
+        let raw = std::fs::read_to_string(&store).unwrap();
+
+        // Truncate the ciphertext base64 (still valid base64, shorter
+        // ciphertext: the AEAD tag check must refuse it).
+        let mut envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw).unwrap();
+        assert!(
+            envelope.ciphertext.len() > 8,
+            "ciphertext should be long enough to truncate"
+        );
+        let truncated_len = envelope.ciphertext.len() - 8;
+        envelope.ciphertext.truncate(truncated_len);
+        std::fs::write(&store, toml::to_string(&envelope).unwrap()).unwrap();
+        let err =
+            read_sealed_secrets(&store, &key).expect_err("truncated ciphertext must fail to open");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("open envelope"),
+            "corruption should surface as an open failure, got: {msg}"
+        );
+
+        // Truncate the nonce base64 the same way.
+        let mut envelope: lillux::vault::SealedEnvelope = toml::from_str(&raw).unwrap();
+        let truncated_len = envelope.nonce.len() - 8;
+        envelope.nonce.truncate(truncated_len);
+        std::fs::write(&store, toml::to_string(&envelope).unwrap()).unwrap();
+        let err = read_sealed_secrets(&store, &key).expect_err("truncated nonce must fail to open");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("open envelope"),
+            "corruption should surface as an open failure, got: {msg}"
+        );
+    }
+}

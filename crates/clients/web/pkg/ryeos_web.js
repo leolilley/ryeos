@@ -1,204 +1,6 @@
 /* @ts-self-types="./ryeos_web.d.ts" */
 
 /**
- * Apply a daemon/session event received by the browser shell.
- * @param {any} event_json
- * @returns {any}
- */
-export function dispatch_daemon_event(event_json) {
-    const ret = wasm.dispatch_daemon_event(event_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Dispatch a keyboard event.
- * @param {number} key_code
- * @param {boolean} shift
- * @param {boolean} ctrl
- * @param {boolean} alt
- * @returns {any}
- */
-export function dispatch_key(key_code, shift, ctrl, alt) {
-    const ret = wasm.dispatch_key(key_code, shift, ctrl, alt);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Apply a browser-fetched daemon snapshot.
- *
- * `PollSnapshot` currently returns `Effect::RefreshState` in the shared
- * reducer. The browser calls this function as the result of a refresh, so the
- * returned refresh effect is deliberately not re-enqueued here.
- * @param {any} snapshot_json
- * @returns {any}
- */
-export function dispatch_poll_snapshot(snapshot_json) {
-    const ret = wasm.dispatch_poll_snapshot(snapshot_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Resize the viewport.
- * @param {number} width
- * @param {number} height
- * @returns {any}
- */
-export function dispatch_resize(width, height) {
-    const ret = wasm.dispatch_resize(width, height);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Apply the daemon's renderer-neutral operational studio dimension.
- * @param {any} dimension_json
- * @returns {any}
- */
-export function dispatch_studio_dimension(dimension_json) {
-    const ret = wasm.dispatch_studio_dimension(dimension_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * @param {any} file_json
- * @returns {any}
- */
-export function dispatch_studio_file_read(file_json) {
-    const ret = wasm.dispatch_studio_file_read(file_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * @param {any} files_json
- * @returns {any}
- */
-export function dispatch_studio_files(files_json) {
-    const ret = wasm.dispatch_studio_files(files_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * @param {any} gc_json
- * @returns {any}
- */
-export function dispatch_studio_gc_status(gc_json) {
-    const ret = wasm.dispatch_studio_gc_status(gc_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Apply the daemon's read-only item inspection response.
- * @param {any} inspection_json
- * @returns {any}
- */
-export function dispatch_studio_item_inspection(inspection_json) {
-    const ret = wasm.dispatch_studio_item_inspection(inspection_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Apply the daemon's real item inventory for the existing Items pane.
- * @param {any} items_json
- * @returns {any}
- */
-export function dispatch_studio_items(items_json) {
-    const ret = wasm.dispatch_studio_items(items_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * @param {any} schedules_json
- * @returns {any}
- */
-export function dispatch_studio_schedules(schedules_json) {
-    const ret = wasm.dispatch_studio_schedules(schedules_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * @param {any} inspection_json
- * @returns {any}
- */
-export function dispatch_studio_thread_inspection(inspection_json) {
-    const ret = wasm.dispatch_studio_thread_inspection(inspection_json);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Render the current shared frame as browser HTML.
- * @returns {string}
- */
-export function render_html() {
-    let deferred2_0;
-    let deferred2_1;
-    try {
-        const ret = wasm.render_html();
-        var ptr1 = ret[0];
-        var len1 = ret[1];
-        if (ret[3]) {
-            ptr1 = 0; len1 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred2_0 = ptr1;
-        deferred2_1 = len1;
-        return getStringFromWasm0(ptr1, len1);
-    } finally {
-        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-    }
-}
-
-/**
- * Initialize the browser client from the daemon-resolved effective surface.
- * @param {any} session_json
- * @param {any} effective_surface_json
- * @param {number} width
- * @param {number} height
- * @returns {any}
- */
-export function start_with_surface(session_json, effective_surface_json, width, height) {
-    const ret = wasm.start_with_surface(session_json, effective_surface_json, width, height);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
  * Apply a browser/daemon effect result to RyeOS.
  * @param {any} result_json
  * @returns {any}
@@ -225,11 +27,36 @@ export function studio_dispatch(event_json) {
 }
 
 /**
+ * Replay durable seat braid events into the in-memory Studio engine.
+ * @param {any} events_json
+ * @returns {any}
+ */
+export function studio_replay_seat_events(events_json) {
+    const ret = wasm.studio_replay_seat_events(events_json);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * Return the current RyeOS scene model without mutating state.
  * @returns {any}
  */
 export function studio_scene_model() {
     const ret = wasm.studio_scene_model();
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * Return the local seat event log so JS can mirror it into the seat braid.
+ * @returns {any}
+ */
+export function studio_seat_events() {
+    const ret = wasm.studio_seat_events();
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -257,31 +84,6 @@ export function studio_start(session_json, viewport_json, now_ms) {
  */
 export function studio_view_model() {
     const ret = wasm.studio_view_model();
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Drain platform effects produced by the shared reducer.
- * @returns {any}
- */
-export function take_effects() {
-    const ret = wasm.take_effects();
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return takeFromExternrefTable0(ret[0]);
-}
-
-/**
- * Advance animation by dt milliseconds.
- * @param {number} now_ms
- * @returns {any}
- */
-export function tick(now_ms) {
-    const ret = wasm.tick(now_ms);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

@@ -1,0 +1,8 @@
+# ryeos:signed:2026-06-11T21:03:06Z:3f04bd3053ecc14346dc65240b19b1c8c48121fe41a00342693bda01b31937d7:YJwt4tSBewTVEX8KwqDupqdji0AzRCRnNEOoUfn/qOsENphkYjnJvydd5XF4ZEJIE5FBHd6kWzB6OkPER5BhBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "commands"
+name: "list"
+kind: service
+endpoint: commands.list
+required_caps: []
+schema: {}
+description: "Node command records with per-session invocability (completion data: the grammar shown is the grammar held)"

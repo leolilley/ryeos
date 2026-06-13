@@ -5,17 +5,17 @@ edition = "2021"
 description = "CAS-as-truth persistence plane for RyeOS"
 
 [dependencies]
-lillux = { path = "../../kernel/lillux" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-tracing = "0.1"
-base64 = "0.22"
-glob = "0.3"
-serde_yaml = "0.9"
-rusqlite = { version = "0.31", features = ["bundled"] }
-libc = "0.2"
+lillux = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+glob = { workspace = true }
+serde_yaml = { workspace = true }
+rusqlite = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-ryeos-tracing = { path = "../../support/ryeos-tracing", features = ["test-harness"] }
+tempfile = { workspace = true }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }

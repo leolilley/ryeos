@@ -252,6 +252,61 @@ mod tests {
         assert_eq!(tc, TrustClass::TrustedProject);
     }
 
+    /// When the requested host triple isn't in the manifest, the error
+    /// enumerates exactly the triples that DO ship the binary, sorted,
+    /// ignoring entries for other binaries.
+    #[test]
+    fn triple_mismatch_enumerates_available_triples() {
+        let mut hashes = HashMap::new();
+        hashes.insert(
+            "bin/x86_64-unknown-linux-gnu/mytool".to_string(),
+            "h1".to_string(),
+        );
+        hashes.insert(
+            "bin/aarch64-apple-darwin/mytool".to_string(),
+            "h2".to_string(),
+        );
+        hashes.insert(
+            "bin/x86_64-pc-windows-msvc/mytool".to_string(),
+            "h3".to_string(),
+        );
+        // A different binary shipped for the requested host triple must
+        // NOT appear in mytool's available list.
+        hashes.insert(
+            "bin/aarch64-unknown-linux-gnu/othertool".to_string(),
+            "h4".to_string(),
+        );
+
+        let err = resolve_native_executor(
+            &hashes,
+            "native:mytool",
+            "aarch64-unknown-linux-gnu",
+            |_hash: &str| -> std::result::Result<Option<Value>, String> { Ok(None) },
+        )
+        .expect_err("missing host triple must fail resolution");
+
+        match err {
+            ExecutorResolutionError::NotInManifest {
+                executor_ref,
+                host_triple,
+                available_triples,
+            } => {
+                assert_eq!(executor_ref, "native:mytool");
+                assert_eq!(host_triple, "aarch64-unknown-linux-gnu");
+                assert_eq!(
+                    available_triples,
+                    vec![
+                        "aarch64-apple-darwin".to_string(),
+                        "x86_64-pc-windows-msvc".to_string(),
+                        "x86_64-unknown-linux-gnu".to_string(),
+                    ],
+                    "available triples must be exactly the shipping triples, sorted"
+                );
+            }
+            other => panic!("expected NotInManifest, got {other:?}"),
+        }
+    }
+
     #[test]
     fn min_returns_weaker() {
         assert_eq!(

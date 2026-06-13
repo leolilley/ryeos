@@ -10,24 +10,24 @@ name = "ryeos-graph-runtime"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-clap = { version = "4", features = ["derive", "env"] }
-lillux = { path = "../../kernel/lillux" }
-rand = "0.8"
-regex = "1"
-ryeos-runtime = { path = "../../engine/ryeos-runtime" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util"] }
-tracing = "0.1"
-ryeos-tracing = { path = "../../support/ryeos-tracing" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+lillux = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+ryeos-runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "process", "io-util"] }
+tracing = { workspace = true }
+ryeos-tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-ryeos-tracing = { path = "../../support/ryeos-tracing", features = ["test-harness"] }
+tempfile = { workspace = true }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }

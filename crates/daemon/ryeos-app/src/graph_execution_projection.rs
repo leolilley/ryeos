@@ -242,6 +242,8 @@ mod tests {
             event_type: event_type.to_string(),
             storage_class: "durable".to_string(),
             ts: "2026-06-08T00:00:00Z".to_string(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
             payload,
         }
     }

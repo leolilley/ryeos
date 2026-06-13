@@ -570,6 +570,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     usage_subject_asserted_by: usage_subject_asserted_by.clone(),
                     operation: request.operation.clone(),
                     inputs: request.inputs.clone(),
+                    previous_thread_id: None,
                 },
             );
 
@@ -710,6 +711,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             usage_subject_asserted_by,
             operation: request.operation.clone(),
             inputs: request.inputs.clone(),
+            previous_thread_id: None,
         };
 
         match ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await {

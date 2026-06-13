@@ -46,8 +46,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut stored_hashes: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
-    let cas_root = state.state_store.cas_root()?;
-    let cas = lillux::cas::CasStore::new(cas_root);
+    let cas = state.cas_store()?;
 
     for entry in &resp.entries {
         match entry.kind.as_str() {

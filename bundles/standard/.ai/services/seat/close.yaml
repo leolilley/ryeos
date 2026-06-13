@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:42Z:ef185effa0220130a013fe8af59dcb3b10b2e13c03532f7d991021a8a5471538:aV38FInsg4JiFr4rMNfDMfHSrgKv/YZjoXDfLMTiZCTWzT4UzcLZP1/sM6wRjYyxfjfqZRfntEw/1nMSsA1XBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat/close
+version: "1.0.0"
+description: Settle a seat session thread
+endpoint: seat.close
+availability: daemon_only

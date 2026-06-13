@@ -1,10 +1,8 @@
 //! `project/status` — report the deployed snapshot for a live project.
 
-use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
-use lillux::cas::CasStore;
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
@@ -22,16 +20,9 @@ pub struct Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
 
-    let path = Path::new(&req.project_path);
-    if !path.is_absolute() {
-        anyhow::bail!("project_path '{}' is not absolute", req.project_path);
-    }
-    let canonical = path.canonicalize().with_context(|| {
-        format!(
-            "cannot canonicalize project_path '{}'; ensure it exists",
-            req.project_path
-        )
-    })?;
+    let canonical = crate::handlers::project_apply_snapshot::canonical_existing_project_path(
+        &req.project_path,
+    )?;
     let canonical_project_path = canonical.to_string_lossy().to_string();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
 
@@ -47,7 +38,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }));
     };
 
-    let cas = CasStore::new(state.state_store.cas_root()?);
+    let cas = state.cas_store()?;
     let snapshot_obj = cas.get_object(&deployed.target_hash)?.ok_or_else(|| {
         anyhow!(
             "deployed snapshot {} not found in CAS",

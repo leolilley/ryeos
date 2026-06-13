@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:42Z:ff8369c01e11d4df152a77a96447dc5c437618190aec636b9fd465660d4c73b4:eMOYkaOPq3la5V2Qu/7M8AfLREDB1LMo7QO7JqnUr7rH/e00MZ+321XJUf50XssszbhAJB5sC8lV6JjWG/DkBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat/append
+version: "1.0.0"
+description: Append seat facet events to an owned running seat braid (operator-signed, owner-only, seat.* namespace)
+endpoint: seat.append
+availability: daemon_only

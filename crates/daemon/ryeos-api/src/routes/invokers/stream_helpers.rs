@@ -90,6 +90,8 @@ mod tests {
             event_type: "cognition_out".into(),
             storage_class: storage_class.into(),
             ts: "2026-05-28T00:00:00Z".into(),
+            prev_chain_event_hash: None,
+            prev_thread_event_hash: None,
             payload: json!({"delta": "hello"}),
         }
     }

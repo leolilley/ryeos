@@ -306,6 +306,7 @@ pub fn append_events(
     let mut last_event_hash: Option<String> = current_chain_state.last_event_hash.clone();
     let mut last_thread_event_hash: Option<String> = current_thread_entry.last_event_hash.clone();
 
+    let mut pending_writes: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
     for mut event in events {
         event.chain_seq = first_chain_seq;
         event.thread_seq = thread_seq;
@@ -317,8 +318,7 @@ pub fn append_events(
         let event_json = lillux::canonical_json(&event_value);
         let event_hash = lillux::sha256_hex(event_json.as_bytes());
         let event_path = lillux::shard_path(cas_root, "objects", &event_hash, ".json");
-        lillux::atomic_write(&event_path, event_json.as_bytes())
-            .context("failed to store event in CAS")?;
+        pending_writes.push((event_path, event_json.into_bytes()));
 
         last_event_hash = Some(event_hash.clone());
         last_thread_event_hash = Some(event_hash);
@@ -326,6 +326,11 @@ pub fn append_events(
         first_chain_seq += 1;
         thread_seq += 1;
     }
+    // One durability barrier for the whole batch instead of one fsync
+    // per event: nothing references these objects until the chain state
+    // below advances, so partial batches after a crash are unreachable
+    // garbage, not corruption.
+    lillux::atomic_write_batch(&pending_writes).context("failed to store events in CAS")?;
 
     let event_count = stored_events.len();
     let first_chain_seq_result = current_chain_state.last_chain_seq + 1;

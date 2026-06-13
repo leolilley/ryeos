@@ -340,6 +340,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             usage_subject_asserted_by,
             operation: req.operation,
             inputs: req.inputs,
+            previous_thread_id: None,
         };
 
         let mut launch_handle = crate::routes::launch::spawn_dispatch_launch(

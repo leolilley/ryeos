@@ -579,6 +579,8 @@ pub struct BuildAndLaunchParams<'a> {
     pub vault_bindings: &'a HashMap<String, String>,
     pub extra_effective_caps: &'a [String],
     pub pre_minted_thread_id: Option<&'a str>,
+    /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
+    pub previous_thread_id: Option<&'a str>,
 }
 
 pub async fn build_and_launch(
@@ -595,6 +597,7 @@ pub async fn build_and_launch(
         vault_bindings,
         extra_effective_caps,
         pre_minted_thread_id,
+        previous_thread_id,
     } = params;
     let engine = provenance.request_engine();
     tracing::info!(
@@ -916,7 +919,7 @@ pub async fn build_and_launch(
         },
         EnvelopeRequest {
             inputs: parameters.clone(),
-            previous_thread_id: None,
+            previous_thread_id: previous_thread_id.map(str::to_string),
             parent_thread_id: None,
             parent_capabilities: None,
             depth: 0,

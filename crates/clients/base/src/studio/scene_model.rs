@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 use crate::atlas::{
     build_file_space_atlas, build_namespace_atlas, AtlasFileInput, AtlasFileSpaceInput, AtlasInput,
@@ -7,7 +6,6 @@ use crate::atlas::{
 };
 
 use super::event::StudioAction;
-use super::model::StudioInspectorState;
 use super::view_model::StudioTone;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,6 +53,13 @@ pub enum StudioSceneObjectKind {
     ServiceBeacon,
     Link,
     LabelAnchor,
+    /// A point/particle: the generic renderer draws it as a dot sized by
+    /// `scale` (`·`/`•`/`●`). The backdrop's orbiting motes are particles.
+    Particle,
+    /// A text object: the generic renderer draws its `label` at the
+    /// projected position. The backdrop's "RYE OS"/welcome/hint lines are
+    /// text objects, not a hardcoded welcome block.
+    Text,
 }
 
 impl Default for StudioSceneModel {
@@ -292,10 +297,15 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
             Some(format!("{} items", items.items.len())),
             StudioTone::Accent,
         ));
-        let selected_ref = match &core.ui.inspector {
-            StudioInspectorState::Item { canonical_ref } => Some(canonical_ref.clone()),
-            _ => None,
-        };
+        // Selection is a seat facet — the scene highlights what the
+        // seat braid says is selected.
+        let selected_ref = core
+            .seat
+            .fold()
+            .get(crate::studio::seat::KEY_SELECTION)
+            .and_then(|sel| sel.get("item"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let mut capabilities = core
             .data
             .session
@@ -338,10 +348,22 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
 
     if core.ui.atlas.active_projection == AtlasProjectionVm::FileSpace {
         let file_space = core.data.file_space.as_ref();
-        let selected_ref = match &core.ui.inspector {
-            StudioInspectorState::File { root, path } => Some(format!("file:{root}:{path}")),
-            _ => None,
-        };
+        let selected_ref = core
+            .seat
+            .fold()
+            .get(crate::studio::seat::KEY_SELECTION)
+            .and_then(|sel| sel.get("file"))
+            .map(|file| {
+                format!(
+                    "file:{}:{}",
+                    file.get("root")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                    file.get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                )
+            });
         scene.atlas = Some(build_file_space_atlas(AtlasFileSpaceInput {
             generation: core.generation,
             root_label: "File Space".to_string(),
@@ -379,19 +401,107 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         ));
     }
 
-    if let Some(schedules) = &core.data.schedules {
+    if let Some(dimension) = &core.data.dimension {
         scene.objects.push(scene_object(
             "schedules:list",
             StudioSceneObjectKind::SchedulePulse,
             [3.8, 0.0, 1.6],
-            [scale_for_count(schedules.schedules.len()), 1.0, 1.0],
+            [scale_for_count(dimension.schedules.total), 1.0, 1.0],
             "#b8bb26",
-            Some(format!("{} loaded schedules", schedules.schedules.len())),
+            Some(format!("{} schedules", dimension.schedules.total)),
             StudioTone::Good,
         ));
     }
 
     scene
+}
+
+/// Build the v1 backdrop "shard" scene: a faceted silhouette traced in
+/// particles, a cloud of orbiting motes, and the brand/welcome/hint text
+/// as text objects. This is *scene content* — the generic renderer draws
+/// it with no knowledge that it is "the shard". A surface selects it via
+/// `backdrop: view:ryeos/backdrop/shard`; new backgrounds are new
+/// content (new builders / data sources), never renderer cases.
+///
+/// Scene space: x ∈ roughly [-16, 16], y ∈ roughly [-7, 7], origin at the
+/// shard's centre. The renderer fits this to the target rect; +y is up.
+/// Build a scene from a `widget: scene` view's body — the generic,
+/// content-driven path. The body declares `objects: [...]`, each a
+/// particle or text object with a position, scale, color, tone, opacity,
+/// and (for text) a label. The renderer draws them generically, so the
+/// background is content with no per-art Rust; `generation` carries the
+/// frame clock so the renderer can animate (the backdrop twinkle).
+pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioSceneModel {
+    let mut scene = StudioSceneModel {
+        generation,
+        ..StudioSceneModel::default()
+    };
+    let Some(objects) = body.get("objects").and_then(serde_json::Value::as_array) else {
+        return scene;
+    };
+    for (index, obj) in objects.iter().enumerate() {
+        let kind = match obj.get("kind").and_then(serde_json::Value::as_str) {
+            Some("text") => StudioSceneObjectKind::Text,
+            _ => StudioSceneObjectKind::Particle,
+        };
+        let position = read_position(obj.get("position"));
+        let scale = read_scale(obj.get("scale"));
+        let color = obj
+            .get("color")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("#ebdbb2")
+            .to_string();
+        let tone = scene_tone(obj.get("tone").and_then(serde_json::Value::as_str));
+        let label = obj
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let opacity = obj
+            .get("opacity")
+            .and_then(serde_json::Value::as_f64)
+            .map(|o| o as f32)
+            .unwrap_or(1.0);
+        let id = obj
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("backdrop:{index}"));
+        let mut object = scene_object(&id, kind, position, scale, &color, label, tone);
+        object.opacity = opacity;
+        scene.objects.push(object);
+    }
+    scene
+}
+
+/// `[x, y]` or `[x, y, z]` -> `[x, y, z]` (z defaults 0).
+fn read_position(v: Option<&serde_json::Value>) -> [f32; 3] {
+    let arr = v.and_then(serde_json::Value::as_array);
+    let get = |i: usize| {
+        arr.and_then(|a| a.get(i))
+            .and_then(serde_json::Value::as_f64)
+            .map(|f| f as f32)
+            .unwrap_or(0.0)
+    };
+    [get(0), get(1), get(2)]
+}
+
+/// A scalar scale -> uniform `[s, s, s]`.
+fn read_scale(v: Option<&serde_json::Value>) -> [f32; 3] {
+    let s = v
+        .and_then(serde_json::Value::as_f64)
+        .map(|f| f as f32)
+        .unwrap_or(1.0);
+    [s, s, s]
+}
+
+fn scene_tone(name: Option<&str>) -> StudioTone {
+    match name {
+        Some("accent") => StudioTone::Accent,
+        Some("good") => StudioTone::Good,
+        Some("warn") => StudioTone::Warn,
+        Some("danger") => StudioTone::Danger,
+        _ => StudioTone::Neutral,
+    }
 }
 
 fn scene_object(
@@ -497,63 +607,10 @@ fn tone_for_topology(
     }
 }
 
-fn atlas_context_refs(core: &StudioCore) -> Vec<String> {
-    let Some(inspection) = &core.data.item_inspection else {
-        return Vec::new();
-    };
-    let current_ref = match &core.ui.inspector {
-        StudioInspectorState::Item { canonical_ref } => canonical_ref.as_str(),
-        _ => return Vec::new(),
-    };
-    if inspection.item.canonical_ref != current_ref {
-        return Vec::new();
-    }
-
-    let mut refs = BTreeSet::new();
-    if let Some(effective) = &inspection.effective {
-        collect_refs_from_json(effective, &mut refs);
-    }
-    if let Some(raw) = &inspection.raw {
-        collect_refs_from_text(&raw.content, &mut refs);
-    }
-    refs.into_iter()
-        .filter(|item_ref| item_ref != current_ref)
-        .collect()
-}
-
-fn collect_refs_from_json(value: &serde_json::Value, refs: &mut BTreeSet<String>) {
-    match value {
-        serde_json::Value::String(value) => collect_refs_from_text(value, refs),
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_refs_from_json(value, refs);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for value in map.values() {
-                collect_refs_from_json(value, refs);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_refs_from_text(text: &str, refs: &mut BTreeSet<String>) {
-    for token in text.split(|ch: char| {
-        ch.is_whitespace() || matches!(ch, ',' | '[' | ']' | '{' | '}' | '(' | ')' | '"' | '\'')
-    }) {
-        let token = token.trim_matches(|ch: char| matches!(ch, ':' | ';' | '.' | ','));
-        if is_canonical_item_ref(token) {
-            refs.insert(token.to_string());
-        }
-    }
-}
-
-fn is_canonical_item_ref(value: &str) -> bool {
-    let Some((kind, bare)) = value.split_once(':') else {
-        return false;
-    };
-    matches!(kind, "directive" | "tool" | "knowledge" | "config") && !bare.is_empty()
+fn atlas_context_refs(_core: &StudioCore) -> Vec<String> {
+    // Context edges return when item inspection data flows through a
+    // bound view source (content), not a typed DTO.
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -564,6 +621,40 @@ mod tests {
         StudioTopologyEdgeSourceDto, StudioTopologyNodeDto, StudioTopologyNodeStatusDto,
         StudioTopologyTrustSummaryDto,
     };
+
+    #[test]
+    fn scene_from_body_reads_objects_as_content() {
+        // The background is content: particle + text objects come from the
+        // view body, not Rust. generation rides through for animation.
+        let body = serde_json::json!({
+            "objects": [
+                { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent", "opacity": 0.95 },
+                { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
+            ]
+        });
+        let scene = scene_from_body(&body, 7);
+        assert_eq!(scene.generation, 7);
+        let particle = scene
+            .objects
+            .iter()
+            .find(|o| o.kind == StudioSceneObjectKind::Particle)
+            .expect("particle from body");
+        assert_eq!(particle.position, [1.0, 2.0, 0.0]);
+        assert_eq!(particle.scale, [0.9, 0.9, 0.9]);
+        assert!((particle.opacity - 0.95).abs() < 1e-6);
+        let brand = scene
+            .objects
+            .iter()
+            .find(|o| o.kind == StudioSceneObjectKind::Text && o.label.as_deref() == Some("RYE OS"))
+            .expect("RYE OS text object from body");
+        assert_eq!(brand.tone, StudioTone::Accent);
+    }
+
+    #[test]
+    fn scene_from_body_empty_is_empty() {
+        let scene = scene_from_body(&serde_json::json!({}), 0);
+        assert!(scene.objects.is_empty());
+    }
 
     #[test]
     fn scene_model_includes_namespace_atlas_for_items() {
@@ -698,58 +789,5 @@ mod tests {
         assert_eq!(detail["source"]["field"], "context");
         assert_eq!(detail["source"]["path"], "/tmp/tool.yaml");
         assert_eq!(detail["confidence"], "declared");
-    }
-
-    #[test]
-    fn scene_model_highlights_inspected_context_refs() {
-        let mut core = StudioCore::default();
-        core.ui.inspector = StudioInspectorState::Item {
-            canonical_ref: "directive:rye/core/create_tool".to_string(),
-        };
-        core.data.items = Some(StudioItemsDto {
-            items: vec![
-                StudioItemDto {
-                    canonical_ref: "directive:rye/core/create_tool".to_string(),
-                    item_kind: "directive".to_string(),
-                    bare_id: "create_tool".to_string(),
-                    label: "create_tool".to_string(),
-                    namespace: Some("rye/core".to_string()),
-                    space: "project".to_string(),
-                    source_path: ".ai/directives/rye/core/create_tool.md".to_string(),
-                    executable: true,
-                    trust: None,
-                },
-                StudioItemDto {
-                    canonical_ref: "knowledge:rye/core/signing".to_string(),
-                    item_kind: "knowledge".to_string(),
-                    bare_id: "signing".to_string(),
-                    label: "signing".to_string(),
-                    namespace: Some("rye/core".to_string()),
-                    space: "project".to_string(),
-                    source_path: ".ai/knowledge/rye/core/signing.md".to_string(),
-                    executable: false,
-                    trust: None,
-                },
-            ],
-            ..StudioItemsDto::default()
-        });
-        core.data.item_inspection = Some(crate::studio::dto::StudioItemInspectionDto {
-            item: crate::studio::dto::StudioInspectedItemDto {
-                canonical_ref: "directive:rye/core/create_tool".to_string(),
-                ..Default::default()
-            },
-            effective: Some(serde_json::json!({
-                "context": ["knowledge:rye/core/signing"]
-            })),
-            ..Default::default()
-        });
-
-        let atlas = build_scene_model(&core).atlas.expect("atlas");
-        let signing = atlas
-            .nodes
-            .iter()
-            .find(|node| node.namespace_key == "rye/core/signing")
-            .expect("signing knowledge");
-        assert!(signing.state.highlighted);
     }
 }

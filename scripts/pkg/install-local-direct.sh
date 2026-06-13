@@ -67,6 +67,112 @@ ryeos_status_quick() {
     run_timeout 10 ryeos node status 2>/dev/null || true
 }
 
+bundle_payload_bins() {
+    case "$1" in
+        core)
+            printf '%s\n' \
+                rye-parser-yaml-document \
+                rye-parser-yaml-header-document \
+                rye-parser-regex-kv \
+                rye-composer-identity \
+                ryeos-core-tools
+            ;;
+        standard)
+            printf '%s\n' \
+                ryeos-directive-runtime \
+                ryeos-graph-runtime \
+                ryeos-knowledge-runtime \
+                rye-composer-extends-chain \
+                rye-composer-graph-permissions
+            ;;
+        studio)
+            printf '%s\n' ryeos-tui web
+            ;;
+        web)
+            printf '%s\n' ryeos-web-tools
+            ;;
+    esac
+}
+
+publisher_fingerprint_from_trust_doc() {
+    local trust_file="$1"
+    sed -n 's/^fingerprint *= *"\([^"]*\)".*/\1/p' "$trust_file" | head -n1
+}
+
+operator_fingerprint() {
+    local key_path="${init_app_root:-$HOME/.local/share/ryeos}/.ai/config/keys/signing/private_key.pem"
+    [[ -s "$key_path" ]] || return 1
+    openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
+        | tail -c 32 \
+        | sha256sum \
+        | cut -d' ' -f1
+}
+
+refresh_installed_bundle_payload() {
+    local name="$1"
+    local dest="$share_dir/$name"
+    local bin_dest="$dest/.ai/bin/x86_64-unknown-linux-gnu"
+    local bins=()
+    local b
+    local trust_fp operator_fp
+
+    while IFS= read -r b; do
+        [[ -n "$b" ]] && bins+=("$b")
+    done < <(bundle_payload_bins "$name")
+    [[ ${#bins[@]} -gt 0 ]] || return 0
+
+    [[ -x "$target_dir/ryeos-core-tools" ]] || \
+        die "bundle payload refresh requires built binary: $target_dir/ryeos-core-tools"
+    [[ -f "$dest/PUBLISHER_TRUST.toml" ]] || \
+        die "bundle payload refresh requires trust doc: $dest/PUBLISHER_TRUST.toml"
+    trust_fp="$(publisher_fingerprint_from_trust_doc "$dest/PUBLISHER_TRUST.toml")"
+    operator_fp="$(operator_fingerprint || true)"
+    if [[ -z "$operator_fp" || "$trust_fp" != "$operator_fp" ]]; then
+        echo "[install-local-direct] skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
+        return 0
+    fi
+
+    echo "[install-local-direct] refreshing $name bundle payload"
+    sudo mkdir -p "$bin_dest"
+    for b in "${bins[@]}"; do
+        [[ -x "$target_dir/$b" ]] || die "bundle payload binary missing: $target_dir/$b"
+        sudo install -Dm755 "$target_dir/$b" "$bin_dest/$b"
+    done
+
+    case "$name" in
+        core)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
+        standard)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$share_dir/core" \
+                --registry-root "$share_dir/core" \
+                --registry-root "$share_dir/standard" \
+                --owner "$owner" >/dev/null
+            ;;
+        studio)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --registry-root "$share_dir/standard" \
+                --owner "$owner" >/dev/null
+            ;;
+        web)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
+    esac
+}
+
 pid_from_status() {
     awk '/^pid:/ { print $2; exit }'
 }
@@ -300,6 +406,11 @@ for name in "${bundle_names[@]}"; do
     if [[ -f "$bundle_dir/README.md" ]]; then
         sudo install -Dm644 "$bundle_dir/README.md" \
             "$doc_dir/$name/README.md"
+    fi
+done
+for name in "${bundle_names[@]}"; do
+    if [[ $run_populate -eq 0 ]]; then
+        refresh_installed_bundle_payload "$name"
     fi
 done
 sudo chown -R root:root "$share_dir"

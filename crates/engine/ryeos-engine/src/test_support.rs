@@ -119,8 +119,21 @@ pub fn load_live_handler_registry() -> Arc<HandlerRegistry> {
         (core_root, TrustClass::TrustedBundle),
         (std_root, TrustClass::TrustedBundle),
     ];
-    let registry = HandlerRegistry::load_base(&tagged_roots, &trust_store)
-        .expect("live HandlerRegistry must load from bundles/{core,standard}/");
+    let registry = HandlerRegistry::load_base(&tagged_roots, &trust_store).unwrap_or_else(|err| {
+        let detail = format!("{err:?}");
+        if detail.contains("not in trust store") {
+            panic!(
+                "PRECONDITION FAILED: bundle bin trees are signed with a key this test \
+                 harness does not trust.\n\n  {detail}\n\n\
+                 The harness trusts the platform-author and dev-publisher (741a8bc6…) keys \
+                 only. This usually means bundles/{{core,standard}}/.ai/bin was last signed \
+                 with a different (e.g. operator) key. Re-sign with the dev key:\n\n  \
+                 ./scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev\n\n\
+                 then re-run. Every live-registry test fails with this same message until then."
+            );
+        }
+        panic!("live HandlerRegistry must load from bundles/{{core,standard}}/: {detail}");
+    });
     Arc::new(registry)
 }
 

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T05:13:17Z:918a474a03b28dd64c15b713c81f45b276449aa8c19c2bba8778d4c18e05bba5:H8g+pzm8gFNLkBYlEzp7zi++6OLCPi9i8tZIVJqlI6qa8QCOXJ0PHgtc3irbgOliK/1XD1R1ibb1ntRLRFD+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T21:03:06Z:918a474a03b28dd64c15b713c81f45b276449aa8c19c2bba8778d4c18e05bba5:H8g+pzm8gFNLkBYlEzp7zi++6OLCPi9i8tZIVJqlI6qa8QCOXJ0PHgtc3irbgOliK/1XD1R1ibb1ntRLRFD+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: threads.usage.summary
 required_caps: ["ryeos.execute.service.threads/usage/summary"]

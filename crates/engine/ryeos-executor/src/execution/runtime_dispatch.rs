@@ -184,6 +184,7 @@ async fn handle_execute(
         usage_subject_asserted_by: None,
         operation: None,
         inputs: None,
+        previous_thread_id: None,
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is

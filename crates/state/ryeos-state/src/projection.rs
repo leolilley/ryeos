@@ -1801,7 +1801,7 @@ impl ProjectionDb {
     ) -> anyhow::Result<Option<ProjectionMeta>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT chain_root_id, indexed_chain_state_hash, updated_at FROM projection_meta WHERE chain_root_id = ?")
+            .prepare_cached("SELECT chain_root_id, indexed_chain_state_hash, updated_at FROM projection_meta WHERE chain_root_id = ?")
             .context("failed to prepare query")?;
 
         let meta = stmt
@@ -1946,7 +1946,7 @@ impl ProjectionDb {
     ) -> anyhow::Result<Vec<CasEntryAttribution>> {
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT hash, entry_kind, bytes, first_seen_at, updated_at,
                     source_principal, source_peer, job_id, state
                  FROM cas_entries WHERE state = ? ORDER BY first_seen_at, hash",
@@ -1962,7 +1962,7 @@ impl ProjectionDb {
     pub fn cas_entries_by_state_summary(&self) -> anyhow::Result<Vec<CasEntriesByStateSummary>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT state, COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS total_bytes FROM cas_entries GROUP BY state ORDER BY state")
+            .prepare_cached("SELECT state, COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS total_bytes FROM cas_entries GROUP BY state ORDER BY state")
             .context("failed to prepare CAS entry attribution summary")?;
         let rows = stmt
             .query_map([], |row| {
@@ -2045,7 +2045,7 @@ impl ProjectionDb {
             validate_non_empty_label("admission policy", policy)?;
             let mut stmt = self
                 .conn
-                .prepare(
+                .prepare_cached(
                     "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
                         expires_at, head_ref_path, indexed_at, state
                      FROM admission_attestations
@@ -2066,7 +2066,7 @@ impl ProjectionDb {
 
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT attestation_hash, subject_hash, policy, claim, issuer, issued_at,
                     expires_at, head_ref_path, indexed_at, state
                  FROM admission_attestations
@@ -2443,7 +2443,7 @@ impl ProjectionDb {
         validate_sync_job_id(job_id)?;
         let mut stmt = self
             .conn
-            .prepare(
+            .prepare_cached(
                 "SELECT attempt_id, job_id, attempt_number, worker_id, state, phase,
                     started_at, updated_at, finished_at, error, result_json
                  FROM sync_job_attempts WHERE job_id = ? ORDER BY attempt_number ASC",
@@ -2490,7 +2490,7 @@ impl ProjectionDb {
         };
         let mut stmt = self
             .conn
-            .prepare(sql)
+            .prepare_cached(sql)
             .context("failed to prepare sync job list query")?;
         let rows = if let Some(state) = state {
             stmt.query_map(

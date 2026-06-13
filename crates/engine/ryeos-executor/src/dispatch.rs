@@ -123,6 +123,12 @@ pub struct DispatchRequest<'a> {
     /// **Op dispatch**: op-specific inputs from the `/execute` request.
     /// Validated against the op's `InputDecl` spec before dispatch.
     pub inputs: Option<Value>,
+    /// Chained-resume turn: when `Some`, the launch envelope carries this
+    /// as `EnvelopeRequest.previous_thread_id` and the runtime replays the
+    /// prior thread's events into the new run (conversation = thread
+    /// chain). Set by daemon-internal callers (the thread-input service);
+    /// never populated from raw HTTP request bodies.
+    pub previous_thread_id: Option<String>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -1038,7 +1044,6 @@ pub async fn dispatch_service(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    let params = request.params.clone();
     let canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
     let schema = ctx.engine.kinds.get(&canonical.kind).ok_or_else(|| {
@@ -1099,6 +1104,11 @@ pub async fn dispatch_service(
                 }
                 _ => DispatchError::Internal(e),
             })?;
+            let params = service_params_with_project_path(
+                request.params.clone(),
+                &verified,
+                request.project_path,
+            );
 
             // validate_only: return schema info without invoking the handler.
             // This is the codepath triggered by `ryeos help <verb>` — the
@@ -1295,6 +1305,47 @@ pub(crate) async fn dispatch_subprocess(
     }
 }
 
+fn service_params_with_project_path(
+    mut params: Value,
+    verified: &ryeos_engine::contracts::VerifiedItem,
+    project_path: &Path,
+) -> Value {
+    if !service_declares_project_path(verified) {
+        return params;
+    }
+    let Some(obj) = params.as_object_mut() else {
+        return params;
+    };
+    obj.entry("project_path".to_string())
+        .or_insert_with(|| Value::String(project_path.to_string_lossy().into_owned()));
+    params
+}
+
+fn service_declares_project_path(verified: &ryeos_engine::contracts::VerifiedItem) -> bool {
+    if verified
+        .resolved
+        .metadata
+        .extra
+        .get("schema")
+        .and_then(Value::as_object)
+        .is_some_and(|schema| schema.contains_key("project_path"))
+    {
+        return true;
+    }
+
+    let Ok(content) = std::fs::read_to_string(&verified.resolved.source_path) else {
+        return false;
+    };
+    let body = lillux::signature::strip_signature_lines(&content);
+    let Ok(parsed) = serde_yaml::from_str::<Value>(&body) else {
+        return false;
+    };
+    parsed
+        .get("schema")
+        .and_then(Value::as_object)
+        .is_some_and(|schema| schema.contains_key("project_path"))
+}
+
 async fn dispatch_managed_subprocess(
     sctx: SubprocessDispatchContext<'_>,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
@@ -1424,6 +1475,7 @@ async fn dispatch_managed_subprocess(
         vault_bindings: &vault_bindings,
         extra_effective_caps: &extra_effective_caps,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
+        previous_thread_id: request.previous_thread_id.as_deref(),
     })
     .await
     .map_err(|e| match &e {
@@ -2207,6 +2259,106 @@ metadata:
             requested_op: None,
             requested_inputs: None,
         }
+    }
+
+    fn verified_service_with_schema(
+        schema: Option<Value>,
+    ) -> ryeos_engine::contracts::VerifiedItem {
+        let source_path = tempdir().join("status.yaml");
+        fs::write(&source_path, "kind: service\nendpoint: project.status\n").unwrap();
+        let mut extra = std::collections::HashMap::new();
+        if let Some(schema) = schema {
+            extra.insert("schema".to_string(), schema);
+        }
+        let canonical_ref = CanonicalRef::parse("service:project/status").unwrap();
+        ryeos_engine::contracts::VerifiedItem {
+            resolved: ryeos_engine::contracts::ResolvedItem {
+                canonical_ref,
+                kind: "service".into(),
+                source_path,
+                source_space: ryeos_engine::contracts::ItemSpace::Bundle,
+                resolved_from: "system".into(),
+                shadowed: Vec::new(),
+                materialized_project_root: None,
+                content_hash: lillux::cas::sha256_hex(b"test"),
+                signature_header: None,
+                source_format: ryeos_engine::contracts::ResolvedSourceFormat {
+                    extension: ".yaml".into(),
+                    parser: "parser:ryeos/core/yaml/yaml".into(),
+                    signature: ryeos_engine::contracts::SignatureEnvelope {
+                        prefix: "#".into(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+                metadata: ryeos_engine::contracts::ItemMetadata {
+                    extra,
+                    ..Default::default()
+                },
+            },
+            signer: None,
+            trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            pinned_version: None,
+        }
+    }
+
+    fn verified_service_with_body(body: &str) -> ryeos_engine::contracts::VerifiedItem {
+        let source_path = tempdir().join("status.yaml");
+        fs::write(&source_path, body).unwrap();
+        let mut verified = verified_service_with_schema(None);
+        verified.resolved.source_path = source_path;
+        verified
+    }
+
+    #[test]
+    fn service_project_path_is_injected_when_schema_declares_it() {
+        let verified = verified_service_with_schema(Some(json!({
+            "project_path": "string",
+            "provider": "string?"
+        })));
+        let params = service_params_with_project_path(
+            json!({"provider": "zen"}),
+            &verified,
+            Path::new("/tmp/project"),
+        );
+
+        assert_eq!(params["project_path"], "/tmp/project");
+        assert_eq!(params["provider"], "zen");
+    }
+
+    #[test]
+    fn service_project_path_does_not_override_explicit_param() {
+        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
+        let params = service_params_with_project_path(
+            json!({"project_path": "/explicit"}),
+            &verified,
+            Path::new("/tmp/project"),
+        );
+
+        assert_eq!(params["project_path"], "/explicit");
+    }
+
+    #[test]
+    fn service_project_path_is_not_injected_without_schema_field() {
+        let verified = verified_service_with_schema(Some(json!({"provider": "string?"})));
+        let params = service_params_with_project_path(
+            json!({"provider": "zen"}),
+            &verified,
+            Path::new("/tmp/project"),
+        );
+
+        assert!(params.get("project_path").is_none());
+    }
+
+    #[test]
+    fn service_project_path_is_injected_from_service_yaml_schema_mapping() {
+        let verified = verified_service_with_body(
+            "# ryeos:signed:test\nkind: service\nendpoint: project.status\nschema:\n  project_path: string\n",
+        );
+        let params =
+            service_params_with_project_path(json!({}), &verified, Path::new("/tmp/project"));
+
+        assert_eq!(params["project_path"], "/tmp/project");
     }
 
     fn write_signed_manifest(ai_dir: &std::path::Path, body: &str) {
@@ -3069,7 +3221,8 @@ runtime_vault:
     fn project_single_root_trust_class_mapping() {
         // Engine TrustClass → Wire TrustClass mapping must preserve trust exactly.
         let root_bundle = make_ancestor("item:bundle", "bundle", EngineTrustClass::TrustedBundle);
-        let root_project = make_ancestor("item:project", "project", EngineTrustClass::TrustedProject);
+        let root_project =
+            make_ancestor("item:project", "project", EngineTrustClass::TrustedProject);
         let root_untrusted =
             make_ancestor("item:untrusted", "un", EngineTrustClass::UntrustedProject);
         let root_unsigned = make_ancestor("item:unsigned", "us", EngineTrustClass::Unsigned);

@@ -133,7 +133,7 @@ impl Engine {
         project_root: Option<&Path>,
     ) -> Result<Cow<'_, TrustStore>, EngineError> {
         match project_root {
-            Some(root) => Ok(Cow::Owned(self.trust_store.with_project_keys(root)?)),
+            Some(root) => Ok(self.trust_store.with_project_keys(root)?),
             None => Ok(Cow::Borrowed(&self.trust_store)),
         }
     }

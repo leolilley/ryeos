@@ -1,0 +1,12 @@
+# ryeos:signed:2026-06-11T21:03:06Z:be8168140c5088296b7c33dd763eefd8eb6c047cac0188504441e40cd2764074:jPIvGu6sQJITDJk2EC13HnkPOxJIEkwIPbcb2V/ubd/gBbx1pDzUhDRUxUUCLb4ZvITV5yTt45GQD9SQ4rEpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "input"
+kind: service
+endpoint: threads.input
+required_caps: ["ryeos.execute.service.threads/input"]
+schema:
+  input: string
+  thread: string?
+  directive: string?
+  project_path: string?
+description: "Deliver operator input to a directive thread chain (settled -> chained-resume launch; live -> refused until runtime-command delivery lands)"

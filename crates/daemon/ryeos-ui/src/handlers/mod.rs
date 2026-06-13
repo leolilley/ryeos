@@ -14,6 +14,7 @@ pub mod ui_studio_items;
 pub mod ui_studio_projects;
 pub mod ui_studio_remotes;
 pub mod ui_studio_schedules;
+pub mod ui_studio_seat;
 pub mod ui_studio_threads;
 
 pub const ALL: &[ServiceDescriptor] = &[
@@ -30,6 +31,10 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_studio_threads::CANCEL_DESCRIPTOR,
     ui_studio_schedules::DESCRIPTOR,
     ui_studio_gc::DESCRIPTOR,
+    ui_studio_seat::OPEN_DESCRIPTOR,
+    ui_studio_seat::APPEND_DESCRIPTOR,
+    ui_studio_seat::REPLAY_DESCRIPTOR,
+    ui_studio_seat::CLOSE_DESCRIPTOR,
     ui_studio_files::FILES_LIST_DESCRIPTOR,
     ui_studio_files::FILES_READ_DESCRIPTOR,
     ui_studio_files::FILES_TREE_DESCRIPTOR,

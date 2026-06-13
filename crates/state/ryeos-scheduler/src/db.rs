@@ -518,7 +518,7 @@ impl SchedulerDb {
 
     pub fn get_spec(&self, schedule_id: &str) -> Result<Option<ScheduleSpecRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
@@ -532,7 +532,7 @@ impl SchedulerDb {
 
     pub fn load_enabled_specs(&self) -> Result<Vec<ScheduleSpecRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT schedule_id, item_ref, params, schedule_type, expression,
                     timezone, misfire_policy, overlap_policy, enabled,
                     project_root, signer_fingerprint, spec_hash, registered_at,
@@ -565,7 +565,7 @@ impl SchedulerDb {
             (false, None) => format!("{sel} FROM schedule_specs"),
         };
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows: Vec<ScheduleSpecRecord> = if let Some(st) = schedule_type {
             stmt.query_map(params![st], |row| row_to_spec(row))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -616,7 +616,7 @@ impl SchedulerDb {
         let sql = format!("{sel} FROM schedule_specs{where_clause}");
 
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
 
         let params: Vec<&dyn rusqlite::ToSql> = param_values
             .iter()
@@ -662,7 +662,7 @@ impl SchedulerDb {
 
     pub fn get_cursor(&self, schedule_id: &str) -> Result<Option<ScheduleCursorRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT schedule_id, spec_hash, last_scheduled_at, next_fire_at,
                     last_evaluated_at, updated_at
              FROM schedule_cursors WHERE schedule_id = ?1",
@@ -881,7 +881,7 @@ impl SchedulerDb {
 
     pub fn get_fire(&self, fire_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE fire_id = ?1",
@@ -899,7 +899,8 @@ impl SchedulerDb {
         schedule_id: &str,
     ) -> Result<std::collections::HashSet<String>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT fire_id FROM schedule_fires WHERE schedule_id = ?1")?;
+        let mut stmt =
+            conn.prepare_cached("SELECT fire_id FROM schedule_fires WHERE schedule_id = ?1")?;
         let rows = stmt.query_map(params![schedule_id], |row| row.get::<_, String>(0))?;
         let mut ids = std::collections::HashSet::new();
         for row in rows {
@@ -952,7 +953,7 @@ impl SchedulerDb {
 
     pub fn get_last_fire(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
@@ -966,7 +967,7 @@ impl SchedulerDb {
 
     pub fn get_inflight_fires(&self) -> Result<Vec<FireRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires WHERE status = 'dispatched'",
@@ -981,7 +982,7 @@ impl SchedulerDb {
 
     pub fn get_inflight_for_schedule(&self, schedule_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
@@ -995,7 +996,7 @@ impl SchedulerDb {
 
     pub fn find_fire_by_thread(&self, thread_id: &str) -> Result<Option<FireRecord>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
@@ -1011,7 +1012,7 @@ impl SchedulerDb {
     pub fn find_stale_dispatched_fires(&self, threshold_secs: i64) -> Result<Vec<FireRecord>> {
         let cutoff = lillux::time::timestamp_millis() - (threshold_secs * 1000);
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                     status, trigger_reason, outcome, signer_fingerprint
              FROM schedule_fires
@@ -1090,7 +1091,7 @@ impl SchedulerDb {
                      ORDER BY scheduled_at DESC LIMIT ?2"
             }
         };
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare_cached(sql)?;
         let fires: Vec<FireRecord> = if let Some(sf) = status_filter {
             stmt.query_map(params![schedule_id, sf, limit as i64], |row| {
                 row_to_fire(row)
@@ -1158,7 +1159,7 @@ fn row_to_cursor(row: &rusqlite::Row<'_>) -> Result<ScheduleCursorRecord, rusqli
 }
 
 fn get_fire_conn(conn: &Connection, fire_id: &str) -> Result<Option<FireRecord>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                 status, trigger_reason, outcome, signer_fingerprint
          FROM schedule_fires WHERE fire_id = ?1",
@@ -1169,7 +1170,7 @@ fn get_fire_conn(conn: &Connection, fire_id: &str) -> Result<Option<FireRecord>>
 }
 
 fn get_spec_conn(conn: &Connection, schedule_id: &str) -> Result<Option<ScheduleSpecRecord>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT schedule_id, item_ref, params, schedule_type, expression,
                 timezone, misfire_policy, overlap_policy, enabled,
                 project_root, signer_fingerprint, spec_hash, registered_at,
@@ -1182,7 +1183,7 @@ fn get_spec_conn(conn: &Connection, schedule_id: &str) -> Result<Option<Schedule
 }
 
 fn get_last_fire_conn(conn: &Connection, schedule_id: &str) -> Result<Option<FireRecord>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT fire_id, schedule_id, scheduled_at, fired_at, completed_at, thread_id,
                 status, trigger_reason, outcome, signer_fingerprint
          FROM schedule_fires

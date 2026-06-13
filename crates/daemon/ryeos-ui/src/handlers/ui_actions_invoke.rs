@@ -52,6 +52,10 @@ fn action_context_for_session(ctx: &HandlerContext, session: &BrowserSession) ->
     }
 }
 
+fn is_session_local_action(command_id: &str) -> bool {
+    command_id.starts_with("service:ui/seat/")
+}
+
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let req: Request = serde_json::from_value(input)
         .map_err(|e| HandlerError::BadRequest(format!("invalid ui.actions.invoke request: {e}")))?;
@@ -69,13 +73,39 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
     // Enforce read_only: write-class actions refused.
-    if session.read_only {
+    if session.read_only && !is_session_local_action(&req.command_id) {
         return Err(
             HandlerError::Forbidden("read-only session cannot invoke actions".into()).into(),
         );
     }
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
+
+    if is_session_local_action(&req.command_id) {
+        let descriptor = state
+            .service_descriptors
+            .iter()
+            .find(|descriptor| descriptor.service_ref == req.command_id)
+            .ok_or_else(|| HandlerError::NotFound)?;
+        let result = (descriptor.handler)(req.args.clone(), ctx.clone(), state.clone()).await?;
+
+        ui.session_bus.publish(
+            &session_id,
+            "action.invoked",
+            json!({
+                "command_id": req.command_id,
+                "invocation_id": invocation_id,
+                "status": "executed",
+            }),
+        );
+
+        return Ok(json!({
+            "status": "executed",
+            "command_id": req.command_id,
+            "invocation_id": invocation_id,
+            "result": result,
+        }));
+    }
 
     if CanonicalRef::parse(&req.command_id).is_ok() {
         let project_path = session
@@ -189,6 +219,7 @@ async fn execute_item_ref(
         usage_subject_asserted_by: None,
         operation: None,
         inputs: None,
+        previous_thread_id: None,
     };
 
     ryeos_executor::dispatch::dispatch(&req.command_id, &dispatch_req, &exec_ctx, state)

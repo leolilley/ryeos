@@ -1,0 +1,19 @@
+# ryeos:signed:2026-06-11T22:51:47Z:3645cc02af80f5474b697cc4c781e374e96669936b2eae6fac2f295a2a283662:i6sCzi78x0AmlfuyojP9r2Xt8KcSVDylfeShQ8fo9fuuiMMgyt7+6zaNpc+ouMFwq9jZYOVBkMzUi2aD5ffuBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: commands-grammar
+version: "1.0.0"
+description: The node's command grammar (the spellbook) - what operator text can do
+
+widget: rows
+source:
+  ref: service:commands/list
+  params: {}
+  collection: commands
+projections:
+  primary: name
+  meta: description
+  tone:
+    field: invocable
+    map:
+      "true": neutral
+      "false": warn
+    default: neutral

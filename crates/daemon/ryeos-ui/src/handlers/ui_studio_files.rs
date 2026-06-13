@@ -3,9 +3,13 @@
 //!
 //! All file access is constrained to allowed roots derived from the
 //! browser session's project path. No arbitrary absolute path reads.
+//! The bundled HTTP routes for these services must remain `browser_session`
+//! authenticated; the verified-operator lane exists for direct signed service
+//! dispatch and intentionally relies on the operator-supplied `project_path`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,8 +21,6 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-use crate::state::get_ui_state;
-
 /// Maximum file read size (256 KiB).
 const MAX_READ_BYTES: usize = 256 * 1024;
 /// Maximum directory entries returned from a single files.list call.
@@ -27,10 +29,6 @@ const MAX_LIST_ENTRIES: usize = 2_000;
 const MAX_TREE_ENTRIES: usize = 3_000;
 /// Maximum recursive depth for file-space tree snapshots.
 const MAX_TREE_DEPTH: usize = 12;
-
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
 
 /// Resolve the allowed root for a given root type + session project.
 fn resolve_allowed_root(root_type: &str, project_path: Option<&str>) -> Result<PathBuf> {
@@ -80,19 +78,22 @@ pub async fn handle_files_list(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let project_root: Option<String> = caller.project_root().map(String::from).or_else(|| {
+        params
+            .get("project_path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let mut params = params;
+    if let Some(map) = params.as_object_mut() {
+        map.remove("project_path");
+    }
 
     let req: FilesListRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, session.project_root.as_deref())
+    let allowed_root = resolve_allowed_root(&req.root, project_root.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
     let safe =
@@ -118,7 +119,9 @@ pub async fn handle_files_list(
         if let Some(meta) = metadata {
             entry_val["size"] = serde_json::json!(meta.len());
             if let Ok(modified) = meta.modified() {
-                entry_val["modified"] = serde_json::json!(format!("{:?}", modified));
+                if let Some(modified) = modified_epoch_ms(modified) {
+                    entry_val["modified"] = serde_json::json!(modified);
+                }
             }
         }
 
@@ -171,7 +174,13 @@ struct FileSpaceEntry {
     name: String,
     is_dir: bool,
     size: Option<u64>,
-    modified: Option<String>,
+    modified: Option<u64>,
+}
+
+fn modified_epoch_ms(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 pub async fn handle_files_tree(
@@ -179,19 +188,22 @@ pub async fn handle_files_tree(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let project_root: Option<String> = caller.project_root().map(String::from).or_else(|| {
+        params
+            .get("project_path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let mut params = params;
+    if let Some(map) = params.as_object_mut() {
+        map.remove("project_path");
+    }
 
     let req: FilesTreeRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, session.project_root.as_deref())
+    let allowed_root = resolve_allowed_root(&req.root, project_root.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
     let root_canonical = allowed_root
         .canonicalize()
@@ -275,10 +287,7 @@ fn collect_tree_entries(
             name,
             is_dir,
             size: (!is_dir).then_some(metadata.len()),
-            modified: metadata
-                .modified()
-                .ok()
-                .map(|modified| format!("{:?}", modified)),
+            modified: metadata.modified().ok().and_then(modified_epoch_ms),
         });
         if is_dir && !metadata.file_type().is_symlink() {
             collect_tree_entries(
@@ -327,19 +336,22 @@ pub async fn handle_files_read(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let project_root: Option<String> = caller.project_root().map(String::from).or_else(|| {
+        params
+            .get("project_path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let mut params = params;
+    if let Some(map) = params.as_object_mut() {
+        map.remove("project_path");
+    }
 
     let req: FilesReadRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let allowed_root = resolve_allowed_root(&req.root, session.project_root.as_deref())
+    let allowed_root = resolve_allowed_root(&req.root, project_root.as_deref())
         .map_err(|e| HandlerError::BadRequest(e.to_string()))?;
 
     let safe =
@@ -380,16 +392,6 @@ pub const FILES_LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
-pub const STUDIO_FILES_LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/studio/files/list",
-    endpoint: "ui.studio.files.list",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_files_list(params, ctx, state).await })
-    },
-};
-
 pub const FILES_READ_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/studio/files/read",
     endpoint: "ui.studio.files.read",
@@ -410,12 +412,42 @@ pub const FILES_TREE_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     },
 };
 
-pub const STUDIO_FILES_READ_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/studio/files/read",
-    endpoint: "ui.studio.files.read",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| {
-        Box::pin(async move { handle_files_read(params, ctx, state).await })
-    },
-};
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("workspace root")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn bundled_file_routes_are_browser_session_only() {
+        // If one of these routes becomes `ryeos_signed`, the operator lane can
+        // reach file services over HTTP with caller-supplied `project_path`.
+        // Keep HTTP file browsing bound to the browser session's project root.
+        let routes = [
+            "bundles/studio/.ai/node/routes/ui/studio/files-list.yaml",
+            "bundles/studio/.ai/node/routes/ui/studio/files-read.yaml",
+            "bundles/studio/.ai/node/routes/ui/studio/files-tree.yaml",
+        ];
+        let service_refs = [
+            "service:ui/studio/files/list",
+            "service:ui/studio/files/read",
+            "service:ui/studio/files/tree",
+        ];
+
+        for (route, service_ref) in routes.into_iter().zip(service_refs) {
+            let contents = std::fs::read_to_string(workspace_root().join(route))
+                .unwrap_or_else(|err| panic!("read {route}: {err}"));
+            let yaml: Value = serde_yaml::from_str(&contents)
+                .unwrap_or_else(|err| panic!("parse {route}: {err}"));
+
+            assert_eq!(yaml["auth"], "browser_session", "{route}");
+            assert_eq!(yaml["response"]["source"], service_ref, "{route}");
+        }
+    }
+}

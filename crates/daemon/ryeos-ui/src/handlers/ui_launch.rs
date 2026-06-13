@@ -50,7 +50,9 @@ pub async fn handle(input: Value, _ctx: HandlerContext, state: Arc<AppState>) ->
             "name": "ryeos_session",
             "value": session_id,
             "http_only": true,
-            "same_site": "Lax",
+            // Strict: the launch redirect is same-origin, so nothing
+            // legitimate needs this cookie on a cross-site request.
+            "same_site": "Strict",
             "secure": false,
             "path": "/ui"
         }

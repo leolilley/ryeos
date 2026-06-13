@@ -1,0 +1,400 @@
+//! Tile and frame chrome: bars, dock tiles, tile frames with title,
+//! corner marks, and the provenance/affordance footer. Chrome carries
+//! truth (provenance, focus) — it is load-bearing, not decoration.
+
+use ryeos_client_base::layout::Rect;
+use ryeos_client_base::studio::view_model::{
+    StudioDockPlaneVm, StudioDockTileVm, StudioInputVm, StudioViewModel, StudioViewVm,
+};
+use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
+
+use super::input::draw_input_tile;
+use super::primitives::{fill_line, fill_rect};
+use super::text::{display_width, letterspace, truncate};
+use super::theme::{border_for, style_muted, tone_style, ACCENT, BG, FG, MUTED};
+
+pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+    let text = format!(
+        " {}  {}  {} ",
+        vm.presentation.chrome.version_label,
+        vm.presentation.chrome.top_bar.focused_title,
+        vm.presentation.chrome.top_bar.layout_symbol
+    );
+    draw_bar(surface, 0, &text, ACCENT);
+}
+
+pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+    let y = surface.height.saturating_sub(1);
+    fill_line(surface, 0, y, surface.width, Style::new().fg(MUTED).bg(BG));
+    let mut x = 1usize;
+    for segment in &vm.presentation.chrome.status_bar.segments {
+        if x >= surface.width {
+            return;
+        }
+        if let Some(label) = &segment.label {
+            let label = format!("{}: ", letterspace(label));
+            surface.draw_text(x, y, &truncate(&label, surface.width - x), style_muted());
+            x = x.saturating_add(display_width(&label));
+        }
+        let value = truncate(&segment.value, surface.width.saturating_sub(x));
+        surface.draw_text(x, y, &value, tone_style(segment.tone));
+        x = x.saturating_add(display_width(&value) + 2);
+    }
+    if x + 3 < surface.width {
+        surface.draw_text(x, y, "·", style_muted());
+        x += 2;
+        surface.draw_text(
+            x,
+            y,
+            &truncate(
+                &vm.presentation.chrome.status_bar.key_hint,
+                surface.width - x,
+            ),
+            style_muted(),
+        );
+    }
+}
+
+fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
+    fill_line(surface, 0, y, surface.width, Style::new().fg(fg).bg(BG));
+    surface.draw_text(
+        0,
+        y,
+        &truncate(text, surface.width),
+        Style::new().fg(fg).bg(BG),
+    );
+}
+
+pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -> Rect {
+    let border = border_for(&vm.presentation.chrome.border);
+    let project_path = vm.session.project_path.as_deref();
+    let (dock_rects, center) = carve_docks(body, &vm.workspace.docks);
+    for (dock, rect) in dock_rects {
+        draw_dock_tile(surface, rect, dock, project_path, border);
+    }
+    center
+}
+
+/// Carve the edge docks out of `body` and return each dock's rect plus the
+/// remaining center — pure geometry, separated from drawing so it can be
+/// tested (Phase A of the layout-plan roadmap). The carving order is
+/// left → right → top → bottom, each taking from the running center with a
+/// 1-cell gap; left/right are bounded so the center keeps ≥ 8 cells wide,
+/// top/bottom so it keeps ≥ 6 tall. This encodes the CURRENT terminal
+/// policy verbatim.
+fn carve_docks<'a>(
+    body: Rect,
+    docks: &'a StudioDockPlaneVm,
+) -> (Vec<(&'a StudioDockTileVm, Rect)>, Rect) {
+    let mut center = body;
+    let mut out = Vec::new();
+
+    if let Some(left) = &docks.left {
+        let w = left.size.min(center.w.saturating_sub(8));
+        if w > 0 {
+            out.push((left, Rect::new(center.x, center.y, w, center.h)));
+            center.x = center.x.saturating_add(w.saturating_add(1));
+            center.w = center.w.saturating_sub(w.saturating_add(1));
+        }
+    }
+
+    if let Some(right) = &docks.right {
+        let w = right.size.min(center.w.saturating_sub(8));
+        if w > 0 {
+            let x = center.x.saturating_add(center.w.saturating_sub(w));
+            out.push((right, Rect::new(x, center.y, w, center.h)));
+            center.w = center.w.saturating_sub(w.saturating_add(1));
+        }
+    }
+
+    if let Some(top) = &docks.top {
+        let h = top.size.min(center.h.saturating_sub(6));
+        if h > 0 {
+            out.push((top, Rect::new(center.x, center.y, center.w, h)));
+            center.y = center.y.saturating_add(h.saturating_add(1));
+            center.h = center.h.saturating_sub(h.saturating_add(1));
+        }
+    }
+
+    if let Some(bottom) = &docks.bottom {
+        let h = bottom.size.min(center.h.saturating_sub(6));
+        if h > 0 {
+            let y = center.y.saturating_add(center.h.saturating_sub(h));
+            out.push((bottom, Rect::new(center.x, y, center.w, h)));
+            center.h = center.h.saturating_sub(h.saturating_add(1));
+        }
+    }
+
+    (out, center)
+}
+
+fn draw_dock_tile(
+    surface: &mut TextSurface,
+    rect: Rect,
+    dock: &StudioDockTileVm,
+    project_path: Option<&str>,
+    border: Option<Border>,
+) {
+    // An input dock renders minimally on the page background — no PANEL
+    // fill, no title, no shadow. Just the bordered buffer + cursor.
+    if let Some(input) = dock.input.as_ref() {
+        draw_input_tile(surface, rect, input, project_path, border);
+        return;
+    }
+
+    // Slots sit flush on the page background (BG), separated by their
+    // border — no PANEL fill, no shadow — consistent with the input box
+    // and the tiles.
+    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    if w < 2 || h < 2 {
+        return;
+    }
+    if let Some(border) = border {
+        surface.draw_box(
+            x,
+            y,
+            x + w - 1,
+            y + h - 1,
+            border,
+            Style::new().fg(MUTED).bg(BG),
+        );
+    }
+    surface.draw_text(
+        x + 2,
+        y,
+        &truncate(&format!(" {} ", dock.title), w.saturating_sub(4)),
+        Style::new().fg(ACCENT).bg(BG).bold(),
+    );
+    // Dock content renders through the SAME widget dispatch as center
+    // tiles — rows with tones, timelines, scenes — not a crude subset.
+    let inner = Rect::new(
+        rect.x + 1,
+        rect.y + 1,
+        rect.w.saturating_sub(2),
+        rect.h.saturating_sub(2),
+    );
+    super::draw_view(surface, inner, &dock.view);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_tile(
+    surface: &mut TextSurface,
+    rect: Rect,
+    tile_id: &str,
+    focused: bool,
+    title: &str,
+    action_count: usize,
+    view: &StudioViewVm,
+    input: Option<&StudioInputVm>,
+    border: Option<Border>,
+) {
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Tiles sit on the page background, separated by their border. The
+    // focused accent stays colour-only; the glyph set follows the
+    // surface-declared border style. No shadow — border weight does it.
+    let border_style = if focused {
+        Style::new().fg(ACCENT).bg(BG)
+    } else {
+        Style::new().fg(MUTED).bg(BG)
+    };
+    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    if w >= 2 && h >= 2 {
+        if let Some(border) = border {
+            surface.draw_box(
+                rect.x as usize,
+                rect.y as usize,
+                rect.x as usize + w - 1,
+                rect.y as usize + h - 1,
+                border,
+                border_style,
+            );
+        }
+        if h > 3 {
+            for x in (rect.x as usize + 1)..(rect.x as usize + w.saturating_sub(1)) {
+                surface.draw_char(x, rect.y as usize + 2, '─', Style::new().fg(MUTED).bg(BG));
+            }
+        }
+        let action_hint = if action_count > 0 {
+            format!("  {action_count} actions")
+        } else {
+            String::new()
+        };
+        let label = format!(" {title} #{tile_id}{action_hint} ");
+        surface.draw_text(
+            rect.x as usize + 2,
+            rect.y as usize + 1,
+            &truncate(&label, w.saturating_sub(4)),
+            if focused {
+                Style::new().fg(ACCENT).bg(BG).bold()
+            } else {
+                Style::new().fg(MUTED).bg(BG)
+            },
+        );
+        if focused {
+            draw_corner_marks(surface, rect);
+        }
+    }
+    let footer = view_chrome(view);
+    if h > 5 {
+        let footer_y = rect.y as usize + h - 2;
+        fill_line(
+            surface,
+            rect.x as usize + 1,
+            footer_y,
+            w.saturating_sub(2),
+            Style::new().fg(MUTED).bg(BG),
+        );
+        if let Some((provenance, affordances)) = footer {
+            surface.draw_text(
+                rect.x as usize + 2,
+                footer_y,
+                &truncate(provenance, w.saturating_sub(4)),
+                style_muted(),
+            );
+            if !affordances.is_empty() && w > 10 {
+                let right = affordances.join(" · ");
+                let right = truncate(&right, w.saturating_sub(4));
+                let right_w = display_width(&right);
+                let x = rect.x as usize + w.saturating_sub(right_w + 2);
+                surface.draw_text(x, footer_y, &right, style_muted());
+            }
+        }
+    }
+    let inner = if rect.h > 4 {
+        Rect::new(
+            rect.x + 1,
+            rect.y + 3,
+            rect.w.saturating_sub(2),
+            rect.h.saturating_sub(if h > 5 { 5 } else { 4 }),
+        )
+    } else {
+        Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.w.saturating_sub(2),
+            rect.h.saturating_sub(2),
+        )
+    };
+    // An instance that declares `input` renders as the prompt — buffer +
+    // cursor only; the tile already owns the border/chrome.
+    if let Some(input) = input {
+        draw_input_tile(surface, inner, input, None, None);
+        return;
+    }
+    super::draw_view(surface, inner, view);
+}
+
+fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
+    match view {
+        StudioViewVm::Rows {
+            provenance,
+            affordance_hints,
+            ..
+        }
+        | StudioViewVm::Timeline {
+            provenance,
+            affordance_hints,
+            ..
+        } => provenance
+            .as_deref()
+            .map(|provenance| (provenance, affordance_hints.as_slice())),
+        _ => None,
+    }
+}
+
+fn draw_corner_marks(surface: &mut TextSurface, rect: Rect) {
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    if w < 2 || h < 2 {
+        return;
+    }
+    let style = Style::new().fg(ACCENT).bg(BG).bold();
+    surface.draw_char(x, y, '╔', style);
+    surface.draw_char(x + w - 1, y, '╗', style);
+    surface.draw_char(x, y + h - 1, '╚', style);
+    surface.draw_char(x + w - 1, y + h - 1, '╝', style);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_client_base::studio::model::StudioDockEdge;
+
+    fn dock(edge: StudioDockEdge, size: u16) -> StudioDockTileVm {
+        StudioDockTileVm {
+            edge,
+            title: "t".into(),
+            size,
+            view: StudioViewVm::Placeholder {
+                title: "t".into(),
+                message: "m".into(),
+            },
+            input: None,
+        }
+    }
+
+    #[test]
+    fn carve_docks_bottom_leaves_center_above_and_preserves_bounds() {
+        let docks = StudioDockPlaneVm {
+            bottom: Some(dock(StudioDockEdge::Bottom, 7)),
+            ..Default::default()
+        };
+        let body = Rect::new(0, 0, 100, 30);
+        let (rects, center) = carve_docks(body, &docks);
+        assert_eq!(rects.len(), 1);
+        let (_, bottom) = rects[0];
+        // The bottom dock is 7 tall, anchored at the bottom of the body.
+        assert_eq!((bottom.y, bottom.h), (23, 7));
+        // The center sits above it, minus the 1-cell gap, never overlapping.
+        assert_eq!(center.y, 0);
+        assert_eq!(center.h, 22);
+        assert!(center.y + center.h < bottom.y, "center is above the dock");
+        assert!(
+            bottom.y + bottom.h <= body.y + body.h,
+            "dock stays in bounds"
+        );
+    }
+
+    #[test]
+    fn carve_docks_left_and_right_keep_center_in_bounds() {
+        let docks = StudioDockPlaneVm {
+            left: Some(dock(StudioDockEdge::Left, 20)),
+            right: Some(dock(StudioDockEdge::Right, 20)),
+            ..Default::default()
+        };
+        let body = Rect::new(0, 0, 100, 30);
+        let (rects, center) = carve_docks(body, &docks);
+        assert_eq!(rects.len(), 2);
+        assert!(
+            center.x > 0 && center.x + center.w <= 100,
+            "center within body"
+        );
+        // Order is left then right.
+        assert_eq!(rects[0].1.x, 0);
+        assert!(rects[1].1.x > center.x);
+    }
+
+    #[test]
+    fn carve_docks_tiny_body_drops_docks_that_would_starve_center() {
+        // A left dock can't take so much that the center drops below 8 wide.
+        let docks = StudioDockPlaneVm {
+            left: Some(dock(StudioDockEdge::Left, 50)),
+            ..Default::default()
+        };
+        let body = Rect::new(0, 0, 10, 6);
+        let (rects, center) = carve_docks(body, &docks);
+        // size 50 clamped to w-8 = 2.
+        assert_eq!(rects[0].1.w, 2);
+        assert!(center.w >= 7, "center keeps room");
+    }
+}

@@ -116,6 +116,21 @@ pub struct StatusResponse {
 }
 
 impl AppState {
+    /// CAS store rooted at this node's state. Shared shorthand for the
+    /// `cas_root()? -> CasStore::new` pair repeated across handlers.
+    pub fn cas_store(&self) -> anyhow::Result<lillux::cas::CasStore> {
+        Ok(lillux::cas::CasStore::new(self.state_store.cas_root()?))
+    }
+
+    /// CAS store plus the refs root, for handlers that read or advance
+    /// signed refs alongside object access.
+    pub fn cas_and_refs(&self) -> anyhow::Result<(lillux::cas::CasStore, std::path::PathBuf)> {
+        Ok((
+            lillux::cas::CasStore::new(self.state_store.cas_root()?),
+            self.state_store.refs_root()?,
+        ))
+    }
+
     pub fn status(&self) -> StatusResponse {
         StatusResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),

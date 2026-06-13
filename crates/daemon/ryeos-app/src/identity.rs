@@ -8,11 +8,21 @@ use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NodeIdentity {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
     fingerprint: String,
+}
+
+/// Manual impl so a stray `{:?}` can never serialize the signing key.
+impl std::fmt::Debug for NodeIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeIdentity")
+            .field("fingerprint", &self.fingerprint)
+            .field("signing_key", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,12 +64,14 @@ impl NodeIdentity {
 
     /// Load existing signing key. Errors if missing.
     pub fn load(key_path: &Path) -> Result<Self> {
-        let pem = fs::read_to_string(key_path).with_context(|| {
+        // Zeroizing: the PEM buffer holds the private key; wipe it once
+        // the SigningKey (which zeroizes itself on drop) is built.
+        let pem = zeroize::Zeroizing::new(fs::read_to_string(key_path).with_context(|| {
             format!(
                 "signing key not found at {} — run 'ryeos init' first",
                 key_path.display()
             )
-        })?;
+        })?);
         let signing_key = SigningKey::from_pkcs8_pem(&pem)
             .with_context(|| format!("failed to decode signing key {}", key_path.display()))?;
         Self::from_signing_key(signing_key)

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
-
-use super::model::StudioInputRoute;
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioEffect {
@@ -29,8 +28,18 @@ pub enum StudioEffectKind {
         kind: Option<String>,
         limit: usize,
     },
-    FetchSchedules,
-    FetchGcStatus,
+    /// Generic source fetch for a bound view: ONE mechanism for all
+    /// content-defined tiles. `{ref, params} -> result keyed to the
+    /// subscribing tile`.
+    FetchSource {
+        tile_id: String,
+        source_ref: String,
+        params: Value,
+    },
+    /// Command records for completion (the grammar shown is the grammar
+    /// held — records carry per-session invocability, evaluated
+    /// daemon-side).
+    FetchCommands,
     ListFiles {
         tile_id: Option<String>,
         root: String,
@@ -46,15 +55,6 @@ pub enum StudioEffectKind {
         root: String,
         path: String,
     },
-    InspectItem {
-        canonical_ref: String,
-        include_raw: bool,
-        include_effective: bool,
-    },
-    InspectThread {
-        thread_id: String,
-        event_limit: usize,
-    },
     InvokeAction {
         command_id: String,
         args: serde_json::Value,
@@ -62,9 +62,16 @@ pub enum StudioEffectKind {
     CancelThread {
         thread_id: String,
     },
-    SubmitInput {
-        route: StudioInputRoute,
-        text: String,
+    /// THE generic rye-plane invocation. The client never interprets the
+    /// target; the substrate decides. `route_seq` carries the seat-braid
+    /// seq of `input.route` at issue time when the invocation came from
+    /// the routed input — results arriving after a later route event may
+    /// notice but never retarget.
+    Invoke {
+        target: InvokeRef,
+        params: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        route_seq: Option<u64>,
     },
     SetLocationHash {
         hash: String,
@@ -98,15 +105,23 @@ pub enum StudioEffectResultKind {
     ProjectOpened,
     Threads,
     Items,
-    Schedules,
-    GcStatus,
     FilesList,
     FileSpace,
     FileRead,
-    ItemInspection,
-    ThreadInspection,
     ActionInvocation,
     ThreadCancelled,
-    InputSubmitted,
+    Invoked,
+    Commands,
+    SourceData,
     BrowserOnly,
+}
+
+/// Target forms for the generic invocation: a canonical item ref, or
+/// command tokens resolved/bound daemon-side (token dispatch lands with
+/// the one-daemon-path slice).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "form", rename_all = "snake_case")]
+pub enum InvokeRef {
+    Ref { item_ref: String },
+    Tokens { tokens: Vec<String> },
 }

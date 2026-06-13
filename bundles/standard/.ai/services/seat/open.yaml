@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:42Z:d4b24ecb154f8bb62a583595bbbe8f6bd6e8133317f6db14ec49e17e1906dc3e:ulPurtV4vtimncyf+2uUQOcu7/PqGEtPhX1p6R4JYObzTrjQAbZA7ERbslnlFOXe3VhuMTMxtRcaRr7OUdMiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat/open
+version: "1.0.0"
+description: Mint a seat session thread - the seat is itself a thread, braided and replayable
+endpoint: seat.open
+availability: daemon_only

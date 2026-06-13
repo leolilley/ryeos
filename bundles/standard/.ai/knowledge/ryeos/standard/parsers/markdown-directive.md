@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T12:11:51Z:eaa55f1d9252e1c5c03a4ef6b33268f0853c8e90467d25932e2f43b805b8fc5f:Jk8fAWE2IbOMkzRhUZQB6XUAPLx67hG+/cYw9i2pkNYioc/UlziTGiqbJfjyteSyFEfbNj8SvJvA1vFKziZlDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T21:03:05Z:eaa55f1d9252e1c5c03a4ef6b33268f0853c8e90467d25932e2f43b805b8fc5f:Jk8fAWE2IbOMkzRhUZQB6XUAPLx67hG+/cYw9i2pkNYioc/UlziTGiqbJfjyteSyFEfbNj8SvJvA1vFKziZlDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/parsers
 tags: [parser, markdown, directive]

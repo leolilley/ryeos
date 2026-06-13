@@ -27,6 +27,93 @@ pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
 ///
 /// Handles three forms:
 /// - `--input <file>` — reads file as JSON
+/// Descriptor-declared parameter short-circuits, shared by the daemon
+/// and offline dispatch paths so the two cannot drift:
+/// - `--input <file|->` is honored only when the command's
+///   `parameter_binding` declares an input flag;
+/// - a single JSON-object argument binds directly when the command
+///   declares `single_json_object_arg`.
+///
+/// Returns `None` when no declared short-circuit applies and normal
+/// positional/flag binding should proceed.
+pub fn bind_declared_shortcuts(
+    tail: &[String],
+    command: &ryeos_runtime::CommandDef,
+) -> Result<Option<Value>, CliDispatchError> {
+    let binding = command.parameter_binding.as_ref();
+    if binding.is_some_and(|binding| binding.input_flag.is_some()) {
+        if let Some(input) = parse_input_arg(tail)? {
+            let input = if command.project.is_some() {
+                merge_project_control_flags(input, tail)?
+            } else {
+                input
+            };
+            return Ok(Some(input));
+        }
+    }
+    if binding.is_some_and(|binding| binding.single_json_object_arg) && tail.len() == 1 {
+        if let Ok(value) = serde_json::from_str::<Value>(&tail[0]) {
+            if value.is_object() {
+                return Ok(Some(value));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn merge_project_control_flags(
+    mut input: Value,
+    tail: &[String],
+) -> Result<Value, CliDispatchError> {
+    let Some(obj) = input.as_object_mut() else {
+        return Ok(input);
+    };
+
+    let mut i = 0;
+    while i < tail.len() {
+        let token = &tail[i];
+        if token == "--no-project" {
+            obj.insert("no_project".to_string(), Value::Bool(true));
+            i += 1;
+            continue;
+        }
+        if let Some(path) = token
+            .strip_prefix("--project=")
+            .or_else(|| token.strip_prefix("-p="))
+        {
+            obj.insert("project".to_string(), Value::String(path.to_string()));
+            i += 1;
+            continue;
+        }
+        if token == "--project" || token == "-p" {
+            let Some(path) = tail.get(i + 1) else {
+                return Err(CliDispatchError::Config(
+                    crate::error::CliConfigError::InvalidExecuteRef {
+                        path: "<cli>".into(),
+                        item_ref: token.clone(),
+                        detail: format!("{token} requires a value (path to the project root)"),
+                    },
+                ));
+            };
+            if path == "--no-project" || path == "--input" || path == "-p" || path == "--project" {
+                return Err(CliDispatchError::Config(
+                    crate::error::CliConfigError::InvalidExecuteRef {
+                        path: "<cli>".into(),
+                        item_ref: token.clone(),
+                        detail: format!("{token} requires a value (path to the project root)"),
+                    },
+                ));
+            }
+            obj.insert("project".to_string(), Value::String(path.clone()));
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+
+    Ok(input)
+}
+
 /// - `--input -` — reads stdin as JSON
 /// - `--input=<file>` — equals-form
 ///

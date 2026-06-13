@@ -388,25 +388,30 @@ impl TrustStore {
         self.signers.is_empty()
     }
 
-    /// Return a new trust store that includes project-local keys.
+    /// Return a trust store that includes project-local keys.
     ///
     /// Project keys take priority (first-wins): if a fingerprint exists
     /// in the project trust dir, it shadows the same fingerprint in this
     /// store. Keys in this store that don't conflict are preserved.
-    pub fn with_project_keys(&self, project_root: &Path) -> Result<Self, EngineError> {
+    /// Borrows `self` unchanged when the project declares no keys — the
+    /// common case — instead of cloning the whole store per request.
+    pub fn with_project_keys(
+        &self,
+        project_root: &Path,
+    ) -> Result<std::borrow::Cow<'_, Self>, EngineError> {
         let trust_dir = project_root.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
         if !trust_dir.is_dir() {
-            return Ok(self.clone());
+            return Ok(std::borrow::Cow::Borrowed(self));
         }
         let project_keys = Self::load_from_dir(&trust_dir)?;
         if project_keys.is_empty() {
-            return Ok(self.clone());
+            return Ok(std::borrow::Cow::Borrowed(self));
         }
         let mut merged = project_keys.signers;
         for (fp, signer) in &self.signers {
             merged.entry(fp.clone()).or_insert_with(|| signer.clone());
         }
-        Ok(Self { signers: merged })
+        Ok(std::borrow::Cow::Owned(Self { signers: merged }))
     }
 }
 
@@ -905,6 +910,19 @@ pub fn verify_item_signature(
         }
     })?;
 
+    verify_item_signature_with_hash(&actual_hash, header, trust_store)
+}
+
+/// Like [`verify_item_signature`], but takes the content hash the
+/// caller already recomputed over the post-signature content, so the
+/// content is not hashed a second time. The hash must come from
+/// [`content_hash_after_signature`] on the same content — passing the
+/// header's own hash would turn the integrity check into a tautology.
+pub fn verify_item_signature_with_hash(
+    actual_hash: &str,
+    header: &SignatureHeader,
+    trust_store: &TrustStore,
+) -> Result<(TrustClass, Option<SignerFingerprint>), EngineError> {
     tracing::trace!(actual_hash = %actual_hash, header_hash = %header.content_hash, "comparing content hashes");
 
     // Step 2: Compare content hashes
@@ -912,7 +930,7 @@ pub fn verify_item_signature(
         return Err(EngineError::ContentHashMismatch {
             canonical_ref: String::new(),
             expected: header.content_hash.clone(),
-            actual: actual_hash,
+            actual: actual_hash.to_owned(),
         });
     }
 

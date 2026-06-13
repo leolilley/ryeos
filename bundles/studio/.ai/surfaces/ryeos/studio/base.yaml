@@ -1,19 +1,50 @@
-# ryeos:signed:2026-06-11T03:43:41Z:b88e6015cddf3b8eb495ba3409eda6ed682d85739362960433efa0ce25e013bd:BbOpkn2+eI3ic4PTNKb8EcnHNXWw8WCv9A8uCtfwlm1lnb9sZcooFYx4ATYEb4tfKFFUzwjYSE2Sv/HSocuyBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T11:23:26Z:8c57f606814111a43a78bb2c221bd36429659f0f6a1f2eb346c9ba908da3824a:JWdf5LcpNWnXp6SNU2LXEEfHrl4z1EwwdgNLSm0GC/Ryz6KQQ53sVQLyYNDxoi7uV8/4lWeeYg35SzghoIIHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
 
-layout:
-  root: home
-  nodes:
-    home:
-      type: pane
-      view: graph
+tiling:
+  mode: master_stack
+  master: { side: right, arrange: vertical, ratio: 0.6, count: 1 }
+  stack: { arrange: horizontal }
+  insert: end
+
+tiles: []
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: false, size: 6 }
+  left: { content: "view:ryeos/threads/list", open: false, size: 32 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
+
+backdrop: view:ryeos/backdrop/shard
+
+library:
+  - view:ryeos/backdrop/shard
+  - view:ryeos/input
+  - view:ryeos/threads/list
+  - view:ryeos/item/inspector
+  - view:ryeos/chain/timeline
+  - view:ryeos/remotes/list
+  - view:ryeos/schedules/list
+  - view:ryeos/commands/grammar
+  - view:ryeos/bundles/list
+  - view:ryeos/node/status
+  - view:ryeos/items/space
+  - view:ryeos/files/list
+  - view:ryeos/gc/status
+
 
 input:
   route:
-    type: directive
-    directive_ref: directive:rye/agent/core/base
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:rye/agent/core/base
 
 ambient:
   show_background: true

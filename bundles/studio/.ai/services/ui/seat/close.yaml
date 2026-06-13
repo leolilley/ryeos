@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-13T00:00:43Z:ba2f0a0b27845a6e92392242a3fc403649ba143f46d937c369ce01864ae9ce9b:fe2Ox0RfJtQSUBU32wiEmbZnkjXdJvAvoyCvKdEYfR/qRf119RCIxpRDV5tzmY5SxB4D/wSsswUw5ls/NK/BCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat-close
+version: "1.0.0"
+description: Finalize the session's seat thread; closed seats refuse further events
+endpoint: ui.seat.close
+availability: daemon_only
