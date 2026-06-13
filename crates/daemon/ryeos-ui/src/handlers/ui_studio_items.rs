@@ -26,7 +26,6 @@ use ryeos_engine::item_resolution::{enumerate_kind_refs, resolve_item_full};
 use ryeos_executor::executor::ServiceAvailability;
 
 use super::ui_graph_topology::{classify_trust, label_for_bare_id, namespace_for_bare_id};
-use crate::state::get_ui_state;
 
 // ── items.list types ───────────────────────────────────────────────
 
@@ -155,25 +154,24 @@ const MAX_RAW_BYTES: usize = 256 * 1024;
 
 // ── items.list handler ─────────────────────────────────────────────
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
 pub async fn handle_items_list(
     params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    let project_path = session.project_root.as_ref().map(PathBuf::from);
+    // Dual-lane (browser session OR verified operator) like the other
+    // ui/studio sources — the TUI calls as a signed operator.
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let project_path: Option<PathBuf> = caller.project_root().map(PathBuf::from).or_else(|| {
+        params
+            .get("project_path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+    });
+    let mut params = params;
+    if let Some(map) = params.as_object_mut() {
+        map.remove("project_path");
+    }
     let request: ItemsListRequest = if params.is_null() {
         ItemsListRequest {
             kind: None,
@@ -319,19 +317,22 @@ pub async fn handle_item_inspect(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
+    // Dual-lane (browser session OR verified operator) like the other
+    // ui/studio sources — the TUI calls as a signed operator.
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let project_path: Option<PathBuf> = caller.project_root().map(PathBuf::from).or_else(|| {
+        params
+            .get("project_path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+    });
+    let mut params = params;
+    if let Some(map) = params.as_object_mut() {
+        map.remove("project_path");
+    }
     let req: ItemInspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let project_path = session.project_root.as_ref().map(PathBuf::from);
     let response = build_item_inspect(&state, project_path.as_ref(), &req)?;
 
     serde_json::to_value(response).map_err(Into::into)
