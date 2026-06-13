@@ -323,8 +323,11 @@ impl Default for StudioUiState {
             loading: BTreeMap::new(),
             notices: Vec::new(),
             route: None,
+            // Both status bars start hidden — their content was incoherent
+            // and we have nothing settled to put there yet. Toggle-on still
+            // works if we decide on content later.
             top_status_visible: false,
-            bottom_status_visible: true,
+            bottom_status_visible: false,
         }
     }
 }

@@ -1,79 +1,86 @@
-//! The input dock: route target strip, prompt buffer with a true
-//! inverted cursor, and the completion/notice hint line.
+//! The input tile — deliberately minimal. A bordered box on the page
+//! background with the buffer and a block cursor; the project path sits
+//! on the bottom border as quiet context. No route strip, no `$`, no
+//! hint line, no title — the border and cursor are the whole signal.
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::StudioInputVm;
-use ryeos_client_base::text_surface::{Style, TextSurface};
+use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 
-use super::primitives::fill_line;
+use super::primitives::fill_rect;
 use super::text::{display_width, input_cursor_byte, truncate};
-use super::theme::{style_fg, style_muted, ACCENT, FG, PANEL, PANEL_2};
+use super::theme::{BG, FG, MUTED};
 
-pub fn draw_input_dock(surface: &mut TextSurface, rect: Rect, input: &StudioInputVm) {
-    let width = rect.w as usize;
-    let height = rect.h as usize;
-    if width == 0 || height == 0 {
+pub fn draw_input_tile(
+    surface: &mut TextSurface,
+    rect: Rect,
+    input: &StudioInputVm,
+    project_path: Option<&str>,
+    border: Option<Border>,
+) {
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    if w < 2 || h < 2 {
         return;
     }
-    let route_style = Style::new().fg(FG).bg(PANEL_2).bold();
-    fill_line(
-        surface,
-        rect.x as usize,
-        rect.y as usize,
-        width,
-        route_style,
-    );
-    surface.draw_text(
-        rect.x as usize,
-        rect.y as usize,
-        &truncate(&input.route_label, width),
-        route_style,
-    );
+    let x = rect.x as usize;
+    let y = rect.y as usize;
 
-    if height < 2 {
-        return;
-    }
-    let prompt_y = rect.y as usize + 1;
-    let text = if input.text.is_empty() {
-        input.placeholder.as_str()
-    } else {
-        input.text.as_str()
-    };
-    surface.draw_text(
-        rect.x as usize,
-        prompt_y,
-        "$ ",
-        Style::new().fg(ACCENT).bg(PANEL).bold(),
-    );
-    let text_x = rect.x as usize + 2;
-    let visible = truncate(text, width.saturating_sub(2));
-    let text_style = if input.text.is_empty() {
-        style_muted()
-    } else {
-        style_fg()
-    };
-    surface.draw_text(text_x, prompt_y, &visible, text_style);
-    let cursor_byte = input_cursor_byte(&input.text, input.cursor);
-    let cursor_x = text_x
-        + display_width(&truncate(
-            &input.text[..cursor_byte],
-            width.saturating_sub(2),
-        ))
-        .min(width.saturating_sub(3));
-    let cursor_char = input.text[cursor_byte..].chars().next().unwrap_or(' ');
-    surface.draw_char(
-        cursor_x,
-        prompt_y,
-        cursor_char,
-        Style::new().fg(PANEL).bg(ACCENT),
-    );
-
-    if height >= 3 {
-        surface.draw_text(
-            rect.x as usize,
-            rect.y as usize + 2,
-            &truncate(&input.hint, width),
-            style_muted(),
+    // The box sits flush on the page background — no PANEL fill.
+    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    if let Some(border) = border {
+        surface.draw_box(
+            x,
+            y,
+            x + w - 1,
+            y + h - 1,
+            border,
+            Style::new().fg(FG).bg(BG),
         );
+    }
+
+    // Quiet context: the project path on the bottom border, right-aligned.
+    if let Some(path) = project_path {
+        let label = format!(" {} ", shorten_home(path));
+        let lw = display_width(&label);
+        if lw + 4 < w {
+            surface.draw_text(
+                x + w.saturating_sub(lw + 2),
+                y + h - 1,
+                &label,
+                Style::new().fg(MUTED).bg(BG),
+            );
+        }
+    }
+
+    // Buffer + block cursor on the first interior row, one cell of padding.
+    let inner_x = x + 2;
+    let row_y = y + 1;
+    let avail = w.saturating_sub(4);
+    if avail == 0 {
+        return;
+    }
+    let visible = truncate(&input.text, avail);
+    surface.draw_text(inner_x, row_y, &visible, Style::new().fg(FG).bg(BG));
+
+    let cursor_byte = input_cursor_byte(&input.text, input.cursor);
+    let cursor_col = display_width(&input.text[..cursor_byte]).min(avail.saturating_sub(1));
+    let cursor_char = input.text[cursor_byte..].chars().next().unwrap_or(' ');
+    // A true block cursor: invert the cell (the char shows through when
+    // there is one; an empty buffer shows a solid block).
+    surface.draw_char(
+        inner_x + cursor_col,
+        row_y,
+        cursor_char,
+        Style::new().fg(BG).bg(FG),
+    );
+}
+
+fn shorten_home(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
     }
 }

@@ -275,15 +275,20 @@ mod tests {
             rendered.contains('·') || rendered.contains('•') || rendered.contains('●'),
             "backdrop particles render as dots"
         );
-        // The real bottom input slot renders in this state (the bug fix):
-        // the prompt + placeholder appear, so typing reaches a real slot.
-        // (The block cursor sits on the first placeholder char when the
-        // buffer is empty, so match a cursor-free tail of the placeholder.)
+        // The real bottom input slot renders in this state (the bug fix) as
+        // a minimal bordered box — no prompt sigil, route strip, or hint;
+        // the border + cursor are the whole signal. The bottom rows carry
+        // the box border.
+        let lines: Vec<&str> = rendered.lines().collect();
+        let tail = lines[lines.len().saturating_sub(8)..].join("\n");
         assert!(
-            rendered.contains("run a command"),
-            "the bottom input slot renders its prompt on an empty center"
+            tail.contains('│') || tail.contains('┃'),
+            "the bottom input slot renders its bordered box"
         );
-        assert!(rendered.contains("$ "), "the input prompt sigil renders");
+        assert!(
+            !rendered.contains("$ ") && !rendered.contains("Shift+Enter"),
+            "the minimal input box drops the prompt sigil and hint"
+        );
     }
 
     #[test]

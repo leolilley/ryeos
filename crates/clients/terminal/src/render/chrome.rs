@@ -8,7 +8,7 @@ use ryeos_client_base::studio::view_model::{
 };
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
 
-use super::input::draw_input_dock;
+use super::input::draw_input_tile;
 use super::primitives::{draw_lines, draw_shadow, fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
 use super::theme::{
@@ -79,12 +79,13 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
     let mut center = body;
     let docks = &vm.workspace.docks;
     let border = border_for(&vm.presentation.chrome.border);
+    let project_path = vm.session.project_path.as_deref();
 
     if let Some(left) = &docks.left {
         let w = left.size.min(center.w.saturating_sub(8));
         if w > 0 {
             let rect = Rect::new(center.x, center.y, w, center.h);
-            draw_dock_tile(surface, rect, left, border);
+            draw_dock_tile(surface, rect, left, project_path, border);
             center.x = center.x.saturating_add(w.saturating_add(1));
             center.w = center.w.saturating_sub(w.saturating_add(1));
         }
@@ -95,7 +96,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
         if w > 0 {
             let x = center.x.saturating_add(center.w.saturating_sub(w));
             let rect = Rect::new(x, center.y, w, center.h);
-            draw_dock_tile(surface, rect, right, border);
+            draw_dock_tile(surface, rect, right, project_path, border);
             center.w = center.w.saturating_sub(w.saturating_add(1));
         }
     }
@@ -104,7 +105,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
         let h = top.size.min(center.h.saturating_sub(6));
         if h > 0 {
             let rect = Rect::new(center.x, center.y, center.w, h);
-            draw_dock_tile(surface, rect, top, border);
+            draw_dock_tile(surface, rect, top, project_path, border);
             center.y = center.y.saturating_add(h.saturating_add(1));
             center.h = center.h.saturating_sub(h.saturating_add(1));
         }
@@ -115,7 +116,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
         if h > 0 {
             let y = center.y.saturating_add(center.h.saturating_sub(h));
             let rect = Rect::new(center.x, y, center.w, h);
-            draw_dock_tile(surface, rect, bottom, border);
+            draw_dock_tile(surface, rect, bottom, project_path, border);
             center.h = center.h.saturating_sub(h.saturating_add(1));
         }
     }
@@ -127,8 +128,16 @@ fn draw_dock_tile(
     surface: &mut TextSurface,
     rect: Rect,
     dock: &StudioDockTileVm,
+    project_path: Option<&str>,
     border: Option<Border>,
 ) {
+    // An input dock renders minimally on the page background — no PANEL
+    // fill, no title, no shadow. Just the bordered buffer + cursor.
+    if let Some(input) = dock.input.as_ref() {
+        draw_input_tile(surface, rect, input, project_path, border);
+        return;
+    }
+
     draw_shadow(surface, rect);
     fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
     let x = rect.x as usize;
@@ -160,12 +169,6 @@ fn draw_dock_tile(
         rect.w.saturating_sub(2),
         rect.h.saturating_sub(2),
     );
-    // An instance that declares `input` renders as the prompt (any widget
-    // may carry a prompt — input is an orthogonal capability).
-    if let Some(input) = dock.input.as_ref() {
-        draw_input_dock(surface, inner, input);
-        return;
-    }
     draw_dock_view(surface, inner, &dock.view);
 }
 
@@ -322,9 +325,10 @@ pub fn draw_tile(
             rect.h.saturating_sub(2),
         )
     };
-    // An instance that declares `input` renders as the prompt.
+    // An instance that declares `input` renders as the prompt — buffer +
+    // cursor only; the tile already owns the border/chrome.
     if let Some(input) = input {
-        draw_input_dock(surface, inner, input);
+        draw_input_tile(surface, inner, input, None, None);
         return;
     }
     super::draw_view(surface, inner, view);
