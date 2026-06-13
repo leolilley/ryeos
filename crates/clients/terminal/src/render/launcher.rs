@@ -36,7 +36,7 @@ pub fn draw_launcher(surface: &mut TextSurface, vm: &StudioViewModel) {
     surface.draw_text(
         x + 2,
         y,
-        " Command Palette ",
+        " Launcher ",
         Style::new().fg(ACCENT).bg(PANEL).bold(),
     );
 

@@ -1,4 +1,3 @@
-# ryeos:signed:2026-06-13T08:19:46Z:2cf15062e13ad35d43aaf08484b34d76164a2d04e600eb28f83dc61af8e032e1:XedDbv0ebI3zXc73pJBD9zwF23AqbN1wrYTIyviC5NC7d/R+3Jxm5ofvjk2ohX3xLbhQH8qjwxojm5uq6+HVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -13,6 +12,7 @@ tiles: []
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: false, size: 6 }
   left: { content: "view:ryeos/threads/list", open: false, size: 32 }
   right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 

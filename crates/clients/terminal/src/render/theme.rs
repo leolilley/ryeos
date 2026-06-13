@@ -8,7 +8,6 @@ use ryeos_client_base::text_surface::{Border, Color, Style};
 
 pub const BG: Color = Color::Rgb(0x1d, 0x20, 0x21);
 pub const PANEL: Color = Color::Rgb(0x28, 0x28, 0x28);
-pub const PANEL_2: Color = Color::Rgb(0x3c, 0x38, 0x36);
 pub const SHADOW: Color = Color::Rgb(0x50, 0x49, 0x45);
 pub const FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
 pub const FG_SOFT: Color = Color::Rgb(0xd5, 0xc4, 0xa1);
@@ -18,12 +17,16 @@ pub const WARN: Color = Color::Rgb(0xfa, 0xbd, 0x2f);
 pub const GOOD: Color = Color::Rgb(0x8e, 0xc0, 0x7c);
 pub const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
 
+// Content renders on the page background (BG), separated by borders —
+// consistent across the backdrop, input box, tiles, and dock slots. There
+// is no distinct PANEL fill for content; PANEL stays only for the launcher
+// overlay, which deliberately stands out against the dimmed scrim.
 pub fn tone_style(tone: StudioTone) -> Style {
     match tone {
-        StudioTone::Good => Style::new().fg(GOOD).bg(PANEL),
-        StudioTone::Warn => Style::new().fg(WARN).bg(PANEL),
-        StudioTone::Danger => Style::new().fg(DANGER).bg(PANEL),
-        StudioTone::Accent => Style::new().fg(ACCENT).bg(PANEL),
+        StudioTone::Good => Style::new().fg(GOOD).bg(BG),
+        StudioTone::Warn => Style::new().fg(WARN).bg(BG),
+        StudioTone::Danger => Style::new().fg(DANGER).bg(BG),
+        StudioTone::Accent => Style::new().fg(ACCENT).bg(BG),
         StudioTone::Neutral => style_fg(),
     }
 }
@@ -39,11 +42,11 @@ pub fn tone_glyph(tone: StudioTone) -> &'static str {
 }
 
 pub fn style_fg() -> Style {
-    Style::new().fg(FG_SOFT).bg(PANEL)
+    Style::new().fg(FG_SOFT).bg(BG)
 }
 
 pub fn style_muted() -> Style {
-    Style::new().fg(MUTED).bg(PANEL)
+    Style::new().fg(MUTED).bg(BG)
 }
 
 pub fn style_selected() -> Style {

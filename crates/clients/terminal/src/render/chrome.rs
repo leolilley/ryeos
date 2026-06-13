@@ -9,13 +9,9 @@ use ryeos_client_base::studio::view_model::{
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
 
 use super::input::draw_input_tile;
-use super::primitives::{draw_lines, draw_shadow, fill_line, fill_rect};
+use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
-use super::theme::{
-    border_for, style_muted, style_selected, tone_style, ACCENT, FG, MUTED, PANEL, PANEL_2, SHADOW,
-    WARN,
-};
-use super::widgets;
+use super::theme::{border_for, style_muted, tone_style, ACCENT, BG, FG, MUTED};
 
 pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     let text = format!(
@@ -29,13 +25,7 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
 
 pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     let y = surface.height.saturating_sub(1);
-    fill_line(
-        surface,
-        0,
-        y,
-        surface.width,
-        Style::new().fg(MUTED).bg(PANEL),
-    );
+    fill_line(surface, 0, y, surface.width, Style::new().fg(MUTED).bg(BG));
     let mut x = 1usize;
     for segment in &vm.presentation.chrome.status_bar.segments {
         if x >= surface.width {
@@ -66,12 +56,12 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
 }
 
 fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
-    fill_line(surface, 0, y, surface.width, Style::new().fg(fg).bg(PANEL));
+    fill_line(surface, 0, y, surface.width, Style::new().fg(fg).bg(BG));
     surface.draw_text(
         0,
         y,
         &truncate(text, surface.width),
-        Style::new().fg(fg).bg(PANEL),
+        Style::new().fg(fg).bg(BG),
     );
 }
 
@@ -152,8 +142,10 @@ fn draw_dock_tile(
         return;
     }
 
-    draw_shadow(surface, rect);
-    fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
+    // Slots sit flush on the page background (BG), separated by their
+    // border — no PANEL fill, no shadow — consistent with the input box
+    // and the tiles.
+    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
     let x = rect.x as usize;
     let y = rect.y as usize;
     let w = rect.w as usize;
@@ -168,60 +160,24 @@ fn draw_dock_tile(
             x + w - 1,
             y + h - 1,
             border,
-            Style::new().fg(SHADOW).bg(PANEL),
+            Style::new().fg(MUTED).bg(BG),
         );
     }
     surface.draw_text(
         x + 2,
         y,
         &truncate(&format!(" {} ", dock.title), w.saturating_sub(4)),
-        Style::new().fg(WARN).bg(PANEL).bold(),
+        Style::new().fg(ACCENT).bg(BG).bold(),
     );
+    // Dock content renders through the SAME widget dispatch as center
+    // tiles — rows with tones, timelines, scenes — not a crude subset.
     let inner = Rect::new(
         rect.x + 1,
         rect.y + 1,
         rect.w.saturating_sub(2),
         rect.h.saturating_sub(2),
     );
-    draw_dock_view(surface, inner, &dock.view);
-}
-
-fn draw_dock_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
-    let lines = match view {
-        StudioViewVm::Rows { title, rows, .. } => {
-            let mut lines = vec![title.clone()];
-            for row in rows.iter().take(rect.h.saturating_sub(2) as usize) {
-                lines.push(format!(
-                    "{} {} {}",
-                    if row.selected { "▶" } else { " " },
-                    row.primary,
-                    row.meta.clone().unwrap_or_default()
-                ));
-            }
-            lines
-        }
-        StudioViewVm::Timeline { title, entries, .. } => {
-            surface.draw_text(
-                rect.x as usize,
-                rect.y as usize,
-                &truncate(title, rect.w as usize),
-                style_muted(),
-            );
-            if rect.h > 1 {
-                widgets::timeline::draw_timeline(
-                    surface,
-                    Rect::new(rect.x, rect.y + 1, rect.w, rect.h.saturating_sub(1)),
-                    entries,
-                );
-            }
-            return;
-        }
-        StudioViewVm::Placeholder { title, message } => {
-            vec![title.clone(), message.clone()]
-        }
-        _ => vec!["unsupported dock view".to_string()],
-    };
-    draw_lines(surface, rect, &lines);
+    super::draw_view(surface, inner, &dock.view);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -241,15 +197,15 @@ pub fn draw_tile(
     if w == 0 || h == 0 {
         return;
     }
-    draw_shadow(surface, rect);
-    // The focused accent stays color-only; the glyph set follows the
-    // surface-declared border style.
+    // Tiles sit on the page background, separated by their border. The
+    // focused accent stays colour-only; the glyph set follows the
+    // surface-declared border style. No shadow — border weight does it.
     let border_style = if focused {
-        Style::new().fg(ACCENT).bg(PANEL)
+        Style::new().fg(ACCENT).bg(BG)
     } else {
-        Style::new().fg(SHADOW).bg(PANEL)
+        Style::new().fg(MUTED).bg(BG)
     };
-    fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
+    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
     if w >= 2 && h >= 2 {
         if let Some(border) = border {
             surface.draw_box(
@@ -262,20 +218,8 @@ pub fn draw_tile(
             );
         }
         if h > 3 {
-            fill_line(
-                surface,
-                rect.x as usize + 1,
-                rect.y as usize + 1,
-                w.saturating_sub(2),
-                Style::new().fg(FG).bg(PANEL_2),
-            );
             for x in (rect.x as usize + 1)..(rect.x as usize + w.saturating_sub(1)) {
-                surface.draw_char(
-                    x,
-                    rect.y as usize + 2,
-                    '─',
-                    Style::new().fg(SHADOW).bg(PANEL),
-                );
+                surface.draw_char(x, rect.y as usize + 2, '─', Style::new().fg(MUTED).bg(BG));
             }
         }
         let action_hint = if action_count > 0 {
@@ -289,9 +233,9 @@ pub fn draw_tile(
             rect.y as usize + 1,
             &truncate(&label, w.saturating_sub(4)),
             if focused {
-                style_selected().bold()
+                Style::new().fg(ACCENT).bg(BG).bold()
             } else {
-                Style::new().fg(MUTED).bg(PANEL_2)
+                Style::new().fg(MUTED).bg(BG)
             },
         );
         if focused {
@@ -306,7 +250,7 @@ pub fn draw_tile(
             rect.x as usize + 1,
             footer_y,
             w.saturating_sub(2),
-            Style::new().fg(MUTED).bg(PANEL),
+            Style::new().fg(MUTED).bg(BG),
         );
         if let Some((provenance, affordances)) = footer {
             surface.draw_text(
@@ -374,7 +318,7 @@ fn draw_corner_marks(surface: &mut TextSurface, rect: Rect) {
     if w < 2 || h < 2 {
         return;
     }
-    let style = Style::new().fg(ACCENT).bg(PANEL).bold();
+    let style = Style::new().fg(ACCENT).bg(BG).bold();
     surface.draw_char(x, y, '╔', style);
     surface.draw_char(x + w - 1, y, '╗', style);
     surface.draw_char(x, y + h - 1, '╚', style);

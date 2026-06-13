@@ -597,6 +597,13 @@ impl StudioCore {
                 }
             }
         }
+        // A source param that references a facet which isn't set yet (e.g.
+        // the inspector's `@facet:selection.item` before anything is
+        // selected) resolves to null. There is nothing to fetch — skip
+        // rather than dispatch a null arg the op rejects (a 500).
+        if facet_param_unresolved(&source.params, &params) {
+            return None;
+        }
         Some(self.emit(StudioEffectKind::FetchSource {
             tile_id: source_key,
             source_ref: source.item_ref,
@@ -732,6 +739,19 @@ impl StudioCore {
     pub fn focused_input_buffer_mut(&mut self) -> Option<&mut StudioInputState> {
         let (key, _) = self.focused_input_instance()?;
         Some(self.ui.input_buffers.entry(key.storage_key()).or_default())
+    }
+}
+
+/// True when a source param that was an `@facet:` reference resolved to
+/// null — the facet isn't set, so the source has nothing to fetch.
+fn facet_param_unresolved(original: &serde_json::Value, resolved: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (original, resolved) {
+        (Value::Object(orig), Value::Object(res)) => orig
+            .iter()
+            .any(|(k, ov)| facet_param_unresolved(ov, res.get(k).unwrap_or(&Value::Null))),
+        (Value::String(s), rv) => s.starts_with("@facet:") && rv.is_null(),
+        _ => false,
     }
 }
 
