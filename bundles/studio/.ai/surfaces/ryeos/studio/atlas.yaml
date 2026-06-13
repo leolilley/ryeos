@@ -1,14 +1,23 @@
-# ryeos:signed:2026-06-11T22:51:46Z:7f83f775885ba966b6ed1d2c1eaab4664d92749274c270e93aa8bb0551dfb1f5:AcGNpxOX9kxvXOMmripsHymKTggXlxy4pTPXaH23wp+CL88KZpLyIrBS/s4pRTniPVx7LV58dXeUfihqh1BBDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T01:49:32Z:38c1cfb0800549c24887a82903e4a825bfb2d84d159c67abdb1a36c72ecbf6e1:GiuRnSKQ6jTIWLo5uSNErUbFfo1coSd+r50cgXHWvF0l91XZbguChJrGzvJ0AIqDwgx1GSq/Ypw6NrjZa30TDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-atlas
 version: "1.0.0"
 description: RyeOS Studio with a Three.js 2D namespace atlas background
 
-layout:
-  root: main
-  nodes:
-    main:
-      type: pane
-      view: graph
+tiling:
+  mode: master_stack
+  master: { side: right, arrange: vertical, ratio: 0.6, count: 1 }
+  stack: { arrange: horizontal }
+  insert: end
+
+tiles: []
+
+slots:
+  bottom: { content: input, open: true, size: 7 }
+  left: { content: "view:ryeos/threads/list", open: false, size: 32 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
 
 ambient:
   show_background: true

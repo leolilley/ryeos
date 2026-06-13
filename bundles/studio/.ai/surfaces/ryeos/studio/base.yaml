@@ -1,14 +1,23 @@
-# ryeos:signed:2026-06-11T22:51:46Z:8b3a5dc425f15be230116430a943f47182958bf52f445c0df38851b385a24e50:C+sVrOO+omSZwKPLIqIBGGAN2ncBJKgnTUWoufcFtqEc0O4Evw22igzQprkcmVu/YBmJrEj6VQy2PBFYkMPNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T01:49:32Z:1e6805e5cd30e2136ae835b1e9f4bd61c7e24756faf4882483cc72776c66f70b:G6NywONk2MLJ2LJsYaT/YsV6swoHU2N6sl95By/lc4dn7UcnrB/XcXxVpot6bQpNYtMvE+VwlOfdEYzs19UmBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
 
-layout:
-  root: home
-  nodes:
-    home:
-      type: pane
-      view: graph
+tiling:
+  mode: master_stack
+  master: { side: right, arrange: vertical, ratio: 0.6, count: 1 }
+  stack: { arrange: horizontal }
+  insert: end
+
+tiles: []
+
+slots:
+  bottom: { content: input, open: true, size: 7 }
+  left: { content: "view:ryeos/threads/list", open: false, size: 32 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
 
 home_view: view:ryeos/home/brand
 

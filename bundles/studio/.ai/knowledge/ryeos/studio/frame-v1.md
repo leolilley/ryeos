@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-12T04:03:16Z:35504d17578b4fa32ce5f7d15bd118d4aa7369bd169a1b1e189307f1249575d5:OZ007gYtrKVYWMPG9ZoQnrjT65PDCAAHXm06qPejVcFNp9HNsbIaHBPFnt6F1RK7pLMeoUQIj+hUMvUr0WLjCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-12T07:42:44Z:a9b2969fee1f6c8f2d999c4074dd63a67ed2b4fe41f88878d2a1a11b977d22ad:NWETknQTDKA8kKRF/WDOUQ3f3ide/nN+YP/l/x3EdFvAJGdiI+MW5YAYJ4V3FhPQ0eysOW3nho1pdShj0MNwBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/studio"
 name: "frame-v1"
@@ -38,7 +38,7 @@ source:
 projections:
   primary: <field path>
   meta: <field path>
-  tone: { field: <path>, map: {value: tone}, default: <tone> }
+  tone: { field: <path>, missing: <tone>, map: {value: tone}, default: <tone> }
   detail: [<field path>...]   # key_value
   event_kinds: { <event_type>: {primary,...} }   # timeline, per kind
   default: { ... }            # timeline fallback
@@ -54,7 +54,9 @@ refresh: { on_hint: <kind> | on_facet: <key> }
 ```
 
 Tones: `neutral | accent | good | warn | danger` (renderers map tone to
-palette; content never names colors).
+palette; content never names colors). A tone map's optional `missing` tone is
+used when the configured field is absent; `default` is used when the field is
+present but unmapped.
 
 Timeline projection blocks may also declare:
 
@@ -67,7 +69,9 @@ Roles are mechanism vocabulary only. Event-kind names stay in signed content:
 the engine knows how to fold `flow`, `boundary`, and pairs, but it never knows
 which runtime event kind means cognition, tool start, or tool result.
 
-- `flow` records merge with adjacent flow records into one prose block.
+- `flow` records merge with adjacent flow records into one prose block; if the
+  projected primary is absent, the record is skipped rather than rendered as raw
+  JSON so ephemeral replay deltas do not leak into durable UI state.
 - `boundary` records render as timeline separators.
 - `pair_open` records emit a pending collapsed pair under `pair_key`.
 - `pair_close` records with the same `pair_key` update the open pair in place.

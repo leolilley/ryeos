@@ -1,23 +1,24 @@
-# ryeos:signed:2026-06-11T22:51:46Z:019d4ed9d97773509309bec460d9908ed0ce388a2239c5c95b315babc50831a4:30265EtssMDMdvAsZGjBz5sg+rO3zDq5t/pgVnXuSlCN/3377kKj2j6V7lT3txf3QTpFqwQ1zwgJcAF1I2bZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T01:49:32Z:dafe4b48e66fab1ec7ebb777cdc12f0675668913e495a55e28e6f384cb014cf8:P8kgdJzlQWtTMK0OgVCTn7m9kRmgJ+vZgRpd6kaOIfEuFIOMuQ0Vu1cf7kn/qW8IZv1vYyK/fOYdXot4MI/CDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
 
-layout:
-  root: split
-  nodes:
-    split:
-      type: split
-      axis: horizontal
-      ratio: 0.65
-      first: main
-      second: side
-    main:
-      type: pane
-      view: graph
-    side:
-      type: pane
-      view: view:ryeos/threads/list
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.65, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - graph
+  - "view:ryeos/threads/list"
+
+slots:
+  bottom: { content: input, open: true, size: 7 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
 
 library:
   - view:ryeos/threads/list

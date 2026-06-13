@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-13T00:00:43Z:86be120588322f1268eef7413e008a3652caa62cb9bbeff6d86c3fbe2ae4721a:KZHpWbEXk6iKD/rQmUZYd5+58i7YCWgTtySj7m3kxKHZnqg8E3cq1dDQ7jcVZ/zV/J7JaBiC6Dq8zBuEx+x0DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat-open
+version: "1.0.0"
+description: Mint or attach the browser session's seat thread - the seat is itself a thread, braided and replayable
+endpoint: ui.seat.open
+availability: daemon_only
