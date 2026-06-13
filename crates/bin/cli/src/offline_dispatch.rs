@@ -487,9 +487,6 @@ fn exec_tool(
         .unwrap_or_default();
 
     envs.push(("RYEOS_APP_ROOT".to_string(), app_root.display().to_string()));
-    if std::env::var("RYEOS_BROWSER_INTEGRATION").as_deref() == Ok("1") {
-        envs.push(("RYEOS_BROWSER_INTEGRATION".to_string(), "1".to_string()));
-    }
 
     if inherit_stdio {
         return exec_inherited(

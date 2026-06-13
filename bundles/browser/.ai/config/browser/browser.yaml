@@ -1,10 +1,13 @@
-# ryeos:signed:2026-06-12T07:47:24Z:13520d9a6ec6f831e7102bb97e6af0e4a1274d5d127b86ac74800a8063693972:9jTHNIXw4YnyPsaS3+RtqAmWJyT1jWkg7RZA9NOYk+N8qLG+rJWp+xuLSTyT+eop6Y3STnNlsZ6BAb37nJbMBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T05:03:33Z:3c3f97ae3b182113a63a433a7feb0f8199eb815548f96c9a4700c9f04d46af04:W4g0TKsMRktTPHMLxQBSkbtTGmyXGadbC8pOzClIEBateZngRwa43YVDWmLtdBNwy2YM1jRKIwKOffjyGqzBDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Browser config — system defaults for tool:rye/browser/browser.
 # Override per-project at .ai/config/browser/browser.yaml.
-# Set RYEOS_BROWSER_INTEGRATION=1 to enable actual Node/Playwright execution.
+# Browser execution is disabled by default. Set enabled: true to run the
+# Node/Playwright runner; otherwise the tool only validates and reports
+# diagnostics.
 category: "browser"
 version: "1.0.0"
 schema_version: "1.0.0"
+enabled: false
 node_path: null
 playwright_package: "playwright"
 browser: "chromium"

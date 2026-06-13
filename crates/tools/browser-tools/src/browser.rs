@@ -51,6 +51,8 @@ enum BrowserAction {
 #[derive(Debug, Deserialize)]
 struct BrowserConfig {
     #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
     node_path: Option<String>,
     #[serde(default = "default_playwright_package")]
     playwright_package: String,
@@ -68,6 +70,7 @@ struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             node_path: None,
             playwright_package: default_playwright_package(),
             browser: default_browser(),
@@ -158,7 +161,7 @@ fn execute(params: BrowserParams) -> anyhow::Result<BrowserEnvelope> {
             ctx.diagnostics(),
         ));
     }
-    if !browser_integration_enabled() {
+    if !ctx.config.enabled {
         return Ok(envelope(
             false,
             action,
@@ -581,11 +584,8 @@ fn find_on_path(binary: &str) -> Option<String> {
     }
     None
 }
-fn browser_integration_enabled() -> bool {
-    env::var("RYEOS_BROWSER_INTEGRATION").is_ok_and(|value| value == "1")
-}
 fn integration_disabled_message() -> String {
-    "browser integration is disabled. Set RYEOS_BROWSER_INTEGRATION=1 to run the Node/Playwright runner; without it the signed Rust facade only validates inputs and reports diagnostics.".into()
+    "browser integration is disabled. Set enabled: true in .ai/config/browser/browser.yaml to run the Node/Playwright runner; without it the signed Rust facade only validates inputs and reports diagnostics.".into()
 }
 fn missing_dependency_message() -> String {
     "browser tool requires Node + Playwright. Configure .ai/config/browser/browser.yaml with node_path: /abs/path/to/node, or ensure node is on PATH and playwright is installed.".into()

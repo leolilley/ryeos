@@ -14,7 +14,6 @@ pub const BASE_ALLOWLIST_NAMES: &[&str] = &[
     "TMPDIR",
     "RUST_LOG",
     "RUST_BACKTRACE",
-    "RYEOS_BROWSER_INTEGRATION",
     "RYEOSD_TEST_STDERR_DIR",
     "HTTPS_PROXY",
     "HTTP_PROXY",
@@ -516,10 +515,7 @@ mod tests {
             map.get("https_proxy").map(String::as_str),
             Some("http://proxy")
         );
-        assert_eq!(
-            map.get("RYEOS_BROWSER_INTEGRATION").map(String::as_str),
-            Some("1")
-        );
+        assert!(!map.contains_key("RYEOS_BROWSER_INTEGRATION"));
         assert!(!map.contains_key("OPENAI_API_KEY"));
         assert!(!map.contains_key("RYEOSD_THREAD_AUTH_TOKEN"));
     }

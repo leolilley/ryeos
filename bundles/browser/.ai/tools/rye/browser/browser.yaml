@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-12T07:47:24Z:75b6dd9d89ac7b1ee1b2a940bc476097c236944d5863ecebb18c0023bd602f02:CRGAbU/hkC9aXVjvPlZ7CNjRg9jjW4pNcZlC3ysa8ownKd06QzZGjm8/Zh+34jy/8zxqxOQWvmGWGzh65cpDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T05:03:33Z:6a244f16064477c62fe705f69036f76d485736ff6cf429ef66880fe4077e457c:3rJ+JZvsPrcUZcofkBf5uh9RTKesLtCgLayLdULS15ehU2XFLjAER8IjKGjsV2EIbenfMdE5rTSviRUyWWSiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/browser"
 version: "1.0.0"
 tool_type: "subprocess"
 executor_id: "@subprocess"
-description: "Browser automation facade backed by Node and Playwright. Actual browser execution is gated by RYEOS_BROWSER_INTEGRATION=1; otherwise the tool validates inputs and returns diagnostics. Runtime defaults are read from .ai/config/browser/browser.yaml."
+description: "Browser automation facade backed by Node and Playwright. Browser execution is disabled by default and enabled via enabled: true in .ai/config/browser/browser.yaml; otherwise the tool validates inputs and returns diagnostics."
 
 config:
   command: "bin:ryeos-browser-tools"
