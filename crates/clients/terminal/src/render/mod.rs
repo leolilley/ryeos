@@ -103,6 +103,9 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
     }
 
     if vm.launcher.open {
+        // The overlay dims the whole frame behind it (a scrim), then draws
+        // the palette on top at full brightness.
+        primitives::dim_surface(&mut surface);
         launcher::draw_launcher(&mut surface, vm);
     }
 

@@ -25,6 +25,37 @@ pub fn fill_line(surface: &mut TextSurface, x: usize, y: usize, width: usize, st
     surface.fill_rect(x, y, x + width - 1, y, ' ', style);
 }
 
+/// Dim the entire surface toward the page background — the scrim behind an
+/// overlay. Each cell's colours are blended toward `BG` so content stays
+/// readable but recedes; the overlay then draws on top at full brightness.
+pub fn dim_surface(surface: &mut TextSurface) {
+    use ryeos_client_base::text_surface::Style;
+    for y in 0..surface.height {
+        for x in 0..surface.width {
+            let cell = surface.get(x, y);
+            let fg = dim_color(cell.fg, 0.62);
+            let bg = dim_color(cell.bg, 0.45);
+            let rune = if cell.rune == '\0' { ' ' } else { cell.rune };
+            surface.draw_char(x, y, rune, Style::new().fg(fg).bg(bg));
+        }
+    }
+}
+
+fn dim_color(
+    c: ryeos_client_base::text_surface::Color,
+    t: f32,
+) -> ryeos_client_base::text_surface::Color {
+    use super::theme::BG;
+    use ryeos_client_base::text_surface::Color;
+    match (c, BG) {
+        (Color::Rgb(r, g, b), Color::Rgb(br, bg_, bb)) => {
+            let mix = |c: u8, d: u8| ((c as f32) * (1.0 - t) + (d as f32) * t).round() as u8;
+            Color::Rgb(mix(r, br), mix(g, bg_), mix(b, bb))
+        }
+        _ => c,
+    }
+}
+
 pub fn draw_shadow(surface: &mut TextSurface, rect: Rect) {
     if rect.w < 2 || rect.h < 2 {
         return;
