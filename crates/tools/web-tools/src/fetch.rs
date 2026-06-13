@@ -1,5 +1,8 @@
+use std::env;
+use std::fs;
 use std::io::Read;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
@@ -7,7 +10,7 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use scraper::Html;
 use serde::{Deserialize, Serialize};
-use url::Url;
+use url::{Host, Url};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 50;
@@ -31,6 +34,19 @@ struct FetchParams {
     max_output_chars: Option<usize>,
     #[serde(default)]
     block_private_networks: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FetchConfig {
+    #[serde(default)]
+    allow_private_networks: bool,
+}
+impl Default for FetchConfig {
+    fn default() -> Self {
+        Self {
+            allow_private_networks: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -74,6 +90,7 @@ pub fn execute_json(raw: &str) -> anyhow::Result<FetchEnvelope> {
 
 fn execute(params: FetchParams) -> anyhow::Result<FetchEnvelope> {
     let initial_url = parse_http_url(&params.url)?;
+    let config = read_fetch_config()?;
     let timeout_secs = params
         .timeout_secs
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
@@ -87,7 +104,11 @@ fn execute(params: FetchParams) -> anyhow::Result<FetchEnvelope> {
         .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS)
         .clamp(1_000, MAX_MAX_OUTPUT_CHARS);
     let format = params.format.unwrap_or_default();
-    let block_private_networks = params.block_private_networks.unwrap_or(true);
+    let block_private_networks = if config.allow_private_networks {
+        params.block_private_networks.unwrap_or(true)
+    } else {
+        true
+    };
     let response = fetch_url(
         initial_url.clone(),
         Duration::from_secs(timeout_secs),
@@ -133,17 +154,9 @@ fn fetch_url(
     max_bytes: usize,
     block_private_networks: bool,
 ) -> anyhow::Result<FetchResponse> {
-    let client = Client::builder()
-        .timeout(timeout)
-        .redirect(Policy::none())
-        .user_agent(USER_AGENT)
-        .build()
-        .context("build HTTP client")?;
     let mut current = initial_url;
     for redirect_count in 0..=MAX_REDIRECTS {
-        if block_private_networks {
-            reject_private_target(&current)?;
-        }
+        let client = build_client(&current, timeout, block_private_networks)?;
         let mut response = client
             .get(current.clone())
             .send()
@@ -193,24 +206,53 @@ fn fetch_url(
     unreachable!()
 }
 
-fn reject_private_target(url: &Url) -> anyhow::Result<()> {
-    let host = url.host_str().ok_or_else(|| anyhow!("url has no host"))?;
+fn build_client(
+    url: &Url,
+    timeout: Duration,
+    block_private_networks: bool,
+) -> anyhow::Result<Client> {
+    let mut builder = Client::builder()
+        .timeout(timeout)
+        .redirect(Policy::none())
+        .user_agent(USER_AGENT);
+    if block_private_networks {
+        let (host, addrs) = checked_resolution(url)?;
+        if let Some(host) = host {
+            builder = builder.resolve_to_addrs(&host, &addrs);
+        }
+    }
+    builder.build().context("build HTTP client")
+}
+
+fn checked_resolution(url: &Url) -> anyhow::Result<(Option<String>, Vec<SocketAddr>)> {
+    let host = url.host().ok_or_else(|| anyhow!("url has no host"))?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| anyhow!("url has no port"))?;
-    for addr in (host, port)
-        .to_socket_addrs()
-        .with_context(|| format!("resolve {host}"))?
-    {
+    let (resolver_host, addrs) = match host {
+        Host::Domain(host) => {
+            let addrs = (host, port)
+                .to_socket_addrs()
+                .with_context(|| format!("resolve {host}"))?
+                .collect::<Vec<_>>();
+            (Some(host.to_string()), addrs)
+        }
+        Host::Ipv4(ip) => (None, vec![SocketAddr::new(IpAddr::V4(ip), port)]),
+        Host::Ipv6(ip) => (None, vec![SocketAddr::new(IpAddr::V6(ip), port)]),
+    };
+    if addrs.is_empty() {
+        anyhow::bail!("resolve {host}: no addresses");
+    }
+    for addr in &addrs {
         if is_private_ip(addr.ip()) {
             anyhow::bail!("target resolves to private or local address: {}", addr.ip());
         }
     }
-    Ok(())
+    Ok((resolver_host, addrs))
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
+    match ip.to_canonical() {
         IpAddr::V4(ip) => {
             ip.is_private()
                 || ip.is_loopback()
@@ -228,6 +270,28 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
+fn read_fetch_config() -> anyhow::Result<FetchConfig> {
+    let Some(path) = fetch_config_path()? else {
+        return Ok(FetchConfig::default());
+    };
+    if !path.exists() {
+        return Ok(FetchConfig::default());
+    }
+    serde_yaml::from_str(&fs::read_to_string(&path)?)
+        .with_context(|| format!("parse config {}", path.display()))
+}
+
+fn fetch_config_path() -> anyhow::Result<Option<PathBuf>> {
+    let Some(app_root) = env::var_os("RYEOS_APP_ROOT") else {
+        return Ok(None);
+    };
+    let app_root = PathBuf::from(app_root);
+    if !app_root.is_absolute() {
+        anyhow::bail!("RYEOS_APP_ROOT must be an absolute path");
+    }
+    Ok(Some(app_root.join(Path::new(".ai/config/web/fetch.yaml"))))
+}
+
 fn html_to_text(html: &str) -> String {
     let doc = Html::parse_document(html);
     doc.root_element()
@@ -242,36 +306,41 @@ fn html_to_text(html: &str) -> String {
 fn html_to_markdown(html: &str) -> String {
     let doc = Html::parse_document(html);
     let mut blocks = Vec::new();
-    for selector in ["h1", "h2", "h3", "p", "li"] {
-        let Ok(sel) = scraper::Selector::parse(selector) else {
+    let Ok(sel) = scraper::Selector::parse("h1, h2, h3, h4, h5, h6, p, li, pre") else {
+        return html_to_text(html);
+    };
+    for node in doc.select(&sel) {
+        let text = normalized_text(&node);
+        if text.is_empty() {
             continue;
-        };
-        for node in doc.select(&sel) {
-            let text = node
-                .text()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if text.is_empty() {
-                continue;
-            }
-            let block = match selector {
-                "h1" => format!("# {text}"),
-                "h2" => format!("## {text}"),
-                "h3" => format!("### {text}"),
-                "li" => format!("- {text}"),
-                _ => render_links(node.html()).unwrap_or(text),
-            };
-            blocks.push(block);
         }
+        let block = match node.value().name() {
+            "h1" => format!("# {text}"),
+            "h2" => format!("## {text}"),
+            "h3" => format!("### {text}"),
+            "h4" => format!("#### {text}"),
+            "h5" => format!("##### {text}"),
+            "h6" => format!("###### {text}"),
+            "li" => format!("- {text}"),
+            "pre" => format!("```\n{}\n```", node.text().collect::<Vec<_>>().join("")),
+            _ => render_links(node.html()).unwrap_or(text),
+        };
+        blocks.push(block);
     }
     if blocks.is_empty() {
         html_to_text(html)
     } else {
         blocks.join("\n\n")
     }
+}
+
+fn normalized_text(node: &scraper::ElementRef<'_>) -> String {
+    node.text()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn render_links(html: String) -> Option<String> {
@@ -329,6 +398,17 @@ mod tests {
         assert!(!md.contains("bad"));
     }
     #[test]
+    fn converts_html_to_markdown_in_document_order_with_code() {
+        let md = html_to_markdown(
+            r#"<html><body><h1>Title</h1><p>Intro</p><h4>Details</h4><pre><code>let x = 1;
+println!("{x}");</code></pre><p>Done</p><ul><li>Last</li></ul></body></html>"#,
+        );
+        assert_eq!(
+            md,
+            "# Title\n\nIntro\n\n#### Details\n\n```\nlet x = 1;\nprintln!(\"{x}\");\n```\n\nDone\n\n- Last"
+        );
+    }
+    #[test]
     fn truncates_by_chars() {
         let (out, truncated) = truncate_chars("abcdef", 3);
         assert_eq!(out, "abc\n... [output truncated]");
@@ -338,6 +418,16 @@ mod tests {
     fn blocks_private_ip_targets_when_enabled() {
         assert!(is_private_ip("127.0.0.1".parse().unwrap()));
         assert!(is_private_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:192.168.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_ipv6_mapped_url_literals() {
+        let url = parse_http_url("http://[::ffff:127.0.0.1]/").unwrap();
+        let err = checked_resolution(&url).unwrap_err();
+        assert!(err.to_string().contains("private or local address"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-12T07:47:24Z:cd3dccbe01a35509003e5ad04ac848e151e8ea844408a286a52c6a67e07b43e3:874I2BXQ97ZI8v72qexUbuugCmM/hkQqcLOrB728eSsmw0WAjJPBLwB11dNd0vQIyTN8DKe5kEt8CIyAJ6F7AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T00:32:34Z:3518a5eecee411d35b4b7636a207194b9607921beec0bda31aab5eef609baaa9:XrULY/HwhwJYm7qMdCHlWaiL8wot7UC1Sy4fYcx4vJzWtvIb8nLWsRwiZRsflAK+FNB+xWlI41xjvHajg5hZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
@@ -18,6 +18,7 @@ config_schema:
   properties:
     url:
       type: string
+      minLength: 1
       description: "HTTP(S) URL to fetch"
     format:
       type: string
@@ -41,4 +42,5 @@ config_schema:
     block_private_networks:
       type: boolean
       default: true
+      description: "May tighten fetch policy. Private/local targets remain blocked unless operator config allows opt-out."
   required: [url]
