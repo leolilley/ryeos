@@ -9,6 +9,29 @@ mod render_text;
 mod terminal;
 mod transport;
 
+/// Collect every `view:`-prefixed ref anywhere in the resolved surface
+/// value so each can be embedded. Skips the `views` map itself (it holds
+/// already-resolved bindings keyed by ref, not refs to resolve).
+fn collect_view_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) if s.starts_with("view:") => out.push(s.clone()),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_view_refs(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, v) in map {
+                if key == "views" {
+                    continue;
+                }
+                collect_view_refs(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn surface_diagnostic_message(diag: &ryeos_client_base::surface::SurfaceDiagnostic) -> &str {
     match diag {
         ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message }
@@ -111,40 +134,16 @@ fn main() {
                         .await
                     {
                         Ok(mut value) => {
-                            // Views-as-content: resolve every `view:` pane
-                            // ref through the same effective-item machinery
-                            // and embed the bindings — surfaces reference
-                            // views, they never define them.
-                            let mut view_refs: Vec<String> = value
-                                .get("layout")
-                                .and_then(|layout| layout.get("nodes"))
-                                .and_then(|nodes| nodes.as_object())
-                                .map(|nodes| {
-                                    nodes
-                                        .values()
-                                        .filter_map(|node| node.get("view"))
-                                        .filter_map(|view| view.as_str())
-                                        .filter(|view| view.starts_with("view:"))
-                                        .map(str::to_string)
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            if let Some(backdrop_ref) = value
-                                .get("backdrop")
-                                .and_then(|v| v.as_str())
-                                .filter(|v| v.starts_with("view:"))
-                            {
-                                view_refs.push(backdrop_ref.to_string());
-                            }
-                            if let Some(library) = value.get("library").and_then(|v| v.as_array()) {
-                                view_refs.extend(
-                                    library
-                                        .iter()
-                                        .filter_map(|v| v.as_str())
-                                        .filter(|v| v.starts_with("view:"))
-                                        .map(str::to_string),
-                                );
-                            }
+                            // Views-as-content: resolve every `view:` ref
+                            // appearing ANYWHERE in the surface — center
+                            // `tiles`, edge `slots`, `backdrop`, `library` —
+                            // through the same effective-item machinery and
+                            // embed the bindings. Surfaces reference views;
+                            // they never define them. Walking the whole value
+                            // keeps this correct as the surface schema grows.
+                            let mut view_refs: Vec<String> = Vec::new();
+                            collect_view_refs(&value, &mut view_refs);
+                            view_refs.sort();
                             view_refs.dedup();
                             for view_ref in view_refs {
                                 match client
@@ -158,7 +157,12 @@ fn main() {
                                             .get("composed_value")
                                             .cloned()
                                             .unwrap_or(binding);
-                                        value["views"][&view_ref] = composed;
+                                        // Embed INTO the composed surface:
+                                        // `from_daemon` parses the SurfaceSpec
+                                        // from `composed_value`, so the views
+                                        // map must live there, not as a
+                                        // sibling of it.
+                                        value["composed_value"]["views"][&view_ref] = composed;
                                     }
                                     Err(e) => {
                                         // Degrade: the pane renders the

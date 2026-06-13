@@ -785,6 +785,14 @@ fn bound_view_vm_keyed(
             message: format!("view {view_ref} is not embedded in the effective surface"),
         };
     };
+    // A binding that failed to parse/validate shows its reason, not its
+    // (absent) content — honest degrade, not a silent "not embedded".
+    if let Some(reason) = &binding.degraded {
+        return StudioViewVm::Placeholder {
+            title: view_ref.to_string(),
+            message: reason.clone(),
+        };
+    }
     let response = core.data.sources.get(source_key);
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
     match (binding.widget.as_str(), response) {

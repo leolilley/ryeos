@@ -41,14 +41,19 @@ impl TimelineRole {
 /// A resolved `view:` item, embedded in the effective surface at session
 /// time. Every view remains an addressable, overridable item; this is its
 /// composed value as the engine consumes it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ViewBinding {
     /// One of the closed widget primitives: rows | text | key_value |
     /// timeline | scene. Unknown widgets degrade (raw + provenance).
+    #[serde(default)]
     pub widget: String,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
+    /// The view's data source. Absent for sourceless views (e.g. a pure
+    /// input). The composer materializes `source: {}` for such views, so
+    /// an object without a non-empty `ref` is treated as absent here
+    /// rather than failing the whole binding.
+    #[serde(default, deserialize_with = "deserialize_optional_source")]
     pub source: Option<SourceBinding>,
     /// Static content for sourceless views (e.g. the home brand panel).
     /// Open JSON — projected by renderers, never typed per-view.
@@ -72,6 +77,43 @@ pub struct ViewBinding {
     /// The view item's canonical ref (provenance chrome).
     #[serde(default)]
     pub view_ref: Option<String>,
+    /// Set when this binding could not be parsed/validated from the
+    /// embedded surface. The renderer shows the reason instead of the
+    /// view — degrade honestly, never drop silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
+}
+
+/// Treat an absent / ref-less / null `source` as no source. The view
+/// composer emits `source: {}` for sourceless views; that empty mapping is
+/// fabricated structure, not a binding, and must not fail the whole view.
+fn deserialize_optional_source<'de, D>(deserializer: D) -> Result<Option<SourceBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let has_ref = value
+        .get("ref")
+        .and_then(Value::as_str)
+        .is_some_and(|r| !r.is_empty());
+    if !has_ref {
+        return Ok(None);
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+impl ViewBinding {
+    /// A visible error placeholder for a binding that failed to parse or
+    /// validate — so the renderer shows *why* instead of "not embedded".
+    fn degraded(view_ref: &str, reason: impl Into<String>) -> Self {
+        Self {
+            view_ref: Some(view_ref.to_string()),
+            degraded: Some(reason.into()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Row-activation binding. The view names which affordance row activation
@@ -583,16 +625,28 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
         return out;
     };
     for (view_ref, value) in views {
-        if let Ok(mut binding) = serde_json::from_value::<ViewBinding>(value.clone()) {
-            // One writer per source param: a `feeds.param` colliding with
-            // a declared source param is a parse error — drop the binding
-            // (fail closed) rather than silently letting two writers race.
-            if feeds_param_collision(&binding).is_some() {
-                continue;
+        // Degrade honestly: a binding that fails to parse or validate
+        // becomes a visible error placeholder carrying the reason — never
+        // a silent disappearance that surfaces as "not embedded".
+        let binding = match serde_json::from_value::<ViewBinding>(value.clone()) {
+            Ok(mut binding) => {
+                // One writer per source param: a `feeds.param` colliding
+                // with a declared source param fails closed, but visibly.
+                if let Some(param) = feeds_param_collision(&binding) {
+                    ViewBinding::degraded(
+                        view_ref,
+                        format!(
+                            "input feeds.param '{param}' collides with a declared source param"
+                        ),
+                    )
+                } else {
+                    binding.view_ref = Some(view_ref.clone());
+                    binding
+                }
             }
-            binding.view_ref = Some(view_ref.clone());
-            out.insert(view_ref.clone(), binding);
-        }
+            Err(e) => ViewBinding::degraded(view_ref, format!("invalid view binding: {e}")),
+        };
+        out.insert(view_ref.clone(), binding);
     }
     out
 }
@@ -613,6 +667,55 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn sourceless_view_with_empty_source_object_parses() {
+        // The view composer materializes `source: {}` for a view that
+        // declares no source (e.g. a pure input). It must parse to a
+        // binding with no source — NOT fail and vanish. This is the bug
+        // that hid the chat input behind "not embedded".
+        let views = json!({
+            "view:ryeos/input": {
+                "widget": "text",
+                "source": {},
+                "projections": {},
+                "refresh": {},
+                "input": { "id": "line", "submit": "route" }
+            }
+        });
+        let surface = json!({ "views": views });
+        let out = views_from_surface(Some(&surface));
+        let binding = out
+            .get("view:ryeos/input")
+            .expect("sourceless view must produce a binding, not be dropped");
+        assert!(binding.source.is_none(), "empty source object is no source");
+        assert!(
+            binding.degraded.is_none(),
+            "a sourceless view is not an error"
+        );
+        assert!(binding.input.is_some());
+    }
+
+    #[test]
+    fn unparseable_binding_degrades_visibly_not_silently() {
+        // A binding that cannot parse becomes a degraded placeholder
+        // carrying the reason — never a silent disappearance that the
+        // renderer reports as "not embedded".
+        let surface = json!({ "views": {
+            "view:ryeos/broken": { "widget": 12345 }  // widget must be a string
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out
+            .get("view:ryeos/broken")
+            .expect("a failed binding must still be present, degraded");
+        assert!(
+            binding
+                .degraded
+                .as_deref()
+                .is_some_and(|m| m.contains("invalid view binding")),
+            "degraded binding carries the parse reason"
+        );
     }
 
     #[test]
@@ -906,8 +1009,9 @@ mod tests {
 
     #[test]
     fn feeds_param_colliding_with_source_param_is_rejected() {
-        // `feeds.param` names a param the source already declares: parse
-        // error — the binding is dropped from the surface index.
+        // `feeds.param` names a param the source already declares: fails
+        // closed, but VISIBLY — the binding is present and degraded with
+        // the reason, never silently dropped.
         let surface = json!({
             "views": {
                 "view:filter/collide": {
@@ -923,14 +1027,18 @@ mod tests {
             }
         });
         let views = views_from_surface(Some(&surface));
+        let collide = views
+            .get("view:filter/collide")
+            .expect("colliding binding is present, degraded — not dropped");
         assert!(
-            !views.contains_key("view:filter/collide"),
-            "colliding feeds.param must be rejected"
+            collide
+                .degraded
+                .as_deref()
+                .is_some_and(|m| m.contains("feeds.param") && m.contains("collides")),
+            "the collision is reported as the degrade reason"
         );
-        assert!(
-            views.contains_key("view:filter/ok"),
-            "non-colliding feeds is accepted"
-        );
+        let ok = views.get("view:filter/ok").expect("non-colliding accepted");
+        assert!(ok.degraded.is_none(), "non-colliding feeds is healthy");
     }
 
     #[test]
