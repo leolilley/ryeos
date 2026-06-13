@@ -20,6 +20,8 @@ projections:
       cancelled: warn
       completed: good
     default: neutral
+selection:
+  activate: inspect
 affordances:
   - id: inspect
     label: Inspect
@@ -27,20 +29,20 @@ affordances:
       plane: ui
       facet: selection
       value:
-        thread: "{thread_id}"
+        thread: "{record.thread_id}"
   - id: aim-input
     label: Aim input here
     invoke:
       plane: ui
       facet: input.route
       merge:
-        thread: "{thread_id}"
+        thread: "{record.thread_id}"
   - id: cancel
     label: Cancel
     invoke:
       plane: rye
       tokens: [thread, cancel]
       args:
-        thread_id: "{thread_id}"
+        thread_id: "{record.thread_id}"
 refresh:
   on_hint: thread

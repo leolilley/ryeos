@@ -68,21 +68,19 @@ function dockTile(dockVm, dispatchUi) {
   tile.__dockSize = dockVm.size;
   const chrome = el("header", "studio-dock-chrome");
   chrome.append(textEl("strong", dockVm.title || edge), textEl("small", edge));
-  tile.append(chrome, dockView(dockVm.view || {}, dispatchUi));
+  tile.append(chrome, dockView(dockVm, dispatchUi));
   return tile;
 }
 
-function dockView(viewVm, dispatchUi) {
+// A view instance that declares `input` renders as the prompt (input is an
+// orthogonal capability, not a dock-content variant). Otherwise the bound
+// widget renders.
+function dockView(instanceVm, dispatchUi) {
   const body = el("div", "studio-dock-body");
-  switch (viewVm.type) {
-    case "input":
-      body.append(inputDock(viewVm, dispatchUi));
-      break;
-    case "view":
-      body.append(view(viewVm.view || {}, "", dispatchUi));
-      break;
-    default:
-      body.append(textEl("p", "Unknown dock view."));
+  if (instanceVm.input) {
+    body.append(inputDock(instanceVm.input, dispatchUi));
+  } else {
+    body.append(view(instanceVm.view || {}, dispatchUi));
   }
   return body;
 }
@@ -124,6 +122,16 @@ function inputDock(inputVm, dispatchUi) {
   submit.addEventListener("click", () => dispatchUi({ type: "submit_input" }));
   row.append(prompt, input, submit);
   wrap.append(meta, row);
+
+  // Completion suggestions from the input's `completion` source.
+  const suggestions = inputVm.completion || [];
+  if (suggestions.length) {
+    const completion = el("div", "studio-input-completion");
+    for (const suggestion of suggestions) {
+      completion.append(textEl("small", suggestion, "studio-input-suggestion"));
+    }
+    wrap.append(completion);
+  }
   return wrap;
 }
 
@@ -160,7 +168,12 @@ function layoutNode(node, dispatchUi, motion = []) {
   });
   const chrome = el("header", "studio-tile-chrome");
   chrome.append(textEl("strong", node.title || "tile"), textEl("small", node.tile_id || ""));
-  tile.append(chrome, view(node.view || {}, node.tile_id || "", dispatchUi), viewFooter(node.view || {}));
+  // A tile whose view declares `input` renders as the prompt.
+  if (node.input) {
+    tile.append(chrome, inputDock(node.input, dispatchUi));
+  } else {
+    tile.append(chrome, view(node.view || {}, dispatchUi), viewFooter(node.view || {}));
+  }
   return tile;
 }
 
@@ -173,7 +186,7 @@ function motionForTile(node, motion) {
   return "";
 }
 
-function view(viewVm, tileId, dispatchUi) {
+function view(viewVm, dispatchUi) {
   const body = el("div", "studio-tile-body");
   switch (viewVm.type) {
     case "map":
@@ -183,7 +196,7 @@ function view(viewVm, tileId, dispatchUi) {
       body.append(atlasTile(viewVm.scene, dispatchUi));
       break;
     case "rows":
-      body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], tileId, "rows", dispatchUi));
+      body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], "rows", dispatchUi));
       break;
     case "timeline":
       body.append(timeline(viewVm));
@@ -436,7 +449,7 @@ function atlasItemVisible(atlas, item) {
   return true;
 }
 
-function rows(items, tileId, kind, dispatchUi) {
+function rows(items, kind, dispatchUi) {
   const list = el("div", `studio-rows lf ${kind || "rows"}`);
   items.forEach((item, index) => {
     const row = el("button", `studio-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);

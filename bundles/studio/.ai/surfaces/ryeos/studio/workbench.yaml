@@ -14,7 +14,7 @@ tiles:
   - "view:ryeos/threads/list"
 
 slots:
-  bottom: { content: input, open: true, size: 7 }
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
   right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 
 style:

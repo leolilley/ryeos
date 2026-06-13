@@ -4,7 +4,7 @@
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::{
-    StudioDockTileVm, StudioDockViewVm, StudioViewModel, StudioViewVm,
+    StudioDockTileVm, StudioInputVm, StudioViewModel, StudioViewVm,
 };
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
 
@@ -160,54 +160,54 @@ fn draw_dock_tile(
         rect.w.saturating_sub(2),
         rect.h.saturating_sub(2),
     );
+    // An instance that declares `input` renders as the prompt (any widget
+    // may carry a prompt — input is an orthogonal capability).
+    if let Some(input) = dock.input.as_ref() {
+        draw_input_dock(surface, inner, input);
+        return;
+    }
     draw_dock_view(surface, inner, &dock.view);
 }
 
-fn draw_dock_view(surface: &mut TextSurface, rect: Rect, view: &StudioDockViewVm) {
-    if let StudioDockViewVm::Input(input) = view {
-        draw_input_dock(surface, rect, input);
-        return;
-    }
+fn draw_dock_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
     let lines = match view {
-        StudioDockViewVm::Input(_) => unreachable!("input docks return above"),
-        StudioDockViewVm::View(view) => match view {
-            StudioViewVm::Rows { title, rows, .. } => {
-                let mut lines = vec![title.clone()];
-                for row in rows.iter().take(rect.h.saturating_sub(2) as usize) {
-                    lines.push(format!(
-                        "{} {} {}",
-                        if row.selected { "▶" } else { " " },
-                        row.primary,
-                        row.meta.clone().unwrap_or_default()
-                    ));
-                }
-                lines
+        StudioViewVm::Rows { title, rows, .. } => {
+            let mut lines = vec![title.clone()];
+            for row in rows.iter().take(rect.h.saturating_sub(2) as usize) {
+                lines.push(format!(
+                    "{} {} {}",
+                    if row.selected { "▶" } else { " " },
+                    row.primary,
+                    row.meta.clone().unwrap_or_default()
+                ));
             }
-            StudioViewVm::Timeline { title, entries, .. } => {
-                surface.draw_text(
-                    rect.x as usize,
-                    rect.y as usize,
-                    &truncate(title, rect.w as usize),
-                    style_muted(),
+            lines
+        }
+        StudioViewVm::Timeline { title, entries, .. } => {
+            surface.draw_text(
+                rect.x as usize,
+                rect.y as usize,
+                &truncate(title, rect.w as usize),
+                style_muted(),
+            );
+            if rect.h > 1 {
+                widgets::timeline::draw_timeline(
+                    surface,
+                    Rect::new(rect.x, rect.y + 1, rect.w, rect.h.saturating_sub(1)),
+                    entries,
                 );
-                if rect.h > 1 {
-                    widgets::timeline::draw_timeline(
-                        surface,
-                        Rect::new(rect.x, rect.y + 1, rect.w, rect.h.saturating_sub(1)),
-                        entries,
-                    );
-                }
-                return;
             }
-            StudioViewVm::Placeholder { title, message } => {
-                vec![title.clone(), message.clone()]
-            }
-            _ => vec!["unsupported dock view".to_string()],
-        },
+            return;
+        }
+        StudioViewVm::Placeholder { title, message } => {
+            vec![title.clone(), message.clone()]
+        }
+        _ => vec!["unsupported dock view".to_string()],
     };
     draw_lines(surface, rect, &lines);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_tile(
     surface: &mut TextSurface,
     rect: Rect,
@@ -216,6 +216,7 @@ pub fn draw_tile(
     title: &str,
     action_count: usize,
     view: &StudioViewVm,
+    input: Option<&StudioInputVm>,
     border: Option<Border>,
 ) {
     let w = rect.w as usize;
@@ -321,6 +322,11 @@ pub fn draw_tile(
             rect.h.saturating_sub(2),
         )
     };
+    // An instance that declares `input` renders as the prompt.
+    if let Some(input) = input {
+        draw_input_dock(surface, inner, input);
+        return;
+    }
     super::draw_view(surface, inner, view);
 }
 

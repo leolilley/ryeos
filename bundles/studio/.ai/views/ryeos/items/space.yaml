@@ -18,6 +18,8 @@ projections:
       trusted: good
       untrusted: danger
     default: neutral
+selection:
+  activate: inspect
 affordances:
   - id: inspect
     label: Inspect
@@ -25,4 +27,4 @@ affordances:
       plane: ui
       facet: selection
       value:
-        item: "{canonical_ref}"
+        item: "{record.canonical_ref}"

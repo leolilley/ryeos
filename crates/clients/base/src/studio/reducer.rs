@@ -171,33 +171,39 @@ impl StudioCore {
                 Vec::new()
             }
             StudioUiEvent::InsertInputChar { ch } => {
-                if !self.input_surface_visible() {
+                let Some(buffer) = self.focused_input_buffer_mut() else {
                     return Vec::new();
-                }
-                self.ui.input.insert_char(ch);
+                };
+                buffer.insert_char(ch);
                 self.bump_generation();
-                Vec::new()
+                self.effects_for_focused_feeds()
             }
             StudioUiEvent::DeleteInputChar => {
-                if !self.input_surface_visible() {
+                let Some(buffer) = self.focused_input_buffer_mut() else {
                     return Vec::new();
-                }
-                self.ui.input.delete_before_cursor();
+                };
+                buffer.delete_before_cursor();
                 self.bump_generation();
-                Vec::new()
+                self.effects_for_focused_feeds()
             }
             StudioUiEvent::SetInputText { text, cursor } => {
-                if !self.input_surface_visible() {
+                let Some(buffer) = self.focused_input_buffer_mut() else {
                     return Vec::new();
-                }
-                self.ui.input.set_text(text, cursor);
+                };
+                buffer.set_text(text, cursor);
                 self.bump_generation();
-                Vec::new()
+                self.effects_for_focused_feeds()
             }
             StudioUiEvent::CompleteInput => {
-                if !self.input_surface_visible() {
+                let Some((key, _)) = self.focused_input_instance() else {
                     return Vec::new();
-                }
+                };
+                let buffer = self
+                    .ui
+                    .input_buffers
+                    .get(&key.storage_key())
+                    .cloned()
+                    .unwrap_or_default();
                 let Some(records) =
                     self.data.commands.as_ref().and_then(|data| {
                         data.get("commands").and_then(serde_json::Value::as_array)
@@ -205,106 +211,17 @@ impl StudioCore {
                 else {
                     return Vec::new();
                 };
-                if let Some((text, cursor)) = super::tokenize::accept_slash_completion(
-                    records,
-                    &self.ui.input.text,
-                    self.ui.input.cursor,
-                ) {
-                    self.ui.input.set_text(text, cursor);
-                    self.bump_generation();
+                if let Some((text, cursor)) =
+                    super::tokenize::accept_slash_completion(records, &buffer.text, buffer.cursor)
+                {
+                    if let Some(buffer) = self.focused_input_buffer_mut() {
+                        buffer.set_text(text, cursor);
+                        self.bump_generation();
+                    }
                 }
                 Vec::new()
             }
-            StudioUiEvent::SubmitInput => {
-                if !self.input_surface_visible() {
-                    return Vec::new();
-                }
-                let text = self.ui.input.text.trim().to_string();
-                if text.is_empty() {
-                    self.notice("Input is empty.", StudioTone::Warn);
-                    return Vec::new();
-                }
-                if self.is_read_only() {
-                    self.notice("This session is read-only.", StudioTone::Warn);
-                    return Vec::new();
-                }
-                let line = match super::tokenize::classify_line(&text) {
-                    Ok(line) => line,
-                    Err(error) => {
-                        self.notice(format!("Input parse error: {error}"), StudioTone::Warn);
-                        return Vec::new();
-                    }
-                };
-                match line {
-                    super::tokenize::InputLine::SlashEmpty => {
-                        self.notice(
-                            "Type command tokens after / (e.g. /thread list).",
-                            StudioTone::Neutral,
-                        );
-                        Vec::new()
-                    }
-                    super::tokenize::InputLine::Slash(tokens) => {
-                        // Explicit grammar: tokens resolve + bind
-                        // daemon-side (one invocation path for all
-                        // clients). Slash bypasses the pinned route —
-                        // explicit tokens win; no implicit thread/site.
-                        vec![self.emit(StudioEffectKind::Invoke {
-                            target: super::effect::InvokeRef::Tokens { tokens },
-                            params: serde_json::json!({}),
-                            route_seq: None,
-                        })]
-                    }
-                    super::tokenize::InputLine::Plain(plain) => {
-                        let fold = self.seat.fold();
-                        let route = fold.input_route();
-                        let route_seq = fold.seq_of(super::seat::KEY_INPUT_ROUTE);
-                        let Some(invoke) = route.invoke.clone() else {
-                            self.notice(
-                                "Input has no target — the surface declares no route.",
-                                StudioTone::Warn,
-                            );
-                            return Vec::new();
-                        };
-                        match invoke {
-                            super::seat::InvokeTemplate::Service { item_ref } => {
-                                // Ground verb: text bound whole to the
-                                // service's declared input, never split.
-                                let mut params = if route.params.is_object() {
-                                    route.params.clone()
-                                } else {
-                                    serde_json::json!({})
-                                };
-                                params["input"] = serde_json::Value::String(plain);
-                                if let Some(thread) = &route.thread {
-                                    params["thread"] = serde_json::Value::String(thread.clone());
-                                }
-                                vec![self.emit(StudioEffectKind::Invoke {
-                                    target: super::effect::InvokeRef::Ref { item_ref },
-                                    params,
-                                    route_seq,
-                                })]
-                            }
-                            super::seat::InvokeTemplate::Command { mut tokens } => {
-                                tokens.push(plain);
-                                vec![self.emit(StudioEffectKind::Invoke {
-                                    target: super::effect::InvokeRef::Tokens { tokens },
-                                    params: serde_json::json!({}),
-                                    route_seq,
-                                })]
-                            }
-                            super::seat::InvokeTemplate::UiFacet { key } => {
-                                let seq = self
-                                    .seat
-                                    .append_facet(key, serde_json::Value::String(plain));
-                                let _ = seq;
-                                self.ui.input.clear();
-                                self.bump_generation();
-                                Vec::new()
-                            }
-                        }
-                    }
-                }
-            }
+            StudioUiEvent::SubmitInput => self.submit_focused_input(),
             StudioUiEvent::MoveLauncherSelection { delta } => {
                 let len = filtered_launcher_items(self).len();
                 if len > 0 {
@@ -430,12 +347,8 @@ impl StudioCore {
                 };
                 slot.visible = !slot.visible;
                 let shown_view = if slot.visible {
-                    match &slot.content {
-                        super::model::StudioDockContent::View { view_ref } => {
-                            Some(view_ref.clone())
-                        }
-                        _ => None,
-                    }
+                    let super::model::StudioDockContent::View { view_ref } = &slot.content;
+                    Some(view_ref.clone())
                 } else {
                     None
                 };
@@ -596,8 +509,212 @@ impl StudioCore {
         })
     }
 
-    pub(crate) fn input_surface_visible(&self) -> bool {
-        self.ui.docks.has_visible_input()
+    /// Refetch the focused instance's source when its input declares
+    /// `feeds` (the buffer is a writer of one source param). Debounce is a
+    /// renderer/transport concern; the reducer emits the refetch and the
+    /// binding carries `debounce_ms` for the renderer to honour.
+    fn effects_for_focused_feeds(&mut self) -> Vec<StudioEffect> {
+        let Some((key, view_ref)) = self.focused_input_instance() else {
+            return Vec::new();
+        };
+        let feeds = self
+            .views
+            .get(&view_ref)
+            .and_then(|binding| binding.input.as_ref())
+            .and_then(|input| input.feeds.as_ref())
+            .is_some();
+        if !feeds {
+            return Vec::new();
+        }
+        self.emit_fetch_source_keyed(key.view_instance_id.clone(), &view_ref)
+            .into_iter()
+            .collect()
+    }
+
+    /// Submit the focused instance's input buffer. Three modes: `feeds`
+    /// (no submit — buffer is live), `submit: <affordance>` (fire it with
+    /// `{value}`), `submit: route` (the engine route-fold: classification
+    /// + route_seq + ratchet, unchanged).
+    fn submit_focused_input(&mut self) -> Vec<StudioEffect> {
+        let Some((key, view_ref)) = self.focused_input_instance() else {
+            return Vec::new();
+        };
+        let Some(input) = self
+            .views
+            .get(&view_ref)
+            .and_then(|binding| binding.input.clone())
+        else {
+            return Vec::new();
+        };
+        // `feeds`-only inputs have no submit — Enter does nothing durable.
+        if input.submit.is_none() {
+            return Vec::new();
+        }
+        let text = self
+            .ui
+            .input_buffers
+            .get(&key.storage_key())
+            .map(|buffer| buffer.text.trim().to_string())
+            .unwrap_or_default();
+        if text.is_empty() {
+            self.notice("Input is empty.", StudioTone::Warn);
+            return Vec::new();
+        }
+
+        if let Some(affordance_id) = input.submit_affordance() {
+            // Mode 2: Enter fires a content affordance with `{value}`.
+            if self.is_read_only() {
+                self.notice("This session is read-only.", StudioTone::Warn);
+                return Vec::new();
+            }
+            return self.invoke_input_affordance(&view_ref, affordance_id, &text);
+        }
+
+        // Mode 3: `submit: route` — the existing engine route-fold.
+        debug_assert!(input.submits_to_route());
+        self.submit_route(&text)
+    }
+
+    /// `submit: route` — classify the line and dispatch through the engine
+    /// route-fold. Behaviour (slash/plain, route_seq, read-only/empty) is
+    /// unchanged; it is now reached through the `input` grammar instead of
+    /// the deleted Input dock special-case.
+    fn submit_route(&mut self, text: &str) -> Vec<StudioEffect> {
+        if self.is_read_only() {
+            self.notice("This session is read-only.", StudioTone::Warn);
+            return Vec::new();
+        }
+        let line = match super::tokenize::classify_line(text) {
+            Ok(line) => line,
+            Err(error) => {
+                self.notice(format!("Input parse error: {error}"), StudioTone::Warn);
+                return Vec::new();
+            }
+        };
+        match line {
+            super::tokenize::InputLine::SlashEmpty => {
+                self.notice(
+                    "Type command tokens after / (e.g. /thread list).",
+                    StudioTone::Neutral,
+                );
+                Vec::new()
+            }
+            super::tokenize::InputLine::Slash(tokens) => {
+                // Explicit grammar: tokens resolve + bind daemon-side (one
+                // invocation path for all clients). Slash bypasses the
+                // pinned route — explicit tokens win; no implicit
+                // thread/site.
+                vec![self.emit(StudioEffectKind::Invoke {
+                    target: super::effect::InvokeRef::Tokens { tokens },
+                    params: serde_json::json!({}),
+                    route_seq: None,
+                })]
+            }
+            super::tokenize::InputLine::Plain(plain) => {
+                let fold = self.seat.fold();
+                let route = fold.input_route();
+                let route_seq = fold.seq_of(super::seat::KEY_INPUT_ROUTE);
+                let Some(invoke) = route.invoke.clone() else {
+                    self.notice(
+                        "Input has no target — the surface declares no route.",
+                        StudioTone::Warn,
+                    );
+                    return Vec::new();
+                };
+                match invoke {
+                    super::seat::InvokeTemplate::Service { item_ref } => {
+                        // Ground verb: text bound whole to the service's
+                        // declared input, never split.
+                        let mut params = if route.params.is_object() {
+                            route.params.clone()
+                        } else {
+                            serde_json::json!({})
+                        };
+                        params["input"] = serde_json::Value::String(plain);
+                        if let Some(thread) = &route.thread {
+                            params["thread"] = serde_json::Value::String(thread.clone());
+                        }
+                        vec![self.emit(StudioEffectKind::Invoke {
+                            target: super::effect::InvokeRef::Ref { item_ref },
+                            params,
+                            route_seq,
+                        })]
+                    }
+                    super::seat::InvokeTemplate::Command { mut tokens } => {
+                        tokens.push(plain);
+                        vec![self.emit(StudioEffectKind::Invoke {
+                            target: super::effect::InvokeRef::Tokens { tokens },
+                            params: serde_json::json!({}),
+                            route_seq,
+                        })]
+                    }
+                    super::seat::InvokeTemplate::UiFacet { key } => {
+                        self.seat
+                            .append_facet(key, serde_json::Value::String(plain));
+                        self.clear_focused_input();
+                        self.bump_generation();
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fire a content affordance bound to `input.submit` with the buffer
+    /// text as the `{value}` payload (the input producer namespace).
+    fn invoke_input_affordance(
+        &mut self,
+        view_ref: &str,
+        affordance_id: &str,
+        value: &str,
+    ) -> Vec<StudioEffect> {
+        let Some(binding) = self.views.get(view_ref) else {
+            return Vec::new();
+        };
+        let Some(affordance) = binding
+            .affordances
+            .iter()
+            .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id))
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let payload = super::content::Payload::Input(value);
+        match super::content::resolve_affordance_invoke(
+            &affordance,
+            super::content::Producer::Input,
+            &payload,
+        ) {
+            Some(super::content::AffordanceInvoke::Ui {
+                facet,
+                value,
+                merge,
+            }) => {
+                let effects = self.apply_ui_affordance(facet, value, merge);
+                self.clear_focused_input();
+                effects
+            }
+            Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
+                vec![self.emit(StudioEffectKind::Invoke {
+                    target: super::effect::InvokeRef::Tokens { tokens },
+                    params: args,
+                    route_seq: None,
+                })]
+            }
+            None => {
+                self.notice(
+                    "Input affordance cannot be supplied by {value}.",
+                    StudioTone::Warn,
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn clear_focused_input(&mut self) {
+        if let Some(buffer) = self.focused_input_buffer_mut() {
+            buffer.clear();
+        }
     }
 
     fn set_tile_filter(
@@ -813,34 +930,19 @@ impl StudioCore {
         else {
             return Vec::new();
         };
-        match super::content::resolve_affordance_invoke(&affordance, record) {
+        // Row activation is the `selection` producer: affordances read
+        // `{record.<field>}`. Validation is binding-time (fails closed).
+        let payload = super::content::Payload::Selection(record);
+        match super::content::resolve_affordance_invoke(
+            &affordance,
+            super::content::Producer::Selection,
+            &payload,
+        ) {
             Some(super::content::AffordanceInvoke::Ui {
                 facet,
                 value,
                 merge,
-            }) => {
-                let next = if let Some(merge) = merge {
-                    let mut current = self
-                        .seat
-                        .fold()
-                        .get(&facet)
-                        .cloned()
-                        .unwrap_or(serde_json::json!({}));
-                    if let (Some(target), Some(patch)) =
-                        (current.as_object_mut(), merge.as_object())
-                    {
-                        for (key, val) in patch {
-                            target.insert(key.clone(), val.clone());
-                        }
-                    }
-                    current
-                } else {
-                    value.unwrap_or(serde_json::Value::Null)
-                };
-                self.seat.append_facet(facet.clone(), next);
-                self.bump_generation();
-                self.effects_for_facet(&facet)
-            }
+            }) => self.apply_ui_affordance(facet, value, merge),
             Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
@@ -850,6 +952,36 @@ impl StudioCore {
             }
             None => Vec::new(),
         }
+    }
+
+    /// Apply a resolved Ui-plane affordance: write the seat facet (value
+    /// replaces; merge folds into the existing value) and refetch every
+    /// binding subscribed to that facet.
+    fn apply_ui_affordance(
+        &mut self,
+        facet: String,
+        value: Option<serde_json::Value>,
+        merge: Option<serde_json::Value>,
+    ) -> Vec<StudioEffect> {
+        let next = if let Some(merge) = merge {
+            let mut current = self
+                .seat
+                .fold()
+                .get(&facet)
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            if let (Some(target), Some(patch)) = (current.as_object_mut(), merge.as_object()) {
+                for (key, val) in patch {
+                    target.insert(key.clone(), val.clone());
+                }
+            }
+            current
+        } else {
+            value.unwrap_or(serde_json::Value::Null)
+        };
+        self.seat.append_facet(facet.clone(), next);
+        self.bump_generation();
+        self.effects_for_facet(&facet)
     }
 
     /// Facet write arrived: refetch every bound tile whose binding
@@ -980,7 +1112,7 @@ impl StudioCore {
                         );
                         return Vec::new();
                     }
-                    self.ui.input.clear();
+                    self.clear_focused_input();
                     let thread_id = data
                         .get("thread_id")
                         .and_then(serde_json::Value::as_str)
@@ -1585,7 +1717,7 @@ mod tests {
                     "invoke": {
                         "plane": "ui",
                         "facet": "selection",
-                        "value": { "item": "{canonical_ref}" }
+                        "value": { "item": "{record.canonical_ref}" }
                     }
                 }]
             }),
@@ -1644,7 +1776,7 @@ mod tests {
                     "invoke": {
                         "plane": "rye",
                         "tokens": ["thread", "cancel"],
-                        "args": { "thread_id": "{thread_id}" }
+                        "args": { "thread_id": "{record.thread_id}" }
                     }
                 }]
             }),
@@ -1692,7 +1824,7 @@ mod tests {
                     "invoke": {
                         "plane": "ui",
                         "facet": "input.route",
-                        "merge": { "thread": "{thread_id}" }
+                        "merge": { "thread": "{record.thread_id}" }
                     }
                 }]
             }),
@@ -1997,10 +2129,9 @@ mod tests {
 
         let vm = build_view_model(&core);
         let dock = vm.workspace.docks.left.expect("left dock");
+        assert!(dock.input.is_none(), "a rows view declares no input");
         match dock.view {
-            crate::studio::view_model::StudioDockViewVm::View(
-                crate::studio::view_model::StudioViewVm::Rows { rows, .. },
-            ) => {
+            crate::studio::view_model::StudioViewVm::Rows { rows, .. } => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].primary, "T-running");
                 assert_eq!(rows[0].meta.as_deref(), Some("directive:demo/chat"));
@@ -2185,7 +2316,37 @@ mod tests {
         ));
     }
 
+    /// Seed the `view:ryeos/input` chat box (`submit: route`) so the
+    /// bottom slot instance owns input.
+    fn seed_input_view(core: &mut StudioCore) {
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route",
+                           "completion": { "ref": "service:commands/list", "collection": "commands" } }
+            }))
+            .unwrap(),
+        );
+    }
+
+    /// Write the focused input instance's transient buffer.
+    fn set_focused_input(core: &mut StudioCore, text: &str) {
+        let len = text.len();
+        core.focused_input_buffer_mut()
+            .expect("an input instance is focused")
+            .set_text(text.to_string(), len);
+    }
+
+    /// Read the focused input instance's buffer text.
+    fn focused_input_text(core: &StudioCore) -> String {
+        core.focused_input_buffer()
+            .map(|buffer| buffer.text.clone())
+            .unwrap_or_default()
+    }
+
     fn seed_service_route(core: &mut StudioCore) {
+        seed_input_view(core);
         core.seat.append_facet(
             crate::studio::seat::KEY_INPUT_ROUTE,
             serde_json::json!({
@@ -2199,7 +2360,7 @@ mod tests {
     fn writable_input_submit_emits_invoke_with_text_bound_whole() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        core.ui.input.set_text("  run this  ".to_string(), 12);
+        set_focused_input(&mut core, "  run this  ");
 
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::SubmitInput,
@@ -2217,33 +2378,38 @@ mod tests {
                 && params["directive"] == "directive:demo/base"
         ));
         // Buffer survives until delivery succeeds.
-        assert_eq!(core.ui.input.text, "  run this  ");
+        assert_eq!(focused_input_text(&core), "  run this  ");
     }
 
     #[test]
     fn complete_input_accepts_top_slash_candidate() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core);
         core.data.commands = Some(serde_json::json!({
             "commands": [
                 { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
                 { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread", "arguments": [{ "name": "thread_id" }] }
             ]
         }));
-        core.ui.input.set_text("/thr".to_string(), 4);
+        set_focused_input(&mut core, "/thr");
 
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::CompleteInput,
         });
 
         assert!(effects.is_empty());
-        assert_eq!(core.ui.input.text, "/thread ");
-        assert_eq!(core.ui.input.cursor, "/thread ".len());
+        assert_eq!(focused_input_text(&core), "/thread ");
+        assert_eq!(
+            core.focused_input_buffer().unwrap().cursor,
+            "/thread ".len()
+        );
     }
 
     #[test]
     fn submit_without_route_warns_and_emits_nothing() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-        core.ui.input.set_text("hello".to_string(), 5);
+        seed_input_view(&mut core);
+        set_focused_input(&mut core, "hello");
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::SubmitInput,
         });
@@ -2259,7 +2425,7 @@ mod tests {
     fn input_submit_launched_clears_buffer_and_ratchets_route() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        core.ui.input.set_text("run this".to_string(), 8);
+        set_focused_input(&mut core, "run this");
         let effect = core
             .dispatch(StudioEvent::Ui {
                 event: StudioUiEvent::SubmitInput,
@@ -2283,7 +2449,7 @@ mod tests {
         assert!(followups
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
-        assert!(core.ui.input.text.is_empty());
+        assert!(focused_input_text(&core).is_empty());
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread.as_deref(), Some("T-9"));
         // Pinned invocation survives the ratchet.
@@ -2294,7 +2460,7 @@ mod tests {
     fn stale_invoke_result_never_retargets_newer_route() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        core.ui.input.set_text("first".to_string(), 5);
+        set_focused_input(&mut core, "first");
         let effect = core
             .dispatch(StudioEvent::Ui {
                 event: StudioUiEvent::SubmitInput,
@@ -2332,7 +2498,7 @@ mod tests {
     fn refused_delivery_keeps_buffer() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        core.ui.input.set_text("hold on".to_string(), 7);
+        set_focused_input(&mut core, "hold on");
         let effect = core
             .dispatch(StudioEvent::Ui {
                 event: StudioUiEvent::SubmitInput,
@@ -2354,12 +2520,183 @@ mod tests {
         });
 
         assert!(followups.is_empty());
-        assert_eq!(core.ui.input.text, "hold on");
+        assert_eq!(focused_input_text(&core), "hold on");
         assert!(core
             .ui
             .notices
             .last()
             .is_some_and(|notice| notice.message.contains("refused")));
+    }
+
+    /// Seed a filtered-list view (`feeds` -> source param) into a focused
+    /// center tile and return the tile id string (buffer instance id).
+    fn seed_filter_tile(core: &mut StudioCore) -> String {
+        seed_view_value(
+            core,
+            "view:test/filter",
+            serde_json::json!({
+                "widget": "rows",
+                "source": { "ref": "service:test/items", "params": { "limit": 50 }, "collection": "items" },
+                "input": { "id": "q", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec::Bound {
+            view_ref: "view:test/filter".to_string(),
+        });
+        core.workspace.focused_tile = tile_id;
+        tile_id.0.to_string()
+    }
+
+    #[test]
+    fn feeds_input_drives_its_source_param() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let tile_id = seed_filter_tile(&mut core);
+        // The focused tile declares `input.feeds`, so it owns input.
+        assert!(core.has_focused_input());
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetInputText {
+                text: "wid".to_string(),
+                cursor: 3,
+            },
+        });
+
+        // Editing a feeds buffer refetches the source with the buffer text
+        // injected into the named param.
+        let fetch = effects.iter().find_map(|effect| match &effect.kind {
+            StudioEffectKind::FetchSource {
+                tile_id: fetched,
+                source_ref,
+                params,
+            } => Some((fetched.clone(), source_ref.clone(), params.clone())),
+            _ => None,
+        });
+        let (fetched, source_ref, params) = fetch.expect("feeds edit refetches source");
+        assert_eq!(fetched, tile_id);
+        assert_eq!(source_ref, "service:test/items");
+        assert_eq!(params["query"], "wid");
+        assert_eq!(params["limit"], 50);
+    }
+
+    #[test]
+    fn feeds_input_has_no_submit_and_allows_read_only() {
+        // `feeds` works in a read-only session (no durable write); Enter
+        // does nothing.
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        seed_filter_tile(&mut core);
+        let edit = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InsertInputChar { ch: 'x' },
+        });
+        assert!(
+            edit.iter()
+                .any(|e| matches!(e.kind, StudioEffectKind::FetchSource { .. })),
+            "feeds refetch is allowed read-only"
+        );
+        let submit = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInput,
+        });
+        assert!(submit.is_empty());
+        // No read-only notice: a feeds input has no submit to block.
+        assert!(core.ui.notices.is_empty());
+    }
+
+    #[test]
+    fn submit_affordance_fires_with_value_payload() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/palette",
+            serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "run" },
+                "affordances": [{
+                    "id": "run",
+                    "invoke": { "plane": "rye", "tokens": ["thread", "input"], "args": { "line": "{value}" } }
+                }]
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec::Bound {
+            view_ref: "view:test/palette".to_string(),
+        });
+        core.workspace.focused_tile = tile_id;
+        set_focused_input(&mut core, "do the thing");
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInput,
+        });
+
+        assert!(matches!(
+            effects.first().map(|effect| &effect.kind),
+            Some(StudioEffectKind::Invoke {
+                target: super::super::effect::InvokeRef::Tokens { tokens },
+                params,
+                route_seq: None,
+            }) if tokens == &vec!["thread".to_string(), "input".to_string()]
+                && params["line"] == "do the thing"
+        ));
+    }
+
+    #[test]
+    fn submit_affordance_blocked_when_read_only() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/palette",
+            serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "run" },
+                "affordances": [{
+                    "id": "run",
+                    "invoke": { "plane": "rye", "tokens": ["x"], "args": { "line": "{value}" } }
+                }]
+            }),
+        );
+        let tile_id = core.workspace.add_tile(ViewSpec::Bound {
+            view_ref: "view:test/palette".to_string(),
+        });
+        core.workspace.focused_tile = tile_id;
+        set_focused_input(&mut core, "blocked");
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInput,
+        });
+        assert!(effects.is_empty());
+        assert!(core
+            .ui
+            .notices
+            .last()
+            .is_some_and(|notice| notice.message.contains("read-only")));
+    }
+
+    #[test]
+    fn duplicate_view_instances_have_independent_buffers() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/filter",
+            serde_json::json!({
+                "widget": "rows",
+                "source": { "ref": "service:test/items", "params": {}, "collection": "items" },
+                "input": { "id": "q", "feeds": { "param": "query" } }
+            }),
+        );
+        let first = core.workspace.add_tile(ViewSpec::Bound {
+            view_ref: "view:test/filter".to_string(),
+        });
+        let second = core.workspace.add_tile(ViewSpec::Bound {
+            view_ref: "view:test/filter".to_string(),
+        });
+        assert_ne!(first, second);
+
+        core.workspace.focused_tile = first;
+        set_focused_input(&mut core, "first-buffer");
+        core.workspace.focused_tile = second;
+        set_focused_input(&mut core, "second-buffer");
+
+        // The same `view:` rendered twice keeps independent buffers.
+        core.workspace.focused_tile = first;
+        assert_eq!(focused_input_text(&core), "first-buffer");
+        core.workspace.focused_tile = second;
+        assert_eq!(focused_input_text(&core), "second-buffer");
     }
 
     #[test]

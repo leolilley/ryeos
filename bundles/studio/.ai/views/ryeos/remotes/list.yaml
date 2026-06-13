@@ -17,6 +17,8 @@ projections:
       ok: good
       error: danger
     default: neutral
+selection:
+  activate: aim-site
 affordances:
   - id: aim-site
     label: Aim input at site
@@ -24,4 +26,4 @@ affordances:
       plane: ui
       facet: input.route
       merge:
-        site: "{name}"
+        site: "{record.name}"

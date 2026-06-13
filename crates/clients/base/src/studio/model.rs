@@ -146,6 +146,41 @@ fn clamp_to_char_boundary(value: &str, cursor: usize) -> usize {
     cursor
 }
 
+/// Layout-neutral key for a transient input buffer. The buffer belongs to
+/// a view instance, not to a placement: the same `view:` rendered twice
+/// (two tiles, a tile and a slot) has independent buffer state. The
+/// `view_instance_id` is a layout address (`tile.<id>`, `slot.bottom`),
+/// not a semantic category.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct InputBufferKey {
+    pub view_instance_id: String,
+    pub view_ref: String,
+    pub input_id: String,
+}
+
+impl InputBufferKey {
+    pub fn new(
+        view_instance_id: impl Into<String>,
+        view_ref: impl Into<String>,
+        input_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            view_instance_id: view_instance_id.into(),
+            view_ref: view_ref.into(),
+            input_id: input_id.into(),
+        }
+    }
+
+    /// Stable string key for the buffer map (JSON map keys must be
+    /// strings). The three components are NUL-joined so they never collide.
+    pub fn storage_key(&self) -> String {
+        format!(
+            "{}\u{1f}{}\u{1f}{}",
+            self.view_instance_id, self.view_ref, self.input_id
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StudioDockEdge {
@@ -168,7 +203,6 @@ impl StudioDockSlotState {
             visible: slot.open,
             size: slot.size,
             content: match &slot.content {
-                SlotContentSpec::Input => StudioDockContent::Input,
                 SlotContentSpec::View(view_ref) => StudioDockContent::View {
                     view_ref: view_ref.clone(),
                 },
@@ -180,10 +214,10 @@ impl StudioDockSlotState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioDockContent {
-    /// The input chrome (engine widget, never content-targetable).
-    Input,
-    /// A content-bound view in a dock slot — docks are tiles with an
-    /// edge; the same bindings render in both.
+    /// A content-bound view in a slot — slots are view instances with an
+    /// edge placement; the same bindings render in slots and tiles. Input
+    /// is no longer a slot variant: it is a view that declares an `input`
+    /// block (e.g. `view:ryeos/input` in the bottom slot).
     View { view_ref: String },
 }
 
@@ -233,11 +267,21 @@ impl StudioDockState {
         }
     }
 
-    pub fn has_visible_input(&self) -> bool {
-        [&self.top, &self.bottom, &self.left, &self.right]
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .any(|slot| slot.visible && matches!(slot.content, StudioDockContent::Input))
+    /// Visible slots, paired with their edge and bound view ref.
+    pub fn visible_slot_views(&self) -> Vec<(StudioDockEdge, String)> {
+        [
+            (StudioDockEdge::Top, &self.top),
+            (StudioDockEdge::Bottom, &self.bottom),
+            (StudioDockEdge::Left, &self.left),
+            (StudioDockEdge::Right, &self.right),
+        ]
+        .into_iter()
+        .filter_map(|(edge, slot)| slot.as_ref().map(|slot| (edge, slot)))
+        .filter(|(_, slot)| slot.visible)
+        .map(|(edge, slot)| match &slot.content {
+            StudioDockContent::View { view_ref } => (edge, view_ref.clone()),
+        })
+        .collect()
     }
 }
 
@@ -246,8 +290,12 @@ pub struct StudioUiState {
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
+    /// Transient input buffers, keyed layout-neutrally by
+    /// `InputBufferKey::storage_key()`. A buffer belongs to a view
+    /// instance, not a placement; the same view rendered twice has
+    /// independent buffers. Ephemera — never braided.
     #[serde(default)]
-    pub input: StudioInputState,
+    pub input_buffers: BTreeMap<String, StudioInputState>,
     #[serde(default)]
     pub docks: StudioDockState,
     #[serde(default)]
@@ -268,7 +316,7 @@ impl Default for StudioUiState {
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
             launcher: StudioLauncherState::default(),
-            input: StudioInputState::default(),
+            input_buffers: BTreeMap::new(),
             docks: StudioDockState::default(),
             atlas: AtlasUiStateVm::default(),
             motion: Vec::new(),
@@ -509,8 +557,10 @@ impl StudioCore {
         self.emit_fetch_source_keyed(tile_id.0.to_string(), view_ref)
     }
 
-    /// Keyed variant: docks and other non-tile hosts subscribe with
-    /// stable string keys (e.g. `dock:left`).
+    /// Keyed variant: slots and other non-tile hosts subscribe with
+    /// stable string keys (e.g. `dock:left`). The same key addresses the
+    /// instance's transient input buffer: a view declaring `input.feeds`
+    /// injects its buffer text into the named source param before fetch.
     pub fn emit_fetch_source_keyed(
         &mut self,
         source_key: String,
@@ -519,7 +569,29 @@ impl StudioCore {
         let binding = self.views.get(view_ref)?;
         let source = binding.source.clone()?;
         let fold = self.seat.fold();
-        let params = super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
+        let mut params =
+            super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
+        // LIVE filter: the buffer is a writer of one source param.
+        if let Some(feeds) = binding
+            .input
+            .as_ref()
+            .and_then(|input| input.feeds.as_ref())
+        {
+            if let Some(input_id) = binding.input.as_ref().map(|input| input.id.clone()) {
+                let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
+                let text = self
+                    .ui
+                    .input_buffers
+                    .get(&key.storage_key())
+                    .map(|buffer| buffer.text.clone())
+                    .unwrap_or_default();
+                if let Some(object) = params.as_object_mut() {
+                    object.insert(feeds.param.clone(), serde_json::Value::String(text));
+                } else {
+                    params = serde_json::json!({ feeds.param.clone(): text });
+                }
+            }
+        }
         Some(self.emit(StudioEffectKind::FetchSource {
             tile_id: source_key,
             source_ref: source.item_ref,
@@ -527,22 +599,22 @@ impl StudioCore {
         }))
     }
 
-    /// Visible content-bound dock slots, keyed for source fetches.
+    /// Visible content-bound slot views, keyed for source fetches.
     pub fn visible_dock_views(&self) -> Vec<(String, String)> {
-        [
-            ("dock:top", &self.ui.docks.top),
-            ("dock:bottom", &self.ui.docks.bottom),
-            ("dock:left", &self.ui.docks.left),
-            ("dock:right", &self.ui.docks.right),
-        ]
-        .into_iter()
-        .filter_map(|(key, slot)| slot.as_ref().map(|slot| (key, slot)))
-        .filter(|(_, slot)| slot.visible)
-        .filter_map(|(key, slot)| match &slot.content {
-            StudioDockContent::View { view_ref } => Some((key.to_string(), view_ref.clone())),
-            _ => None,
-        })
-        .collect()
+        self.ui
+            .docks
+            .visible_slot_views()
+            .into_iter()
+            .map(|(edge, view_ref)| (dock_source_key(edge), view_ref))
+            .collect()
+    }
+
+    /// Does the instance addressed by `instance_id`/`view_ref` declare an
+    /// input buffer? (Layout-neutral — slots and tiles answer the same.)
+    pub fn instance_declares_input(&self, view_ref: &str) -> bool {
+        self.views
+            .get(view_ref)
+            .is_some_and(|binding| binding.input.is_some())
     }
 
     fn surface_uses_atlas_ambient(&self) -> bool {
@@ -595,6 +667,80 @@ impl StudioCore {
             })
             .collect()
     }
+
+    /// The view instance that currently owns input, if any. Input follows
+    /// the focused view instance: the focused center tile if it declares
+    /// `input`, otherwise a visible slot that declares `input` (bottom
+    /// first — initial focus is a frame policy, not an input-special
+    /// placement). Returns the buffer key and the resolved view ref.
+    pub fn focused_input_instance(&self) -> Option<(InputBufferKey, String)> {
+        // Focused center tile first.
+        let focused = self.workspace.focused_tile;
+        if let Some(ViewSpec::Bound { view_ref }) =
+            self.workspace.tiles.get(&focused).map(|tile| &tile.view)
+        {
+            if let Some(input) = self.views.get(view_ref).and_then(|b| b.input.as_ref()) {
+                return Some((
+                    InputBufferKey::new(focused.0.to_string(), view_ref.clone(), input.id.clone()),
+                    view_ref.clone(),
+                ));
+            }
+        }
+        // Then visible slots, bottom-first as initial-focus frame policy.
+        for (edge, view_ref) in self.ordered_slot_views() {
+            if let Some(input) = self.views.get(&view_ref).and_then(|b| b.input.as_ref()) {
+                return Some((
+                    InputBufferKey::new(dock_source_key(edge), view_ref.clone(), input.id.clone()),
+                    view_ref,
+                ));
+            }
+        }
+        None
+    }
+
+    fn ordered_slot_views(&self) -> Vec<(StudioDockEdge, String)> {
+        let mut slots = self.ui.docks.visible_slot_views();
+        // Bottom is the conventional initial input focus; sort it first.
+        slots.sort_by_key(|(edge, _)| match edge {
+            StudioDockEdge::Bottom => 0,
+            StudioDockEdge::Left => 1,
+            StudioDockEdge::Right => 2,
+            StudioDockEdge::Top => 3,
+        });
+        slots
+    }
+
+    /// Whether any focused view instance owns input (printable keys edit a
+    /// buffer rather than falling through to the keymap).
+    pub fn has_focused_input(&self) -> bool {
+        self.focused_input_instance().is_some()
+    }
+
+    /// Read-only access to the focused instance's input buffer.
+    pub fn focused_input_buffer(&self) -> Option<&StudioInputState> {
+        let (key, _) = self.focused_input_instance()?;
+        self.ui.input_buffers.get(&key.storage_key())
+    }
+
+    /// Mutable access to the focused instance's input buffer, creating it
+    /// on first edit.
+    pub fn focused_input_buffer_mut(&mut self) -> Option<&mut StudioInputState> {
+        let (key, _) = self.focused_input_instance()?;
+        Some(self.ui.input_buffers.entry(key.storage_key()).or_default())
+    }
+}
+
+/// Stable source-fetch key for a slot edge (also the buffer instance id).
+pub fn dock_source_key(edge: StudioDockEdge) -> String {
+    format!(
+        "dock:{}",
+        match edge {
+            StudioDockEdge::Top => "top",
+            StudioDockEdge::Bottom => "bottom",
+            StudioDockEdge::Left => "left",
+            StudioDockEdge::Right => "right",
+        }
+    )
 }
 
 impl Default for StudioCore {
@@ -678,7 +824,12 @@ mod tests {
         let bottom = docks.bottom.as_ref().expect("bottom slot");
         assert!(bottom.visible);
         assert_eq!(bottom.size, 7);
-        assert_eq!(bottom.content, StudioDockContent::Input);
+        // The bottom input is now a view (`view:ryeos/input`), not a slot
+        // literal. Slot content is uniformly a bound view ref.
+        assert!(matches!(
+            &bottom.content,
+            StudioDockContent::View { view_ref } if view_ref == "view:ryeos/input"
+        ));
         let left = docks.left.as_ref().expect("left slot");
         assert!(!left.visible);
         assert_eq!(left.size, 32);
@@ -693,21 +844,34 @@ mod tests {
             &right.content,
             StudioDockContent::View { view_ref } if view_ref == "view:ryeos/item/inspector"
         ));
-        assert!(docks.has_visible_input());
+    }
+
+    /// Seed a `view:ryeos/input` binding (chat box: route-fold submit).
+    fn with_input_view(core: &mut StudioCore) {
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+            }))
+            .unwrap(),
+        );
     }
 
     #[test]
-    fn studio_docks_detect_input_on_any_visible_edge() {
-        let mut docks = StudioDockState::default();
-        docks.bottom.as_mut().unwrap().visible = false;
-        assert!(!docks.has_visible_input());
-
-        docks.top = Some(StudioDockSlotState {
-            visible: true,
-            size: 4,
-            content: StudioDockContent::Input,
-        });
-        assert!(docks.has_visible_input());
+    fn input_follows_focused_view_instance() {
+        let mut core = StudioCore::default();
+        // No input view embedded yet: no instance owns input.
+        assert!(!core.has_focused_input());
+        with_input_view(&mut core);
+        // The visible bottom slot binds the input view -> it owns input.
+        let (key, view_ref) = core.focused_input_instance().expect("bottom owns input");
+        assert_eq!(view_ref, "view:ryeos/input");
+        assert_eq!(key.view_instance_id, "dock:bottom");
+        assert_eq!(key.input_id, "line");
+        // Hiding the slot removes the instance: focus falls through.
+        core.ui.docks.bottom.as_mut().unwrap().visible = false;
+        assert!(!core.has_focused_input());
     }
 
     #[test]
@@ -717,7 +881,7 @@ mod tests {
                 "name": "custom-slots",
                 "slots": {
                     "left": { "content": "view:custom/list", "open": true, "size": 20 },
-                    "bottom": { "content": "input", "open": false, "size": 5 }
+                    "bottom": { "content": "view:ryeos/input", "open": false, "size": 5 }
                 },
                 "style": { "border": "thick" }
             })),
@@ -743,7 +907,8 @@ mod tests {
 
     #[test]
     fn studio_core_vm_exposes_default_input_dock() {
-        let core = StudioCore::default();
+        let mut core = StudioCore::default();
+        with_input_view(&mut core);
         let vm = super::super::view_model::build_view_model(&core);
         assert!(vm.workspace.docks.bottom.is_some());
         assert!(vm.workspace.docks.top.is_none());
@@ -754,15 +919,16 @@ mod tests {
     #[test]
     fn hidden_input_ignores_stale_input_events() {
         let mut core = StudioCore::default();
+        with_input_view(&mut core);
         core.ui.docks.bottom.as_mut().unwrap().visible = false;
 
         let effects = core.dispatch(super::super::event::StudioEvent::Ui {
             event: super::super::event::StudioUiEvent::InsertInputChar { ch: 'x' },
         });
         assert!(effects.is_empty());
-        assert!(core.ui.input.text.is_empty());
+        assert!(core.focused_input_buffer().is_none());
 
-        core.ui.input.set_text("run this".to_string(), 8);
+        // No focused input instance: submit is a no-op.
         let effects = core.dispatch(super::super::event::StudioEvent::Ui {
             event: super::super::event::StudioUiEvent::SubmitInput,
         });
@@ -773,13 +939,16 @@ mod tests {
     #[test]
     fn visible_input_submit_respects_read_only_default() {
         let mut core = StudioCore::default();
-        core.ui.input.set_text("run this".to_string(), 8);
+        with_input_view(&mut core);
+        core.focused_input_buffer_mut()
+            .unwrap()
+            .set_text("run this".to_string(), 8);
         let effects = core.dispatch(super::super::event::StudioEvent::Ui {
             event: super::super::event::StudioUiEvent::SubmitInput,
         });
         assert!(effects.is_empty());
         assert_eq!(core.ui.notices.len(), 1);
         assert_eq!(core.ui.notices[0].message, "This session is read-only.");
-        assert_eq!(core.ui.input.text, "run this");
+        assert_eq!(core.focused_input_buffer().unwrap().text, "run this");
     }
 }

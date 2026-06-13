@@ -56,6 +56,15 @@ pub struct ViewBinding {
     pub body: Value,
     #[serde(default)]
     pub projections: Value,
+    /// Row-activation binding intrinsic to the `rows` widget:
+    /// `selection.activate: <affordance_id>`. Explicit — there is no
+    /// implicit "first affordance" activation.
+    #[serde(default)]
+    pub selection: Option<SelectionBinding>,
+    /// The one new optional capability: a singular transient input buffer
+    /// (one per view; there is no `inputs:` list).
+    #[serde(default)]
+    pub input: Option<InputBlock>,
     #[serde(default)]
     pub affordances: Vec<Value>,
     #[serde(default)]
@@ -63,6 +72,71 @@ pub struct ViewBinding {
     /// The view item's canonical ref (provenance chrome).
     #[serde(default)]
     pub view_ref: Option<String>,
+}
+
+/// Row-activation binding. The view names which affordance row activation
+/// fires; that affordance reads `{record.<field>}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectionBinding {
+    pub activate: String,
+}
+
+/// A singular transient input buffer declared on a view binding. Not a
+/// facet, not a widget — a place keystrokes accumulate, view-local.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputBlock {
+    /// Unique within the view (instance keying).
+    pub id: String,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    /// Optional author label for the prompt's target strip; else derived
+    /// from the bound submit target.
+    #[serde(default)]
+    pub target_label: Option<String>,
+    /// LIVE: the buffer is a param to THIS view's own source.
+    #[serde(default)]
+    pub feeds: Option<InputFeeds>,
+    /// Optional suggestion source (rows over a service).
+    #[serde(default)]
+    pub completion: Option<InputCompletion>,
+    /// Enter behaviour: an affordance id, or the reserved `route` value.
+    #[serde(default)]
+    pub submit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputFeeds {
+    pub param: String,
+    #[serde(default)]
+    pub debounce_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputCompletion {
+    #[serde(rename = "ref")]
+    pub item_ref: String,
+    #[serde(default)]
+    pub collection: Option<String>,
+}
+
+/// The reserved `submit:` value meaning "dispatch through the engine's
+/// existing route-fold" (the chat box).
+pub const SUBMIT_ROUTE: &str = "route";
+
+impl InputBlock {
+    /// Whether `submit:` names the reserved engine route-fold path.
+    pub fn submits_to_route(&self) -> bool {
+        self.submit.as_deref() == Some(SUBMIT_ROUTE)
+    }
+
+    /// The affordance id `submit:` fires, if it is a content affordance
+    /// (not the reserved `route` value, not absent).
+    pub fn submit_affordance(&self) -> Option<&str> {
+        match self.submit.as_deref() {
+            Some(SUBMIT_ROUTE) | None => None,
+            Some(id) => Some(id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -297,32 +371,151 @@ fn compact_value(value: &Value) -> String {
     }
 }
 
-/// Substitute whole-string `{field}` placeholders in a template value
-/// from a row's raw record. Single-field substitution only — no
-/// expressions, no interpolation inside larger strings, no logic;
+/// A payload producer: what fires an affordance binding. Validation and
+/// substitution are namespaced by producer, never on the affordance alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Producer {
+    /// Row selection — supplies `{record.<field>}` from the row's record.
+    Selection,
+    /// An input buffer submit — supplies `{value}` (the buffer text).
+    Input,
+}
+
+impl Producer {
+    fn namespace(self) -> &'static str {
+        match self {
+            Producer::Selection => "record",
+            Producer::Input => "value",
+        }
+    }
+
+    /// Whether this producer can supply the namespaced placeholder name
+    /// (`record.<field>` or `value`).
+    fn supplies(self, placeholder: &str) -> bool {
+        match self {
+            Producer::Selection => placeholder
+                .strip_prefix("record.")
+                .is_some_and(|rest| !rest.is_empty()),
+            Producer::Input => placeholder == "value",
+        }
+    }
+}
+
+/// One produced payload, the source of a substitution. `Selection` carries
+/// the row's raw record (read as `{record.<field>}`); `Input` carries the
+/// buffer text (read as `{value}`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Payload<'a> {
+    Selection(&'a Value),
+    Input(&'a str),
+}
+
+impl Payload<'_> {
+    /// Resolve a namespaced placeholder name into a value, or Null if the
+    /// producer cannot supply it.
+    fn resolve(&self, placeholder: &str) -> Value {
+        match self {
+            Payload::Selection(record) => placeholder
+                .strip_prefix("record.")
+                .and_then(|field| field_path(record, field).cloned())
+                .unwrap_or(Value::Null),
+            Payload::Input(text) => {
+                if placeholder == "value" {
+                    Value::String((*text).to_string())
+                } else {
+                    Value::Null
+                }
+            }
+        }
+    }
+}
+
+/// Substitute whole-string namespaced `{record.<field>}` / `{value}`
+/// placeholders in a template value from a produced payload. Single-field
+/// substitution only — no interpolation inside larger strings, no logic;
 /// anything richer belongs in the source service.
-pub fn substitute_fields(template: &Value, record: &Value) -> Value {
+pub fn substitute_payload(template: &Value, payload: &Payload) -> Value {
     match template {
         Value::String(s) => {
-            if let Some(field) = s.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')) {
-                field_path(record, field).cloned().unwrap_or(Value::Null)
+            if let Some(name) = s.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')) {
+                payload.resolve(name)
             } else {
                 template.clone()
             }
         }
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), substitute_fields(v, record)))
+                .map(|(k, v)| (k.clone(), substitute_payload(v, payload)))
                 .collect(),
         ),
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|v| substitute_fields(v, record)).collect())
-        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| substitute_payload(v, payload))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
 
-/// A parsed affordance invocation — the closed grammar bound rows can
+/// Validate, at binding resolution, that every placeholder an affordance
+/// reads can be supplied by the producer firing it. Fails closed: an
+/// unsuppliable placeholder returns Err. `@facet:` refs are not
+/// placeholders and are ignored (resolved against the seat fold).
+pub fn validate_affordance_placeholders(
+    affordance: &Value,
+    producer: Producer,
+) -> Result<(), String> {
+    let mut bad: Option<String> = None;
+    if let Some(invoke) = affordance.get("invoke") {
+        for field in ["value", "merge", "args"] {
+            if let Some(target) = invoke.get(field) {
+                visit_placeholders(target, &mut |placeholder| {
+                    if bad.is_none() && !producer.supplies(placeholder) {
+                        bad = Some(placeholder.to_string());
+                    }
+                });
+            }
+        }
+    }
+    match bad {
+        Some(placeholder) => Err(format!(
+            "placeholder {{{placeholder}}} cannot be supplied by the `{}` producer",
+            producer.namespace()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Walk a template value, invoking `f` with each whole-string `{…}`
+/// placeholder name (braces stripped). `@facet:` strings are not
+/// placeholders and are skipped.
+fn visit_placeholders(template: &Value, f: &mut dyn FnMut(&str)) {
+    match template {
+        Value::String(s) => {
+            if let Some(name) = s.strip_prefix('{').and_then(|rest| rest.strip_suffix('}')) {
+                f(name);
+            }
+        }
+        Value::Object(map) => map.values().for_each(|v| visit_placeholders(v, f)),
+        Value::Array(items) => items.iter().for_each(|v| visit_placeholders(v, f)),
+        _ => {}
+    }
+}
+
+/// Parse error: `input.feeds.param` names a source param the source
+/// already declares. One writer per source param.
+pub fn feeds_param_collision(binding: &ViewBinding) -> Option<String> {
+    let feeds = binding.input.as_ref()?.feeds.as_ref()?;
+    let source = binding.source.as_ref()?;
+    let declares = source
+        .params
+        .as_object()
+        .is_some_and(|params| params.contains_key(&feeds.param));
+    declares.then(|| feeds.param.clone())
+}
+
+/// A parsed affordance invocation — the closed grammar bound producers can
 /// trigger. `Ui` writes a seat facet (value replaces, merge folds into
 /// the existing facet value); `Rye` dispatches command tokens through
 /// the one daemon path.
@@ -339,19 +532,28 @@ pub enum AffordanceInvoke {
     },
 }
 
-/// Parse an affordance's `invoke` block, substituting row fields.
-/// Unknown planes degrade to None (never crash a renderer).
-pub fn resolve_affordance_invoke(affordance: &Value, record: &Value) -> Option<AffordanceInvoke> {
+/// Parse an affordance's `invoke` block, substituting namespaced
+/// placeholders from the produced payload. Validation runs at binding
+/// resolution: an affordance whose placeholders the producer cannot supply
+/// resolves to None (fails closed). Unknown planes also degrade to None.
+pub fn resolve_affordance_invoke(
+    affordance: &Value,
+    producer: Producer,
+    payload: &Payload,
+) -> Option<AffordanceInvoke> {
+    if validate_affordance_placeholders(affordance, producer).is_err() {
+        return None;
+    }
     let invoke = affordance.get("invoke")?;
     match invoke.get("plane").and_then(Value::as_str)? {
         "ui" => Some(AffordanceInvoke::Ui {
             facet: invoke.get("facet").and_then(Value::as_str)?.to_string(),
             value: invoke
                 .get("value")
-                .map(|value| substitute_fields(value, record)),
+                .map(|value| substitute_payload(value, payload)),
             merge: invoke
                 .get("merge")
-                .map(|merge| substitute_fields(merge, record)),
+                .map(|merge| substitute_payload(merge, payload)),
         }),
         "rye" => Some(AffordanceInvoke::Rye {
             tokens: invoke
@@ -363,7 +565,7 @@ pub fn resolve_affordance_invoke(affordance: &Value, record: &Value) -> Option<A
                 .collect(),
             args: invoke
                 .get("args")
-                .map(|args| substitute_fields(args, record))
+                .map(|args| substitute_payload(args, payload))
                 .unwrap_or(Value::Null),
         }),
         _ => None,
@@ -382,6 +584,12 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
     };
     for (view_ref, value) in views {
         if let Ok(mut binding) = serde_json::from_value::<ViewBinding>(value.clone()) {
+            // One writer per source param: a `feeds.param` colliding with
+            // a declared source param is a parse error — drop the binding
+            // (fail closed) rather than silently letting two writers race.
+            if feeds_param_collision(&binding).is_some() {
+                continue;
+            }
             binding.view_ref = Some(view_ref.clone());
             out.insert(view_ref.clone(), binding);
         }
@@ -580,5 +788,159 @@ mod tests {
         let rows = project_records(&binding, &response);
         assert!(rows[0].primary.contains("\"a\""));
         assert_eq!(rows[0].raw, json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn parses_singular_input_block_with_three_submit_modes() {
+        let feeds: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows",
+            "source": { "ref": "service:x", "params": {}, "collection": "items" },
+            "input": { "id": "filter", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
+        }))
+        .unwrap();
+        let input = feeds.input.as_ref().unwrap();
+        assert_eq!(input.id, "filter");
+        assert_eq!(input.feeds.as_ref().unwrap().param, "query");
+        assert_eq!(input.feeds.as_ref().unwrap().debounce_ms, Some(120));
+        assert!(input.submit_affordance().is_none());
+        assert!(!input.submits_to_route());
+
+        let affordance: ViewBinding = serde_json::from_value(json!({
+            "widget": "text",
+            "input": { "id": "line", "submit": "run" }
+        }))
+        .unwrap();
+        assert_eq!(affordance.input.unwrap().submit_affordance(), Some("run"));
+
+        let route: ViewBinding = serde_json::from_value(json!({
+            "widget": "text",
+            "input": { "id": "line", "submit": "route",
+                       "completion": { "ref": "service:commands/list", "collection": "commands" } }
+        }))
+        .unwrap();
+        let route_input = route.input.unwrap();
+        assert!(route_input.submits_to_route());
+        assert!(route_input.submit_affordance().is_none());
+        assert_eq!(
+            route_input.completion.unwrap().item_ref,
+            "service:commands/list"
+        );
+    }
+
+    #[test]
+    fn inputs_plural_list_form_is_rejected() {
+        // Input is singular: there is no `inputs:` list. The unknown field
+        // must not silently parse a buffer.
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "text",
+            "inputs": [ { "id": "a" }, { "id": "b" } ]
+        }))
+        .unwrap();
+        assert!(binding.input.is_none(), "`inputs:` must not populate input");
+    }
+
+    #[test]
+    fn namespaced_record_substitution_resolves_from_selection() {
+        let affordance = json!({
+            "invoke": { "plane": "ui", "facet": "selection",
+                        "value": { "thread": "{record.thread_id}" } }
+        });
+        let record = json!({ "thread_id": "T-1", "status": "running" });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&record),
+        )
+        .expect("selection supplies record");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Ui {
+                facet: "selection".into(),
+                value: Some(json!({ "thread": "T-1" })),
+                merge: None,
+            }
+        );
+    }
+
+    #[test]
+    fn value_substitution_resolves_from_input_submit() {
+        let affordance = json!({
+            "invoke": { "plane": "rye", "tokens": ["thread", "input"], "args": { "line": "{value}" } }
+        });
+        let invoke =
+            resolve_affordance_invoke(&affordance, Producer::Input, &Payload::Input("hello world"))
+                .expect("input supplies value");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Rye {
+                tokens: vec!["thread".into(), "input".into()],
+                args: json!({ "line": "hello world" }),
+            }
+        );
+    }
+
+    #[test]
+    fn binding_time_validation_fails_closed_when_producer_cannot_supply() {
+        // An input submit cannot supply `{record.*}`.
+        let affordance = json!({
+            "invoke": { "plane": "ui", "facet": "selection", "value": { "x": "{record.thread_id}" } }
+        });
+        assert!(validate_affordance_placeholders(&affordance, Producer::Input).is_err());
+        assert!(
+            resolve_affordance_invoke(&affordance, Producer::Input, &Payload::Input("x")).is_none(),
+            "unsuppliable placeholder must fail closed at resolution"
+        );
+
+        // A selection cannot supply `{value}`.
+        let value_affordance = json!({
+            "invoke": { "plane": "ui", "facet": "f", "value": { "x": "{value}" } }
+        });
+        assert!(validate_affordance_placeholders(&value_affordance, Producer::Selection).is_err());
+
+        // No `{input}` alias — only `{value}`.
+        let alias = json!({
+            "invoke": { "plane": "ui", "facet": "f", "value": { "x": "{input}" } }
+        });
+        assert!(validate_affordance_placeholders(&alias, Producer::Input).is_err());
+    }
+
+    #[test]
+    fn feeds_param_colliding_with_source_param_is_rejected() {
+        // `feeds.param` names a param the source already declares: parse
+        // error — the binding is dropped from the surface index.
+        let surface = json!({
+            "views": {
+                "view:filter/collide": {
+                    "widget": "rows",
+                    "source": { "ref": "service:x", "params": { "query": "@facet:selection.q" }, "collection": "items" },
+                    "input": { "id": "f", "feeds": { "param": "query" } }
+                },
+                "view:filter/ok": {
+                    "widget": "rows",
+                    "source": { "ref": "service:x", "params": { "limit": 5 }, "collection": "items" },
+                    "input": { "id": "f", "feeds": { "param": "query" } }
+                }
+            }
+        });
+        let views = views_from_surface(Some(&surface));
+        assert!(
+            !views.contains_key("view:filter/collide"),
+            "colliding feeds.param must be rejected"
+        );
+        assert!(
+            views.contains_key("view:filter/ok"),
+            "non-colliding feeds is accepted"
+        );
+    }
+
+    #[test]
+    fn selection_binding_parses_explicit_activate() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "rows",
+            "selection": { "activate": "open" },
+            "affordances": [{ "id": "open", "invoke": { "plane": "ui", "facet": "active.thread", "value": "{record.thread_id}" } }]
+        }))
+        .unwrap();
+        assert_eq!(binding.selection.unwrap().activate, "open");
     }
 }

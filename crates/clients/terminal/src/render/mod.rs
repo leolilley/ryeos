@@ -130,6 +130,7 @@ fn draw_layout_node(
             title,
             actions,
             view,
+            input,
         } => chrome::draw_tile(
             surface,
             rect,
@@ -138,6 +139,7 @@ fn draw_layout_node(
             title,
             actions.len(),
             view,
+            input.as_ref(),
             border,
         ),
         StudioLayoutNodeVm::Split {

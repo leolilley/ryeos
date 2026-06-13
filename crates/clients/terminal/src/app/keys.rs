@@ -76,7 +76,9 @@ fn terminal_studio_key_event(key: KeyEvent) -> Option<StudioKeyEvent> {
 fn key_context(core: &StudioCore) -> StudioKeyContext {
     StudioKeyContext {
         launcher_open: core.ui.launcher.open,
-        input_visible: core.ui.docks.has_visible_input(),
+        // Input follows the focused view instance: printable keys edit a
+        // buffer only when the focused instance declares `input`.
+        input_visible: core.has_focused_input(),
     }
 }
 

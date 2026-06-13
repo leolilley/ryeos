@@ -254,7 +254,7 @@ impl Default for SlotsSpec {
         Self {
             top: None,
             bottom: Some(SlotSpec {
-                content: SlotContentSpec::Input,
+                content: SlotContentSpec::View("view:ryeos/input".to_string()),
                 open: true,
                 size: 7,
             }),
@@ -286,18 +286,18 @@ fn default_slot_size() -> u16 {
     8
 }
 
-/// Slot content: the literal engine input widget or a bound `view:` ref.
-/// Unknown content errors — fail closed, like view kinds.
+/// Slot content: a bound `view:` ref, the one uniform content form.
+/// Input is no longer a slot literal — it is a view that declares an
+/// `input` block (`view:ryeos/input`). Unknown content errors — fail
+/// closed, like view kinds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotContentSpec {
-    Input,
     View(String),
 }
 
 impl Serialize for SlotContentSpec {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            SlotContentSpec::Input => serializer.serialize_str("input"),
             SlotContentSpec::View(view_ref) => serializer.serialize_str(view_ref),
         }
     }
@@ -306,14 +306,11 @@ impl Serialize for SlotContentSpec {
 impl<'de> Deserialize<'de> for SlotContentSpec {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        if raw == "input" {
-            return Ok(SlotContentSpec::Input);
-        }
         if raw.starts_with("view:") {
             return Ok(SlotContentSpec::View(raw));
         }
         Err(serde::de::Error::custom(format!(
-            "unknown slot content `{raw}` (`input` or view: ref expected)"
+            "unknown slot content `{raw}` (view: ref expected; `input` is now a view)"
         )))
     }
 }
@@ -962,12 +959,12 @@ mod tests {
         assert!(spec.tiles.is_empty());
         assert_eq!(spec.tiling, TilingSpec::default());
         assert!(matches!(
-            spec.slots.bottom,
+            &spec.slots.bottom,
             Some(SlotSpec {
-                content: SlotContentSpec::Input,
+                content: SlotContentSpec::View(view_ref),
                 open: true,
                 size: 7,
-            })
+            }) if view_ref == "view:ryeos/input"
         ));
         assert!(spec.slots.top.is_none());
         assert_eq!(spec.style.border, BorderStyleSpec::Thin);
@@ -1018,7 +1015,7 @@ tiles:
   - atlas
   - graph
 slots:
-  bottom: { content: input, open: true, size: 7 }
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
   left: { content: "view:ryeos/threads/list", open: false, size: 32 }
 style:
   border: thick
@@ -1067,14 +1064,14 @@ style:
     }
 
     #[test]
-    fn slot_content_parses_input_and_view_refs_only() {
+    fn slot_content_parses_view_refs_only() {
         let spec: SurfaceSpec = serde_yaml::from_str(
-            "name: x\nslots:\n  bottom: { content: input }\n  left: { content: \"view:a/b\" }\n",
+            "name: x\nslots:\n  bottom: { content: \"view:ryeos/input\" }\n  left: { content: \"view:a/b\" }\n",
         )
         .unwrap();
         assert_eq!(
             spec.slots.bottom.as_ref().map(|s| &s.content),
-            Some(&SlotContentSpec::Input)
+            Some(&SlotContentSpec::View("view:ryeos/input".into()))
         );
         assert_eq!(
             spec.slots.left.as_ref().map(|s| &s.content),
@@ -1084,6 +1081,19 @@ style:
         let bad: Result<SurfaceSpec, _> =
             serde_yaml::from_str("name: x\nslots:\n  bottom: { content: status }\n");
         assert!(bad.is_err(), "unknown slot content must be rejected");
+    }
+
+    #[test]
+    fn slot_content_input_literal_is_rejected() {
+        // CLEAN CUT: `content: input` is gone. The bottom input is a view
+        // (`view:ryeos/input`) that declares an `input` block.
+        let bad: Result<SurfaceSpec, _> =
+            serde_yaml::from_str("name: x\nslots:\n  bottom: { content: input }\n");
+        let err = bad.expect_err("`content: input` must be rejected");
+        assert!(
+            err.to_string().contains("input"),
+            "error should mention the rejected literal: {err}"
+        );
     }
 
     #[test]
@@ -1252,7 +1262,7 @@ tiles = ["view:ryeos/threads/list"]
         assert!(spec.tiles.is_empty(), "base starts with an empty center");
         assert!(matches!(
             spec.slots.bottom.as_ref().map(|s| &s.content),
-            Some(SlotContentSpec::Input)
+            Some(SlotContentSpec::View(view_ref)) if view_ref == "view:ryeos/input"
         ));
         assert_eq!(spec.style.border, BorderStyleSpec::Thin);
         let ws = spec.to_workspace();

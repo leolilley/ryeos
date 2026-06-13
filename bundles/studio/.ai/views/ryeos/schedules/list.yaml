@@ -17,6 +17,8 @@ projections:
       "true": good
       "false": warn
     default: neutral
+selection:
+  activate: pause
 affordances:
   - id: pause
     label: Pause
@@ -24,11 +26,11 @@ affordances:
       plane: rye
       tokens: [scheduler, pause]
       args:
-        schedule_id: "{schedule_id}"
+        schedule_id: "{record.schedule_id}"
   - id: resume
     label: Resume
     invoke:
       plane: rye
       tokens: [scheduler, resume]
       args:
-        schedule_id: "{schedule_id}"
+        schedule_id: "{record.schedule_id}"

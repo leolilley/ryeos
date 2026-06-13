@@ -12,7 +12,7 @@ tiling:
 tiles: []
 
 slots:
-  bottom: { content: input, open: true, size: 7 }
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
   left: { content: "view:ryeos/threads/list", open: false, size: 32 }
   right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 

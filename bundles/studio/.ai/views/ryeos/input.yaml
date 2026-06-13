@@ -1,0 +1,12 @@
+name: input
+version: "1.0.0"
+description: The studio chat box - an input buffer that dispatches through the engine route-fold
+
+widget: text
+input:
+  id: line
+  placeholder: Ask or run a command
+  completion:
+    ref: service:commands/list
+    collection: commands
+  submit: route

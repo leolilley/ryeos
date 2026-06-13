@@ -245,26 +245,32 @@ pub struct StudioDockTileVm {
     pub edge: StudioDockEdge,
     pub title: String,
     pub size: u16,
-    pub view: StudioDockViewVm,
+    /// The bound view (every slot is a view instance; input is no longer a
+    /// dock-content variant).
+    pub view: StudioViewVm,
+    /// Present when this instance declares an `input` block: the prompt
+    /// renderers draw (target strip, buffer, cursor, completion). Any
+    /// widget may carry a prompt — input is an orthogonal capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<StudioInputVm>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StudioDockViewVm {
-    Input(StudioInputVm),
-    /// A content-bound view in a dock slot: same VM the tile plane
-    /// renders, no dock-specific product shapes.
-    View(StudioViewVm),
-}
-
+/// The projection of a view instance's active input buffer. Shape
+/// preserved from the deleted Input dock variant; re-sourced from the
+/// instance's transient buffer rather than a dock content variant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioInputVm {
     pub text: String,
     pub cursor: usize,
+    /// Target strip: `target_label` if authored, else derived from the
+    /// bound submit target.
     pub route_label: String,
     pub placeholder: String,
     pub hint: String,
     pub submit_enabled: bool,
+    /// Completion suggestions from the input's `completion` source.
+    #[serde(default)]
+    pub completion: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,6 +288,9 @@ pub enum StudioLayoutNodeVm {
         title: String,
         actions: Vec<StudioTileActionVm>,
         view: StudioViewVm,
+        /// Present when the tile's view declares an `input` block.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<StudioInputVm>,
     },
 }
 
@@ -781,31 +790,28 @@ fn dock_tile_vm(
     if !state.visible {
         return None;
     }
-    let edge_key = match edge {
-        StudioDockEdge::Top => "top",
-        StudioDockEdge::Bottom => "bottom",
-        StudioDockEdge::Left => "left",
-        StudioDockEdge::Right => "right",
-    };
+    let StudioDockContent::View { view_ref } = &state.content;
+    let source_key = super::model::dock_source_key(edge);
     Some(StudioDockTileVm {
         edge,
-        title: match &state.content {
-            StudioDockContent::Input => "RyeOS input".to_string(),
-            StudioDockContent::View { view_ref } => {
-                view_ref.rsplit('/').next().unwrap_or(view_ref).to_string()
-            }
-        },
+        title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
-        view: match &state.content {
-            StudioDockContent::Input => StudioDockViewVm::Input(input_vm(core)),
-            StudioDockContent::View { view_ref } => StudioDockViewVm::View(bound_view_vm_keyed(
-                core,
-                &format!("dock:{edge_key}"),
-                None,
-                view_ref,
-            )),
-        },
+        view: bound_view_vm_keyed(core, &source_key, None, view_ref),
+        input: instance_input_vm(core, &source_key, view_ref),
     })
+}
+
+/// The input prompt VM for a view instance, if its binding declares an
+/// `input` block. Re-sources the active transient buffer; layout-neutral.
+fn instance_input_vm(
+    core: &StudioCore,
+    instance_id: &str,
+    view_ref: &str,
+) -> Option<StudioInputVm> {
+    let binding = core.views.get(view_ref)?;
+    let input = binding.input.as_ref()?;
+    let key = super::model::InputBufferKey::new(instance_id, view_ref, input.id.clone());
+    Some(input_vm(core, &key, view_ref, input))
 }
 
 /// Render a content-bound view: binding + source response -> widget VM.
@@ -846,14 +852,27 @@ fn bound_view_vm_keyed(
             ),
         },
         ("rows", Some(response)) => {
-            // Rows act through the binding's first affordance — the
-            // content-declared default interaction.
-            let default_affordance = binding
-                .affordances
-                .first()
-                .and_then(|a| a.get("id"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
+            // Row activation is explicit: the view names the affordance via
+            // `selection.activate` (no implicit "first affordance"). The
+            // named affordance must be supplied by the `record` producer
+            // (binding-time validation) or row activation is unbound.
+            let activate_affordance = binding
+                .selection
+                .as_ref()
+                .map(|selection| selection.activate.clone())
+                .filter(|affordance_id| {
+                    binding
+                        .affordances
+                        .iter()
+                        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id))
+                        .is_some_and(|affordance| {
+                            super::content::validate_affordance_placeholders(
+                                affordance,
+                                super::content::Producer::Selection,
+                            )
+                            .is_ok()
+                        })
+                });
             let rows = super::content::project_records(binding, response)
                 .into_iter()
                 .enumerate()
@@ -863,7 +882,7 @@ fn bound_view_vm_keyed(
                     secondary: None,
                     meta: record.meta,
                     kind: None,
-                    action: default_affordance.as_ref().map(|affordance_id| {
+                    action: activate_affordance.as_ref().map(|affordance_id| {
                         StudioAction::InvokeAffordance {
                             view_ref: view_ref.to_string(),
                             affordance_id: affordance_id.clone(),
@@ -1030,42 +1049,145 @@ fn tone_from_name(name: Option<&str>) -> StudioTone {
     }
 }
 
-fn input_vm(core: &StudioCore) -> StudioInputVm {
-    // The label renders the route facet truthfully, phrased as execution,
-    // never presence.
+/// Project a view instance's input buffer into the prompt VM. The target
+/// strip is `target_label` if authored, else derived from the bound submit
+/// target (the seat route for `submit: route`; the affordance's invoke
+/// target for `submit: <affordance>`).
+fn input_vm(
+    core: &StudioCore,
+    key: &super::model::InputBufferKey,
+    view_ref: &str,
+    input: &super::content::InputBlock,
+) -> StudioInputVm {
+    let buffer = core.ui.input_buffers.get(&key.storage_key());
+    let text = buffer.map(|b| b.text.clone()).unwrap_or_default();
+    let cursor = buffer.map(|b| b.cursor).unwrap_or(0);
+
     let route = core.seat.fold().input_route();
-    let route_label = match (&route.invoke, &route.thread) {
-        (None, _) => "no target — surface declares no route".to_string(),
-        (Some(_), Some(thread)) => format!("→ chained on {thread}"),
-        (Some(InvokeTemplate::Service { item_ref }), None) => {
-            format!("→ {item_ref} (new chain)")
-        }
-        (Some(InvokeTemplate::Command { tokens }), None) => {
-            format!("→ /{} (new chain)", tokens.join(" "))
-        }
-        (Some(InvokeTemplate::UiFacet { key }), None) => format!("→ {key}"),
-    };
-    let text = core.ui.input.text.clone();
-    let hint = slash_completion_hint(core, &text).unwrap_or_else(|| {
-        "Shift+Enter submit · / for commands · routed input surface".to_string()
-    });
+    let route_label = input
+        .target_label
+        .clone()
+        .map(|label| format!("→ {label}"))
+        .unwrap_or_else(|| derived_target_label(core, view_ref, input, &route));
+
+    // Completion suggestions come from the input's `completion` source.
+    let completion = input_completion(core, input, &text);
+    let hint = completion
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Shift+Enter submit · / for commands".to_string());
+
+    let has_route_target =
+        input.submits_to_route() && (text.starts_with('/') || route.has_target());
+    let has_affordance_target = input.submit_affordance().is_some();
     StudioInputVm {
-        cursor: core.ui.input.cursor,
+        cursor,
         route_label,
-        placeholder: "type RyeOS input…".to_string(),
+        placeholder: input
+            .placeholder
+            .clone()
+            .unwrap_or_else(|| "type RyeOS input…".to_string()),
         hint,
-        submit_enabled: !text.trim().is_empty() && (text.starts_with('/') || route.has_target()),
+        submit_enabled: !text.trim().is_empty() && (has_route_target || has_affordance_target),
+        completion,
         text,
     }
 }
 
-/// Completion derived purely from command records: when the buffer is in
-/// slash mode, show next-token candidates (invocable-only — the grammar
-/// shown is the grammar held). Pure projection over open JSON; the engine
-/// never types per-command knowledge.
-fn slash_completion_hint(core: &StudioCore, text: &str) -> Option<String> {
-    let records = core.data.commands.as_ref()?.get("commands")?.as_array()?;
+/// Derive the target strip when the author gives no `target_label`.
+fn derived_target_label(
+    core: &StudioCore,
+    view_ref: &str,
+    input: &super::content::InputBlock,
+    route: &super::seat::InputRoute,
+) -> String {
+    if let Some(affordance_id) = input.submit_affordance() {
+        // Derive from the bound affordance's invoke target.
+        if let Some(target) = core
+            .views
+            .get(view_ref)
+            .and_then(|binding| affordance_invoke_target(binding, affordance_id))
+        {
+            return format!("→ {target}");
+        }
+        return format!("→ {affordance_id}");
+    }
+    // `submit: route` — render the seat route truthfully.
+    match (&route.invoke, &route.thread) {
+        (None, _) => "no target — surface declares no route".to_string(),
+        (Some(_), Some(thread)) => format!("→ chained on {thread}"),
+        (Some(InvokeTemplate::Service { item_ref }), None) => format!("→ {item_ref} (new chain)"),
+        (Some(InvokeTemplate::Command { tokens }), None) => {
+            format!("→ /{} (new chain)", tokens.join(" "))
+        }
+        (Some(InvokeTemplate::UiFacet { key }), None) => format!("→ {key}"),
+    }
+}
+
+fn affordance_invoke_target(
+    binding: &super::content::ViewBinding,
+    affordance_id: &str,
+) -> Option<String> {
+    let affordance = binding
+        .affordances
+        .iter()
+        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id))?;
+    let invoke = affordance.get("invoke")?;
+    match invoke.get("plane").and_then(serde_json::Value::as_str)? {
+        "rye" => invoke
+            .get("ref")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                invoke
+                    .get("tokens")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|tokens| {
+                        format!(
+                            "/{}",
+                            tokens
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
+            }),
+        "ui" => invoke
+            .get("facet")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Completion suggestions from the input's `completion` source. For the
+/// `service:commands/list` grammar this is slash-mode next-token
+/// candidates; pure projection over open JSON.
+fn input_completion(
+    core: &StudioCore,
+    input: &super::content::InputBlock,
+    text: &str,
+) -> Vec<String> {
+    let Some(completion) = input.completion.as_ref() else {
+        return Vec::new();
+    };
+    // The command grammar is fetched into `core.data.commands`.
+    if completion.item_ref != "service:commands/list" {
+        return Vec::new();
+    }
+    let Some(records) = core
+        .data
+        .commands
+        .as_ref()
+        .and_then(|data| data.get("commands"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
     super::tokenize::slash_completion_hint(records, text)
+        .into_iter()
+        .collect()
 }
 
 fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
@@ -1086,12 +1208,23 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
                 .get(tile_id)
                 .map(|tile| tile.view.title())
                 .unwrap_or_else(|| "Missing".to_string());
+            let input = core
+                .workspace
+                .tiles
+                .get(tile_id)
+                .and_then(|tile| match &tile.view {
+                    ViewSpec::Bound { view_ref } => {
+                        instance_input_vm(core, &tile_id.0.to_string(), view_ref)
+                    }
+                    _ => None,
+                });
             StudioLayoutNodeVm::Tile {
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
                 title,
                 actions: tile_actions(core, *tile_id),
                 view,
+                input,
             }
         }
         LayoutTree::Split {
@@ -1756,5 +1889,101 @@ mod tests {
             timeline_entries(records).as_slice(),
             [StudioTimelineEntryVm::Line { primary, .. }] if primary == "message"
         ));
+    }
+
+    fn input_session(view: serde_json::Value) -> crate::studio::model::StudioCore {
+        let session = crate::studio::model::BrowserSession {
+            effective_surface: Some(json!({
+                "name": "t",
+                "slots": { "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 } },
+                "views": { "view:ryeos/input": view }
+            })),
+            ..Default::default()
+        };
+        StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn input_view_renders_prompt_in_bottom_slot() {
+        let core = input_session(json!({
+            "widget": "text",
+            "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+        }));
+        let vm = build_view_model(&core);
+        let bottom = vm.workspace.docks.bottom.expect("bottom slot");
+        let input = bottom.input.expect("bottom instance declares input");
+        assert_eq!(input.placeholder, "Ask or run a command");
+    }
+
+    #[test]
+    fn target_label_override_wins_over_derived_strip() {
+        let core = input_session(json!({
+            "widget": "text",
+            "input": { "id": "line", "target_label": "thread input", "submit": "route" }
+        }));
+        let vm = build_view_model(&core);
+        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        assert_eq!(input.route_label, "→ thread input");
+    }
+
+    #[test]
+    fn completion_uses_the_inputs_completion_source() {
+        let mut core = input_session(json!({
+            "widget": "text",
+            "input": {
+                "id": "line",
+                "submit": "route",
+                "completion": { "ref": "service:commands/list", "collection": "commands" }
+            }
+        }));
+        core.data.commands = Some(json!({
+            "commands": [
+                { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
+                { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread" }
+            ]
+        }));
+        core.ui.input_buffers.insert(
+            crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
+                .storage_key(),
+            crate::studio::model::StudioInputState {
+                text: "/thread ".to_string(),
+                cursor: "/thread ".len(),
+            },
+        );
+        let vm = build_view_model(&core);
+        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        assert!(
+            input
+                .completion
+                .iter()
+                .any(|s| s.contains("get") && s.contains("list")),
+            "completion lists next slash tokens: {:?}",
+            input.completion
+        );
+    }
+
+    #[test]
+    fn input_without_completion_source_has_no_suggestions() {
+        let mut core = input_session(json!({
+            "widget": "text",
+            "input": { "id": "line", "submit": "route" }
+        }));
+        core.data.commands = Some(json!({ "commands": [
+            { "invocable": true, "tokens": ["thread", "list"] }
+        ] }));
+        core.ui.input_buffers.insert(
+            crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
+                .storage_key(),
+            crate::studio::model::StudioInputState {
+                text: "/thr".to_string(),
+                cursor: 4,
+            },
+        );
+        let vm = build_view_model(&core);
+        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        assert!(
+            input.completion.is_empty(),
+            "no completion source -> no suggestions"
+        );
     }
 }

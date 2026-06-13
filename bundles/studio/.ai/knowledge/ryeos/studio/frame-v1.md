@@ -24,8 +24,9 @@ source.
 | `timeline` | append-ordered events | `{primary, meta?, tone?, role?, pair_key?, raw}` per event |
 | `scene` | ambient/spatial projection | semantic scene objects |
 
-Engine chrome (not content-targetable in v1): input_line, completion,
-notice, dock/tile chrome.
+Engine chrome (not content-targetable in v1): notice, dock/tile chrome.
+Input is no longer engine chrome: it is a content capability (the `input`
+block below), and a view's `completion` source drives the suggestion rows.
 
 ## View binding schema (`view:` items)
 
@@ -42,16 +43,75 @@ projections:
   detail: [<field path>...]   # key_value
   event_kinds: { <event_type>: {primary,...} }   # timeline, per kind
   default: { ... }            # timeline fallback
+selection:                    # OPTIONAL: explicit row-activation binding (rows widget)
+  activate: <affordance_id>   # row activation fires this affordance; reads {record.<field>}
+input:                        # OPTIONAL, SINGULAR: one transient view-local buffer per view
+  id: <id>                    # unique within the view (instance keying)
+  placeholder: <string>
+  target_label: <string>      # OPTIONAL author label for the prompt's target strip; else derived
+  feeds: { param: <name>, debounce_ms: <int> }  # OPTIONAL: buffer -> this view's own source param
+  completion: { ref: <service ref>, collection: <path> }  # OPTIONAL suggestion source
+  submit: <affordance_id> | route   # OPTIONAL Enter behaviour (see "Input" below)
 affordances:
   - id: <id>
     label: <label>
     invoke:
       plane: ui | rye
-      # ui: facet write -- facet/value or facet/merge; whole-value "{field}" substitutes row fields
-      #     ("prefix-{field}" is literal text; put formatting in the source service)
+      # ui: facet write -- facet/value or facet/merge; whole-value placeholder substitutes a payload
       # rye: tokens + args (registry-resolved daemon-side)
+      # Placeholders are NAMESPACED by producer:
+      #   {record.<field>} -- from selection (row activation)
+      #   {value}          -- from an input submit (the buffer text; no {input} alias)
+      #   @facet:<key>      -- facet reads (unchanged)
 refresh: { on_hint: <kind> | on_facet: <key> }
 ```
+
+### Selection (row activation)
+
+Row activation is intrinsic to the `rows` widget but **explicit**: a view
+names which affordance row-activation fires via `selection.activate`. There
+is no implicit "first affordance" activation. The named affordance is fired
+by the `selection` producer and reads `{record.<field>}`.
+
+### Input (one capability, three submit modes)
+
+`input` is the single new optional capability: a transient, view-local
+keystroke buffer — NOT a facet, NOT a widget. Exactly one per view (there
+is no `inputs:` list). Any widget may carry a prompt; input is orthogonal
+to display. The buffer is keyed layout-neutrally by
+`{view_instance_id, view_ref, input_id}`, so the same `view:` rendered
+twice has independent buffers. Printable keys edit the buffer of the
+**focused view instance** that declares `input`; otherwise they fall
+through to the keymap. No placement is special — initial focus (e.g. the
+bottom slot) is frame policy, not an input rule.
+
+Three submit modes, all from the one capability:
+
+1. **`feeds` (no submit)** — the buffer is a parameter to THIS view's own
+   `source`; on edit (debounced by `debounce_ms`) the source refetches.
+   The filter case. **One writer per source param:** if `feeds.param`
+   names a param the source already declares, that is a parse error. A
+   `feeds` input works read-only (no durable write) and Enter does
+   nothing.
+
+2. **`submit: <affordance_id>`** — Enter fires that content affordance with
+   the buffer text as `{value}` (the `input` producer namespace). The
+   affordance does the durable thing (a `ui` facet write or `rye`
+   dispatch). The command-palette / vault-setter case. Blocked read-only.
+
+3. **`submit: route`** — a reserved value naming the engine's existing
+   route-fold dispatch: classify the line (slash → tokens →
+   `commands/dispatch`; plain → the `input.route` invocation template),
+   carry `route_seq` stale-protection, apply read-only / empty handling,
+   and ratchet the route on launch. This is the chat box
+   (`view:ryeos/input`). The route metadata lives in the surface's
+   top-level `input.route` block (a seat facet), not in the view.
+
+Placeholder validation runs at **binding resolution** (`selection.activate
+→ X`, `input.submit → Y`), not on the affordance alone: a placeholder a
+producer can't supply fails closed before runtime. The prompt's target
+strip is `target_label` if authored, else derived from the bound submit
+target.
 
 Tones: `neutral | accent | good | warn | danger` (renderers map tone to
 palette; content never names colors). A tone map's optional `missing` tone is
