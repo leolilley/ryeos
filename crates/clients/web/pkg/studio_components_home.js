@@ -5,8 +5,6 @@ let ambientCanvas = null;
 let ambientScene = null;
 let homeShell = null;
 let homeField = null;
-let homeLanding = null;
-let homeLandingSignature = "";
 let atlasInspector = null;
 let atlasInspectorSignature = "";
 let atlasFocus = null;
@@ -14,32 +12,15 @@ let latestAmbient = {};
 let atlasPanelVisible = false;
 let atlasHoverCard = null;
 let latestShell = null;
-let typerTimer = null;
-let typerLineIndex = 0;
-let typerTarget = null;
-let typerLinesSignature = "";
 let transientTopbarUntil = 0;
 
-const FALLBACK_TYPER_LINES = [
-  "hashes for truth. signatures for agency. attestations for proof.",
-  "content-addressed. tamper-evident. verified by math.",
-  "identity is a keypair. trust is a pin. authority is local.",
-  "every item carries a chain of custody. every node verifies it.",
-  "descriptors are trust pins, not credentials.",
-  "wildcards rejected. capabilities attenuate. no escalation.",
-  "the CAS is the commitment. the attestation is the proof.",
-  "admission is proof of possession. not proof of account.",
-  "two nodes, zero prior relationship, shared verified state.",
-  "swap the model. swap the machine. the signatures hold.",
-  "no central authority. no bearer tokens. no provider in the loop.",
-  "closure complete, hashes verified, attestation signed.",
-  "staged. mirrored. accepted. every byte accounted for.",
-  "the hosting provider runs dns. the node runs authority.",
-  "convergence without consensus. trust without coordination.",
-];
-
+// The always-on ambient layer (style.md: ambient sits behind content,
+// never blocking input). There is no "home" mode anymore — this renders
+// the surface-declared ambient (the Three.js / 2D atlas topology scene)
+// behind everything in every state. The deleted home brand/welcome/typer
+// block does NOT render here; the empty-center backdrop is content drawn
+// by the generic scene renderer in the workspace plane, not here.
 export function studioHome(vm, scene, shell) {
-  const isHome = vm.workspace?.is_home !== false;
   const home = homeShell || el("section", "studio-home");
   const ambient = vm.session?.ambient || {};
   const namespaceAtlas = isNamespaceAtlasAmbient(ambient);
@@ -47,36 +28,27 @@ export function studioHome(vm, scene, shell) {
   latestAmbient = ambient;
   homeShell = home;
   if (!home.dataset.initialized) {
-    home.setAttribute("aria-label", "RyeOS home space");
+    home.setAttribute("aria-label", "RyeOS ambient layer");
+    home.setAttribute("aria-hidden", "true");
     homeField = el("div", "studio-home-field");
     home.append(ambientBackground(scene, ambient), homeField);
     home.dataset.initialized = "true";
   } else {
     ambientBackground(scene, ambient);
   }
+  home.classList.add("backdrop-only");
   home.classList.toggle("ambient-hidden", ambient.show_background === false);
   home.classList.toggle("ambient-atlas-2d", namespaceAtlas && atlasStyle(ambient) === "flat_2d");
   home.classList.toggle("atlas-panel-visible", atlasPanelVisible);
   home.style.setProperty("--ambient-opacity", String(ambient.opacity ?? 1));
   home.style.setProperty("--scene-object-count", String(scene?.objects?.length || 0));
-  if (!isHome) {
-    home.classList.add("backdrop-only");
-    home.setAttribute("aria-hidden", "true");
-    if (homeLanding) homeLanding.hidden = true;
-  } else {
-    home.classList.remove("backdrop-only");
-    home.removeAttribute("aria-hidden");
-    const landing = homeLandingView(vm, shell);
-    landing.hidden = false;
-    if (!landing.parentNode) home.append(landing);
-    if (namespaceAtlas && atlasFocus?.pinned) {
-      const inspector = atlasInspectorView(scene);
-      inspector.hidden = false;
-      if (!inspector.parentNode) home.append(inspector);
-    } else if (atlasInspector) {
-      atlasInspector.hidden = true;
-      setAtlasFocus(null, scene, ambient);
-    }
+  if (namespaceAtlas && atlasFocus?.pinned) {
+    const inspector = atlasInspectorView(scene);
+    inspector.hidden = false;
+    if (!inspector.parentNode) home.append(inspector);
+  } else if (atlasInspector) {
+    atlasInspector.hidden = true;
+    setAtlasFocus(null, scene, ambient);
   }
   updateObjectField(scene, ambient);
   return home;
@@ -101,37 +73,10 @@ function updateObjectField(scene, ambient = {}) {
   }
 }
 
-function homeLandingView(vm, shell) {
-  const identity = el("div", "studio-home-identity");
-  const homeVm = vm.presentation?.home || {};
-  const signature = JSON.stringify({
-    home: homeVm,
-    version: vm.presentation?.chrome?.version_label || "",
-    readOnly: vm.session?.read_only || false,
-    project: vm.session?.project_path || "",
-  });
-  if (homeLanding && signature === homeLandingSignature) return homeLanding;
-  homeLandingSignature = signature;
-  const landing = el("div", "studio-home-landing");
-  identity.append(
-    textEl("div", homeVm.brand || "RYE OS"),
-    textEl("small", homeVm.tagline || "portable operating system for ai"),
-    el("i", "studio-home-line"),
-    textEl("p", homeVm.description || "Persistent, signed AI substrate that travels with you across spaces, machines, and models."),
-    typerLine(homeVm.terminal_lines),
-    heroCta(shell, homeVm),
-  );
-
-  const version = textEl("div", vm.presentation?.chrome?.version_label || `RYE OS - ${ryeosVersion(shell)}`);
-  version.className = "studio-home-version";
-  landing.append(identity, version);
-  if (homeLanding?.parentNode) homeLanding.replaceWith(landing);
-  homeLanding = landing;
-  return landing;
-}
-
 export function opticFrame(frame = {}) {
-  const node = el("div", `studio-optic-frame ${frame.mode || "home"}`);
+  // No frame mode anymore: the optic frame is the corner-mark accent in
+  // every state. Tone comes from the frame VM; the class is static.
+  const node = el("div", `studio-optic-frame ${frame.corners?.tone || "accent"}`);
   node.setAttribute("aria-hidden", "true");
   if (frame.corners?.visible !== false) {
     for (const corner of ["tl", "tr", "bl", "br"]) node.append(el("i", `studio-corner ${corner}`));
@@ -438,86 +383,3 @@ function atlasStyle(ambient = {}) {
   return "flat_2d";
 }
 
-function typerLine(lines = FALLBACK_TYPER_LINES) {
-  const choices = Array.isArray(lines) && lines.length > 0 ? lines : FALLBACK_TYPER_LINES;
-  const signature = JSON.stringify(choices);
-  if (typerTarget?.isConnected && typerLinesSignature === signature) {
-    return typerTarget.closest(".studio-home-typer");
-  }
-  const line = el("div", "studio-home-typer");
-  const text = textEl("span", "");
-  text.className = "typer-text";
-  line.append(textEl("span", "> ", "typer-cursor"), text, el("span", "typer-caret"));
-  typerTarget = text;
-  typerLinesSignature = signature;
-  window.queueMicrotask(() => startTypewriter(text, choices));
-  return line;
-}
-
-function startTypewriter(target, lines) {
-  window.clearTimeout(typerTimer);
-  const choices = Array.isArray(lines) && lines.length > 0 ? lines : FALLBACK_TYPER_LINES;
-  const typeCurrentLine = () => {
-    if (!target.isConnected) return;
-    const value = choices[typerLineIndex % choices.length];
-    let index = 0;
-    target.textContent = "";
-    const typeChar = () => {
-      if (!target.isConnected) return;
-      if (index < value.length) {
-        target.textContent += value[index];
-        index += 1;
-        typerTimer = window.setTimeout(typeChar, 40 + Math.random() * 30);
-      } else {
-        typerTimer = window.setTimeout(eraseLine, 2400);
-      }
-    };
-    const eraseLine = () => {
-      if (!target.isConnected) return;
-      if (target.textContent.length > 0) {
-        target.textContent = target.textContent.slice(0, -1);
-        typerTimer = window.setTimeout(eraseLine, 20);
-      } else {
-        typerLineIndex = (typerLineIndex + 1) % choices.length;
-        typerTimer = window.setTimeout(typeCurrentLine, 400);
-      }
-    };
-    typeChar();
-  };
-  typeCurrentLine();
-}
-
-function heroCta(shell, homeVm = {}) {
-  const cta = el("div", "studio-home-cta");
-  const actions = el("div", "studio-home-actions");
-  const primary = el("button", "studio-home-btn primary");
-  primary.type = "button";
-  primary.textContent = homeVm.primary_label || "OPEN";
-  primary.addEventListener("click", () => shell.openLauncher?.());
-  const secondary = el("a", "studio-home-btn secondary");
-  secondary.href = homeVm.secondary_url || "https://github.com/leolilley/ryeos";
-  secondary.target = "_blank";
-  secondary.rel = "noreferrer";
-  secondary.textContent = homeVm.secondary_label || "GITHUB";
-  actions.append(primary, secondary);
-
-  const install = el("button", "studio-install-card");
-  install.type = "button";
-  install.append(
-    textEl("span", "$", "prompt"),
-    textEl("span", homeVm.install_command || "pip install ryeos-mcp"),
-    textEl("span", "CLICK TO COPY", "copy-hint"),
-  );
-  install.addEventListener("click", async () => {
-    await navigator.clipboard?.writeText?.(homeVm.install_command || "pip install ryeos-mcp");
-    install.classList.add("copied");
-    const hint = install.querySelector(".copy-hint");
-    if (hint) hint.textContent = "COPIED ✓";
-    window.setTimeout(() => {
-      install.classList.remove("copied");
-      if (hint) hint.textContent = "CLICK TO COPY";
-    }, 1600);
-  });
-  cta.append(actions, install);
-  return cta;
-}

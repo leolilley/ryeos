@@ -32,6 +32,11 @@ impl StudioCore {
             StudioEvent::DaemonEvent { payload: _ } => self.initial_effects(),
             StudioEvent::Tick { now_ms } => {
                 self.runtime.now_ms = now_ms;
+                // The frame clock advances `generation` so generation-keyed
+                // motion (the backdrop twinkle, via the generic scene
+                // renderer) steps each tick. The loop already repaints on
+                // tick; bumping generation is what makes the step visible.
+                self.bump_generation();
                 Vec::new()
             }
             StudioEvent::Resize { viewport } => {
@@ -291,7 +296,7 @@ impl StudioCore {
                 effects
             }
             StudioAction::CloseFocused => {
-                if self.close_tile_or_home(self.workspace.focused_tile) {
+                if self.close_tile_or_empty(self.workspace.focused_tile) {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -300,7 +305,7 @@ impl StudioCore {
                 let Some(tile_id) = parse_tile_id(&tile_id) else {
                     return Vec::new();
                 };
-                if self.close_tile_or_home(tile_id) {
+                if self.close_tile_or_empty(tile_id) {
                     self.bump_generation();
                 }
                 Vec::new()
@@ -808,16 +813,15 @@ impl StudioCore {
     }
 
     fn open_view(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
-        if is_home_view(&view) {
-            if !self.workspace.is_home() {
+        if is_clear_center_view(&view) {
+            if !self.workspace.center_is_empty() {
                 for tile_id in self.workspace.tile_ids() {
                     self.push_motion(StudioMotionEventVm::TileExit {
                         tile_id: tile_id.0.to_string(),
                     });
                 }
-                self.push_motion(StudioMotionEventVm::HomeEnter);
             }
-            self.workspace.reset_to_home();
+            self.workspace.reset_to_empty();
             self.bump_generation();
             return self.effects_for_view(&view);
         }
@@ -842,16 +846,15 @@ impl StudioCore {
         effects
     }
 
-    fn close_tile_or_home(&mut self, tile_id: TileId) -> bool {
+    fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
         if self.workspace.tile_ids().len() <= 1 {
-            if self.workspace.is_home() || !self.workspace.tiles.contains_key(&tile_id) {
+            if self.workspace.center_is_empty() || !self.workspace.tiles.contains_key(&tile_id) {
                 return false;
             }
             self.push_motion(StudioMotionEventVm::TileExit {
                 tile_id: tile_id.0.to_string(),
             });
-            self.push_motion(StudioMotionEventVm::HomeEnter);
-            self.workspace.reset_to_home();
+            self.workspace.reset_to_empty();
             return true;
         }
         if self.workspace.close_tile(tile_id) {
@@ -870,14 +873,13 @@ impl StudioCore {
     /// Add a center tile through the tiling algorithm (insert: end) and
     /// emit the motions a renderer needs. Returns the new tile id.
     fn add_tile_motions(&mut self, view: ViewSpec) -> TileId {
-        let was_home = self.workspace.is_home();
+        let was_empty = self.workspace.center_is_empty();
         let source_tile_id = self.workspace.focused_tile;
         let tile_id = self.workspace.add_tile(view);
-        if was_home {
-            self.push_motion(StudioMotionEventVm::HomeExit);
-        } else {
+        if !was_empty {
             // New tiles land in the stack region; the motion axis is
-            // the stack arrangement.
+            // the stack arrangement. (The first tile into an empty center
+            // needs no split motion — it simply fills the center.)
             self.push_motion(StudioMotionEventVm::TileSplit {
                 source_tile_id: source_tile_id.0.to_string(),
                 new_tile_id: tile_id.0.to_string(),
@@ -1358,7 +1360,9 @@ fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
     }
 }
 
-fn is_home_view(view: &ViewSpec) -> bool {
+/// Opening the bare topology view clears the center to empty (the
+/// ambient topology / backdrop owns the frame) rather than adding a tile.
+fn is_clear_center_view(view: &ViewSpec) -> bool {
     matches!(view, ViewSpec::Graph { graph_id: None })
 }
 
@@ -3190,7 +3194,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_last_app_tile_returns_home() {
+    fn closing_last_app_tile_empties_center() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -3201,7 +3205,7 @@ mod tests {
                 },
             },
         });
-        assert!(!core.workspace.is_home());
+        assert!(!core.workspace.center_is_empty());
 
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
@@ -3209,12 +3213,13 @@ mod tests {
             },
         });
 
-        assert!(core.workspace.is_home());
+        assert!(core.workspace.center_is_empty());
+        // The last-tile close emits a tile-exit motion (no home mode).
         assert!(core
             .ui
             .motion
             .iter()
-            .any(|event| matches!(event, StudioMotionEventVm::HomeEnter)));
+            .any(|event| matches!(event, StudioMotionEventVm::TileExit { .. })));
     }
 
     #[test]

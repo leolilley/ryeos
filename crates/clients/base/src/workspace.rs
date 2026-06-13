@@ -2,8 +2,8 @@
 //!
 //! The workspace never stores a layout tree. It holds an ordered tile
 //! list and the surface-declared `TilingSpec`; `compute_layout` derives
-//! the `LayoutTree` renderers consume. Zero tiles means home: the
-//! center renders nothing and the ambient background owns the frame.
+//! the `LayoutTree` renderers consume. Zero tiles means an empty center:
+//! the center renders nothing and the backdrop scene shows behind it.
 
 use crate::ids::TileId;
 use crate::layout::{layout_rects, LayoutTree, Rect, SplitAxis};
@@ -198,7 +198,7 @@ pub struct Workspace {
     pub center_tiles: Vec<TileId>,
     /// Per-tile view + local state.
     pub tiles: HashMap<TileId, TileState>,
-    /// Focused tile. Dangling when the center is empty (home).
+    /// Focused tile. Dangling when the center is empty.
     pub focused_tile: TileId,
 }
 
@@ -240,13 +240,15 @@ impl Workspace {
         self.center_tiles.clone()
     }
 
-    /// Home: an empty center. The ambient background owns the frame.
-    pub fn is_home(&self) -> bool {
+    /// An empty center: no tiles. The backdrop scene shows behind the
+    /// (empty) center; closing the last tile returns here. There is no
+    /// "home" mode — this is a derived query over the tile list.
+    pub fn center_is_empty(&self) -> bool {
         self.center_tiles.is_empty()
     }
 
-    /// Clear the center back to home.
-    pub fn reset_to_home(&mut self) {
+    /// Clear the center back to empty.
+    pub fn reset_to_empty(&mut self) {
         self.center_tiles.clear();
         self.tiles.clear();
         self.focused_tile = TileId::new(0);
@@ -303,7 +305,7 @@ impl Workspace {
 
     /// Close a tile by id, keeping the remaining order. Returns false if
     /// the tile is not in the center. Closing the last tile empties the
-    /// center (home).
+    /// center.
     pub fn close_tile(&mut self, tile_id: TileId) -> bool {
         let Some(position) = self.center_tiles.iter().position(|id| *id == tile_id) else {
             return false;
@@ -668,10 +670,10 @@ mod tests {
     #[test]
     fn first_added_tile_takes_the_full_center() {
         let mut ws = Workspace::from_tiling(TilingSpec::default(), Vec::new());
-        assert!(ws.is_home());
+        assert!(ws.center_is_empty());
         assert!(ws.layout().is_none());
         let id = ws.add_tile(bound("solo"));
-        assert!(!ws.is_home());
+        assert!(!ws.center_is_empty());
         assert_eq!(ws.layout(), Some(LayoutTree::Leaf(id)));
     }
 
@@ -690,11 +692,11 @@ mod tests {
     }
 
     #[test]
-    fn closing_last_tile_returns_home() {
+    fn closing_last_tile_empties_center() {
         let mut ws = workspace_with(1);
         let only = ws.tile_ids()[0];
         assert!(ws.close_tile(only));
-        assert!(ws.is_home());
+        assert!(ws.center_is_empty());
         assert!(ws.layout().is_none());
     }
 

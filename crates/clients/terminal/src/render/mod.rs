@@ -9,12 +9,11 @@
 //! only color authority (tone → palette; draw sites never invent
 //! colors); `text` is width-aware string shaping; `primitives` are raw
 //! surface ops; `chrome` is bars/frames/docks; `widgets/*` is one file
-//! per widget primitive; `home`/`launcher`/`input` are compositions.
-//! This file orchestrates: frame mode, layout traversal, view dispatch.
+//! per widget primitive (incl. the generic `scene` renderer);
+//! `launcher`/`input` are compositions. This file orchestrates: layout
+//! traversal, the empty-center backdrop, view dispatch.
 
-mod ambient;
 mod chrome;
-mod home;
 mod input;
 mod launcher;
 mod primitives;
@@ -24,7 +23,7 @@ mod widgets;
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::{
-    StudioFrameModeVm, StudioLayoutNodeVm, StudioSplitAxisVm, StudioViewModel, StudioViewVm,
+    StudioLayoutNodeVm, StudioSplitAxisVm, StudioViewModel, StudioViewVm,
 };
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 
@@ -61,18 +60,10 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
     let mut surface = TextSurface::new(width, height);
     surface.fill(Style::new().fg(FG).bg(BG));
 
-    if matches!(vm.presentation.frame.mode, StudioFrameModeVm::Home) && vm.workspace.is_home {
-        home::draw_home(
-            &mut surface,
-            Rect::new(0, 0, width as u16, height as u16),
-            vm,
-        );
-        if vm.launcher.open {
-            launcher::draw_launcher(&mut surface, vm);
-        }
-        return surface;
-    }
-
+    // There is no "home" mode. The bars, docks (incl. the real bottom
+    // input slot), and launcher render in EVERY state. The only branch is
+    // backdrop-vs-tiles in the center: an empty center draws the backdrop
+    // scene; tiles fill it otherwise.
     let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
         chrome::draw_top_bar(&mut surface, vm);
         1
@@ -88,10 +79,14 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
     let center = chrome::draw_docks(&mut surface, body, vm);
-    // Empty center (no computed tree): the background fill stands.
     if let Some(root) = &vm.workspace.root {
         let border = theme::border_for(&vm.presentation.chrome.border);
         draw_layout_node(&mut surface, center, root, border);
+    } else if let Some(backdrop) = &vm.workspace.backdrop {
+        // Empty center: the backdrop is content — the ONE generic scene
+        // renderer draws it (particles twinkle by generation). No
+        // per-art code, no background enum.
+        widgets::scene::draw_scene(&mut surface, center, backdrop);
     }
 
     for (index, notice) in vm.notices.iter().rev().take(2).enumerate() {
@@ -201,13 +196,18 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         widgets::rows::draw_rows(surface, rect, columns, rows);
         return;
     }
+    // Scenes (map/atlas) draw through the ONE generic scene renderer —
+    // the same renderer the backdrop uses. No widget-specific scene code.
+    if let StudioViewVm::Map { scene } | StudioViewVm::Atlas { scene } = view {
+        widgets::scene::draw_scene(surface, rect, scene);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
         StudioViewVm::Rows { .. } => unreachable!("rows views return above"),
         StudioViewVm::Timeline { .. } => unreachable!("timeline views return above"),
-        StudioViewVm::Map { scene } | StudioViewVm::Atlas { scene } => {
-            lines.push(format!("scene objects: {}", scene.objects.len()));
-            lines.push("terminal atlas renderer pending; use rows for interaction".into());
+        StudioViewVm::Map { .. } | StudioViewVm::Atlas { .. } => {
+            unreachable!("scene views return above")
         }
         StudioViewVm::Placeholder { title, message } => {
             lines.push(title.clone());
@@ -236,29 +236,80 @@ mod tests {
         out
     }
 
-    #[test]
-    fn home_mode_renders_missing_home_view_without_workspace_docks() {
+    /// A surface whose empty center declares a backdrop scene and a
+    /// bottom input slot — the post-cut shape (no home mode).
+    fn empty_center_core() -> StudioCore {
         let session = BrowserSession {
-            session_id: "S-home".to_string(),
+            session_id: "S-backdrop".to_string(),
             surface_ref: "surface:ryeos/studio/base".to_string(),
             effective_surface: Some(json!({
                 "name": "studio-base",
                 "version": "1.0.0",
-                "home_view": "view:ryeos/home/brand",
-                "views": {}
+                "backdrop": "view:ryeos/backdrop/shard",
+                "slots": {
+                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 }
+                },
+                "views": {
+                    "view:ryeos/input": {
+                        "widget": "text",
+                        "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+                    }
+                }
             })),
             ..Default::default()
         };
-        let core = StudioCore::new(session, BrowserViewport::default(), 0);
-        let vm = build_view_model(&core);
+        StudioCore::new(session, BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn empty_center_draws_backdrop_scene_and_bottom_input() {
+        let vm = build_view_model(&empty_center_core());
+        // The backdrop scene resolved on an empty center.
+        assert!(vm.workspace.center_is_empty);
+        assert!(vm.workspace.backdrop.is_some());
 
         let rendered = surface_text(&build_surface(&vm, 96, 28));
+        // The backdrop scene draws its text objects + particles.
+        assert!(rendered.contains("RYE OS"), "backdrop brand text renders");
+        assert!(
+            rendered.contains('·') || rendered.contains('•') || rendered.contains('●'),
+            "backdrop particles render as dots"
+        );
+        // The real bottom input slot renders in this state (the bug fix):
+        // the prompt + placeholder appear, so typing reaches a real slot.
+        // (The block cursor sits on the first placeholder char when the
+        // buffer is empty, so match a cursor-free tail of the placeholder.)
+        assert!(
+            rendered.contains("run a command"),
+            "the bottom input slot renders its prompt on an empty center"
+        );
+        assert!(rendered.contains("$ "), "the input prompt sigil renders");
+    }
 
-        assert!(rendered.contains("Welcome to RyeOS"));
-        assert!(!rendered.contains("home view missing: view:ryeos/home/brand"));
-        assert!(!rendered.contains("type RyeOS input"));
-        assert!(!rendered.contains("RyeOS input"));
-        assert!(!rendered.contains("service:threads/input"));
-        assert!(!rendered.contains("T I L E S"));
+    #[test]
+    fn bottom_slot_is_the_active_input_on_empty_center() {
+        // The bug's regression: on an empty center, the bottom slot is the
+        // focused/active input instance carrying the prompt VM.
+        let vm = build_view_model(&empty_center_core());
+        let bottom = vm
+            .workspace
+            .docks
+            .bottom
+            .expect("bottom input slot present");
+        let input = bottom.input.expect("bottom slot declares input");
+        assert_eq!(input.placeholder, "Ask or run a command");
+    }
+
+    #[test]
+    fn backdrop_twinkle_differs_across_generations() {
+        // End-to-end animation proof: stepping `generation` repaints the
+        // backdrop with different particle cells (the twinkle). This is
+        // the generation → scene → render pipeline working.
+        let mut core = empty_center_core();
+        core.generation = 0;
+        let a = surface_text(&build_surface(&build_view_model(&core), 96, 28));
+        core.generation = 1;
+        let b = surface_text(&build_surface(&build_view_model(&core), 96, 28));
+        assert_ne!(a, b, "the backdrop renders differently across generations");
     }
 }

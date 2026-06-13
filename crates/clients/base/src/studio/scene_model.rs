@@ -53,6 +53,13 @@ pub enum StudioSceneObjectKind {
     ServiceBeacon,
     Link,
     LabelAnchor,
+    /// A point/particle: the generic renderer draws it as a dot sized by
+    /// `scale` (`·`/`•`/`●`). The backdrop's orbiting motes are particles.
+    Particle,
+    /// A text object: the generic renderer draws its `label` at the
+    /// projected position. The backdrop's "RYE OS"/welcome/hint lines are
+    /// text objects, not a hardcoded welcome block.
+    Text,
 }
 
 impl Default for StudioSceneModel {
@@ -409,6 +416,129 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
     scene
 }
 
+/// Build the v1 backdrop "shard" scene: a faceted silhouette traced in
+/// particles, a cloud of orbiting motes, and the brand/welcome/hint text
+/// as text objects. This is *scene content* — the generic renderer draws
+/// it with no knowledge that it is "the shard". A surface selects it via
+/// `backdrop: view:ryeos/backdrop/shard`; new backgrounds are new
+/// content (new builders / data sources), never renderer cases.
+///
+/// Scene space: x ∈ roughly [-16, 16], y ∈ roughly [-7, 7], origin at the
+/// shard's centre. The renderer fits this to the target rect; +y is up.
+pub fn build_shard_scene(generation: u64) -> StudioSceneModel {
+    let mut scene = StudioSceneModel {
+        generation,
+        ..StudioSceneModel::default()
+    };
+
+    // The shard silhouette: a vertical bipyramid (kite) traced as accent
+    // particles. Ported from the ASCII facet mark in the old
+    // `render/ambient.rs` — the strokes become a ring of points so the
+    // generic point renderer draws the outline.
+    let silhouette: &[[f32; 2]] = &[
+        // top apex down the right edge
+        [0.0, 6.0],
+        [1.6, 4.2],
+        [2.6, 2.4],
+        [3.2, 0.6],
+        [3.4, 0.0],
+        // table line (mid)
+        [-3.4, 0.0],
+        [-1.7, 0.0],
+        [1.7, 0.0],
+        // lower right edge down to the bottom apex
+        [3.0, -1.2],
+        [2.2, -2.8],
+        [1.2, -4.4],
+        [0.0, -6.0],
+        // lower left edge back up
+        [-1.2, -4.4],
+        [-2.2, -2.8],
+        [-3.0, -1.2],
+        // upper left edge back to apex
+        [-3.4, 0.0],
+        [-3.2, 0.6],
+        [-2.6, 2.4],
+        [-1.6, 4.2],
+    ];
+    for (index, [x, y]) in silhouette.iter().enumerate() {
+        let mut object = scene_object(
+            &format!("backdrop:shard:{index}"),
+            StudioSceneObjectKind::Particle,
+            [*x, *y, 0.0],
+            [0.9, 0.9, 0.9],
+            "#d65d0e",
+            None,
+            StudioTone::Accent,
+        );
+        object.opacity = 0.95;
+        scene.objects.push(object);
+    }
+
+    // Orbiting motes: scattered around the shard at varied radii / sizes.
+    // These are the particles that twinkle — the renderer varies their
+    // glyph/opacity by `generation` with a per-object phase from the id.
+    let motes: &[([f32; 2], f32, &str, StudioTone)] = &[
+        ([-11.0, 4.0], 0.4, "#a89984", StudioTone::Neutral),
+        ([10.0, 3.4], 0.5, "#d5c4a1", StudioTone::Neutral),
+        ([-9.0, -3.5], 0.7, "#8ec07c", StudioTone::Good),
+        ([9.5, -3.0], 0.5, "#a89984", StudioTone::Neutral),
+        ([-13.0, 0.5], 0.4, "#d5c4a1", StudioTone::Neutral),
+        ([12.5, -0.5], 0.6, "#8ec07c", StudioTone::Good),
+        ([-6.5, 5.5], 0.4, "#a89984", StudioTone::Neutral),
+        ([6.0, 5.2], 0.5, "#d5c4a1", StudioTone::Neutral),
+        ([-7.5, -5.5], 0.6, "#a89984", StudioTone::Neutral),
+        ([7.0, -5.4], 0.4, "#8ec07c", StudioTone::Good),
+        ([0.0, 7.0], 0.5, "#d5c4a1", StudioTone::Neutral),
+        ([-14.0, -2.0], 0.4, "#a89984", StudioTone::Neutral),
+        ([13.5, 2.0], 0.5, "#d5c4a1", StudioTone::Neutral),
+    ];
+    for (index, ([x, y], size, color, tone)) in motes.iter().enumerate() {
+        let mut object = scene_object(
+            &format!("backdrop:mote:{index}"),
+            StudioSceneObjectKind::Particle,
+            [*x, *y, 0.0],
+            [*size, *size, *size],
+            color,
+            None,
+            *tone,
+        );
+        object.opacity = 0.7;
+        scene.objects.push(object);
+    }
+
+    // The brand + welcome + hint lines as text objects (positioned,
+    // toned, animatable later) — not a hardcoded welcome block.
+    let texts: &[(&str, [f32; 2], &str, StudioTone)] = &[
+        ("RYE OS", [0.0, -8.2], "#d65d0e", StudioTone::Accent),
+        (
+            "portable operating system for ai",
+            [0.0, -9.6],
+            "#a89984",
+            StudioTone::Neutral,
+        ),
+        (
+            "alt+k launcher · ctrl+c quit",
+            [0.0, -11.0],
+            "#a89984",
+            StudioTone::Neutral,
+        ),
+    ];
+    for (index, (label, [x, y], color, tone)) in texts.iter().enumerate() {
+        scene.objects.push(scene_object(
+            &format!("backdrop:text:{index}"),
+            StudioSceneObjectKind::Text,
+            [*x, *y, 0.0],
+            [1.0, 1.0, 1.0],
+            color,
+            Some((*label).to_string()),
+            *tone,
+        ));
+    }
+
+    scene
+}
+
 fn scene_object(
     id: &str,
     kind: StudioSceneObjectKind,
@@ -526,6 +656,30 @@ mod tests {
         StudioTopologyEdgeSourceDto, StudioTopologyNodeDto, StudioTopologyNodeStatusDto,
         StudioTopologyTrustSummaryDto,
     };
+
+    #[test]
+    fn shard_scene_has_particles_and_text_objects() {
+        let scene = build_shard_scene(7);
+        assert_eq!(scene.generation, 7);
+        let particles = scene
+            .objects
+            .iter()
+            .filter(|o| o.kind == StudioSceneObjectKind::Particle)
+            .count();
+        assert!(particles > 10, "shard silhouette + motes are particles");
+        // The brand / welcome / hints are text objects with labels.
+        let brand = scene
+            .objects
+            .iter()
+            .find(|o| o.kind == StudioSceneObjectKind::Text && o.label.as_deref() == Some("RYE OS"))
+            .expect("RYE OS text object");
+        assert_eq!(brand.tone, StudioTone::Accent);
+        assert!(scene
+            .objects
+            .iter()
+            .any(|o| o.kind == StudioSceneObjectKind::Text
+                && o.label.as_deref() == Some("alt+k launcher · ctrl+c quit")));
+    }
 
     #[test]
     fn scene_model_includes_namespace_atlas_for_items() {

@@ -83,10 +83,13 @@ pub struct SurfaceSpec {
     /// inline — surfaces reference views, they do not define them).
     #[serde(default)]
     pub views: Option<serde_json::Value>,
-    /// Optional home-panel view ref (content for the home dimension's
-    /// brand/idle state; absent = no panel, renderers degrade).
+    /// Optional backdrop scene view ref (`view:ryeos/backdrop/<name>`, a
+    /// normal `view` with `widget: scene`). The renderer draws this scene
+    /// into the center rect when the center is empty — the background is
+    /// content, never a renderer enum. Absent = no backdrop, the
+    /// background fill stands.
     #[serde(default)]
-    pub home_view: Option<String>,
+    pub backdrop: Option<String>,
     /// Launchable view refs (the surface's library): resolved and
     /// embedded alongside pane refs; the launcher derives from these.
     #[serde(default)]
@@ -752,9 +755,9 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
 
 /// The built-in default Studio surface — dynamic-tiling workspace.
 ///
-/// Data-equivalent to `surface:ryeos/studio/base`: empty center (home
-/// covers first-run), default master/stack tiling, bottom input slot
-/// open, side slots closed, thin borders.
+/// Data-equivalent to `surface:ryeos/studio/base`: empty center (the
+/// backdrop scene shows on first-run), default master/stack tiling,
+/// bottom input slot open, side slots closed, thin borders.
 pub fn builtin_default() -> SurfaceSpec {
     SurfaceSpec {
         name: "studio-base".into(),
@@ -767,7 +770,7 @@ pub fn builtin_default() -> SurfaceSpec {
         style: SurfaceStyleSpec::default(),
         input: None,
         views: None,
-        home_view: None,
+        backdrop: None,
         library: Vec::new(),
         ambient: None,
         affordances: Vec::new(),
@@ -971,11 +974,38 @@ mod tests {
     }
 
     #[test]
-    fn builtin_default_produces_home_workspace() {
+    fn builtin_default_produces_empty_center_workspace() {
         let ws = builtin_default().to_workspace();
-        assert!(ws.is_home());
+        assert!(ws.center_is_empty());
         assert!(ws.tile_ids().is_empty());
         assert!(ws.layout().is_none());
+    }
+
+    #[test]
+    fn surface_with_home_view_field_is_rejected() {
+        // CLEAN CUT: `home_view` (the deleted home-mode field) must fail
+        // to parse — the empty-center background is now `backdrop`.
+        let bad: Result<SurfaceSpec, _> =
+            serde_yaml::from_str("name: x\nhome_view: \"view:ryeos/home/brand\"\n");
+        let err = bad.expect_err("`home_view` must be rejected");
+        assert!(
+            err.to_string().contains("home_view"),
+            "error should name the rejected field: {err}"
+        );
+    }
+
+    #[test]
+    fn surface_with_frame_home_field_is_rejected() {
+        // CLEAN CUT: there is no `frame` field; `frame: home` must fail.
+        let bad: Result<SurfaceSpec, _> = serde_yaml::from_str("name: x\nframe: home\n");
+        assert!(bad.is_err(), "`frame: home` must be rejected");
+    }
+
+    #[test]
+    fn surface_declares_backdrop_scene_view() {
+        let spec: SurfaceSpec =
+            serde_yaml::from_str("name: x\nbackdrop: \"view:ryeos/backdrop/shard\"\n").unwrap();
+        assert_eq!(spec.backdrop.as_deref(), Some("view:ryeos/backdrop/shard"));
     }
 
     #[test]
@@ -1266,7 +1296,7 @@ tiles = ["view:ryeos/threads/list"]
         ));
         assert_eq!(spec.style.border, BorderStyleSpec::Thin);
         let ws = spec.to_workspace();
-        assert!(ws.is_home());
+        assert!(ws.center_is_empty());
     }
 
     #[test]

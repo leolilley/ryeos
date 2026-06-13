@@ -91,7 +91,6 @@ pub struct StudioPresentationVm {
     pub chrome: StudioPresentationChromeVm,
     pub metrics: StudioPresentationMetricsVm,
     pub frame: StudioFrameVm,
-    pub home: StudioHomeVm,
     pub motion: Vec<StudioMotionEventVm>,
 }
 
@@ -164,33 +163,13 @@ pub struct StudioStatusSegmentVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioFrameVm {
-    pub mode: StudioFrameModeVm,
     pub corners: StudioFrameCornersVm,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StudioFrameModeVm {
-    Home,
-    Workspace,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioFrameCornersVm {
     pub visible: bool,
     pub tone: StudioTone,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioHomeVm {
-    pub brand: String,
-    pub tagline: String,
-    pub description: String,
-    pub terminal_lines: Vec<String>,
-    pub primary_label: String,
-    pub secondary_label: String,
-    pub secondary_url: String,
-    pub install_command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,8 +189,6 @@ pub enum StudioMotionEventVm {
     FocusChanged {
         tile_id: String,
     },
-    HomeEnter,
-    HomeExit,
     LauncherOpen,
     LauncherClose,
     TabChanged {
@@ -221,12 +198,20 @@ pub enum StudioMotionEventVm {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioWorkspaceVm {
-    /// The computed layout tree. None when the center is empty (home /
-    /// background fill) — the engine computes this from the ordered
+    /// The computed layout tree. None when the center is empty (the
+    /// backdrop scene shows) — the engine computes this from the ordered
     /// tile list and the tiling algorithm; it is never authored.
     pub root: Option<StudioLayoutNodeVm>,
     pub focused_tile: String,
-    pub is_home: bool,
+    /// True when the center has no tiles. Drives backdrop-vs-tiles: when
+    /// empty, the renderer draws `backdrop`; otherwise the layout tree.
+    pub center_is_empty: bool,
+    /// The resolved backdrop scene, present only when `center_is_empty`
+    /// and the surface declares a `backdrop` view. A normal
+    /// `StudioSceneModel` the generic scene renderer draws — the
+    /// background is content, never a renderer enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backdrop: Option<StudioSceneModel>,
     pub tile_count: usize,
     #[serde(default)]
     pub docks: StudioDockPlaneVm,
@@ -464,17 +449,11 @@ fn presentation_vm(
         },
         metrics: presentation_metrics_vm(core, workspace),
         frame: StudioFrameVm {
-            mode: if workspace.is_home {
-                StudioFrameModeVm::Home
-            } else {
-                StudioFrameModeVm::Workspace
-            },
             corners: StudioFrameCornersVm {
                 visible: true,
                 tone: StudioTone::Accent,
             },
         },
-        home: home_vm(core),
         motion: core.ui.motion.clone(),
     }
 }
@@ -486,7 +465,9 @@ fn top_bar_vm(core: &StudioCore) -> StudioTopBarVm {
             .workspaces
             .iter()
             .enumerate()
-            .filter(|(index, workspace)| *index == core.active_workspace || !workspace.is_home())
+            .filter(|(index, workspace)| {
+                *index == core.active_workspace || !workspace.center_is_empty()
+            })
             .map(|(index, workspace)| StudioWorkspaceTabVm {
                 number: index + 1,
                 active: index == core.active_workspace,
@@ -702,74 +683,41 @@ fn status_bar_vm(
     }
 }
 
-fn home_vm(core: &StudioCore) -> StudioHomeVm {
-    // Home panel content comes from the surface-declared home view
-    // (`home_view: view:…`), never from client source. Absent content
-    // degrades visibly so missing content is never hidden by an empty shell.
-    let home_ref = core
-        .data
-        .session
-        .as_ref()
-        .and_then(|session| session.effective_surface.as_ref())
-        .and_then(|surface| surface.get("home_view"))
-        .and_then(serde_json::Value::as_str);
-    let body = home_ref
-        .and_then(|home_ref| core.views.get(home_ref))
-        .map(|binding| binding.body.clone())
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "brand": "RYE OS",
-                "tagline": "home view unavailable",
-                "description": format!(
-                    "home view missing: {}",
-                    home_ref.unwrap_or("<none>")
-                ),
-                "terminal_lines": [],
-                "primary_label": "OPEN",
-                "secondary_label": "",
-                "secondary_url": "",
-                "install_command": ""
-            })
-        });
-    let text = |key: &str| {
-        body.get(key)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    StudioHomeVm {
-        brand: text("brand"),
-        tagline: text("tagline"),
-        description: text("description"),
-        terminal_lines: body
-            .get("terminal_lines")
-            .and_then(serde_json::Value::as_array)
-            .map(|lines| {
-                lines
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        primary_label: text("primary_label"),
-        secondary_label: text("secondary_label"),
-        secondary_url: text("secondary_url"),
-        install_command: text("install_command"),
-    }
-}
-
 fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
+    let center_is_empty = core.workspace.center_is_empty();
     StudioWorkspaceVm {
         root: core
             .workspace
             .layout()
             .map(|layout| layout_node_vm(&layout, core)),
         focused_tile: tile_id_text(core.workspace.focused_tile),
-        is_home: core.workspace.is_home(),
+        center_is_empty,
+        // The backdrop scene resolves only on an empty center. The
+        // surface's `backdrop` ref selects the scene content; v1 ships the
+        // client-side shard builder (the renderer stays generic, so a
+        // data/service source later is invisible to it).
+        backdrop: center_is_empty.then(|| backdrop_scene(core)).flatten(),
         tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
     }
+}
+
+/// Resolve the backdrop scene from the surface's `backdrop` view ref.
+/// For v1 the only backdrop content is the client-side shard scene; the
+/// ref selects it. Absent `backdrop` → no scene (the background fill
+/// stands).
+fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
+    let backdrop_ref = core
+        .data
+        .session
+        .as_ref()
+        .and_then(|session| session.effective_surface.as_ref())
+        .and_then(|surface| surface.get("backdrop"))
+        .and_then(serde_json::Value::as_str)?;
+    if !backdrop_ref.starts_with("view:") {
+        return None;
+    }
+    Some(super::scene_model::build_shard_scene(core.generation))
 }
 
 fn dock_plane_vm(core: &StudioCore) -> StudioDockPlaneVm {
@@ -1616,43 +1564,46 @@ mod tests {
     }
 
     #[test]
-    fn home_vm_uses_embedded_home_view_body() {
+    fn empty_center_resolves_backdrop_scene_from_surface_ref() {
         let session = crate::studio::model::BrowserSession {
-            session_id: "S-home".to_string(),
+            session_id: "S-backdrop".to_string(),
             surface_ref: "surface:ryeos/studio/base".to_string(),
             effective_surface: Some(json!({
                 "name": "studio-base",
                 "version": "1.0.0",
-                "home_view": "view:ryeos/home/brand",
-                "views": {
-                    "view:ryeos/home/brand": {
-                        "widget": "text",
-                        "body": {
-                            "brand": "TEST OS",
-                            "tagline": "portable substrate",
-                            "description": "signed content",
-                            "terminal_lines": ["verified by math"],
-                            "primary_label": "OPEN",
-                            "secondary_label": "DOCS",
-                            "secondary_url": "https://example.invalid",
-                            "install_command": "install test"
-                        }
-                    }
-                }
+                "backdrop": "view:ryeos/backdrop/shard",
+                "views": {}
             })),
             ..Default::default()
         };
         let core = StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0);
+        let vm = build_view_model(&core);
 
-        let home = home_vm(&core);
+        assert!(vm.workspace.center_is_empty);
+        let backdrop = vm
+            .workspace
+            .backdrop
+            .expect("backdrop scene on empty center");
+        // The shard scene resolves to objects, including text labels.
+        assert!(!backdrop.objects.is_empty());
+        assert!(backdrop
+            .objects
+            .iter()
+            .any(|o| o.label.as_deref() == Some("RYE OS")));
+    }
 
-        assert_eq!(home.brand, "TEST OS");
-        assert_eq!(home.tagline, "portable substrate");
-        assert_eq!(home.description, "signed content");
-        assert_eq!(home.terminal_lines, vec!["verified by math"]);
-        assert_eq!(home.primary_label, "OPEN");
-        assert_eq!(home.secondary_label, "DOCS");
-        assert_eq!(home.install_command, "install test");
+    #[test]
+    fn no_backdrop_ref_means_no_backdrop_scene() {
+        let session = crate::studio::model::BrowserSession {
+            session_id: "S-nobackdrop".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            effective_surface: Some(json!({ "name": "studio-base", "views": {} })),
+            ..Default::default()
+        };
+        let core = StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0);
+        let vm = build_view_model(&core);
+        assert!(vm.workspace.center_is_empty);
+        assert!(vm.workspace.backdrop.is_none());
     }
 
     #[test]
@@ -1673,28 +1624,6 @@ mod tests {
         // Absent style defaults to thin.
         let default_vm = build_view_model(&StudioCore::default());
         assert_eq!(default_vm.presentation.chrome.border, "thin");
-    }
-
-    #[test]
-    fn home_vm_missing_home_view_degrades_visibly() {
-        let session = crate::studio::model::BrowserSession {
-            session_id: "S-home".to_string(),
-            surface_ref: "surface:ryeos/studio/base".to_string(),
-            effective_surface: Some(json!({
-                "name": "studio-base",
-                "version": "1.0.0",
-                "home_view": "view:ryeos/home/brand",
-                "views": {}
-            })),
-            ..Default::default()
-        };
-        let core = StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0);
-
-        let home = home_vm(&core);
-
-        assert_eq!(home.brand, "RYE OS");
-        assert_eq!(home.tagline, "home view unavailable");
-        assert_eq!(home.description, "home view missing: view:ryeos/home/brand");
     }
 
     #[test]

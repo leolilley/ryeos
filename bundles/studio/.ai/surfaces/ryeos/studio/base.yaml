@@ -1,4 +1,3 @@
-# ryeos:signed:2026-06-13T05:38:46Z:e913a50ad1fc3a7bb7a361df2921444b8996cddbaec3051f3eb81b7653661ae0:NCKnh3WiKQO4S6twO8zm0hBGX9ISWMi+UdRzdhrBM8caxCCk0ej/3ntIGrGmc4hjRaVyl5L8BKdxgjjRIctrAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -19,9 +18,10 @@ slots:
 style:
   border: thin
 
-home_view: view:ryeos/home/brand
+backdrop: view:ryeos/backdrop/shard
 
 library:
+  - view:ryeos/backdrop/shard
   - view:ryeos/input
   - view:ryeos/threads/list
   - view:ryeos/item/inspector

@@ -10,15 +10,14 @@ const utf8Encoder = new TextEncoder();
 
 export function studioWorkspace(vm, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
-  // Home is an empty center: the ambient background owns the frame.
-  if (vm?.is_home) {
-    main.classList.add("home-space");
-    return main;
-  }
+  // There is no "home" mode. The plane (docks incl. the real bottom input
+  // slot) renders in every state; the only branch is backdrop-vs-tiles in
+  // the center, handled inside workspacePlane.
   if (!vm) {
     main.append(textEl("p", "No workspace loaded."));
     return main;
   }
+  if (vm.center_is_empty) main.classList.add("empty-center");
   main.append(workspacePlane(vm, dispatchUi, motion));
   return main;
 }
@@ -53,8 +52,13 @@ function workspacePlane(vm, dispatchUi, motion) {
   if (top) plane.append(top);
 
   const stack = el("section", "studio-workspace-stack");
-  // No computed tree (empty center in workspace mode): background fill.
-  if (vm.root) stack.append(layoutNode(vm.root, dispatchUi, motion));
+  if (vm.root) {
+    stack.append(layoutNode(vm.root, dispatchUi, motion));
+  } else if (vm.backdrop) {
+    // Empty center: the backdrop is content — drawn through the same
+    // generic scene path. The background is a scene, never a renderer enum.
+    stack.append(backdropScene(vm.backdrop, dispatchUi));
+  }
   plane.append(stack);
 
   if (bottom) plane.append(bottom);
@@ -254,6 +258,74 @@ function timelineEntry(entry) {
       return row;
     }
   }
+}
+
+// The generic backdrop scene renderer (web parity with the terminal's
+// widgets/scene.rs): the same StudioSceneModel drives both. Objects are
+// orthographically projected into the stage; particles twinkle by a
+// function of the scene's `generation` (CSS/JS opacity + glyph size),
+// with a per-object phase so they don't pulse in unison. No per-art code,
+// no `ambient` enum — new backgrounds are new scene content.
+const TWINKLE_GLYPHS = ["·", "•", "●"];
+
+function backdropScene(scene, _dispatchUi) {
+  const wrap = el("section", "studio-backdrop studio-scene");
+  const stage = el("div", "studio-backdrop-stage studio-scene-stage");
+  const generation = Number(scene?.generation || 0);
+  const objects = scene?.objects || [];
+  // Fit the object cloud to the stage (orthographic; +y up → top flips).
+  const xs = objects.map((o) => o.position?.[0] || 0);
+  const ys = objects.map((o) => o.position?.[1] || 0);
+  const minX = Math.min(...xs, -1), maxX = Math.max(...xs, 1);
+  const minY = Math.min(...ys, -1), maxY = Math.max(...ys, 1);
+  const spanX = Math.max(0.001, maxX - minX);
+  const spanY = Math.max(0.001, maxY - minY);
+  objects.forEach((object, index) => {
+    const px = object.position || [0, 0, 0];
+    const left = 6 + ((px[0] - minX) / spanX) * 88;
+    const top = 6 + (1 - (px[1] - minY) / spanY) * 88;
+    if (object.kind === "text" || object.kind === "label_anchor") {
+      const label = textEl("div", object.label || "", `studio-backdrop-text ${object.tone || "neutral"}`);
+      label.style.left = `${left}%`;
+      label.style.top = `${top}%`;
+      label.style.setProperty("--node-color", object.color || "#d65d0e");
+      stage.append(label);
+      return;
+    }
+    const dot = el("span", `studio-backdrop-dot ${object.tone || "neutral"}`);
+    dot.style.left = `${left}%`;
+    dot.style.top = `${top}%`;
+    dot.style.setProperty("--node-color", object.color || "#a89984");
+    if (object.kind === "particle") {
+      const phase = phaseFor(object.id || "", index);
+      const step = (generation + phase) % 4;
+      const base = sizeIndex(object.scale?.[0] ?? 0.5);
+      const delta = step === 1 ? 1 : step === 3 ? -1 : 0;
+      const idx = Math.max(0, Math.min(TWINKLE_GLYPHS.length - 1, base + delta));
+      dot.textContent = TWINKLE_GLYPHS[idx];
+      dot.style.opacity = String(step === 3 ? 0.4 : (object.opacity ?? 0.8));
+    } else {
+      dot.textContent = TWINKLE_GLYPHS[sizeIndex(object.scale?.[0] ?? 0.5)];
+      dot.style.opacity = String(object.opacity ?? 1);
+    }
+    stage.append(dot);
+  });
+  wrap.append(stage);
+  return wrap;
+}
+
+function sizeIndex(scale) {
+  if (scale >= 0.85) return 2;
+  if (scale >= 0.5) return 1;
+  return 0;
+}
+
+function phaseFor(id, index) {
+  let hash = index >>> 0;
+  for (let i = 0; i < id.length; i += 1) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  }
+  return hash % 4;
 }
 
 function sceneMap(scene, dispatchUi) {

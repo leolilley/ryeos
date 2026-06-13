@@ -1,4 +1,3 @@
-<!-- ryeos:signed:2026-06-13T05:38:45Z:a09114df686f7e957fd851ebd1ef8fde2e8164951754d821f64efb5fecf30cda:Brid6EUCMJ4mZ4XN2GcoyQ2mzc36h6nmDP58bfQhpWnYz96GbmdsCe70U1DBPdaDvg0SOctED7d5HYDGEAshAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/studio"
 name: "frame-v1"
@@ -137,6 +136,35 @@ which runtime event kind means cognition, tool start, or tool result.
 - `pair_close` records with the same `pair_key` update the open pair in place.
 - Unknown or absent roles degrade to line records.
 - Pair roles with no resolvable `pair_key` degrade to line records.
+
+## Backdrop (the empty-center background is a scene)
+
+There is no "home" mode. The center is the tiling algorithm over the tile
+list: an **empty center** (zero tiles) shows the backdrop; tiles fill it
+otherwise; closing the last tile returns to an empty center. No mode, no
+destination — `center_is_empty` is a derived query.
+
+The backdrop is **content, not a renderer enum.** A surface declares:
+
+```yaml
+backdrop: view:ryeos/backdrop/<name>   # a normal view, widget: scene
+```
+
+The `view:ryeos/backdrop/<name>` view is a `widget: scene` view; the
+renderer draws its `StudioSceneModel` through the **one generic scene
+renderer** (the same renderer that draws the atlas and any future scene).
+Each scene object — `particle` (a dot sized by `scale`), `text` (its
+`label`), structural kinds — is orthographically projected into the
+center rect, glyphed by kind/scale, coloured by `tone`. New backgrounds
+(shard, starfield, atlas, …) are new **scene content**, never new renderer
+cases or an `ambient:` enum. The slots (incl. the bottom `view:ryeos/input`
+prompt) render in every state, below the backdrop.
+
+Animation falls out of the frame clock: `StudioSceneModel` carries
+`generation`, the loop ticks (250ms) advancing it, and the generic
+renderer steps generation-keyed motion (v1: the backdrop particles
+*twinkle* — a per-object size/brightness pulse). The motion is generic
+(the renderer steps by `generation`); the scene only declares particles.
 
 ## Laws
 

@@ -464,8 +464,10 @@ impl StudioCore {
         let needs_atlas = self.surface_uses_atlas_ambient();
         let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
         let mut needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
-        // Home (empty center) renders the ambient topology background.
-        let mut needs_topology = self.workspace.is_home();
+        // An empty center can host the ambient topology background; the
+        // backdrop scene itself is client-side, but the atlas ambient
+        // still wants topology when no tiles occupy the center.
+        let mut needs_topology = self.workspace.center_is_empty();
         let mut bound_tiles: Vec<(crate::ids::TileId, String)> = Vec::new();
 
         for tile_id in self.workspace.tile_ids() {

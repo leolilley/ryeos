@@ -19,7 +19,7 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   const presentation = presentationState(vm, scene);
   applyPresentationState(root, presentation);
   const motionSnapshot = captureWorkspaceMotion(root);
-  const currentTileIds = new Set(vm.workspace?.is_home ? [] : tileIdsForNode(vm.workspace?.root));
+  const currentTileIds = new Set(vm.workspace?.center_is_empty ? [] : tileIdsForNode(vm.workspace?.root));
   const home = studioHome(vm, scene, chromeShell);
   const layers = [
     opticFrame(vm.presentation?.frame),

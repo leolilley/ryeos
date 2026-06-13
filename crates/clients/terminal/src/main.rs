@@ -129,12 +129,12 @@ fn main() {
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            if let Some(home_ref) = value
-                                .get("home_view")
+                            if let Some(backdrop_ref) = value
+                                .get("backdrop")
                                 .and_then(|v| v.as_str())
                                 .filter(|v| v.starts_with("view:"))
                             {
-                                view_refs.push(home_ref.to_string());
+                                view_refs.push(backdrop_ref.to_string());
                             }
                             if let Some(library) = value.get("library").and_then(|v| v.as_array()) {
                                 view_refs.extend(

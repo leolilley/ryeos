@@ -1,0 +1,11 @@
+name: backdrop-shard
+version: "1.0.0"
+description: >-
+  The empty-center backdrop scene — the RyeOS shard mark traced in
+  particles, orbiting motes, and the brand/welcome/hint text as scene
+  objects. The background is content (a `scene`), drawn by the one generic
+  scene renderer; selecting this view as a surface's `backdrop` shows it on
+  an empty center. New backgrounds are new scene content (new builders or
+  data sources), never renderer cases.
+
+widget: scene
