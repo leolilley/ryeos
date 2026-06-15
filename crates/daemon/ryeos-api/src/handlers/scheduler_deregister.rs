@@ -17,6 +17,12 @@ use ryeos_executor::executor::ServiceAvailability;
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub schedule_id: String,
+    /// Also delete the on-disk fire-history dir (`.ai/state/schedules/<id>/`).
+    /// Off by default (history is kept for audit), but the history dir blocks
+    /// re-registering the same `schedule_id`, so set this when you intend to
+    /// recreate the schedule cleanly instead of hand-deleting files.
+    #[serde(default)]
+    pub purge_history: bool,
 }
 
 pub async fn handle(
@@ -58,7 +64,24 @@ pub async fn handle(
         .delete_fires_for_schedule(&req.schedule_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
-    // JSONL file on disk is preserved (audit trail)
+    // The on-disk JSONL history dir is preserved by default (audit trail), but
+    // it blocks re-registering the same id. `purge_history` removes it so the id
+    // can be recreated cleanly without hand-deleting files.
+    let mut history_purged = false;
+    if req.purge_history {
+        let fires_dir = state
+            .config
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
+            .join("schedules")
+            .join(&req.schedule_id);
+        if fires_dir.exists() {
+            std::fs::remove_dir_all(&fires_dir)
+                .map_err(|e| HandlerError::Internal(e.to_string()))?;
+            history_purged = true;
+        }
+    }
 
     // Ping timer loop
     if let Some(ref tx) = state.scheduler_reload_tx {
@@ -72,7 +95,8 @@ pub async fn handle(
     Ok(serde_json::json!({
         "schedule_id": req.schedule_id,
         "deleted": true,
-        "history_preserved": true,
+        "history_preserved": !history_purged,
+        "history_purged": history_purged,
     }))
 }
 
