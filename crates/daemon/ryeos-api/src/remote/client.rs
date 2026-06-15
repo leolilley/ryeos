@@ -18,14 +18,16 @@ use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
 
-/// HTTP error from a remote-node call, carrying the status code and request
-/// path so callers can react to a specific failure — e.g. a 404 that means a
-/// route is simply absent on an out-of-date remote node — instead of
-/// string-matching a formatted message.
+/// HTTP error from a remote-node call, carrying the status code and the **full
+/// request URL** so callers can react to a specific failure — and so an operator
+/// can see *which host* answered. A bare path hides the most common cause of a
+/// confusing 404: the remote URL in config points at the wrong node, so the
+/// route truly isn't there at that URL even though it exists on the real node.
 #[derive(Debug)]
 pub struct RemoteHttpError {
     pub method: &'static str,
-    pub path: String,
+    /// Full URL hit (base_url + path), e.g. `https://node.example.com/project/apply-snapshot`.
+    pub url: String,
     pub status: reqwest::StatusCode,
     pub body: String,
 }
@@ -35,7 +37,7 @@ impl std::fmt::Display for RemoteHttpError {
         write!(
             f,
             "{} {} returned {}: {}",
-            self.method, self.path, self.status, self.body
+            self.method, self.url, self.status, self.body
         )
     }
 }
@@ -739,7 +741,7 @@ impl RemoteClient {
         if !status.is_success() {
             return Err(RemoteHttpError {
                 method: "POST",
-                path: path.to_string(),
+                url: url.clone(),
                 status,
                 body: resp_body.to_string(),
             }
@@ -772,7 +774,7 @@ impl RemoteClient {
         if !status.is_success() {
             return Err(RemoteHttpError {
                 method: "POST",
-                path: path.to_string(),
+                url: url.clone(),
                 status,
                 body: resp_body.to_string(),
             }
