@@ -573,7 +573,11 @@ function semanticSignature(sceneModel, namespaceAtlas = false) {
   if (namespaceAtlas && sceneModel?.atlas) {
     const nodes = sceneModel.atlas.nodes || [];
     const ui = sceneModel.atlas.ui || {};
-    return `atlas:${sceneModel.atlas.generation}:${sceneModel.atlas.selected_ref || ""}:${(ui.visible_layers || []).join(",")}:${ui.active_lens || "none"}:` + nodes
+    // The frame counter (`generation`) is intentionally excluded: this
+    // signature gates a full Three.js scene rebuild and must reflect
+    // STRUCTURAL change only (nodes, selection, layers, lens), never the
+    // per-tick animation clock — otherwise the atlas rebuilds ~4x/second.
+    return `atlas:${sceneModel.atlas.selected_ref || ""}:${(ui.visible_layers || []).join(",")}:${ui.active_lens || "none"}:` + nodes
       .map((node) => [node.id, node.stack?.length || 0, node.state?.selected ? "s" : "", node.state?.highlighted ? "h" : "", node.state?.dimmed ? "d" : ""].join("/"))
       .join(";") + `:${sceneModel.atlas.regions?.length || 0}:${sceneModel.atlas.links?.length || 0}`;
   }

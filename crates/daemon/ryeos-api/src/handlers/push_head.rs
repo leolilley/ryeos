@@ -52,6 +52,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     ryeos_state::project_sync::validate_project_manifest_paths(
         &manifest,
         snapshot.project_sync_scope,
+        Some(state.ignore_matcher.as_ref()),
     )?;
 
     // 3. Validate manifest entries don't contain ignored paths
@@ -89,9 +90,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // 5. Write the HEAD ref (with CAS compare-and-swap if HEAD already exists)
     let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
     let project_lock = crate::handlers::project_apply_snapshot::project_apply_lock(&project_hash);
-    let _project_guard = project_lock
-        .lock()
-        .map_err(|_| anyhow!("project lock poisoned for '{}'", canonical_project_path))?;
+    let _project_guard = project_lock.lock_owned().await;
     let _permit = state
         .write_barrier
         .try_acquire()

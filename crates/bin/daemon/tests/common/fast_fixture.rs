@@ -247,10 +247,7 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
         .join("trusted");
     for sk in [&publisher, &node, &user] {
         write_self_signed_trust_doc(&trust_dir, sk).with_context(|| {
-            format!(
-                "write self-signed trust doc under {}",
-                state_path.display()
-            )
+            format!("write self-signed trust doc under {}", state_path.display())
         })?;
     }
 

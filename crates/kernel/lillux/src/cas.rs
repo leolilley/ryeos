@@ -34,6 +34,53 @@ pub fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Atomically write a batch of files with a single durability barrier.
+///
+/// Each file is written tmp+rename like [`atomic_write`], but per-file
+/// fsyncs are deferred: on Linux one `syncfs` flushes the whole batch
+/// (one journal commit instead of one per file); elsewhere each file is
+/// fsynced in a second pass. Only use this when the batch shares one
+/// downstream durability point (e.g. CAS event objects flushed before
+/// the chain head that references them advances): a crash mid-batch may
+/// leave some files missing or empty, which is only safe while nothing
+/// references them yet.
+pub fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    if let [(target, data)] = writes {
+        return atomic_write(target, data);
+    }
+    for (target, data) in writes {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(data)?;
+        fs::rename(&tmp, target)?;
+    }
+    sync_write_batch(writes)
+}
+
+#[cfg(target_os = "linux")]
+fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let Some((first, _)) = writes.first() else {
+        return Ok(());
+    };
+    let dir = fs::File::open(first.parent().unwrap_or_else(|| Path::new(".")))?;
+    if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    for (target, _) in writes {
+        fs::File::open(target)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Materialize a blob from CAS to a target path, setting Unix permission
 /// bits so the result is executable. Like `atomic_write` but preserves
 /// the exec mode from the `ItemSource` record.

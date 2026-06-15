@@ -51,7 +51,9 @@ impl SignSource {
                 "source `system` is rejected — bundle items are signed by their \
                  author key during bundle authoring, not re-signed in place"
             ),
-            "operator" => bail!("source `operator` is rejected — app-root config is not an item source"),
+            "operator" => {
+                bail!("source `operator` is rejected — app-root config is not an item source")
+            }
             other => bail!("unknown source `{other}` (expected: project)"),
         }
     }
@@ -86,8 +88,6 @@ pub fn run_sign(
     project_path: Option<&Path>,
     source: SignSource,
 ) -> Result<BatchReport> {
-    let target = parse_sign_target(item_ref)?;
-
     let bundle_roots = {
         let app_root = match std::env::var("RYEOS_APP_ROOT") {
             Ok(p) => PathBuf::from(p),
@@ -117,6 +117,26 @@ pub fn run_sign(
     .with_context(|| "load trust store")?;
 
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
+
+    // `sign` canonically takes a ref (`graph:foo/bar`), but operators and LLMs
+    // routinely pass the file path they just edited. A path under the project's
+    // `.ai/` maps to exactly one canonical ref, so resolve it and sign that —
+    // no reason to make the caller retype what we already resolved.
+    let target = match parse_sign_target(item_ref) {
+        Ok(t) => t,
+        Err(e) => match resolve_path_to_ref(item_ref, source, project_path, &kinds) {
+            Some(resolved) => {
+                tracing::info!(
+                    path = %item_ref,
+                    canonical_ref = %resolved,
+                    "resolved file path to canonical ref for signing"
+                );
+                parse_sign_target(&resolved)?
+            }
+            None => return Err(e),
+        },
+    };
+
     let kind_schema = kinds
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
@@ -269,17 +289,54 @@ fn sign_one(
 }
 
 fn sign_warnings(kind_name: &str, parsed: &serde_json::Value) -> Vec<String> {
+    let mut warnings = Vec::new();
+
     if kind_name == "tool"
         && parsed
             .get("executor_id")
             .is_some_and(serde_json::Value::is_null)
     {
-        return vec![
+        warnings.push(
             "tool declares `executor_id: null`; this is valid for terminal executor-chain endpoints, but the tool is not directly invokable as a requested item"
                 .to_string(),
-        ];
+        );
     }
-    Vec::new()
+
+    // A graph-shaped YAML placed under `.ai/tools/**/graphs/` resolves as a
+    // `tool:` (resolution keys off the directory, not `tool_type`), never as a
+    // `graph:`. This is a common trap — flag it at sign time, pointing at the
+    // canonical location.
+    if kind_name == "tool" && looks_graph_shaped(parsed) {
+        warnings.push(
+            "this item looks like a graph (graph-shaped body) but is being signed as a `tool:`. \
+             Graphs only resolve from `.ai/graphs/<id>/`; a file under `.ai/tools/**/graphs/` \
+             resolves as `tool:...`, not `graph:...`. Move it to `.ai/graphs/` and sign \
+             `graph:<id>` if you intended a graph."
+                .to_string(),
+        );
+    }
+
+    warnings
+}
+
+/// Heuristic: does this parsed item body look like a graph definition?
+/// True when it declares `tool_type: graph`, sits in a `*/graphs` category,
+/// or carries the graph control structure (`config.start` + `config.nodes`).
+fn looks_graph_shaped(parsed: &serde_json::Value) -> bool {
+    if parsed.get("tool_type").and_then(|v| v.as_str()) == Some("graph") {
+        return true;
+    }
+    if parsed
+        .get("category")
+        .and_then(|v| v.as_str())
+        .is_some_and(|c| c == "graphs" || c.ends_with("/graphs"))
+    {
+        return true;
+    }
+    parsed
+        .get("config")
+        .map(|cfg| cfg.get("nodes").is_some() && cfg.get("start").is_some())
+        .unwrap_or(false)
 }
 
 #[derive(Debug)]
@@ -340,6 +397,50 @@ fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
         kind: kind.to_string(),
         bare_id: bare_id.to_string(),
     })
+}
+
+/// Reverse-map a path-shaped argument to the canonical ref `sign` expects.
+///
+/// Returns e.g. `graph:snap-track/daily_profile_pipeline` for
+/// `.ai/graphs/snap-track/daily_profile_pipeline.yaml`. `None` if the arg
+/// doesn't look like a path, isn't under the source `.ai/` root, or doesn't
+/// match a known kind directory + extension. A path under the project `.ai/`
+/// maps to exactly one ref, so the caller signs the resolved ref directly.
+fn resolve_path_to_ref(
+    arg: &str,
+    source: SignSource,
+    project_path: Option<&Path>,
+    kinds: &KindRegistry,
+) -> Option<String> {
+    // Only attempt for path-shaped args (avoid hijacking refs/globs).
+    let looks_path =
+        arg.contains('/') && (Path::new(arg).exists() || Path::new(arg).extension().is_some());
+    if !looks_path {
+        return None;
+    }
+
+    let ai_root = source_ai_root(source, project_path).ok()?;
+    // Canonicalize both sides so a relative arg resolves against cwd and the
+    // `.ai/` prefix strip works regardless of how either was spelled.
+    let abs = std::fs::canonicalize(arg).ok()?;
+    let ai_abs = std::fs::canonicalize(&ai_root).ok()?;
+    let rel = abs.strip_prefix(&ai_abs).ok()?;
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+    for kind in kinds.kinds() {
+        let Some(dir) = kinds.directory(kind) else {
+            continue;
+        };
+        let Some(rest) = rel_str.strip_prefix(&format!("{dir}/")) else {
+            continue;
+        };
+        for ext in kinds.extension_strs(kind).unwrap_or_default() {
+            if let Some(bare) = rest.strip_suffix(ext) {
+                return Some(format!("{kind}:{bare}"));
+            }
+        }
+    }
+    None
 }
 
 fn is_glob_ref(s: &str) -> bool {

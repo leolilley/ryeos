@@ -72,7 +72,7 @@ async fn studio_config_is_isolated_by_durable_user_principal() {
         .path()
         .join(".ai/principals")
         .join(principal_a_key)
-        .join("user-space/.ai/config/studio.yaml")
+        .join("space/.ai/config/studio.yaml")
         .is_file());
 }
 

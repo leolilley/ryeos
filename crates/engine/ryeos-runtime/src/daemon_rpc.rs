@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::net::UnixStream;
 
 use crate::framing;
 
@@ -60,11 +62,66 @@ struct RpcErrorPayload {
 #[derive(Clone, Debug)]
 pub struct DaemonRpcClient {
     socket_path: PathBuf,
+    /// Cached connection, shared across clones. The daemon serves many
+    /// frames per connection, so callbacks reuse one socket instead of
+    /// paying connect/teardown per RPC (streaming runtimes issue one
+    /// RPC per event). Requests serialize on the lock, which also keeps
+    /// request/response frames paired.
+    conn: Arc<tokio::sync::Mutex<Option<UnixStream>>>,
+}
+
+enum RoundtripFailure {
+    /// The request write failed: the daemon saw none of this request.
+    Send(std::io::Error),
+    /// The request was (at least partially) delivered; the response is
+    /// unknown. Never retried — appends are not idempotent.
+    Recv(std::io::Error),
+    Closed,
+}
+
+impl From<RoundtripFailure> for RpcError {
+    fn from(failure: RoundtripFailure) -> Self {
+        match failure {
+            RoundtripFailure::Send(e) | RoundtripFailure::Recv(e) => RpcError::Io(e),
+            RoundtripFailure::Closed => RpcError::ConnectionClosed,
+        }
+    }
+}
+
+/// Non-blocking probe for a connection the daemon already closed (or
+/// desynchronized by sending unsolicited bytes). Healthy idle
+/// connections report `WouldBlock`.
+fn connection_is_broken(stream: &UnixStream) -> bool {
+    let mut buf = [0u8; 1];
+    match stream.try_read(&mut buf) {
+        Ok(_) => true, // EOF or unsolicited bytes — either way unusable
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(_) => true,
+    }
 }
 
 impl DaemonRpcClient {
     pub fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+        Self {
+            socket_path,
+            conn: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    async fn roundtrip(
+        stream: &mut UnixStream,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, RoundtripFailure> {
+        framing::send_frame(stream, payload)
+            .await
+            .map_err(RoundtripFailure::Send)?;
+        let bytes = framing::recv_frame(stream)
+            .await
+            .map_err(RoundtripFailure::Recv)?;
+        if bytes.is_empty() {
+            return Err(RoundtripFailure::Closed);
+        }
+        Ok(bytes)
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -76,13 +133,35 @@ impl DaemonRpcClient {
         };
         let payload = rmp_serde::to_vec_named(&frame)?;
 
-        let mut stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-        framing::send_frame(&mut stream, &payload).await?;
+        let mut conn = self.conn.lock().await;
 
-        let response_bytes = framing::recv_frame(&mut stream).await?;
-        if response_bytes.is_empty() {
-            return Err(RpcError::ConnectionClosed);
+        // Discard a cached connection the daemon has since closed.
+        if conn.as_ref().is_some_and(connection_is_broken) {
+            *conn = None;
         }
+        let reused = conn.is_some();
+        if conn.is_none() {
+            *conn = Some(UnixStream::connect(&self.socket_path).await?);
+        }
+        let stream = conn.as_mut().expect("connection just ensured");
+
+        let response_bytes = match Self::roundtrip(stream, &payload).await {
+            Ok(bytes) => bytes,
+            Err(RoundtripFailure::Send(_)) if reused => {
+                // The write itself failed on a reused connection, so the
+                // daemon received none of this request; one retry on a
+                // fresh connection cannot double-apply.
+                *conn = None;
+                let mut fresh = UnixStream::connect(&self.socket_path).await?;
+                let bytes = Self::roundtrip(&mut fresh, &payload).await?;
+                *conn = Some(fresh);
+                bytes
+            }
+            Err(failure) => {
+                *conn = None;
+                return Err(failure.into());
+            }
+        };
 
         let response: RpcResponseFrame = rmp_serde::from_slice(&response_bytes)?;
 

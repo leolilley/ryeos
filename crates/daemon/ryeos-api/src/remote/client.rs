@@ -18,6 +18,41 @@ use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
 
+/// HTTP error from a remote-node call, carrying the status code and request
+/// path so callers can react to a specific failure — e.g. a 404 that means a
+/// route is simply absent on an out-of-date remote node — instead of
+/// string-matching a formatted message.
+#[derive(Debug)]
+pub struct RemoteHttpError {
+    pub method: &'static str,
+    pub path: String,
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for RemoteHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} returned {}: {}",
+            self.method, self.path, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for RemoteHttpError {}
+
+/// Cap on establishing a TCP/TLS connection to a remote. Applies to
+/// every request; without it a dead or filtered remote hangs callers
+/// for the OS connect timeout (minutes).
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total-request cap for control-plane calls (health, discovery,
+/// listings, signed GETs). Deliberately NOT applied to `signed_post`:
+/// `/execute` and CAS transfers may legitimately run far longer and
+/// are bounded by the connect timeout plus server-side limits.
+const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Typed client for a remote ryEOS node.
 pub struct RemoteClient {
     /// Base URL (e.g. `https://ryeos.example.com`).
@@ -35,7 +70,12 @@ impl RemoteClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             audience: audience.to_string(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                // Builder only fails on TLS backend init; fall back to
+                // the default client rather than panicking the daemon.
+                .unwrap_or_else(|_| reqwest::Client::new()),
             identity,
         }
     }
@@ -74,6 +114,7 @@ impl RemoteClient {
         let resp = self
             .http
             .get(&url)
+            .timeout(CONTROL_PLANE_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
@@ -115,6 +156,7 @@ impl RemoteClient {
         let resp = self
             .http
             .get(&url)
+            .timeout(CONTROL_PLANE_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
@@ -134,6 +176,7 @@ impl RemoteClient {
         let resp = self
             .http
             .get(&url)
+            .timeout(CONTROL_PLANE_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
@@ -647,6 +690,7 @@ impl RemoteClient {
         let resp = self
             .http
             .get(&url)
+            .timeout(CONTROL_PLANE_TIMEOUT)
             .header("x-ryeos-key-id", &headers.key_id)
             .header("x-ryeos-timestamp", &headers.timestamp)
             .header("x-ryeos-nonce", &headers.nonce)
@@ -693,7 +737,13 @@ impl RemoteClient {
             .with_context(|| format!("failed to parse response from POST {}", url))?;
 
         if !status.is_success() {
-            anyhow::bail!("POST {} returned {}: {}", url, status, resp_body);
+            return Err(RemoteHttpError {
+                method: "POST",
+                path: path.to_string(),
+                status,
+                body: resp_body.to_string(),
+            }
+            .into());
         }
 
         Ok(resp_body)
@@ -706,6 +756,7 @@ impl RemoteClient {
         let resp = self
             .http
             .post(&url)
+            .timeout(CONTROL_PLANE_TIMEOUT)
             .header("content-type", "application/json")
             .body(body_bytes)
             .send()
@@ -719,7 +770,13 @@ impl RemoteClient {
             .with_context(|| format!("failed to parse response from POST {}", url))?;
 
         if !status.is_success() {
-            anyhow::bail!("POST {} returned {}: {}", url, status, resp_body);
+            return Err(RemoteHttpError {
+                method: "POST",
+                path: path.to_string(),
+                status,
+                body: resp_body.to_string(),
+            }
+            .into());
         }
 
         Ok(resp_body)

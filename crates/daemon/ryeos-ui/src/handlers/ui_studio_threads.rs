@@ -43,7 +43,7 @@ fn require_browser_session(
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    require_browser_session(&ctx, &state)?;
+    crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let limit = params
         .get("limit")
@@ -79,7 +79,7 @@ pub async fn handle_inspect(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    require_browser_session(&ctx, &state)?;
+    crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let req: InspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
@@ -146,14 +146,6 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
 };
 
-pub const STUDIO_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/studio/threads/list",
-    endpoint: "ui.studio.threads.list",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
-};
-
 pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/studio/thread/inspect",
     endpoint: "ui.studio.thread.inspect",
@@ -168,12 +160,4 @@ pub const CANCEL_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle_cancel(params, ctx, state).await }),
-};
-
-pub const STUDIO_INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/studio/thread/inspect",
-    endpoint: "ui.studio.thread.inspect",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle_inspect(params, ctx, state).await }),
 };

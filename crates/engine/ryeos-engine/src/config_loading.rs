@@ -8,7 +8,7 @@ use crate::error::EngineError;
 use crate::item_resolution::{parse_signature_header, ResolutionRoots};
 use crate::kind_registry::KindRegistry;
 use crate::parsers::dispatcher::ParserDispatcher;
-use crate::trust::{content_hash_after_signature, verify_item_signature, TrustStore};
+use crate::trust::{content_hash_after_signature, verify_item_signature_with_hash, TrustStore};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,14 +147,10 @@ pub fn load_and_verify_config_file(
                     reason: "could not locate signature line in config file".to_string(),
                 }
             })?;
-            if recomputed != header.content_hash {
-                return Err(EngineError::ContentHashMismatch {
-                    canonical_ref: path.display().to_string(),
-                    expected: header.content_hash.clone(),
-                    actual: recomputed,
-                });
-            }
-            match verify_item_signature(&content, &header, envelope, ctx.trust_store) {
+            // Hash compare happens inside the verify call; a mismatch
+            // surfaces as the hard ContentHashMismatch arm below while
+            // other trust failures only warn (allow_unsigned policy).
+            match verify_item_signature_with_hash(&recomputed, &header, ctx.trust_store) {
                 Ok((trust, _fp)) => tracing::debug!(
                     config_path = %path.display(),
                     ?trust,

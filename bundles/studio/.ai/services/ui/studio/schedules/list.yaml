@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-10T04:04:00Z:f6905f2942dc52442b456681bad40614e9067a3045279a471b7ab6e4dfe310d3:uY8Er5VpLTtB+HsA/kmhFqyLqghN/Jo98YRX/et/lXZSPBm6MTDhmUnuAhYtRan+aU3USSVVshg8mDULwmbEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-11T22:51:46Z:f6905f2942dc52442b456681bad40614e9067a3045279a471b7ab6e4dfe310d3:uY8Er5VpLTtB+HsA/kmhFqyLqghN/Jo98YRX/et/lXZSPBm6MTDhmUnuAhYtRan+aU3USSVVshg8mDULwmbEDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: studio/schedules/list
 version: "1.0.0"

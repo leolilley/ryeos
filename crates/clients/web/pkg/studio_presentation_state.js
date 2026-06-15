@@ -12,7 +12,7 @@ export function presentationState(vm, scene) {
   const opticEnergy = clamp01((semanticMetrics.activity_level ?? 0) + motionCount * 0.12);
 
   return {
-    mode: workspace.is_home ? "home" : "workspace",
+    mode: workspace.center_is_empty ? "empty-center" : "workspace",
     theme: vm.presentation?.theme?.id || "gruvbox-optic",
     motion,
     currentMotion,

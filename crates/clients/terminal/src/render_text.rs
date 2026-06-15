@@ -8,11 +8,18 @@ use crossterm::{
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
+    terminal::{Clear, ClearType},
 };
-use ryeos_client_base::text_surface::{Cell, Color as CoreColor, TextSurface};
+use ryeos_client_base::text_surface::{Attr, Cell, Color as CoreColor, TextSurface};
 use std::io::Write;
 
 /// Render a complete text surface to the terminal using diff painting.
+///
+/// Full redraws (first frame, resize) clear the screen first — the
+/// emulator reflows the previous frame during a resize and absolute
+/// repaints don't cover the displaced junk — and dedupe color codes
+/// across runs of same-styled cells, which keeps resize storms cheap
+/// enough to repaint per event.
 #[allow(dead_code)]
 pub fn render_text_surface(
     stdout: &mut impl Write,
@@ -26,28 +33,22 @@ pub fn render_text_surface(
         || prev.as_ref().unwrap().height != new.height;
 
     if full_redraw {
+        queue!(
+            stdout,
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Clear(ClearType::All),
+        )?;
+        let mut brush = Brush::default();
         for y in 0..new.height {
-            queue!(
-                stdout,
-                MoveTo(offset_x, offset_y + y as u16),
-                ResetColor,
-                SetAttribute(Attribute::Reset),
-            )?;
+            queue!(stdout, MoveTo(offset_x, offset_y + y as u16))?;
             for x in 0..new.width {
-                let cell = new.get(x, y);
-                paint_cell_inline(stdout, cell)?;
+                paint_cell(stdout, new.get(x, y), &mut brush)?;
             }
         }
     } else {
         let prev_surf = prev.as_ref().unwrap();
         for y in 0..new.height {
-            // Quick row check: hash first and last cells as heuristic
-            let _first_new = new.get(0, y);
-            let _last_new = new.get(new.width.saturating_sub(1), y);
-            let _first_old = prev_surf.get(0, y);
-            let _last_old = prev_surf.get(prev_surf.width.saturating_sub(1), y);
-
-            // Always scan full row for correctness
             let mut row_changed = false;
             for x in 0..new.width {
                 if new.get(x, y) != prev_surf.get(x, y) {
@@ -57,17 +58,13 @@ pub fn render_text_surface(
             }
 
             if row_changed {
+                let mut brush = Brush::default();
                 for x in 0..new.width {
                     let new_cell = new.get(x, y);
                     let old_cell = prev_surf.get(x, y);
                     if new_cell != old_cell {
-                        queue!(
-                            stdout,
-                            MoveTo(offset_x + x as u16, offset_y + y as u16),
-                            ResetColor,
-                            SetAttribute(Attribute::Reset),
-                        )?;
-                        paint_cell_inline(stdout, new_cell)?;
+                        queue!(stdout, MoveTo(offset_x + x as u16, offset_y + y as u16))?;
+                        paint_cell(stdout, new_cell, &mut brush)?;
                     }
                 }
             }
@@ -79,12 +76,52 @@ pub fn render_text_surface(
     Ok(())
 }
 
-fn paint_cell_inline(stdout: &mut impl Write, cell: Cell) -> std::io::Result<()> {
-    if cell.fg != CoreColor::Default {
-        queue!(stdout, SetForegroundColor(to_crossterm_color(cell.fg)))?;
+/// Last emitted fg/bg/attr, so runs of same-styled cells emit codes once
+/// instead of per cell.
+#[derive(Default)]
+struct Brush {
+    fg: Option<CoreColor>,
+    bg: Option<CoreColor>,
+    attr: Option<Attr>,
+}
+
+fn paint_cell(stdout: &mut impl Write, cell: Cell, brush: &mut Brush) -> std::io::Result<()> {
+    // Attributes first: changing them means `SetAttribute(Reset)`, which
+    // also clears colors — so on an attr change we re-emit fg/bg. Without
+    // this, bold/italic/underline/reverse set by draw sites never reach
+    // the terminal at all.
+    if brush.attr != Some(cell.attr) {
+        queue!(stdout, SetAttribute(Attribute::Reset))?;
+        if cell.attr.contains(Attr::BOLD) {
+            queue!(stdout, SetAttribute(Attribute::Bold))?;
+        }
+        if cell.attr.contains(Attr::ITALIC) {
+            queue!(stdout, SetAttribute(Attribute::Italic))?;
+        }
+        if cell.attr.contains(Attr::UNDERLINE) {
+            queue!(stdout, SetAttribute(Attribute::Underlined))?;
+        }
+        if cell.attr.contains(Attr::REVERSE) {
+            queue!(stdout, SetAttribute(Attribute::Reverse))?;
+        }
+        brush.attr = Some(cell.attr);
+        // Reset cleared the colors — force them to re-emit below.
+        brush.fg = None;
+        brush.bg = None;
     }
-    if cell.bg != CoreColor::Default {
-        queue!(stdout, SetBackgroundColor(to_crossterm_color(cell.bg)))?;
+    if brush.fg != Some(cell.fg) {
+        match cell.fg {
+            CoreColor::Default => queue!(stdout, SetForegroundColor(Color::Reset))?,
+            fg => queue!(stdout, SetForegroundColor(to_crossterm_color(fg)))?,
+        }
+        brush.fg = Some(cell.fg);
+    }
+    if brush.bg != Some(cell.bg) {
+        match cell.bg {
+            CoreColor::Default => queue!(stdout, SetBackgroundColor(Color::Reset))?,
+            bg => queue!(stdout, SetBackgroundColor(to_crossterm_color(bg)))?,
+        }
+        brush.bg = Some(cell.bg);
     }
     if cell.rune == '\u{0}' {
         // continuation cell for wide char — skip
@@ -121,5 +158,22 @@ mod tests {
             to_crossterm_color(CoreColor::Rgb(1, 2, 3)),
             Color::Rgb { .. }
         ));
+    }
+
+    #[test]
+    fn bold_attribute_is_emitted_to_the_terminal() {
+        // Regression: the painter previously tracked only fg/bg, so a bold
+        // draw produced no SGR bold sequence and rendered at normal weight.
+        use ryeos_client_base::text_surface::Style;
+        let mut surface = TextSurface::new(4, 1);
+        surface.draw_text(0, 0, "Hi", Style::new().bold());
+        let mut out: Vec<u8> = Vec::new();
+        let mut prev = None;
+        render_text_surface(&mut out, &surface, &mut prev, 0, 0).unwrap();
+        // crossterm encodes SetAttribute(Bold) as ESC[1m.
+        assert!(
+            String::from_utf8_lossy(&out).contains("\x1b[1m"),
+            "the bold SGR sequence reaches the terminal"
+        );
     }
 }

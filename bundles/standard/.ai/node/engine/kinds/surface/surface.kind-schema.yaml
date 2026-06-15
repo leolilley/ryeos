@@ -1,4 +1,4 @@
-# ryeos:signed:2026-05-24T11:43:17Z:ed36bb7eba5d13a78bcb4e055b3070bd897c8de6157b55a0871b4bb8d014b6ec:uz2wn0AJrys6RvbrTRqTCCXLiUalxPvZTcYmPMW8GGIjypD3SLPri50uSUIqaTnJehirhMmjwpN3tsfqCTcBBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T03:01:09Z:597c4d6e0a1d2edf2e9c4ff04c5c78a7e874634f6c9bc3f9724366139321d35c:IvpwsStDwfNnBY0z55y2V+luk4+Kcq/Aw8xu3xG2xDwDwCR1z2MV7FEZlORmWAGhlxY5i+gNNOI4NE7Oe4iJDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/surface"
 version: "1.0.0"
 location:
@@ -20,10 +20,18 @@ effective_trust:
 composer_config:
   extends_field: extends
   fields:
-    - name: layout
-      strategy: replace_root_last
+    - name: tiling
+      strategy: dict_merge_root_last
       expect_value_type: mapping
-      required: true
+    - name: tiles
+      strategy: replace_root_last
+      expect_value_type: sequence
+    - name: slots
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: style
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
     - name: input
       strategy: dict_merge_root_last
       expect_value_type: mapping
@@ -44,17 +52,20 @@ composer_config:
 
 composed_value_contract:
   root_type: mapping
-  required:
-    layout:
+  required: {}
+  optional:
+    tiling:
       type: single
       prim: mapping
-      contract:
-        root_type: mapping
-        required:
-          root: { type: single, prim: string }
-        optional:
-          nodes: { type: single, prim: mapping }
-  optional:
+    tiles:
+      type: single
+      prim: sequence
+    slots:
+      type: single
+      prim: mapping
+    style:
+      type: single
+      prim: mapping
     extends:
       type: union
       prims: [string, "null"]

@@ -6,6 +6,7 @@
 //! - Streaming sources → `CompiledGatewayLaunch`, `CompiledThreadsEventsStream`
 //! - Launch mode → `CompiledLaunchInvocation`
 
+pub mod chain_tail_invocation;
 pub mod dispatch_invocation;
 pub mod gateway_stream_invocation;
 pub mod hmac_invocation;

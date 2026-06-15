@@ -8,27 +8,27 @@ name = "ryeos-directive-runtime"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-clap = { version = "4", features = ["derive"] }
-lillux = { path = "../../kernel/lillux" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+lillux = { workspace = true }
 quick-xml = "0.36"
-regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-futures-util = "0.3"
-bytes = "1"
-ryeos-engine = { path = "../../engine/ryeos-engine" }
-ryeos-runtime = { path = "../../engine/ryeos-runtime" }
-ryeos-state = { path = "../../state/ryeos-state" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "io-util", "net"] }
-tracing = "0.1"
-ryeos-tracing = { path = "../../support/ryeos-tracing" }
-base64 = "0.22"
+regex = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
+futures-util = { workspace = true }
+bytes = { workspace = true }
+ryeos-engine = { workspace = true }
+ryeos-runtime = { workspace = true }
+ryeos-state = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal", "io-util", "net"] }
+tracing = { workspace = true }
+ryeos-tracing = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-ryeos-tracing = { path = "../../support/ryeos-tracing", features = ["test-harness"] }
+tempfile = { workspace = true }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }

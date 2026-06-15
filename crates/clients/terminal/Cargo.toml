@@ -9,25 +9,26 @@ name = "ryeos-tui"
 path = "src/main.rs"
 
 [dependencies]
-ryeos-client-base = { path = "../base" }
-ryeos-cli = { path = "../../bin/cli" }
-lillux = { path = "../../kernel/lillux" }
-ed25519-dalek = { version = "2", features = ["default"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "io-util", "net", "time", "sync"] }
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["http1", "tokio"] }
-http-body-util = "0.1"
-bytes = "1"
+ryeos-client-base = { workspace = true }
+ryeos-cli = { workspace = true }
+lillux = { workspace = true }
+ed25519-dalek = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-util", "net", "time", "sync"] }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["http1", "tokio"] }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
 eventsource-stream = "0.2"
-futures-util = "0.3"
+futures-util = { workspace = true }
 crossterm = { version = "0.29", features = ["event-stream"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-thiserror = "2"
-dirs = "6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
 notify = "7"
-tracing = "0.1"
+tracing = { workspace = true }
+unicode-width = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

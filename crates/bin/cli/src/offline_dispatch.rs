@@ -2,7 +2,7 @@
 //!
 //! Commands whose service descriptor declares `availability: offline` (or `both`)
 //! run locally without a daemon. Client and tool descriptors are also dispatchable
-//! offline when the verb's `execute` field targets them directly.
+//! offline when the command's `execute` field targets them directly.
 //!
 //! The engine resolves items (tools, services, clients) through the same pipeline
 //! the daemon uses: kind-agnostic resolution, trust verification, composition.
@@ -44,9 +44,11 @@ pub fn try_offline_dispatch(
     argv: &[String],
     app_root: &Path,
     project_path: &str,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
-    // 1. Load verified node config from signed installed bundle registrations.
-    let snapshot = crate::node_descriptors::load_verified_snapshot(app_root).map_err(local_err)?;
+    // 1. The verified node config comes from the caller, loaded once per
+    //    invocation in `dispatcher::run` from signed installed bundle
+    //    registrations.
     let bundle_roots: Vec<PathBuf> = snapshot
         .bundles
         .iter()
@@ -574,9 +576,6 @@ fn dispatch_service(
 
     // Bind params with service schema
     let mut params = bind_params_with_schema(tail, command, &service_schema, project_path)?;
-    if let Some(obj) = params.as_object_mut() {
-        obj.insert("_verb".to_string(), Value::String(command.name.clone()));
-    }
 
     // Strip internal routing fields before passing to the subprocess tool.
     if let Some(obj) = params.as_object_mut() {
@@ -691,7 +690,11 @@ fn bind_params_minimal(
     command: &CommandDef,
     project_path: &str,
 ) -> Result<Value, CliError> {
-    if let Some(input) = crate::arg_bind::parse_input_arg(tail)? {
+    // Shared with daemon dispatch so the two paths cannot drift:
+    // `--input` is only honored when the descriptor declares an input
+    // flag (clean cut from the old always-on offline behavior), and
+    // declared single-JSON-object binding now works offline too.
+    if let Some(input) = crate::arg_bind::bind_declared_shortcuts(tail, command)? {
         return Ok(input);
     }
 
@@ -1360,13 +1363,25 @@ else:
         "x86_64-apple-darwin"
     }
 
+    /// Tests exercise the public entry point with the snapshot loaded
+    /// the same way `dispatcher::run` does.
+    fn try_offline_dispatch_for_test(
+        argv: &[String],
+        app_root: &std::path::Path,
+        project_path: &str,
+    ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
+        let snapshot =
+            crate::node_descriptors::load_verified_snapshot(app_root).map_err(local_err)?;
+        try_offline_dispatch(argv, app_root, project_path, &snapshot)
+    }
+
     #[test]
     fn offline_dispatch_executes_descriptor_declared_tool() {
         let fixture = Fixture::new();
         let argv = vec!["custom".to_string(), "leo".to_string()];
 
         let result = expect_json(
-            try_offline_dispatch(&argv, &fixture.system, &fixture.project_str())
+            try_offline_dispatch_for_test(&argv, &fixture.system, &fixture.project_str())
                 .unwrap()
                 .expect("handled offline"),
         );
@@ -1380,7 +1395,8 @@ else:
         let fixture = Fixture::new();
         fixture.write_standard_descriptors(None);
 
-        let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
+        let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
+            .unwrap_err();
 
         match err {
             CliError::Local { detail } => {
@@ -1398,7 +1414,7 @@ else:
         let fixture = Fixture::new();
 
         let result = expect_json(
-            try_offline_dispatch(
+            try_offline_dispatch_for_test(
                 &[
                     "custom".to_string(),
                     "--project".to_string(),
@@ -1451,7 +1467,8 @@ else:
             "category: commands\nsection: commands\nname: other-custom\ntokens: [\"custom\"]\ndescription: Other offline command\ndispatch:\n  kind: execute_ref\n  execute: service:other\n",
         );
 
-        let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
+        let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
+            .unwrap_err();
         match err {
             CliError::Local { detail } => {
                 assert!(detail.contains("command token collision"), "{detail}");
@@ -1473,7 +1490,8 @@ else:
             "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"cat\"\n  input_data: \"{params_json}\"\n",
         );
 
-        let err = try_offline_dispatch(&["custom".to_string()], &fixture.system, ".").unwrap_err();
+        let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
+            .unwrap_err();
         match err {
             CliError::Local { detail } => {
                 assert!(
@@ -1499,7 +1517,7 @@ else:
         );
 
         let result = expect_json(
-            try_offline_dispatch(
+            try_offline_dispatch_for_test(
                 &["custom".to_string(), "leo".to_string()],
                 &fixture.system,
                 ".",
@@ -1536,7 +1554,7 @@ else:
             "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\n    mock: \"--mock\"\nserves:\n  kind: surface\n",
         );
 
-        let outcome = try_offline_dispatch(
+        let outcome = try_offline_dispatch_for_test(
             &[
                 "capture".to_string(),
                 "--surface".to_string(),
@@ -1584,7 +1602,7 @@ else:
             "launch:\n  mode: cli_exec\n  binary_ref: bin/{triple}/capture-client\n  args:\n    surface: \"--surface\"\nserves:\n  kind: surface\n",
         );
 
-        let outcome = try_offline_dispatch(
+        let outcome = try_offline_dispatch_for_test(
             &["capture".to_string(), "base".to_string()],
             &fixture.system,
             &fixture.project_str(),

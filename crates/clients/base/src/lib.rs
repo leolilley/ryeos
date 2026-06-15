@@ -4,28 +4,16 @@
 //! This crate must not depend on crossterm, tokio, hyper, ryeos-cli,
 //! wasm-bindgen, or any platform-specific I/O.
 
-pub mod animation;
 pub mod atlas;
-pub mod command_registry;
-pub mod commands;
 pub mod effective_surface;
-pub mod effects;
-pub mod frame;
 pub mod ids;
-pub mod input;
 pub mod layout;
 pub mod math3d;
-pub mod model;
 pub mod radial_tree;
 pub mod scene;
 pub mod scene_config;
-pub mod store;
 pub mod studio;
-pub mod substrate;
 pub mod surface;
 pub mod text_surface;
 pub mod theme;
-pub mod update;
-pub mod views;
-pub mod widgets;
 pub mod workspace;

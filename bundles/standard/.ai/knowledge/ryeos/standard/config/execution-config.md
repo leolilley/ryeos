@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-23T12:11:51Z:f6179dd9ad8c744b7c36851f6308511a2844173e67dfd3dc585738d9a7591967:st35GOVi1Vi05Vkto/4hmMMfz1ZE/ljazeP6vjvOoAJrMFlzf32hJm5Dq59/EkQiFGQn7ms1bKuUEt5fd0vQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-11T21:03:05Z:f6179dd9ad8c744b7c36851f6308511a2844173e67dfd3dc585738d9a7591967:st35GOVi1Vi05Vkto/4hmMMfz1ZE/ljazeP6vjvOoAJrMFlzf32hJm5Dq59/EkQiFGQn7ms1bKuUEt5fd0vQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard/config

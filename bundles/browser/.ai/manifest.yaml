@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-12T07:47:24Z:ba9bb8b7419c06070bf29de0a1d4c4d795ab4f01a9fcfa2fd7a8e6e02078469b:x/MkfRdDIP72x1S2TzigsCA/Ij/ZodYwDeBbK/cUGcm/L5k1mzMPB8/Zv1B710yaJGmAEOz+EAB8Oothymo6CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: browser
+version: 0.1.0
+description: Optional browser automation tools for agents
+provides_kinds: []
+requires_kinds:
+- tool
+uses_kinds: []
+bundle_events: []
+runtime_vault: []

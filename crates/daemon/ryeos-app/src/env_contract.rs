@@ -504,6 +504,7 @@ mod tests {
                 ("PATH", "/bin"),
                 ("OPENAI_API_KEY", "secret"),
                 ("https_proxy", "http://proxy"),
+                ("RYEOS_BROWSER_INTEGRATION", "1"),
                 ("RYEOSD_THREAD_AUTH_TOKEN", "bad"),
             ]))
             .unwrap()
@@ -514,6 +515,7 @@ mod tests {
             map.get("https_proxy").map(String::as_str),
             Some("http://proxy")
         );
+        assert!(!map.contains_key("RYEOS_BROWSER_INTEGRATION"));
         assert!(!map.contains_key("OPENAI_API_KEY"));
         assert!(!map.contains_key("RYEOSD_THREAD_AUTH_TOKEN"));
     }

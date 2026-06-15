@@ -72,6 +72,7 @@ pub async fn push_project_ai_only(
     ryeos_state::project_sync::validate_project_manifest_paths(
         &manifest,
         ProjectSyncScope::AiOnly,
+        remote_ignore,
     )?;
     let manifest_hash = local_cas.store_object(&manifest.to_value())?;
 

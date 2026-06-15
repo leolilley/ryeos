@@ -1,0 +1,36 @@
+# ryeos:signed:2026-06-13T05:38:46Z:2088c148410c73e272df5b2884f20929f72174223da35514c7c0f3d3312d5757:9YYNKhR/FQQ+PQtpi1NV2fY0umgiksJDzzkmQb3W02izwxx4FF2488RoLoY3Pu5xkPhEF5fuq7O+bPyvMJggCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: schedules-list
+version: "1.0.0"
+description: Registered schedules and their state
+
+widget: rows
+source:
+  ref: service:scheduler/list
+  params: {}
+  collection: schedules
+projections:
+  primary: schedule_id
+  meta: expression
+  tone:
+    field: enabled
+    map:
+      "true": good
+      "false": warn
+    default: neutral
+selection:
+  activate: pause
+affordances:
+  - id: pause
+    label: Pause
+    invoke:
+      plane: rye
+      tokens: [scheduler, pause]
+      args:
+        schedule_id: "{record.schedule_id}"
+  - id: resume
+    label: Resume
+    invoke:
+      plane: rye
+      tokens: [scheduler, resume]
+      args:
+        schedule_id: "{record.schedule_id}"

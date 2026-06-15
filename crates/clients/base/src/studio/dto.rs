@@ -329,22 +329,6 @@ pub struct StudioThreadsDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioSchedulesDto {
-    #[serde(default)]
-    pub schedules: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioGcStatusDto {
-    #[serde(default)]
-    pub running: bool,
-    #[serde(default)]
-    pub state: Option<serde_json::Value>,
-    #[serde(default)]
-    pub recent_events: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioFilesDto {
     #[serde(default)]
     pub root: String,
@@ -421,32 +405,6 @@ pub struct StudioFileReadDto {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioItemInspectionDto {
-    #[serde(default)]
-    pub item: StudioInspectedItemDto,
-    #[serde(default)]
-    pub raw: Option<StudioRawContentDto>,
-    #[serde(default)]
-    pub effective: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioInspectedItemDto {
-    #[serde(default)]
-    pub canonical_ref: String,
-    #[serde(default)]
-    pub item_kind: String,
-    #[serde(default)]
-    pub bare_id: String,
-    #[serde(default)]
-    pub source_path: String,
-    #[serde(default)]
-    pub space: String,
-    #[serde(default)]
-    pub executable: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioRawContentDto {
     #[serde(default)]
     pub content: String,
@@ -454,20 +412,4 @@ pub struct StudioRawContentDto {
     pub bytes: usize,
     #[serde(default)]
     pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct StudioThreadInspectionDto {
-    #[serde(default)]
-    pub thread: serde_json::Value,
-    #[serde(default)]
-    pub result: Option<serde_json::Value>,
-    #[serde(default)]
-    pub artifacts: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub children: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub facets: Option<serde_json::Value>,
-    #[serde(default)]
-    pub events: Vec<serde_json::Value>,
 }

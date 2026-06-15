@@ -1,7 +1,9 @@
 //! SurfaceSpec — declarative UI contract for the RyeOS Studio.
 //!
-//! A surface is a non-executable Rye item describing layout, views, commands,
-//! and instruments. The TUI consumes **effective surfaces** — either:
+//! A surface is a non-executable Rye item describing the dynamic-tiling
+//! workspace (tiling algorithm + ordered initial tiles), edge slots,
+//! chrome style, views, commands, and instruments. The TUI consumes
+//! **effective surfaces** — either:
 //! - `BuiltinDefault`: internal safe fallback (no explicit request)
 //! - `LocalPreview`: from `--surface-file`, explicitly untrusted, dev-only
 //! - `RyeResolved`: from Rye item services via `--surface`, trusted and composed
@@ -10,9 +12,7 @@
 //! kind-schema loading, signature verification, or extends-chain composition.
 //! Those belong in ryeosd / item services.
 
-use crate::ids::TileId;
-use crate::layout::{LayoutTree, SplitAxis};
-use crate::workspace::{InputBarState, TileState, ViewLocalState, ViewSpec, Workspace};
+use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -63,9 +63,37 @@ pub struct SurfaceSpec {
     pub extends: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    pub layout: SurfaceLayoutSpec,
+    /// Dynamic-tiling algorithm for the center plane. The layout tree is
+    /// COMPUTED from this plus the ordered tile list — never authored.
+    #[serde(default)]
+    pub tiling: TilingSpec,
+    /// Ordered initial center tiles (`view:<ref>` | `atlas` | `graph`).
+    #[serde(default)]
+    pub tiles: Vec<ViewKindSpec>,
+    /// Fixed edge slots; an absent edge has no slot.
+    #[serde(default)]
+    pub slots: SlotsSpec,
+    /// Chrome style (border treatment).
+    #[serde(default)]
+    pub style: SurfaceStyleSpec,
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+    /// Resolved `view:` bindings embedded at session/load time, keyed by
+    /// ref (views-as-content; populated by the resolver, never authored
+    /// inline — surfaces reference views, they do not define them).
+    #[serde(default)]
+    pub views: Option<serde_json::Value>,
+    /// Optional backdrop scene view ref (`view:ryeos/backdrop/<name>`, a
+    /// normal `view` with `widget: scene`). The renderer draws this scene
+    /// into the center rect when the center is empty — the background is
+    /// content, never a renderer enum. Absent = no backdrop, the
+    /// background fill stands.
+    #[serde(default)]
+    pub backdrop: Option<String>,
+    /// Launchable view refs (the surface's library): resolved and
+    /// embedded alongside pane refs; the launcher derives from these.
+    #[serde(default)]
+    pub library: Vec<String>,
     #[serde(default)]
     pub ambient: Option<AmbientSpec>,
     #[serde(default)]
@@ -91,106 +119,306 @@ pub struct SurfaceCapabilitySpec {
 }
 
 // ---------------------------------------------------------------------------
-// Layout
+// Tiling — the dynamic layout algorithm (mechanism words only)
 // ---------------------------------------------------------------------------
 
-/// Root layout spec — names a root node and defines a map of layout nodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SurfaceLayoutSpec {
-    pub root: String,
-    pub nodes: std::collections::HashMap<String, LayoutNodeSpec>,
+/// Dynamic tiling algorithm. The engine computes the layout tree from
+/// this spec and the ordered tile list; surfaces never author trees.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TilingSpec {
+    #[serde(default)]
+    pub mode: TilingModeSpec,
+    #[serde(default)]
+    pub master: MasterSpec,
+    #[serde(default)]
+    pub stack: StackSpec,
+    #[serde(default)]
+    pub insert: InsertSpec,
 }
 
-/// A single layout node — either a split or a pane.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LayoutNodeSpec {
-    Split {
-        axis: SplitAxis,
-        #[serde(default = "default_ratio")]
-        ratio: f32,
-        first: String,
-        second: String,
-    },
-    Pane {
-        view: ViewKindSpec,
-    },
-}
-
-fn default_ratio() -> f32 {
-    0.5
-}
-
-/// Supported view kinds for surface panes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Closed tiling-mode vocabulary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum TilingModeSpec {
+    #[default]
+    MasterStack,
+}
+
+/// Master region: side, internal arrangement, share, and tile count.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterSpec {
+    #[serde(default)]
+    pub side: SideSpec,
+    #[serde(default = "arrange_vertical")]
+    pub arrange: ArrangeSpec,
+    #[serde(default = "default_master_ratio", deserialize_with = "clamped_ratio")]
+    pub ratio: f32,
+    #[serde(default = "default_master_count")]
+    pub count: usize,
+}
+
+impl Default for MasterSpec {
+    fn default() -> Self {
+        Self {
+            side: SideSpec::Right,
+            arrange: ArrangeSpec::Vertical,
+            ratio: default_master_ratio(),
+            count: default_master_count(),
+        }
+    }
+}
+
+/// Stack region: internal arrangement of the non-master tiles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StackSpec {
+    #[serde(default = "arrange_horizontal")]
+    pub arrange: ArrangeSpec,
+}
+
+impl Default for StackSpec {
+    fn default() -> Self {
+        Self {
+            arrange: ArrangeSpec::Horizontal,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SideSpec {
+    Left,
+    #[default]
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArrangeSpec {
+    /// Stacked top-to-bottom.
+    Vertical,
+    /// Side-by-side left-to-right.
+    Horizontal,
+}
+
+/// Closed insertion vocabulary: where new tiles enter the ordered list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InsertSpec {
+    /// Append: new tiles land at the bottom of the stack region.
+    #[default]
+    End,
+}
+
+fn arrange_vertical() -> ArrangeSpec {
+    ArrangeSpec::Vertical
+}
+
+fn arrange_horizontal() -> ArrangeSpec {
+    ArrangeSpec::Horizontal
+}
+
+fn default_master_ratio() -> f32 {
+    0.6
+}
+
+fn default_master_count() -> usize {
+    1
+}
+
+fn clamped_ratio<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let raw = f32::deserialize(deserializer)?;
+    Ok(raw.clamp(0.1, 0.9))
+}
+
+// ---------------------------------------------------------------------------
+// Slots — fixed edge slots
+// ---------------------------------------------------------------------------
+
+/// Fixed edge slots. An absent edge has no slot at all (nothing to
+/// toggle); a closed slot keeps its content but frees its space.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlotsSpec {
+    #[serde(default)]
+    pub top: Option<SlotSpec>,
+    #[serde(default)]
+    pub bottom: Option<SlotSpec>,
+    #[serde(default)]
+    pub left: Option<SlotSpec>,
+    #[serde(default)]
+    pub right: Option<SlotSpec>,
+}
+
+impl Default for SlotsSpec {
+    fn default() -> Self {
+        Self {
+            top: None,
+            bottom: Some(SlotSpec {
+                content: SlotContentSpec::View("view:ryeos/input".to_string()),
+                open: true,
+                size: 7,
+            }),
+            left: Some(SlotSpec {
+                content: SlotContentSpec::View("view:ryeos/threads/list".to_string()),
+                open: false,
+                size: 32,
+            }),
+            right: Some(SlotSpec {
+                content: SlotContentSpec::View("view:ryeos/item/inspector".to_string()),
+                open: false,
+                size: 40,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlotSpec {
+    pub content: SlotContentSpec,
+    #[serde(default)]
+    pub open: bool,
+    #[serde(default = "default_slot_size")]
+    pub size: u16,
+}
+
+fn default_slot_size() -> u16 {
+    8
+}
+
+/// Slot content: a bound `view:` ref, the one uniform content form.
+/// Input is no longer a slot literal — it is a view that declares an
+/// `input` block (`view:ryeos/input`). Unknown content errors — fail
+/// closed, like view kinds.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlotContentSpec {
+    View(String),
+}
+
+impl Serialize for SlotContentSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SlotContentSpec::View(view_ref) => serializer.serialize_str(view_ref),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SlotContentSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        if raw.starts_with("view:") {
+            return Ok(SlotContentSpec::View(raw));
+        }
+        Err(serde::de::Error::custom(format!(
+            "unknown slot content `{raw}` (view: ref expected; `input` is now a view)"
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Style
+// ---------------------------------------------------------------------------
+
+/// Chrome style declared by the surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceStyleSpec {
+    #[serde(default)]
+    pub border: BorderStyleSpec,
+}
+
+/// Closed border vocabulary. Renderers map names to local glyph/pixel
+/// treatments; the engine never draws.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BorderStyleSpec {
+    Thick,
+    #[default]
+    Thin,
+    Hidden,
+    None,
+}
+
+impl BorderStyleSpec {
+    pub fn name(self) -> &'static str {
+        match self {
+            BorderStyleSpec::Thick => "thick",
+            BorderStyleSpec::Thin => "thin",
+            BorderStyleSpec::Hidden => "hidden",
+            BorderStyleSpec::None => "none",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// View kinds
+// ---------------------------------------------------------------------------
+
+/// Supported view kinds for center tiles. `Bound` carries a `view:` item
+/// ref — views-as-content; the remaining named kinds are sanctioned
+/// structural views.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ViewKindSpec {
-    ThreadList,
-    Thread,
-    Overview,
-    Remotes,
-    Services,
-    ItemInspector,
-    Schedules,
-    GcStatus,
-    Files,
-    Projects,
-    SpaceBrowser,
-    Trust,
     Atlas,
     Graph,
-    EventInspector,
+    /// A `view:` item reference (views-as-content).
+    Bound(String),
+}
+
+const VIEW_KIND_NAMES: &[(&str, fn() -> ViewKindSpec)] = &[
+    ("atlas", || ViewKindSpec::Atlas),
+    ("graph", || ViewKindSpec::Graph),
+];
+
+impl Serialize for ViewKindSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let ViewKindSpec::Bound(view_ref) = self {
+            return serializer.serialize_str(view_ref);
+        }
+        for (name, make) in VIEW_KIND_NAMES {
+            if make() == *self {
+                return serializer.serialize_str(name);
+            }
+        }
+        unreachable!("every non-Bound view kind has a name")
+    }
+}
+
+impl<'de> Deserialize<'de> for ViewKindSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        for (name, make) in VIEW_KIND_NAMES {
+            if *name == raw {
+                return Ok(make());
+            }
+        }
+        if raw.starts_with("view:") {
+            return Ok(ViewKindSpec::Bound(raw));
+        }
+        Err(serde::de::Error::custom(format!(
+            "unknown pane view `{raw}` (named kind or view: ref expected)"
+        )))
+    }
 }
 
 impl ViewKindSpec {
     /// Convert to a ViewSpec with no ID binding.
     pub fn to_view_spec(&self) -> ViewSpec {
         match self {
-            ViewKindSpec::ThreadList => ViewSpec::ThreadList,
-            ViewKindSpec::Thread => ViewSpec::Thread { thread_id: None },
-            ViewKindSpec::Overview => ViewSpec::Overview,
-            ViewKindSpec::Remotes => ViewSpec::Remotes,
-            ViewKindSpec::Services => ViewSpec::Services,
-            ViewKindSpec::ItemInspector => ViewSpec::ItemInspector,
-            ViewKindSpec::Schedules => ViewSpec::Schedules,
-            ViewKindSpec::GcStatus => ViewSpec::GcStatus,
-            ViewKindSpec::Files => ViewSpec::Files,
-            ViewKindSpec::Projects => ViewSpec::Projects,
-            ViewKindSpec::SpaceBrowser => ViewSpec::SpaceBrowser { project: None },
-            ViewKindSpec::Trust => ViewSpec::Trust,
             ViewKindSpec::Atlas => ViewSpec::Atlas,
             ViewKindSpec::Graph => ViewSpec::Graph { graph_id: None },
-            ViewKindSpec::EventInspector => ViewSpec::EventInspector,
+            ViewKindSpec::Bound(view_ref) => ViewSpec::Bound {
+                view_ref: view_ref.clone(),
+            },
         }
     }
 
     /// Create the appropriate initial local state for this view kind.
     pub fn initial_local_state(&self) -> ViewLocalState {
-        match self {
-            ViewKindSpec::ThreadList => ViewLocalState::ThreadList {
-                cursor: 0,
-                filter: String::new(),
-            },
-            ViewKindSpec::Thread => ViewLocalState::Thread(Default::default()),
-            ViewKindSpec::SpaceBrowser => ViewLocalState::SpaceBrowser {
-                cursor: 0,
-                query: String::new(),
-                kind: String::new(),
-                path: String::new(),
-                scroll: 0,
-            },
-            ViewKindSpec::Overview
-            | ViewKindSpec::Services
-            | ViewKindSpec::ItemInspector
-            | ViewKindSpec::Schedules
-            | ViewKindSpec::GcStatus
-            | ViewKindSpec::Files
-            | ViewKindSpec::EventInspector => ViewLocalState::GenericList {
-                cursor: 0,
-                scroll: 0,
-            },
-            _ => ViewLocalState::None,
-        }
+        self.to_view_spec().initial_local_state()
     }
 }
 
@@ -275,7 +503,10 @@ pub struct SurfaceCommandSpec {
     #[serde(default)]
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invoke: Option<crate::commands::InvocationSpec>,
+    /// Invocation spec — open content (planes/grammar), never a typed
+    /// client enum. Renderers dispatch it through the shared invocation
+    /// system.
+    pub invoke: Option<serde_json::Value>,
     #[serde(default)]
     pub requires_capabilities: Vec<String>,
 }
@@ -522,60 +753,25 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
 // Built-in default surface
 // ---------------------------------------------------------------------------
 
-/// The built-in default Studio surface — mission-control layout.
+/// The built-in default Studio surface — dynamic-tiling workspace.
 ///
-/// Data-equivalent to `surface:ryeos/studio/base`.
-/// Three-pane: thread list (left 25%) | thread (right-top 85%) + status (right-bottom).
+/// Data-equivalent to `surface:ryeos/studio/base`: empty center (the
+/// backdrop scene shows on first-run), default master/stack tiling,
+/// bottom input slot open, side slots closed, thin borders.
 pub fn builtin_default() -> SurfaceSpec {
-    let mut nodes = std::collections::HashMap::new();
-
-    nodes.insert(
-        "main".into(),
-        LayoutNodeSpec::Split {
-            axis: SplitAxis::Horizontal,
-            ratio: 0.25,
-            first: "thread_list".into(),
-            second: "right".into(),
-        },
-    );
-    nodes.insert(
-        "thread_list".into(),
-        LayoutNodeSpec::Pane {
-            view: ViewKindSpec::ThreadList,
-        },
-    );
-    nodes.insert(
-        "right".into(),
-        LayoutNodeSpec::Split {
-            axis: SplitAxis::Vertical,
-            ratio: 0.85,
-            first: "thread".into(),
-            second: "status".into(),
-        },
-    );
-    nodes.insert(
-        "thread".into(),
-        LayoutNodeSpec::Pane {
-            view: ViewKindSpec::Thread,
-        },
-    );
-    nodes.insert(
-        "status".into(),
-        LayoutNodeSpec::Pane {
-            view: ViewKindSpec::Overview,
-        },
-    );
-
     SurfaceSpec {
         name: "studio-base".into(),
         version: "1.0.0".into(),
         extends: None,
-        description: Some("Default RyeOS Studio — three-pane mission control".into()),
-        layout: SurfaceLayoutSpec {
-            root: "main".into(),
-            nodes,
-        },
+        description: Some("Default RyeOS Studio — dynamic tiling workspace".into()),
+        tiling: TilingSpec::default(),
+        tiles: Vec::new(),
+        slots: SlotsSpec::default(),
+        style: SurfaceStyleSpec::default(),
         input: None,
+        views: None,
+        backdrop: None,
+        library: Vec::new(),
         ambient: None,
         affordances: Vec::new(),
         instruments: Vec::new(),
@@ -640,9 +836,9 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
         }
     };
 
-    let (spec, parse_diagnostics) = match path.extension().and_then(|e| e.to_str()) {
+    let spec = match path.extension().and_then(|e| e.to_str()) {
         Some("toml") => match toml::from_str::<SurfaceSpec>(&content) {
-            Ok(s) => (s, Vec::new()),
+            Ok(s) => s,
             Err(e) => {
                 return LoadedSurface::LocalPreview {
                     path: path.to_path_buf(),
@@ -654,7 +850,7 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
             }
         },
         Some("yaml") | Some("yml") => match serde_yaml::from_str::<SurfaceSpec>(&content) {
-            Ok(s) => (s, Vec::new()),
+            Ok(s) => s,
             Err(e) => {
                 return LoadedSurface::LocalPreview {
                     path: path.to_path_buf(),
@@ -679,14 +875,8 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
         }
     };
 
-    // Run TUI semantic validation
-    let mut diagnostics = parse_diagnostics;
-    let validation_warnings = validate_surface(&spec);
-    for w in validation_warnings {
-        diagnostics.push(SurfaceDiagnostic::ValidationError { message: w });
-    }
-
     // Warn about unsupported fields
+    let mut diagnostics = Vec::new();
     if spec.capabilities.is_some() {
         diagnostics.push(SurfaceDiagnostic::UnsupportedField {
             field: "capabilities".into(),
@@ -704,7 +894,7 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
         diagnostics.push(SurfaceDiagnostic::UnsupportedField {
             field: "extends".into(),
             message: "extends composition not yet supported in local preview, \
-                       layout must be fully specified"
+                       tiling must be fully specified"
                 .into(),
         });
     }
@@ -717,200 +907,19 @@ fn load_local_preview(path: &std::path::Path) -> LoadedSurface {
 }
 
 // ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
-/// Validate a surface spec for TUI renderability.
-///
-/// Returns diagnostics. Empty means valid.
-/// Invalid specs should still produce a usable workspace (with fallbacks),
-/// but the diagnostics must be surfaced to the operator.
-pub fn validate_surface(spec: &SurfaceSpec) -> Vec<String> {
-    let mut warnings = Vec::new();
-
-    // Root must exist in nodes
-    if !spec.layout.nodes.contains_key(&spec.layout.root) {
-        warnings.push(format!(
-            "layout root '{}' not found in nodes",
-            spec.layout.root
-        ));
-    }
-
-    // Check all node references exist
-    for (name, node) in &spec.layout.nodes {
-        match node {
-            LayoutNodeSpec::Split { first, second, .. } => {
-                if !spec.layout.nodes.contains_key(first) {
-                    warnings.push(format!(
-                        "node '{}' references missing child '{}'",
-                        name, first
-                    ));
-                }
-                if !spec.layout.nodes.contains_key(second) {
-                    warnings.push(format!(
-                        "node '{}' references missing child '{}'",
-                        name, second
-                    ));
-                }
-            }
-            LayoutNodeSpec::Pane { .. } => {}
-        }
-    }
-
-    // Check for cycles
-    if let Some(cycle) = detect_cycle(&spec.layout) {
-        warnings.push(format!("layout contains a cycle: {}", cycle));
-    }
-
-    warnings
-}
-
-fn detect_cycle(layout: &SurfaceLayoutSpec) -> Option<String> {
-    let mut visited = std::collections::HashSet::new();
-    let mut path = Vec::new();
-    dfs_cycle(layout, &layout.root, &mut visited, &mut path)
-}
-
-fn dfs_cycle(
-    layout: &SurfaceLayoutSpec,
-    node_name: &str,
-    visited: &mut std::collections::HashSet<String>,
-    path: &mut Vec<String>,
-) -> Option<String> {
-    if path.contains(&node_name.to_string()) {
-        let cycle_start = path.iter().position(|n| n == node_name).unwrap();
-        let cycle: Vec<&str> = path[cycle_start..].iter().map(|s| s.as_str()).collect();
-        return Some(cycle.join(" -> "));
-    }
-    if visited.contains(node_name) {
-        return None;
-    }
-
-    visited.insert(node_name.to_string());
-    path.push(node_name.to_string());
-
-    if let Some(node) = layout.nodes.get(node_name) {
-        match node {
-            LayoutNodeSpec::Split { first, second, .. } => {
-                if let Some(cycle) = dfs_cycle(layout, first, visited, path) {
-                    return Some(cycle);
-                }
-                if let Some(cycle) = dfs_cycle(layout, second, visited, path) {
-                    return Some(cycle);
-                }
-            }
-            LayoutNodeSpec::Pane { .. } => {}
-        }
-    }
-
-    path.pop();
-    None
-}
-
-// ---------------------------------------------------------------------------
 // SurfaceSpec → Workspace conversion
 // ---------------------------------------------------------------------------
 
 impl SurfaceSpec {
     /// Convert this surface spec into a Workspace for rendering.
     ///
-    /// Allocates fresh TileIds, builds the LayoutTree from the node map,
-    /// and initializes view-local state based on view kind.
-    /// Falls back to `Workspace::default_three_pane()` on structural error.
+    /// The workspace holds the ordered tile list and the tiling spec;
+    /// the layout tree is computed, never stored.
     pub fn to_workspace(&self) -> Workspace {
-        match self.try_to_workspace() {
-            Ok(ws) => ws,
-            Err(e) => {
-                eprintln!(
-                    "warn: surface->workspace conversion failed ({}), using default",
-                    e
-                );
-                Workspace::default_three_pane()
-            }
-        }
-    }
-
-    fn try_to_workspace(&self) -> Result<Workspace, String> {
-        let mut tile_id_counter = 0u64;
-        let mut tile_map: std::collections::HashMap<String, TileId> =
-            std::collections::HashMap::new();
-
-        // First pass: allocate TileIds for all pane nodes
-        for (name, node) in &self.layout.nodes {
-            if matches!(node, LayoutNodeSpec::Pane { .. }) {
-                tile_id_counter += 1;
-                tile_map.insert(name.clone(), TileId::new(tile_id_counter));
-            }
-        }
-
-        // Second pass: build LayoutTree recursively
-        let layout = self.build_layout_node(&self.layout.root, &self.layout, &tile_map)?;
-
-        // Third pass: build tile states with proper initial local state
-        let mut tiles = std::collections::HashMap::new();
-        for (name, node) in &self.layout.nodes {
-            if let LayoutNodeSpec::Pane { view } = node {
-                let tile_id = tile_map[name];
-                tiles.insert(
-                    tile_id,
-                    TileState {
-                        view: view.to_view_spec(),
-                        local: view.initial_local_state(),
-                    },
-                );
-            }
-        }
-
-        // Focused tile: first pane tile in tree traversal order
-        let focused_tile = layout
-            .tile_ids()
-            .into_iter()
-            .next()
-            .ok_or_else(|| "layout tree has no tiles".to_string())?;
-
-        Ok(Workspace {
-            layout,
-            tiles,
-            focused_tile,
-            input_bar: InputBarState::default(),
-            master_tiles: vec![focused_tile],
-        })
-    }
-
-    fn build_layout_node(
-        &self,
-        name: &str,
-        layout: &SurfaceLayoutSpec,
-        tile_map: &std::collections::HashMap<String, TileId>,
-    ) -> Result<LayoutTree, String> {
-        let node = layout
-            .nodes
-            .get(name)
-            .ok_or_else(|| format!("layout node '{}' not found in nodes map", name))?;
-
-        match node {
-            LayoutNodeSpec::Pane { .. } => {
-                let id = tile_map
-                    .get(name)
-                    .ok_or_else(|| format!("pane '{}' has no allocated TileId", name))?;
-                Ok(LayoutTree::Leaf(*id))
-            }
-            LayoutNodeSpec::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => {
-                let first_tree = self.build_layout_node(first, layout, tile_map)?;
-                let second_tree = self.build_layout_node(second, layout, tile_map)?;
-                Ok(LayoutTree::Split {
-                    axis: *axis,
-                    ratio: ratio.clamp(0.1, 0.9),
-                    first: Box::new(first_tree),
-                    second: Box::new(second_tree),
-                })
-            }
-        }
+        Workspace::from_tiling(
+            self.tiling.clone(),
+            self.tiles.iter().map(ViewKindSpec::to_view_spec).collect(),
+        )
     }
 }
 
@@ -947,112 +956,201 @@ mod tests {
     }
 
     #[test]
-    fn builtin_default_is_valid() {
+    fn builtin_default_is_empty_center_with_default_slots() {
         let spec = builtin_default();
         assert_eq!(spec.name, "studio-base");
-        let warnings = validate_surface(&spec);
-        assert!(
-            warnings.is_empty(),
-            "builtin should be valid: {:?}",
-            warnings
-        );
-    }
-
-    #[test]
-    fn builtin_default_produces_workspace() {
-        let spec = builtin_default();
-        let ws = spec.to_workspace();
-        assert_eq!(ws.tiles.len(), 3, "should have 3 tiles");
-        assert!(!ws.layout.tile_ids().is_empty());
-    }
-
-    #[test]
-    fn builtin_default_matches_three_pane() {
-        let spec = builtin_default();
-        let ws = spec.to_workspace();
-        let default_ws = Workspace::default_three_pane();
-        assert_eq!(ws.tiles.len(), default_ws.tiles.len());
-    }
-
-    #[test]
-    fn workspace_initializes_correct_local_state() {
-        let spec = builtin_default();
-        let ws = spec.to_workspace();
-        // Thread list tile should have ThreadList local state
-        let thread_list_tile = ws
-            .tiles
-            .values()
-            .find(|t| matches!(t.view, ViewSpec::ThreadList));
-        assert!(thread_list_tile.is_some());
+        assert!(spec.tiles.is_empty());
+        assert_eq!(spec.tiling, TilingSpec::default());
         assert!(matches!(
-            thread_list_tile.unwrap().local,
-            ViewLocalState::ThreadList { .. }
+            &spec.slots.bottom,
+            Some(SlotSpec {
+                content: SlotContentSpec::View(view_ref),
+                open: true,
+                size: 7,
+            }) if view_ref == "view:ryeos/input"
         ));
+        assert!(spec.slots.top.is_none());
+        assert_eq!(spec.style.border, BorderStyleSpec::Thin);
     }
 
     #[test]
-    fn detect_missing_root() {
-        let spec = SurfaceSpec {
-            name: "bad".into(),
-            version: "1.0.0".into(),
-            extends: None,
-            description: None,
-            layout: SurfaceLayoutSpec {
-                root: "nonexistent".into(),
-                nodes: std::collections::HashMap::new(),
-            },
-            input: None,
-            ambient: None,
-            affordances: Vec::new(),
-            instruments: Vec::new(),
-            capabilities: None,
-        };
-        let warnings = validate_surface(&spec);
-        assert!(warnings.iter().any(|w| w.contains("not found")));
+    fn builtin_default_produces_empty_center_workspace() {
+        let ws = builtin_default().to_workspace();
+        assert!(ws.center_is_empty());
+        assert!(ws.tile_ids().is_empty());
+        assert!(ws.layout().is_none());
     }
 
     #[test]
-    fn detect_cycle() {
-        let mut nodes = std::collections::HashMap::new();
-        nodes.insert(
-            "a".into(),
-            LayoutNodeSpec::Split {
-                axis: SplitAxis::Horizontal,
-                ratio: 0.5,
-                first: "b".into(),
-                second: "a".into(),
-            },
-        );
-        nodes.insert(
-            "b".into(),
-            LayoutNodeSpec::Split {
-                axis: SplitAxis::Horizontal,
-                ratio: 0.5,
-                first: "a".into(),
-                second: "a".into(),
-            },
-        );
-        let spec = SurfaceSpec {
-            name: "cyclic".into(),
-            version: "1.0.0".into(),
-            extends: None,
-            description: None,
-            layout: SurfaceLayoutSpec {
-                root: "a".into(),
-                nodes,
-            },
-            input: None,
-            ambient: None,
-            affordances: Vec::new(),
-            instruments: Vec::new(),
-            capabilities: None,
-        };
-        let warnings = validate_surface(&spec);
+    fn surface_with_home_view_field_is_rejected() {
+        // CLEAN CUT: `home_view` (the deleted home-mode field) must fail
+        // to parse — the empty-center background is now `backdrop`.
+        let bad: Result<SurfaceSpec, _> =
+            serde_yaml::from_str("name: x\nhome_view: \"view:ryeos/home/brand\"\n");
+        let err = bad.expect_err("`home_view` must be rejected");
         assert!(
-            warnings.iter().any(|w| w.contains("cycle")),
-            "should detect cycle: {:?}",
-            warnings
+            err.to_string().contains("home_view"),
+            "error should name the rejected field: {err}"
         );
+    }
+
+    #[test]
+    fn surface_with_frame_home_field_is_rejected() {
+        // CLEAN CUT: there is no `frame` field; `frame: home` must fail.
+        let bad: Result<SurfaceSpec, _> = serde_yaml::from_str("name: x\nframe: home\n");
+        assert!(bad.is_err(), "`frame: home` must be rejected");
+    }
+
+    #[test]
+    fn surface_declares_backdrop_scene_view() {
+        let spec: SurfaceSpec =
+            serde_yaml::from_str("name: x\nbackdrop: \"view:ryeos/backdrop/shard\"\n").unwrap();
+        assert_eq!(spec.backdrop.as_deref(), Some("view:ryeos/backdrop/shard"));
+    }
+
+    #[test]
+    fn legacy_layout_node_tree_is_rejected() {
+        // CLEAN CUT: the static node-tree form is gone. A surface that
+        // still authors `layout: {root, nodes}` must fail to parse.
+        let legacy = r#"
+name: legacy
+version: "1.0.0"
+layout:
+  root: main
+  nodes:
+    main:
+      type: pane
+      view: "view:ryeos/threads/list"
+"#;
+        let parsed: Result<SurfaceSpec, _> = serde_yaml::from_str(legacy);
+        let err = parsed.expect_err("legacy layout block must be rejected");
+        assert!(
+            err.to_string().contains("layout"),
+            "error should name the rejected field: {err}"
+        );
+    }
+
+    #[test]
+    fn new_schema_parses_fully() {
+        let yaml = r#"
+name: full
+version: "1.0.0"
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: horizontal, ratio: 0.7, count: 2 }
+  stack: { arrange: vertical }
+  insert: end
+tiles:
+  - "view:ryeos/chain/timeline"
+  - atlas
+  - graph
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  left: { content: "view:ryeos/threads/list", open: false, size: 32 }
+style:
+  border: thick
+"#;
+        let spec: SurfaceSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.tiling.master.side, SideSpec::Left);
+        assert_eq!(spec.tiling.master.arrange, ArrangeSpec::Horizontal);
+        assert_eq!(spec.tiling.master.count, 2);
+        assert!((spec.tiling.master.ratio - 0.7).abs() < f32::EPSILON);
+        assert_eq!(spec.tiling.stack.arrange, ArrangeSpec::Vertical);
+        assert_eq!(spec.tiles.len(), 3);
+        assert_eq!(
+            spec.tiles[0],
+            ViewKindSpec::Bound("view:ryeos/chain/timeline".into())
+        );
+        assert_eq!(spec.tiles[1], ViewKindSpec::Atlas);
+        // Edges not named have no slot.
+        assert!(spec.slots.right.is_none());
+        assert!(spec.slots.top.is_none());
+        assert_eq!(spec.style.border, BorderStyleSpec::Thick);
+    }
+
+    #[test]
+    fn ratio_is_clamped_at_parse() {
+        let spec: SurfaceSpec =
+            serde_yaml::from_str("name: clamp\ntiling:\n  master: { ratio: 0.99 }\n").unwrap();
+        assert!((spec.tiling.master.ratio - 0.9).abs() < f32::EPSILON);
+        let spec: SurfaceSpec =
+            serde_yaml::from_str("name: clamp\ntiling:\n  master: { ratio: 0.01 }\n").unwrap();
+        assert!((spec.tiling.master.ratio - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn closed_vocab_rejects_unknown_values() {
+        for bad in [
+            "name: x\ntiling: { mode: spiral }\n",
+            "name: x\ntiling: { insert: start }\n",
+            "name: x\ntiling:\n  master: { side: top }\n",
+            "name: x\ntiling:\n  master: { arrange: diagonal }\n",
+            "name: x\ntiling:\n  stack: { arrange: spiral }\n",
+            "name: x\nstyle: { border: wavy }\n",
+        ] {
+            let parsed: Result<SurfaceSpec, _> = serde_yaml::from_str(bad);
+            assert!(parsed.is_err(), "must reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn slot_content_parses_view_refs_only() {
+        let spec: SurfaceSpec = serde_yaml::from_str(
+            "name: x\nslots:\n  bottom: { content: \"view:ryeos/input\" }\n  left: { content: \"view:a/b\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            spec.slots.bottom.as_ref().map(|s| &s.content),
+            Some(&SlotContentSpec::View("view:ryeos/input".into()))
+        );
+        assert_eq!(
+            spec.slots.left.as_ref().map(|s| &s.content),
+            Some(&SlotContentSpec::View("view:a/b".into()))
+        );
+        // Unknown slot content fails closed.
+        let bad: Result<SurfaceSpec, _> =
+            serde_yaml::from_str("name: x\nslots:\n  bottom: { content: status }\n");
+        assert!(bad.is_err(), "unknown slot content must be rejected");
+    }
+
+    #[test]
+    fn slot_content_input_literal_is_rejected() {
+        // CLEAN CUT: `content: input` is gone. The bottom input is a view
+        // (`view:ryeos/input`) that declares an `input` block.
+        let bad: Result<SurfaceSpec, _> =
+            serde_yaml::from_str("name: x\nslots:\n  bottom: { content: input }\n");
+        let err = bad.expect_err("`content: input` must be rejected");
+        assert!(
+            err.to_string().contains("input"),
+            "error should mention the rejected literal: {err}"
+        );
+    }
+
+    #[test]
+    fn to_workspace_preserves_tile_order() {
+        let spec: SurfaceSpec =
+            serde_yaml::from_str("name: x\ntiles: [\"view:a/b\", graph, atlas]\n").unwrap();
+        let ws = spec.to_workspace();
+        let ids = ws.tile_ids();
+        assert_eq!(ids.len(), 3);
+        assert!(matches!(
+            ws.tiles.get(&ids[0]).map(|t| &t.view),
+            Some(ViewSpec::Bound { view_ref }) if view_ref == "view:a/b"
+        ));
+        assert!(matches!(
+            ws.tiles.get(&ids[1]).map(|t| &t.view),
+            Some(ViewSpec::Graph { .. })
+        ));
+        assert!(matches!(
+            ws.tiles.get(&ids[2]).map(|t| &t.view),
+            Some(ViewSpec::Atlas)
+        ));
+        assert_eq!(ws.focused_tile, ids[0]);
+        // Bound tiles carry generic list local state.
+        assert!(matches!(
+            ws.tiles.get(&ids[0]).map(|t| &t.local),
+            Some(ViewLocalState::GenericList { .. })
+        ));
     }
 
     #[test]
@@ -1077,13 +1175,7 @@ mod tests {
             r#"
 name = "test"
 version = "0.1.0"
-
-[layout]
-root = "main"
-
-[layout.nodes.main]
-type = "pane"
-view = "thread_list"
+tiles = ["view:ryeos/threads/list"]
 "#,
         )
         .unwrap();
@@ -1095,6 +1187,7 @@ view = "thread_list"
         let loaded = load_surface(&opts);
         assert!(matches!(loaded, LoadedSurface::LocalPreview { .. }));
         assert_eq!(loaded.spec().name, "test");
+        assert_eq!(loaded.spec().tiles.len(), 1);
         assert!(matches!(loaded.source(), SurfaceSource::LocalPreview(_)));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1139,19 +1232,11 @@ view = "thread_list"
     #[test]
     fn view_kind_initial_local_state() {
         assert!(matches!(
-            ViewKindSpec::ThreadList.initial_local_state(),
-            ViewLocalState::ThreadList { .. }
+            ViewKindSpec::Bound("view:test/x".into()).initial_local_state(),
+            ViewLocalState::GenericList { .. }
         ));
         assert!(matches!(
-            ViewKindSpec::Thread.initial_local_state(),
-            ViewLocalState::Thread(_)
-        ));
-        assert!(matches!(
-            ViewKindSpec::SpaceBrowser.initial_local_state(),
-            ViewLocalState::SpaceBrowser { .. }
-        ));
-        assert!(matches!(
-            ViewKindSpec::Trust.initial_local_state(),
+            ViewKindSpec::Atlas.initial_local_state(),
             ViewLocalState::None
         ));
     }
@@ -1184,12 +1269,8 @@ view = "thread_list"
     #[test]
     fn view_kind_to_view_spec_roundtrip() {
         assert!(matches!(
-            ViewKindSpec::ThreadList.to_view_spec(),
-            ViewSpec::ThreadList
-        ));
-        assert!(matches!(
-            ViewKindSpec::Thread.to_view_spec(),
-            ViewSpec::Thread { .. }
+            ViewKindSpec::Bound("view:test/x".into()).to_view_spec(),
+            ViewSpec::Bound { .. }
         ));
         assert!(matches!(
             ViewKindSpec::Graph.to_view_spec(),
@@ -1208,28 +1289,70 @@ view = "thread_list"
             .unwrap_or_else(|e| panic!("failed to parse bundled base surface: {}", e));
         assert_eq!(spec.name, "studio-base");
         assert!(!spec.affordances.is_empty());
-        assert!(spec.layout.nodes.contains_key("main"));
-        let warnings = validate_surface(&spec);
-        assert!(
-            warnings.is_empty(),
-            "bundled base should be valid: {:?}",
-            warnings
-        );
+        assert!(spec.tiles.is_empty(), "base starts with an empty center");
+        assert!(matches!(
+            spec.slots.bottom.as_ref().map(|s| &s.content),
+            Some(SlotContentSpec::View(view_ref)) if view_ref == "view:ryeos/input"
+        ));
+        assert_eq!(spec.style.border, BorderStyleSpec::Thin);
         let ws = spec.to_workspace();
-        assert_eq!(ws.tiles.len(), 3);
+        assert!(ws.center_is_empty());
     }
 
     #[test]
-    fn bundled_graph_surface_loads() {
+    fn legacy_product_pane_names_are_rejected() {
+        // The named-kind vocabulary is engine-only; product concepts
+        // arrive as `view:` refs. Old names must fail loudly, never
+        // silently map.
+        for legacy in [
+            "thread_list",
+            "overview",
+            "remotes",
+            "services",
+            "item_inspector",
+            "schedules",
+            "gc_status",
+            "files",
+            "projects",
+            "space_browser",
+            "trust",
+            "event_inspector",
+            "thread",
+        ] {
+            let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{legacy}\""));
+            assert!(
+                parsed.is_err(),
+                "legacy pane name `{legacy}` must be rejected"
+            );
+        }
+        for kept in ["atlas", "graph", "view:ryeos/threads/list"] {
+            let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{kept}\""));
+            assert!(parsed.is_ok(), "pane name `{kept}` must parse");
+        }
+    }
+
+    #[test]
+    fn bundled_workbench_surface_loads_with_bound_view() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/studio/.ai/surfaces/ryeos/studio/graph.yaml");
-        assert!(path.exists(), "bundled graph surface missing at {path:?}");
+            .join("bundles/studio/.ai/surfaces/ryeos/studio/workbench.yaml");
+        assert!(
+            path.exists(),
+            "bundled workbench surface missing at {path:?}"
+        );
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
-            .unwrap_or_else(|e| panic!("failed to parse bundled graph surface: {}", e));
-        assert_eq!(spec.name, "graph-operator");
-        assert_eq!(spec.extends.as_deref(), Some("surface:ryeos/studio/base"));
+            .unwrap_or_else(|e| panic!("failed to parse bundled workbench surface: {}", e));
+        assert_eq!(spec.name, "studio-workbench");
+        // Views-as-content: the workbench binds the threads view by ref
+        // in its ordered center tiles.
+        assert!(
+            spec.tiles
+                .iter()
+                .any(|tile| matches!(tile, ViewKindSpec::Bound(view_ref)
+                    if view_ref == "view:ryeos/threads/list")),
+            "workbench must bind the threads view by ref"
+        );
     }
 
     #[test]
@@ -1252,7 +1375,6 @@ view = "thread_list"
                 .and_then(|ambient| ambient.namespace_atlas_style()),
             Some(AmbientAtlasStyleSpec::Flat2d)
         );
-        assert!(validate_surface(&spec).is_empty());
     }
 
     #[test]
@@ -1265,12 +1387,8 @@ view = "thread_list"
             r#"
 name: test-yaml
 version: "0.1.0"
-layout:
-  root: main
-  nodes:
-    main:
-      type: pane
-      view: thread_list
+tiles:
+  - "view:ryeos/threads/list"
 "#,
         )
         .unwrap();
@@ -1285,15 +1403,13 @@ layout:
                 spec, diagnostics, ..
             } => {
                 assert_eq!(spec.name, "test-yaml");
-                assert_eq!(spec.layout.root, "main");
-                // Should not have TOML fallback diagnostic
-                assert!(!diagnostics.iter().any(|d| matches!(
-                    d,
-                    SurfaceDiagnostic::Info { message } if message.contains("TOML")
-                )));
+                assert_eq!(spec.tiles.len(), 1);
+                assert!(diagnostics.is_empty(), "no diagnostics for clean surface");
             }
             _ => panic!("expected LocalPreview"),
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1306,13 +1422,7 @@ layout:
             r#"
 name = "test"
 version = "0.1.0"
-
-[layout]
-root = "main"
-
-[layout.nodes.main]
-type = "pane"
-view = "thread_list"
+tiles = ["view:ryeos/threads/list"]
 
 [capabilities]
 allow_execute = true
@@ -1357,12 +1467,7 @@ id = "test"
             "provenance": provenance_json("surface:ryeos/studio/base", []),
             "composed_value": {
                 "name": "base",
-                "layout": {
-                    "root": "sidebar",
-                    "nodes": {
-                        "sidebar": { "type": "pane", "view": "thread" }
-                    }
-                },
+                "tiles": ["view:ryeos/chain/timeline"],
                 "affordances": [
                     { "id": "view.thread", "label": "Thread", "category": "View" }
                 ]
@@ -1385,6 +1490,7 @@ id = "test"
             } => {
                 assert_eq!(requested_ref, "surface:ryeos/studio/base");
                 assert_eq!(spec.name, "base");
+                assert_eq!(spec.tiles.len(), 1);
                 assert_eq!(spec.affordances.len(), 1);
                 assert_eq!(spec.affordances[0].id, "view.thread");
                 assert!(*trusted, "signed surface should be trusted");
@@ -1416,12 +1522,7 @@ id = "test"
             "provenance": provenance_json("surface:ryeos/studio/graph", []),
             "composed_value": {
                 "name": "graph",
-                "layout": {
-                    "root": "main",
-                    "nodes": {
-                        "main": { "type": "pane", "view": "graph" }
-                    }
-                },
+                "tiles": ["graph"],
                 "affordances": []
             },
             "derived": {},
@@ -1466,7 +1567,7 @@ id = "test"
     }
 
     #[test]
-    fn from_daemon_rejects_old_commands_field() {
+    fn from_daemon_rejects_legacy_layout_field() {
         let response = serde_json::json!({
             "requested_ref": "surface:ryeos/studio/old",
             "canonical_ref": "surface:ryeos/studio/old",
@@ -1481,9 +1582,38 @@ id = "test"
                 "layout": {
                     "root": "main",
                     "nodes": {
-                        "main": { "type": "pane", "view": "thread" }
+                        "main": { "type": "pane", "view": "view:ryeos/chain/timeline" }
                     }
-                },
+                }
+            },
+            "derived": {},
+            "policy_facts": {},
+            "diagnostics": []
+        });
+
+        let err = LoadedSurface::from_daemon("surface:ryeos/studio/old", response).unwrap_err();
+        match err {
+            SurfaceDiagnostic::ValidationError { message } => {
+                assert!(message.contains("unknown field `layout`"));
+            }
+            other => panic!("expected ValidationError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_daemon_rejects_old_commands_field() {
+        let response = serde_json::json!({
+            "requested_ref": "surface:ryeos/studio/old",
+            "canonical_ref": "surface:ryeos/studio/old",
+            "kind": "surface",
+            "trusted": true,
+            "trust_class": "trusted_bundle",
+            "root_trust_class": "trusted_bundle",
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/old.yaml" },
+            "provenance": provenance_json("surface:ryeos/studio/old", []),
+            "composed_value": {
+                "name": "old",
+                "tiles": ["view:ryeos/chain/timeline"],
                 "commands": []
             },
             "derived": {},
@@ -1513,12 +1643,7 @@ id = "test"
             "provenance": ["old-string-list-is-invalid"],
             "composed_value": {
                 "name": "bad-provenance",
-                "layout": {
-                    "root": "main",
-                    "nodes": {
-                        "main": { "type": "pane", "view": "thread" }
-                    }
-                },
+                "tiles": ["view:ryeos/chain/timeline"],
                 "affordances": []
             },
             "derived": {},
@@ -1552,12 +1677,7 @@ id = "test"
             ),
             "composed_value": {
                 "name": "custom",
-                "layout": {
-                    "root": "main",
-                    "nodes": {
-                        "main": { "type": "pane", "view": "thread" }
-                    }
-                },
+                "tiles": ["view:ryeos/chain/timeline"],
                 "affordances": []
             },
             "derived": {},

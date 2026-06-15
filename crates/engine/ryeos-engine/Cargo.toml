@@ -6,19 +6,19 @@ description = "Native policy engine for Rye OS — resolution, trust, planning"
 license = "MIT"
 
 [dependencies]
-base64 = "0.22"
-directories = "5"
-jsonschema = { version = "0.26", default-features = false }
-lillux = { path = "../../kernel/lillux" }
-regex = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-ryeos-handler-protocol = { path = "../ryeos-handler-protocol" }
-thiserror = "2"
-toml = "0.8"
-tracing = "0.1"
+base64 = { workspace = true }
+directories = { workspace = true }
+jsonschema = { workspace = true }
+lillux = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+ryeos-handler-protocol = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
 
 [features]
 # Exposes `ryeos_engine::test_support` for downstream test crates that
@@ -27,5 +27,5 @@ tracing = "0.1"
 test-support = []
 
 [dev-dependencies]
-tempfile = "3"
-ryeos-tracing = { path = "../../support/ryeos-tracing", features = ["test-harness"] }
+tempfile = { workspace = true }
+ryeos-tracing = { workspace = true, features = ["test-harness"] }

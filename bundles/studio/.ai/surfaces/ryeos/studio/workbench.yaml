@@ -1,0 +1,54 @@
+# ryeos:signed:2026-06-13T05:38:46Z:64714c11fe756ced083a2a44b2f89be58aa868bfb756827c01512b01a055b13c:MnWFwrYeyywvVmq0Tzc+ZWIpX3K0bYn6CzPlKMJUId+jJ4SOSY/vjcKLIQpqIhT4cVNE9s/zgT6Z9vVQOG3YDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: studio-workbench
+version: "1.0.0"
+description: Working seat - home pane beside a content-bound thread list
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.65, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - graph
+  - "view:ryeos/threads/list"
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
+
+library:
+  - view:ryeos/threads/list
+  - view:ryeos/item/inspector
+  - view:ryeos/chain/timeline
+  - view:ryeos/remotes/list
+  - view:ryeos/schedules/list
+  - view:ryeos/commands/grammar
+  - view:ryeos/bundles/list
+  - view:ryeos/node/status
+  - view:ryeos/items/space
+  - view:ryeos/files/list
+  - view:ryeos/gc/status
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:rye/agent/core/base
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View

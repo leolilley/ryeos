@@ -1,0 +1,29 @@
+# ryeos:signed:2026-06-13T05:38:46Z:e5414ba589d411a0373d7771d6d8f2aa1df8b9e9b9633eb5ac83d4ea87fb4d86:kuyvbkVbIfJ40swoSYe3gCBrmgfpNapnxz4/qlKb+6/fFvWaBoMLevRdXoecjKRRo5U2+D+A1CvNl0WIcoDvAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: remotes-list
+version: "1.0.0"
+description: Configured remote nodes (the mesh as reach)
+
+widget: rows
+source:
+  ref: service:remote/list
+  params: {}
+  collection: remotes
+projections:
+  primary: name
+  meta: status
+  tone:
+    field: status
+    map:
+      ok: good
+      error: danger
+    default: neutral
+selection:
+  activate: aim-site
+affordances:
+  - id: aim-site
+    label: Aim input at site
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        site: "{record.name}"

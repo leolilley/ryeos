@@ -288,8 +288,8 @@ async fn items_list_applies_filters_and_accepts_include_shadowed() {
     let result = (ryeos_ui::handlers::ui_studio_items::ITEMS_LIST_DESCRIPTOR.handler)(
         json!({
             "kind": "tool",
-            "space": "system",
-            "query": "sign",
+            "space": "bundle",
+            "query": "core/sign",
             "limit": 1,
             "include_shadowed": true
         }),
@@ -300,8 +300,8 @@ async fn items_list_applies_filters_and_accepts_include_shadowed() {
     .expect("items.list should succeed");
 
     let items = result["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1);
+    assert_eq!(items.len(), 1, "summary: {:?}", &result["counts"]);
     assert_eq!(items[0]["canonical_ref"], "tool:ryeos/core/sign");
     assert_eq!(items[0]["item_kind"], "tool");
-    assert_eq!(items[0]["space"], "system");
+    assert_eq!(items[0]["space"], "bundle");
 }

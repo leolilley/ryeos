@@ -2,7 +2,7 @@
 //!
 //! `ryeos help` prints lifecycle commands (always available) and discovers
 //! the rest from installed bundle descriptors on disk. No daemon required.
-//! `ryeos help <verb>` uses installed descriptors first and only queries the
+//! `ryeos help <command>` uses installed descriptors first and only queries the
 //! daemon when no local descriptor help is available.
 
 use std::collections::BTreeMap;
@@ -21,11 +21,18 @@ use crate::node_descriptors::LoadedCommandDescriptor;
 /// Print top-level help. Static lifecycle help always renders. Dynamic command
 /// discovery is included only after installed node config verifies; verification
 /// failures are surfaced as warnings instead of being treated as absent config.
-pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
+///
+/// The snapshot is loaded once per invocation in `dispatcher::run` and
+/// threaded through so help never re-reads node config from disk.
+pub fn print_help(
+    mut out: impl Write,
+    app_root: &Path,
+    snapshot: &anyhow::Result<NodeConfigSnapshot>,
+) -> std::io::Result<()> {
     writeln!(out, "ryeos — CLI for Rye OS")?;
     writeln!(out)?;
     writeln!(out, "USAGE:")?;
-    writeln!(out, "  ryeos [-p PROJECT] [--debug] <verb...> [args...]")?;
+    writeln!(out, "  ryeos [-p PROJECT] [--debug] <command...> [args...]")?;
     writeln!(out)?;
     writeln!(out, "LIFECYCLE:")?;
     writeln!(
@@ -63,23 +70,18 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
     writeln!(out)?;
 
     // ── Dynamic command discovery from installed bundles ──
-    let app_root = discover_app_root();
-    let snapshot = match crate::node_descriptors::load_verified_snapshot(&app_root) {
+    let snapshot = match snapshot {
         Ok(snapshot) => Some(snapshot),
         Err(err) => {
             eprintln!("warning: installed node config failed verification: {err:#}");
             None
         }
     };
-    let bundle_roots = snapshot
-        .as_ref()
-        .map(snapshot_bundle_roots)
-        .unwrap_or_default();
+    let bundle_roots = snapshot.map(snapshot_bundle_roots).unwrap_or_default();
     let engine = (!bundle_roots.is_empty())
-        .then(|| build_help_engine(&app_root, ".", &bundle_roots).ok())
+        .then(|| build_help_engine(app_root, ".", &bundle_roots).ok())
         .flatten();
     let discovered = snapshot
-        .as_ref()
         .map(|snapshot| discover_commands_from_snapshot(snapshot, engine.as_ref(), "."))
         .unwrap_or_default();
 
@@ -114,7 +116,7 @@ pub fn print_help(mut out: impl Write) -> std::io::Result<()> {
         }
     }
 
-    writeln!(out, "Run `ryeos help <verb>` for verb-specific help.")?;
+    writeln!(out, "Run `ryeos help <command>` for command-specific help.")?;
     Ok(())
 }
 
@@ -148,19 +150,20 @@ fn discover_commands_from_snapshot(
 }
 
 /// Print command-specific help from installed descriptors or local bootstrap help.
-pub async fn print_verb_help(
-    verb_tokens: &[String],
+pub async fn print_command_help(
+    command_tokens: &[String],
     app_root: &std::path::Path,
     project_path: &str,
+    snapshot: &anyhow::Result<NodeConfigSnapshot>,
 ) -> Result<(), CliError> {
     // Prefer installed descriptor help. This keeps help kind-agnostic in the
     // CLI: command descriptors are node config, and the help renderer does not
     // need to classify the execute ref before deciding whether it can print usage.
-    if print_installed_verb_help(verb_tokens, app_root, project_path)? {
+    if print_installed_command_help(command_tokens, app_root, project_path, snapshot)? {
         return Ok(());
     }
 
-    print_local_verb_help(verb_tokens)?;
+    print_lifecycle_command_help(command_tokens)?;
 
     Ok(())
 }
@@ -247,18 +250,19 @@ impl ItemHelpMetadata {
     }
 }
 
-fn print_installed_verb_help(
-    verb_tokens: &[String],
+fn print_installed_command_help(
+    command_tokens: &[String],
     app_root: &std::path::Path,
     project_path: &str,
+    snapshot: &anyhow::Result<NodeConfigSnapshot>,
 ) -> std::io::Result<bool> {
-    let snapshot = crate::node_descriptors::load_verified_snapshot(app_root).map_err(|err| {
+    let snapshot = snapshot.as_ref().map_err(|err| {
         std::io::Error::other(format!(
             "installed node config failed verification: {err:#}"
         ))
     })?;
     let bundle_roots = snapshot_bundle_roots(&snapshot);
-    let Some(command_descriptor) = crate::node_descriptors::find_command(&snapshot, verb_tokens)
+    let Some(command_descriptor) = crate::node_descriptors::find_command(&snapshot, command_tokens)
     else {
         return Ok(false);
     };
@@ -320,13 +324,10 @@ fn print_installed_verb_help(
         writeln!(out, "PROJECT:")?;
         writeln!(
             out,
-            "  --project <DIR>       Project root; accepted before or after the verb"
+            "  --project <DIR>       Project root; accepted before or after the command"
         )?;
         if project_resolution == ryeos_runtime::CommandProjectResolution::Optional {
-            writeln!(
-                out,
-                "  --no-project          Resolve against bundles only"
-            )?;
+            writeln!(out, "  --no-project          Resolve against bundles only")?;
         }
     }
 
@@ -466,11 +467,11 @@ fn resolve_effective_help(
     Some(ItemHelpMetadata::from_composed(&item.composed_value))
 }
 
-/// Print help for local verbs when the daemon is unavailable.
-fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
+/// Print help for lifecycle commands when installed descriptors are unavailable.
+fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()> {
     use std::io::Write;
     let mut out = std::io::stdout();
-    match verb_tokens.first().map(|s| s.as_str()) {
+    match command_tokens.first().map(|s| s.as_str()) {
         Some("init") => {
             writeln!(out, "ryeos init — Bootstrap operator keys and core bundle")?;
             writeln!(out)?;
@@ -487,12 +488,12 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
             )?;
             writeln!(out, "  --app-root <DIR>        App root")?;
         }
-        Some("node") if verb_tokens.get(1).map(String::as_str) == Some("status") => {
+        Some("node") if command_tokens.get(1).map(String::as_str) == Some("status") => {
             writeln!(out, "ryeos node status — Show local node lifecycle status")?;
             writeln!(out)?;
             writeln!(out, "USAGE: ryeos node status [--json] [--app-root <DIR>]")?;
         }
-        Some("system") if verb_tokens.get(1).map(String::as_str) == Some("status") => {
+        Some("system") if command_tokens.get(1).map(String::as_str) == Some("status") => {
             writeln!(
                 out,
                 "ryeos system status — Show local node lifecycle status"
@@ -506,7 +507,10 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
         Some("start") => {
             writeln!(out, "ryeos start — Bring the local node runtime online")?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos start [--app-root <DIR>]")?;
+            writeln!(
+                out,
+                "USAGE: ryeos start [--app-root <DIR>] [--bind <ADDR>] [--uds-path <PATH>]"
+            )?;
         }
         Some("stop") => {
             writeln!(out, "ryeos stop — Gracefully stop the local node runtime")?;
@@ -567,15 +571,6 @@ fn print_local_verb_help(verb_tokens: &[String]) -> std::io::Result<()> {
         None => {}
     }
     Ok(())
-}
-
-fn discover_app_root() -> std::path::PathBuf {
-    if let Ok(p) = std::env::var("RYEOS_APP_ROOT") {
-        return std::path::PathBuf::from(p);
-    }
-    dirs::data_dir()
-        .map(|d| d.join("ryeos"))
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ fn workspace_root() -> String {
 async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let launch_context = LaunchContext {
-        surface_ref: "surface:ryeos/studio/graph".into(),
+        surface_ref: "surface:ryeos/studio/atlas".into(),
         project_path: Some(workspace_root()),
         read_only: true,
         granted_caps: vec!["ui.read".into()],
@@ -51,7 +51,7 @@ async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
     assert_eq!(result["kind"], "topology_graph");
     assert_eq!(
         result["metadata"]["root_surface"],
-        "surface:ryeos/studio/graph"
+        "surface:ryeos/studio/atlas"
     );
 
     let nodes = result["nodes"].as_array().expect("nodes array");
@@ -91,14 +91,11 @@ async fn graph_topology_returns_live_bundle_topology_for_browser_session() {
         assert!(node_ids.contains(to), "missing edge.to item: {to}");
     }
 
-    assert!(has_node("surface:ryeos/studio/graph"));
+    assert!(has_node("surface:ryeos/studio/atlas"));
     assert!(has_node("client:ryeos/web"));
     assert!(has_node("kind:surface"));
-    assert!(has_edge(
-        "surface:ryeos/studio/graph",
-        "extends",
-        "surface:ryeos/studio/base"
-    ));
+    // No extends relationships exist in current bundle content; the
+    // edge machinery is covered by serves_kind below.
     assert!(has_edge("client:ryeos/web", "serves_kind", "kind:surface"));
     assert!(has_edge(
         "kind:surface",

@@ -7,6 +7,7 @@ pub mod assets;
 pub mod browser_session;
 pub mod handlers;
 pub mod invokers;
+pub mod seat_auth;
 pub mod session_bus;
 pub mod state;
 

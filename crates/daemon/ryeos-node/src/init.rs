@@ -188,7 +188,9 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .with_context(|| {
             format!(
                 "write node public identity {}",
-                node_key_path.with_file_name("public-identity.json").display()
+                node_key_path
+                    .with_file_name("public-identity.json")
+                    .display()
             )
         })?;
 
@@ -333,10 +335,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             // aligned with the installed-registration loader's structured,
             // fail-closed semantics instead of preserving malformed-but-signed
             // old records.
-            let node_dir = opts
-                .app_root
-                .join(ryeos_engine::AI_DIR)
-                .join("node");
+            let node_dir = opts.app_root.join(ryeos_engine::AI_DIR).join("node");
             let grants = command_registration_grants
                 .get(name)
                 .cloned()
@@ -354,14 +353,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
                 .get(name)
                 .cloned()
                 .unwrap_or_default();
-            install_bundle(
-                &opts.app_root,
-                name,
-                source_path,
-                &grants,
-                &node_key,
-                true,
-            )?;
+            install_bundle(&opts.app_root, name, source_path, &grants, &node_key, true)?;
         }
 
         bundles_installed.push(name.clone());
@@ -410,9 +402,27 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .with_context(|| format!("write ignore config {}", ignore_path.display()))?;
     }
 
+    // ── 8c. Generated sync-policy discovery file ──
+    // A read-only window on the effective sync policy: deployable surfaces and
+    // the two code-enforced floors, pointing at ignore.yaml as the one editable
+    // input. Regenerated (overwritten) on every init so it tracks the binary.
+    let sync_dir = opts
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("sync");
+    fs::create_dir_all(&sync_dir)
+        .with_context(|| format!("create sync dir {}", sync_dir.display()))?;
+    let policy_path = sync_dir.join("policy.yaml");
+    let policy_yaml = ryeos_state::project_sync::render_effective_sync_policy_yaml(
+        ".ai/node/ingest/ignore.yaml",
+    );
+    fs::write(&policy_path, policy_yaml)
+        .with_context(|| format!("write sync policy {}", policy_path.display()))?;
+
     // ── 9. Post-init trust verification ──
-    let post_trust = TrustStore::load(None, &operator_config_root)
-        .context("load post-init trust store")?;
+    let post_trust =
+        TrustStore::load(None, &operator_config_root).context("load post-init trust store")?;
     if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {
         bail!(
             "post-init self-check failed: official publisher key {} is \
@@ -969,8 +979,8 @@ fn install_bundle(
     let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
     if !skip_preflight {
         // Preflight: load trust store from operator config.
-        let trust_store = TrustStore::load(None, &operator_config_root)
-            .context("preflight: load trust store")?;
+        let trust_store =
+            TrustStore::load(None, &operator_config_root).context("preflight: load trust store")?;
         if !trust_store.is_trusted(OFFICIAL_PUBLISHER_FP) {
             bail!(
                 "internal error: official publisher key {} not in trust store \

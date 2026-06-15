@@ -1,0 +1,47 @@
+# ryeos:signed:2026-06-12T07:42:45Z:ab7b3c732dbed276c690773f58b4bc6d4222c1b8a4b6214586515e495fb54aad:VajWid6ekkL2RRlG4JLLuk0ylto+Dkkr8bpauUrQ+dE4N5TMMX07crASeUL5bG1I6tVUsMfJPBcqbzjEcE9hBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: chain-timeline
+version: "1.0.0"
+description: Event braid timeline for the input route's conversation chain
+
+widget: timeline
+source:
+  ref: service:events/chain_replay
+  params:
+    chain_root_id: "@facet:input.route.thread"
+  collection: events
+projections:
+  event_kinds:
+    cognition_out:
+      primary: payload.content
+      role: flow
+    thread_continued:
+      primary: payload.previous_thread_id
+      meta: event_type
+      role: boundary
+    cognition_in:
+      primary: payload.turn
+      meta: event_type
+      role: boundary
+    tool_call_start:
+      primary: payload.tool
+      meta: payload.call_id
+      role: pair_open
+      pair_key: payload.call_id
+    tool_call_result:
+      primary: payload.tool
+      meta: payload.result_size_bytes
+      role: pair_close
+      pair_key: payload.call_id
+      tone:
+        field: payload.truncated_reason
+        missing: good
+        map:
+          error_envelope: danger
+          size_cap_exceeded: warn
+          result_guard: warn
+        default: good
+  default:
+    primary: event_type
+    meta: ts
+refresh:
+  on_hint: thread

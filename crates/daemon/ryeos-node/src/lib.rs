@@ -47,8 +47,20 @@ impl NodeConfig {
     }
 
     pub fn load_local(app_root: Option<PathBuf>) -> Result<Self> {
+        Self::load_local_with_overrides(app_root, None, None, false)
+    }
+
+    pub fn load_local_with_overrides(
+        app_root: Option<PathBuf>,
+        bind: Option<SocketAddr>,
+        uds_path: Option<PathBuf>,
+        force: bool,
+    ) -> Result<Self> {
         let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
             app_root,
+            bind,
+            uds_path,
+            force,
             ..Default::default()
         })?;
         Ok(Self::from_app_config(&config))
@@ -98,6 +110,17 @@ impl LocalLifecycleEnv {
     pub fn load(app_root: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
             config: NodeConfig::load_local(app_root)?,
+        })
+    }
+
+    pub fn load_with_overrides(
+        app_root: Option<PathBuf>,
+        bind: Option<SocketAddr>,
+        uds_path: Option<PathBuf>,
+        force: bool,
+    ) -> Result<Self> {
+        Ok(Self {
+            config: NodeConfig::load_local_with_overrides(app_root, bind, uds_path, force)?,
         })
     }
 

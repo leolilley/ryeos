@@ -1,0 +1,13 @@
+# ryeos:signed:2026-06-11T22:51:46Z:9fb14c7407fb54e9cfd79c61dce33b0d8b526772a81e01b126392c3ab3976eac:HEYleHgkqu0ZW1HrewoDxN4CkpaGGAPw0gHKbdDQ97fG/GVWbh3KNbr/r5CZfejh4zCd5J+vcB8ThToU4QQUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: bundles-list
+version: "1.0.0"
+description: Installed bundles (the content packs)
+
+widget: rows
+source:
+  ref: service:bundle/list
+  params: {}
+  collection: bundles
+projections:
+  primary: name
+  meta: version

@@ -5,7 +5,7 @@
 //! The projection DB indexes both. Nuke the DB → rebuild from these files.
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -259,14 +259,16 @@ pub fn rebuild_fires_from_dir(fires_dir: &Path, db: &SchedulerDb) -> Result<()> 
 /// Parse a JSONL file and upsert fire records.
 /// Last entry for a given `fire_id` wins (self-contained snapshots).
 fn rebuild_fire_projection(jsonl_path: &Path, db: &SchedulerDb) -> Result<()> {
-    let content =
-        fs::read_to_string(jsonl_path).with_context(|| format!("read {}", jsonl_path.display()))?;
+    let file =
+        fs::File::open(jsonl_path).with_context(|| format!("read {}", jsonl_path.display()))?;
+    let reader = std::io::BufReader::new(file);
 
     // Collect entries by fire_id (last wins)
     let mut latest: std::collections::HashMap<String, FireRecord> =
         std::collections::HashMap::new();
 
-    for line in content.lines() {
+    for line in reader.lines() {
+        let line = line.with_context(|| format!("read {}", jsonl_path.display()))?;
         let line = line.trim();
         if line.is_empty() {
             continue;

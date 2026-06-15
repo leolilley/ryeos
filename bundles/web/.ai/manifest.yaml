@@ -1,6 +1,6 @@
-# ryeos:signed:2026-06-08T03:48:10Z:16b971c5936d07fabe4fe88d30f355f02829fa92f954cb65650f50b3cc5cf42b:lNT8Q0qRvmWe5fH+OdKOF78V8dM7EUJsSSno30knagFPSZRHjolxLqi0TUeMVvqD1gzDbtcQd3FDEb531lNqBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-13T00:32:34Z:438eed8f53c0cb28b2c573ecb41dcd4e5f4b9eeb4a68cbb468fcc980cbb9a718:VscYaU7Fae92u3qElz0wQKipf5Bd+mVAsFy+4lPxmT1pZq4hnFx82sFSf0Ykpw/FciGQTC8t7CtDcwBqBAAvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: web
-version: 0.5.0
+version: 0.6.0
 description: Optional web access tools for agents
 provides_kinds: []
 requires_kinds:

@@ -1,0 +1,59 @@
+# ryeos:signed:2026-06-11T21:03:05Z:ee2db73781d726763c8ba4e218304f88232ef501b4133ad704494c077213bb0b:NqyTgwHqHqLKVZku/D7j+tm2iXxfBffx+Fw5TPzppRSI8ed9WYelj6YDSN/bACXxn+vlIegFkA5F9JohIGbQAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "engine/kinds/view"
+version: "1.0.0"
+location:
+  directory: views
+
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+
+composer: handler:ryeos/core/extends-chain
+resolution:
+  - step: resolve_extends_chain
+    field: extends
+    max_depth: 16
+effective_trust:
+  include_references: false
+composer_config:
+  extends_field: extends
+  fields:
+    - name: widget
+      strategy: replace_root_last
+      expect_value_type: string
+      required: true
+    - name: source
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: projections
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+    - name: affordances
+      strategy: keyed_seq_merge_root_last
+      key: id
+      expect_value_type: array
+    - name: refresh
+      strategy: dict_merge_root_last
+      expect_value_type: mapping
+
+composed_value_contract:
+  root_type: mapping
+  required:
+    widget:
+      type: single
+      prim: string
+  optional:
+    source:
+      type: single
+      prim: mapping
+    projections:
+      type: single
+      prim: mapping
+    affordances:
+      type: single
+      prim: sequence
+    refresh:
+      type: single
+      prim: mapping

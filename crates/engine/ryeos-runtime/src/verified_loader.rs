@@ -906,10 +906,7 @@ pem = """
         create_trust_store(&operator_root, &op_sk);
         create_trust_store(&project, &proj_sk);
 
-        let store = TrustStore::load(
-            &project,
-            &operator_root.join(".ai/config/keys/trusted"),
-        );
+        let store = TrustStore::load(&project, &operator_root.join(".ai/config/keys/trusted"));
 
         assert_eq!(store.len(), 2);
         let op_fp = lillux::signature::compute_fingerprint(&op_sk.verifying_key());
@@ -1031,8 +1028,11 @@ pem = """
         )
         .unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_operator_trust());
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            vec![system],
+            &no_operator_trust(),
+        );
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
@@ -1057,8 +1057,11 @@ pem = """
             lillux::signature::sign_content_at(yaml_body, &sk, "#", None, "2026-01-01T00:00:00Z");
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader =
-            VerifiedLoader::new(tmp.path().join("project"), vec![system], &no_operator_trust());
+        let loader = VerifiedLoader::new(
+            tmp.path().join("project"),
+            vec![system],
+            &no_operator_trust(),
+        );
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");

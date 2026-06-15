@@ -6,6 +6,9 @@ import { applyPresentationState, presentationState } from "/ui/assets/studio_pre
 
 export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   root.className = "studio-app studio-os";
+  // Surface-declared border treatment (thick | thin | hidden | none);
+  // CSS maps it onto tiles, dock tiles, and panels.
+  root.dataset.border = vm.presentation?.chrome?.border || "thin";
   const chromeShell = { ...shell, dispatchUi };
   const topBar = vm.presentation?.chrome?.top_bar;
   const statusBar = vm.presentation?.chrome?.status_bar;
@@ -16,7 +19,7 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
   const presentation = presentationState(vm, scene);
   applyPresentationState(root, presentation);
   const motionSnapshot = captureWorkspaceMotion(root);
-  const currentTileIds = new Set(vm.workspace?.is_home ? [] : tileIdsForNode(vm.workspace?.root));
+  const currentTileIds = new Set(vm.workspace?.center_is_empty ? [] : tileIdsForNode(vm.workspace?.root));
   const home = studioHome(vm, scene, chromeShell);
   const layers = [
     opticFrame(vm.presentation?.frame),

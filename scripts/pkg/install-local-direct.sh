@@ -38,6 +38,14 @@ Options:
                         (core+standard), hosted-node, or hosted-workflow
                         (core+standard+hosted-node)
                         (default: full)
+  --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
+                        Use a smaller N if a full release build exhausts memory.
+  --crates "A B C"      With --populate, rebuild only these crates (e.g.
+                        --crates ryeos-tools to refresh just core-tools). Other
+                        bundle binaries must already exist in target/release.
+  --all                 With --populate, rebuild the whole bundle set. Required to
+                        do a full rebuild — --populate refuses to build everything
+                        implicitly (that full release build is what exhausts memory).
   -h, --help            Show this help
 
 Default behavior is incremental: install already-built binaries and bundle
@@ -65,6 +73,112 @@ run_timeout() {
 
 ryeos_status_quick() {
     run_timeout 10 ryeos node status 2>/dev/null || true
+}
+
+bundle_payload_bins() {
+    case "$1" in
+        core)
+            printf '%s\n' \
+                rye-parser-yaml-document \
+                rye-parser-yaml-header-document \
+                rye-parser-regex-kv \
+                rye-composer-identity \
+                ryeos-core-tools
+            ;;
+        standard)
+            printf '%s\n' \
+                ryeos-directive-runtime \
+                ryeos-graph-runtime \
+                ryeos-knowledge-runtime \
+                rye-composer-extends-chain \
+                rye-composer-graph-permissions
+            ;;
+        studio)
+            printf '%s\n' ryeos-tui web
+            ;;
+        web)
+            printf '%s\n' ryeos-web-tools
+            ;;
+    esac
+}
+
+publisher_fingerprint_from_trust_doc() {
+    local trust_file="$1"
+    sed -n 's/^fingerprint *= *"\([^"]*\)".*/\1/p' "$trust_file" | head -n1
+}
+
+operator_fingerprint() {
+    local key_path="${init_app_root:-$HOME/.local/share/ryeos}/.ai/config/keys/signing/private_key.pem"
+    [[ -s "$key_path" ]] || return 1
+    openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
+        | tail -c 32 \
+        | sha256sum \
+        | cut -d' ' -f1
+}
+
+refresh_installed_bundle_payload() {
+    local name="$1"
+    local dest="$share_dir/$name"
+    local bin_dest="$dest/.ai/bin/x86_64-unknown-linux-gnu"
+    local bins=()
+    local b
+    local trust_fp operator_fp
+
+    while IFS= read -r b; do
+        [[ -n "$b" ]] && bins+=("$b")
+    done < <(bundle_payload_bins "$name")
+    [[ ${#bins[@]} -gt 0 ]] || return 0
+
+    [[ -x "$target_dir/ryeos-core-tools" ]] || \
+        die "bundle payload refresh requires built binary: $target_dir/ryeos-core-tools"
+    [[ -f "$dest/PUBLISHER_TRUST.toml" ]] || \
+        die "bundle payload refresh requires trust doc: $dest/PUBLISHER_TRUST.toml"
+    trust_fp="$(publisher_fingerprint_from_trust_doc "$dest/PUBLISHER_TRUST.toml")"
+    operator_fp="$(operator_fingerprint || true)"
+    if [[ -z "$operator_fp" || "$trust_fp" != "$operator_fp" ]]; then
+        echo "[install-local-direct] skipping $name bundle payload refresh: installed bundle trusts $trust_fp, operator key is ${operator_fp:-unavailable}; run with --populate to refresh publisher-signed payloads"
+        return 0
+    fi
+
+    echo "[install-local-direct] refreshing $name bundle payload"
+    sudo mkdir -p "$bin_dest"
+    for b in "${bins[@]}"; do
+        [[ -x "$target_dir/$b" ]] || die "bundle payload binary missing: $target_dir/$b"
+        sudo install -Dm755 "$target_dir/$b" "$bin_dest/$b"
+    done
+
+    case "$name" in
+        core)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
+        standard)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$share_dir/core" \
+                --registry-root "$share_dir/core" \
+                --registry-root "$share_dir/standard" \
+                --owner "$owner" >/dev/null
+            ;;
+        studio)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --registry-root "$share_dir/standard" \
+                --owner "$owner" >/dev/null
+            ;;
+        web)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
+    esac
 }
 
 pid_from_status() {
@@ -113,6 +227,9 @@ cleanup_shadows=1
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
 bundle_set="full"
+jobs=""            # forwarded to populate as cargo -j N
+crates=""          # forwarded to populate to rebuild only these crates
+populate_all=0     # explicit opt-in to rebuild the whole bundle set
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -146,6 +263,20 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "--bundle-set requires a value"
             bundle_set="$2"
             shift 2
+            ;;
+        --jobs)
+            [[ $# -ge 2 ]] || die "--jobs requires a number"
+            jobs="$2"
+            shift 2
+            ;;
+        --crates)
+            [[ $# -ge 2 ]] || die "--crates requires a space-separated crate list"
+            crates="$2"
+            shift 2
+            ;;
+        --all)
+            populate_all=1
+            shift
             ;;
         -h|--help)
             usage
@@ -204,11 +335,16 @@ optional_bins=(lillux)
 
 if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
+    # Be explicit about scope — never trigger a full workspace rebuild implicitly.
+    if [[ -z "$crates" && $populate_all -eq 0 ]]; then
+        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-tools), or --all to rebuild the whole '$bundle_set' set"
+    fi
     echo "[install-local-direct] populating bundles"
-    "$repo_root/scripts/populate-bundles.sh" \
-        --key "$key" \
-        --owner "$owner" \
-        --bundle-set "$bundle_set"
+    populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")
+    [[ -n "$jobs" ]] && populate_args+=(--jobs "$jobs")
+    [[ -n "$crates" ]] && populate_args+=(--crates "$crates")
+    [[ $populate_all -eq 1 ]] && populate_args+=(--all)
+    "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}"
 fi
 
 daemon_was_running=0
@@ -300,6 +436,11 @@ for name in "${bundle_names[@]}"; do
     if [[ -f "$bundle_dir/README.md" ]]; then
         sudo install -Dm644 "$bundle_dir/README.md" \
             "$doc_dir/$name/README.md"
+    fi
+done
+for name in "${bundle_names[@]}"; do
+    if [[ $run_populate -eq 0 ]]; then
+        refresh_installed_bundle_payload "$name"
     fi
 done
 sudo chown -R root:root "$share_dir"

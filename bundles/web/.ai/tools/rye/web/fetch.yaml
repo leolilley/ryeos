@@ -1,0 +1,46 @@
+# ryeos:signed:2026-06-13T00:32:34Z:3518a5eecee411d35b4b7636a207194b9607921beec0bda31aab5eef609baaa9:XrULY/HwhwJYm7qMdCHlWaiL8wot7UC1Sy4fYcx4vJzWtvIb8nLWsRwiZRsflAK+FNB+xWlI41xjvHajg5hZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "rye/web"
+version: "1.0.0"
+tool_type: "subprocess"
+executor_id: "@subprocess"
+description: "Fetch an HTTP(S) page and return markdown, text, or HTML"
+
+config:
+  command: "bin:ryeos-web-tools"
+  args:
+    - "fetch"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 60
+
+config_schema:
+  type: object
+  properties:
+    url:
+      type: string
+      minLength: 1
+      description: "HTTP(S) URL to fetch"
+    format:
+      type: string
+      enum: ["markdown", "text", "html"]
+      default: "markdown"
+    timeout_secs:
+      type: integer
+      minimum: 1
+      maximum: 50
+      default: 30
+    max_bytes:
+      type: integer
+      minimum: 1
+      maximum: 5000000
+      default: 1000000
+    max_output_chars:
+      type: integer
+      minimum: 1000
+      maximum: 200000
+      default: 50000
+    block_private_networks:
+      type: boolean
+      default: true
+      description: "May tighten fetch policy. Private/local targets remain blocked unless operator config allows opt-out."
+  required: [url]

@@ -1,6 +1,8 @@
 import init, {
   studio_apply_effect_result,
   studio_dispatch,
+  studio_replay_seat_events,
+  studio_seat_events,
   studio_start,
 } from "/ui/assets/ryeos_web.js";
 import { renderDom } from "/ui/assets/studio_dom_adapter.js";
@@ -11,6 +13,9 @@ let committing = false;
 let queuedEnvelope = null;
 let currentEnvelope = null;
 let latestDimension = null;
+let seatThreadId = null;
+let seatSynced = 0;
+let seatSyncing = false;
 
 export async function bootStudio(appRoot) {
   root = appRoot;
@@ -18,6 +23,7 @@ export async function bootStudio(appRoot) {
 
   const session = await getJson("/ui/api/session/current");
   let envelope = studio_start(session, viewport(), BigInt(Date.now()));
+  envelope = await attachSeat(session, envelope);
   await commit(envelope);
   if (location.hash) {
     await commit(studio_dispatch({ type: "route_changed", route: location.hash.replace(/^#/, "") }));
@@ -52,6 +58,7 @@ async function commit(envelope) {
         })
         .catch((error) => commit(studio_apply_effect_result(failedResultFor(effect, error))));
     }
+    void syncSeatBraid();
   } finally {
     committing = false;
     if (queuedEnvelope) {
@@ -60,6 +67,84 @@ async function commit(envelope) {
       await commit(next);
     }
   }
+}
+
+async function attachSeat(session, envelope) {
+  const seededEvents = safeSeatEvents().length;
+  try {
+    const opened = await invokeSeatService("service:ui/seat/open", {
+      surface_ref: session.surface_ref,
+      client_ref: "client:ryeos/web",
+    });
+    seatThreadId = opened?.thread_id || null;
+    if (!seatThreadId) return envelope;
+
+    let replayedEnvelope = envelope;
+    if (opened?.reattached) {
+      const replay = await invokeSeatService("service:ui/seat/replay", {
+        chain_root_id: seatThreadId,
+      });
+      const events = Array.isArray(replay?.events) ? replay.events : [];
+      if (events.length > 0) {
+        replayedEnvelope = studio_replay_seat_events(events);
+      }
+    }
+
+    const currentEvents = safeSeatEvents().length;
+    seatSynced = currentEvents > seededEvents ? currentEvents : 0;
+    return replayedEnvelope;
+  } catch (error) {
+    console.warn("RyeOS Studio seat attach failed; continuing with local-only seat", error);
+    seatThreadId = null;
+    seatSynced = 0;
+    return envelope;
+  }
+}
+
+async function syncSeatBraid() {
+  if (!seatThreadId || seatSyncing) return;
+  const events = safeSeatEvents();
+  if (events.length <= seatSynced) return;
+  const targetLen = events.length;
+  const batch = events.slice(seatSynced).map((event) => ({
+    event_type: event.event_type,
+    payload: {
+      seq: event.seq,
+      payload: event.payload,
+    },
+  })).filter((event) => event.event_type);
+  if (batch.length === 0) {
+    seatSynced = targetLen;
+    return;
+  }
+
+  seatSyncing = true;
+  try {
+    await invokeSeatService("service:ui/seat/append", {
+      thread_id: seatThreadId,
+      events: batch,
+    });
+    seatSynced = targetLen;
+  } catch (error) {
+    console.warn("RyeOS Studio seat sync failed", error);
+  } finally {
+    seatSyncing = false;
+    if (safeSeatEvents().length > seatSynced) void syncSeatBraid();
+  }
+}
+
+function safeSeatEvents() {
+  try {
+    const events = studio_seat_events();
+    return Array.isArray(events) ? events : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+async function invokeSeatService(commandId, args) {
+  const resp = await postJson("/ui/api/actions/invoke", { command_id: commandId, args });
+  return resp?.result?.result ?? resp?.result ?? resp;
 }
 
 function dispatchUi(event) {
@@ -258,6 +343,23 @@ function attachBrowserEvents() {
   window.addEventListener("hashchange", () => {
     void commit(studio_dispatch({ type: "route_changed", route: location.hash.replace(/^#/, "") }));
   });
+  window.addEventListener("pagehide", () => {
+    if (!seatThreadId) return;
+    const body = JSON.stringify({
+      command_id: "service:ui/seat/close",
+      args: { thread_id: seatThreadId },
+    });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/ui/api/actions/invoke", new Blob([body], { type: "application/json" }));
+    } else {
+      fetch("/ui/api/actions/invoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  });
 }
 
 function rowCursorDelta(key) {
@@ -319,6 +421,16 @@ function viewport() {
 async function getJson(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  return response.json();
+}
+
+async function postJson(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (!response.ok) throw new Error(`${url}: ${response.status} ${await response.text()}`);
   return response.json();
 }
 

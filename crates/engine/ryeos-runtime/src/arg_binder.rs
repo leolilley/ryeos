@@ -106,8 +106,48 @@ pub fn bind_argv_with_command(
         .collect();
 
     if positionals.is_empty() {
-        apply_command_defaults(&mut value, command);
-        return Ok(value);
+        for form in &forms {
+            for slot in &form.slots {
+                let key = normalise_key(&slot.field);
+                if matches!(obj.get(&key), Some(serde_json::Value::Bool(true))) {
+                    return Err(format!(
+                        "--{} requires a value",
+                        slot.field.replace('_', "-")
+                    ));
+                }
+            }
+        }
+        if forms.iter().any(|form| {
+            form.slots.iter().all(|slot| {
+                let key = normalise_key(&slot.field);
+                obj.contains_key(&key) || command.defaults.contains_key(&key)
+            })
+        }) {
+            apply_command_defaults(&mut value, command);
+            return Ok(value);
+        }
+        let required = forms
+            .first()
+            .map(|form| {
+                form.slots
+                    .iter()
+                    .filter(|slot| {
+                        let key = normalise_key(&slot.field);
+                        !obj.contains_key(&key) && !command.defaults.contains_key(&key)
+                    })
+                    .map(|slot| format!("<{}>", slot.field))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|required| !required.is_empty())
+            .unwrap_or_else(|| "required positional argument".to_string());
+        if forms.len() == 1 {
+            return Err(format!("command {:?} requires {required}", command.tokens));
+        }
+        return Err(format!(
+            "command {:?} requires one of its positional forms",
+            command.tokens
+        ));
     }
 
     for form in &forms {
@@ -582,6 +622,57 @@ mod tests {
         assert_eq!(result["source"], "bundles/core");
         assert_eq!(result["registry_root"], "bundles/core");
         assert!(result.get("_args").is_none());
+    }
+
+    #[test]
+    fn command_path_form_accepts_flagged_source_without_positional() {
+        let command = test_command(
+            vec!["bundle".into(), "verify".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "source".into(),
+                    matcher: crate::CommandArgumentKind::Path,
+                }],
+            }],
+        );
+
+        let result =
+            bind_argv_with_command(&["--source".into(), "bundles/core".into()], Some(&command))
+                .unwrap();
+
+        assert_eq!(result["source"], "bundles/core");
+    }
+
+    #[test]
+    fn command_path_form_rejects_missing_source() {
+        let command = test_command(
+            vec!["bundle".into(), "verify".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "source".into(),
+                    matcher: crate::CommandArgumentKind::Path,
+                }],
+            }],
+        );
+
+        let err = bind_argv_with_command(&[], Some(&command)).unwrap_err();
+        assert!(err.contains("requires <source>"), "got: {err}");
+    }
+
+    #[test]
+    fn command_path_form_rejects_source_without_value() {
+        let command = test_command(
+            vec!["bundle".into(), "verify".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "source".into(),
+                    matcher: crate::CommandArgumentKind::Path,
+                }],
+            }],
+        );
+
+        let err = bind_argv_with_command(&["--source".into()], Some(&command)).unwrap_err();
+        assert!(err.contains("--source requires a value"), "got: {err}");
     }
 
     #[test]

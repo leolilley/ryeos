@@ -20,6 +20,7 @@ pub enum StudioKey {
     Enter,
     Escape,
     Backspace,
+    Tab,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -40,6 +41,10 @@ pub struct StudioKeyEvent {
 pub struct StudioKeyContext {
     pub launcher_open: bool,
     pub input_visible: bool,
+    /// The focused input has a non-empty buffer. Plain Enter then submits
+    /// (the chat convention) rather than activating a row — terminals
+    /// can't reliably send Shift+Enter, so it can't be the only submit.
+    pub input_has_text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,7 +71,14 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
     }
 
     match event.key {
-        StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'k') => {
+        // Ctrl+K is the reliable launcher binding: a control char that
+        // terminals and tmux pass straight through. Alt+K is kept for
+        // environments that deliver it, but Alt/ESC combos are eaten by
+        // tmux, so Ctrl+K is what we advertise.
+        StudioKey::Char(c)
+            if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
+                && c.eq_ignore_ascii_case(&'k') =>
+        {
             ui(StudioUiEvent::OpenLauncher)
         }
         StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'q') => {
@@ -98,6 +110,16 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
             cycle_tab(StudioStackMoveDirection::Down)
         }
         StudioKey::Escape if event.modifiers.none() => action(StudioAction::CloseFocused),
+        // Plain Enter submits when you're typing in the input (chat
+        // convention); Shift+Enter also submits where the terminal can
+        // send it. An empty input lets plain Enter activate a row.
+        StudioKey::Enter
+            if context.input_visible
+                && context.input_has_text
+                && (event.modifiers.none() || event.modifiers.shift_only()) =>
+        {
+            ui(StudioUiEvent::SubmitInput)
+        }
         StudioKey::Enter if context.input_visible && event.modifiers.shift_only() => {
             ui(StudioUiEvent::SubmitInput)
         }
@@ -114,6 +136,9 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
         StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
             ui(StudioUiEvent::DeleteInputChar)
+        }
+        StudioKey::Tab if context.input_visible && event.modifiers.none() => {
+            ui(StudioUiEvent::CompleteInput)
         }
         StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
         StudioKey::Char(ch)
@@ -222,6 +247,27 @@ mod tests {
         }
     }
 
+    fn ctrl(ch: char) -> StudioKeyEvent {
+        StudioKeyEvent {
+            key: StudioKey::Char(ch),
+            modifiers: StudioKeyModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn ctrl_k_opens_the_launcher() {
+        // The reliable launcher binding — Alt/ESC combos are eaten by tmux.
+        assert!(matches!(
+            studio_key_command(ctrl('k'), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::OpenLauncher
+            }
+        ));
+    }
+
     fn ctrl_arrow(key: StudioKey) -> StudioKeyEvent {
         StudioKeyEvent {
             key,
@@ -236,6 +282,15 @@ mod tests {
         StudioKeyContext {
             launcher_open,
             input_visible,
+            input_has_text: false,
+        }
+    }
+
+    fn context_typing() -> StudioKeyContext {
+        StudioKeyContext {
+            launcher_open: false,
+            input_visible: true,
+            input_has_text: true,
         }
     }
 
@@ -317,9 +372,34 @@ mod tests {
             }
         ));
         assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CompleteInput
+            }
+        ));
+        assert!(matches!(
             studio_key_command(shift_enter(), context(false, true)),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::SubmitInput
+            }
+        ));
+    }
+
+    #[test]
+    fn plain_enter_submits_when_input_has_text() {
+        // The core chat loop: typing then plain Enter submits (terminals
+        // can't be relied on for Shift+Enter).
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Enter), context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::SubmitInput
+            }
+        ));
+        // Empty input: plain Enter activates the focused row instead.
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Enter), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::ActivateFocused
             }
         ));
     }

@@ -62,9 +62,10 @@ enum Cmd {
         #[arg(long = "registry-root")]
         registry_roots: Vec<PathBuf>,
 
-        /// Owner label for the trust doc. Defaults to "local-dev".
-        #[arg(long, default_value = "local-dev")]
-        owner: String,
+        /// Owner label for the trust doc. Defaults to an existing pinned label for
+        /// the signing key, or "local-dev" when the key is not pinned.
+        #[arg(long)]
+        owner: Option<String>,
 
         /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
         #[arg(long)]
@@ -158,6 +159,13 @@ enum Cmd {
         /// Human-readable label for the authorized key.
         #[arg(long, default_value = "cli-authorized")]
         label: String,
+
+        /// Union the given scopes with any already on the existing
+        /// authorized-key file instead of replacing them. Without this,
+        /// existing scopes not re-listed are dropped (and a warning is
+        /// printed).
+        #[arg(long)]
+        merge_scopes: bool,
     },
 
     /// Mint a one-time node-local admission token for remote bootstrap.
@@ -283,6 +291,10 @@ enum SnapshotCmd {
         /// Include unchanged files in the changes list.
         #[arg(long)]
         include_unchanged: bool,
+
+        /// Worktree scan budget in milliseconds; 0 disables the cap.
+        #[arg(long, default_value_t = 5_000)]
+        time_budget_ms: u64,
     },
 
     /// Show recent snapshots from the principal's project head.
@@ -508,12 +520,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             public_key,
             scopes,
             label,
+            merge_scopes,
         } => {
             let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
                 "--scopes required, comma-separated, in canonical form. \
                  Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
             ))?;
-            run_authorize_client(app_root, public_key, scopes, label, cli.stdin_json)
+            run_authorize_client(app_root, public_key, scopes, label, merge_scopes, cli.stdin_json)
         }
         Cmd::AdmissionToken {
             app_root,
@@ -553,6 +566,7 @@ fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
         SnapshotCmd::Status {
             project_path,
             include_unchanged,
+            time_budget_ms,
         } => {
             let params = if stdin_json {
                 serde_json::from_value(read_stdin_json()?)?
@@ -562,6 +576,7 @@ fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
                         .or_else(|| std::env::current_dir().ok())
                         .ok_or_else(|| anyhow::anyhow!("--project-path required"))?,
                     include_unchanged,
+                    time_budget_ms,
                 }
             };
             println!("{}", serde_json::to_string_pretty(&run_status(params)?)?);
@@ -625,7 +640,7 @@ fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
 fn run_build(
     bundle_source: Option<PathBuf>,
     registry_roots: Vec<PathBuf>,
-    owner: String,
+    owner: Option<String>,
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
@@ -641,7 +656,7 @@ fn run_build(
         (
             params.source,
             registry_roots,
-            params.owner.unwrap_or_else(|| "local-dev".to_string()),
+            params.owner,
             params.no_trust_doc,
         )
     } else {
@@ -676,6 +691,7 @@ fn run_build(
     let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
     let base_trust_store = ryeos_engine::trust::TrustStore::load(None, &operator_config_root)
         .context("load trust store for registry roots")?;
+    let owner = resolve_publish_owner(owner, &signing_key, &base_trust_store);
 
     let report = run_publish(&PublishOptions {
         bundle_source: source_path,
@@ -688,6 +704,20 @@ fn run_build(
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn resolve_publish_owner(
+    explicit_owner: Option<String>,
+    signing_key: &lillux::crypto::SigningKey,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> String {
+    explicit_owner.unwrap_or_else(|| {
+        let fp = ryeos_engine::trust::compute_fingerprint(&signing_key.verifying_key());
+        trust_store
+            .get(&fp)
+            .and_then(|signer| signer.label.clone())
+            .unwrap_or_else(|| "local-dev".to_string())
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -1336,6 +1366,7 @@ fn run_authorize_client(
     public_key: Option<String>,
     scopes: String,
     label: String,
+    merge_scopes: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
@@ -1400,13 +1431,26 @@ fn run_authorize_client(
         scopes,
         label,
         allow_wildcard: false, // core-tools is not the bootstrap path
+        merge: merge_scopes,
     })?;
+
+    if !result.dropped_scopes.is_empty() {
+        eprintln!(
+            "warning: replaced the authorized-key scopes for {fp}; {n} existing scope(s) \
+             were dropped: {dropped}. Re-run with --merge-scopes to keep them.",
+            fp = result.fingerprint,
+            n = result.dropped_scopes.len(),
+            dropped = result.dropped_scopes.join(", "),
+        );
+    }
 
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "fingerprint": result.fingerprint,
             "path": result.path.to_string_lossy(),
+            "merged": result.merged,
+            "dropped_scopes": result.dropped_scopes,
         }))?
     );
 
@@ -1658,6 +1702,40 @@ mod tests {
         .unwrap();
 
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn bundle_publish_owner_defaults_to_pinned_signer_label() {
+        let key = SigningKey::generate(&mut OsRng);
+        let fp = ryeos_engine::trust::compute_fingerprint(&key.verifying_key());
+        let trust_store = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fp,
+                verifying_key: key.verifying_key(),
+                label: Some("user".to_string()),
+            },
+        ]);
+
+        assert_eq!(resolve_publish_owner(None, &key, &trust_store), "user");
+    }
+
+    #[test]
+    fn bundle_publish_owner_defaults_to_local_dev_when_unpinned() {
+        let key = SigningKey::generate(&mut OsRng);
+        let trust_store = ryeos_engine::trust::TrustStore::empty();
+
+        assert_eq!(resolve_publish_owner(None, &key, &trust_store), "local-dev");
+    }
+
+    #[test]
+    fn bundle_publish_owner_explicit_value_wins() {
+        let key = SigningKey::generate(&mut OsRng);
+        let trust_store = ryeos_engine::trust::TrustStore::empty();
+
+        assert_eq!(
+            resolve_publish_owner(Some("alice".to_string()), &key, &trust_store),
+            "alice"
+        );
     }
 
     #[test]

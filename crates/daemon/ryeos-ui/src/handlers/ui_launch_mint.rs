@@ -35,6 +35,10 @@ fn default_read_only() -> bool {
     true
 }
 
+fn launch_session_caps() -> Vec<String> {
+    vec!["ui.read".into()]
+}
+
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
@@ -71,7 +75,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         surface_ref: req.surface_ref,
         project_path: req.project_path,
         read_only: req.read_only,
-        granted_caps: vec!["ui.read".into()],
+        granted_caps: launch_session_caps(),
         user_principal_id,
     };
 
@@ -213,5 +217,15 @@ mod tests {
         .unwrap();
 
         assert!(req.read_only);
+    }
+
+    #[test]
+    fn launch_sessions_only_grant_ui_read() {
+        // `ui.actions.invoke` may execute a canonical item ref using a durable
+        // session principal, so browser launch sessions must not silently grow
+        // execution capabilities. Surface affordances remain the UI contract;
+        // this is the daemon-side backstop that keeps cookie-authenticated
+        // sessions read-only at the executor cap gate.
+        assert_eq!(launch_session_caps(), vec!["ui.read".to_string()]);
     }
 }

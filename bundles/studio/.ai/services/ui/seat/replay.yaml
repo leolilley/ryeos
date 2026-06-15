@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-13T00:00:43Z:066ce33cbec1b0bcbb339ed6be957bcb8b35f88bf995acd3ae9248e75a8e647f:FCwdFwCYi8+XHzGdN26Z/KWTiguBW60p+mmyRDzwqt61KFBg4MtHEUJdJEYTr/DwZijBR1barBTKEtjhAqSmBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: seat-replay
+version: "1.0.0"
+description: Replay the session's seat braid so seat state folds from history - live and replay are the same fold
+endpoint: ui.seat.replay
+availability: daemon_only

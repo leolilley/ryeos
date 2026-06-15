@@ -98,6 +98,15 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "manifest_entries": result.manifest_entries,
                 "blobs_uploaded": result.blobs_uploaded,
                 "blobs_skipped": result.blobs_skipped,
+                // `remote push` uploads CAS objects and records the snapshot; it
+                // does NOT apply the snapshot to the live project. Say so, so a
+                // successful push is not mistaken for a deploy.
+                "applied": false,
+                "note": "objects uploaded to the remote CAS and the snapshot recorded, but NOT applied to the live project. `remote push` uploads only — it does not deploy.",
+                "next_step": format!(
+                    "run `ryeos remote sync-project-ai --remote {}` to apply the pushed AI content (push + apply-snapshot)",
+                    req.remote
+                ),
             }))
         }
         ProjectSyncScope::FullProject => {
@@ -133,6 +142,9 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "manifest_entries": result.manifest_entries,
                 "blobs_uploaded": result.blobs_uploaded,
                 "blobs_skipped": result.blobs_skipped,
+                // See ai_only branch: push uploads only, it does not deploy.
+                "applied": false,
+                "note": "objects uploaded to the remote CAS and the snapshot recorded, but NOT applied to the live project worktree. `remote push` uploads only — it does not deploy.",
             }))
         }
     }

@@ -5,26 +5,26 @@ edition = "2021"
 description = "RyeOS UI/browser session handlers and session event substrate"
 
 [dependencies]
-anyhow = "1"
-async-stream = "0.3"
-axum = "0.7"
-lillux = { path = "../../kernel/lillux" }
-rand = "0.8"
-ryeos-api = { path = "../ryeos-api" }
-ryeos-app = { path = "../../daemon/ryeos-app" }
-ryeos-engine = { path = "../../engine/ryeos-engine" }
-ryeos-executor = { path = "../../engine/ryeos-executor" }
-ryeos-runtime = { path = "../../engine/ryeos-runtime" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-serde_yaml = "0.9"
-sha2 = "0.10"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1.18"
-uuid = { version = "1", features = ["v4"] }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+axum = { workspace = true, features = ["default"] }
+lillux = { workspace = true }
+rand = { workspace = true }
+ryeos-api = { workspace = true }
+ryeos-app = { workspace = true }
+ryeos-engine = { workspace = true }
+ryeos-executor = { workspace = true }
+ryeos-runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio-stream = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-ryeos-engine = { path = "../../engine/ryeos-engine", features = ["test-support"] }
-ryeos-runtime = { path = "../../engine/ryeos-runtime" }
-ryeos-scheduler = { path = "../../state/ryeos-scheduler" }
+tempfile = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }
+ryeos-runtime = { workspace = true }
+ryeos-scheduler = { workspace = true }

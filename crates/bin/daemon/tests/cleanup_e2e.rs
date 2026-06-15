@@ -212,9 +212,11 @@ async fn cli_maintenance_gc_token_command_runs_with_default_params() {
     let orphan_object = lillux::shard_path(&cas_root, "objects", orphan_hash, ".json");
     std::fs::create_dir_all(orphan_object.parent().expect("orphan parent"))
         .expect("create orphan CAS shard");
-    std::fs::write(&orphan_object, br#"{"kind":"orphan"}"#)
-        .expect("write orphan CAS object");
-    assert!(orphan_object.is_file(), "orphan object should exist before GC");
+    std::fs::write(&orphan_object, br#"{"kind":"orphan"}"#).expect("write orphan CAS object");
+    assert!(
+        orphan_object.is_file(),
+        "orphan object should exist before GC"
+    );
 
     let out = tokio::process::Command::new(&ryeos)
         .args(["maintenance", "gc"])

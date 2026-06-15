@@ -1,0 +1,18 @@
+# ryeos:signed:2026-06-11T21:03:06Z:85109ea1fa761db65143a18c664b85b376ba0ca967cd6e9eab526ae1649512f7:DxtUyPGDG3PfUA3096UsZXy+f6wVZsVhcxOmUlUhv0YC1Acrpfrl0ANjtoFpFXztpjUN7Hz8rWaniopGPXI6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "routes"
+section: routes
+id: chain/events-stream
+path: /chains/{chain_root_id}/events/stream
+methods:
+  - GET
+auth: ryeos_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 0
+  concurrent_max: 64
+response:
+  mode: event_stream
+  source: chain_tail
+  source_config:
+    chain_root_id: "${path.chain_root_id}"
+    keep_alive_secs: 15

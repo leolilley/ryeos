@@ -1,0 +1,9 @@
+# ryeos:signed:2026-06-13T00:32:34Z:ced647e00c7b35136b4caa365c5a0d1d82fc195fef91a461ad91d6a126a1e205:BmDMCTrchHcjqLi2g+LmoCQF0xdrT/me/eVH913PX80qBcO3HpgL2cCRrab80OlH4Tw3K2epC4wVVFlWqRiWBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Web fetch config — system defaults for tool:rye/web/fetch.
+# Override per-project at .ai/config/web/fetch.yaml.
+category: "web"
+version: "1.0.0"
+schema_version: "1.0.0"
+# Private/local network targets are blocked by default. Setting this true lets
+# an individual tool call opt out with block_private_networks=false.
+allow_private_networks: false

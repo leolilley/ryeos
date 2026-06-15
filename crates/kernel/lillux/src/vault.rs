@@ -53,6 +53,7 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 const ENVELOPE_VERSION: u32 = 1;
 const DEK_LEN: usize = 32;
@@ -132,12 +133,16 @@ const SECRET_TAG: &str = "x25519-secret:";
 const PUBLIC_TAG: &str = "x25519-public:";
 
 /// Encode a vault secret key to a single-line `x25519-secret:<b64>` string.
-pub fn encode_secret_key(sk: &VaultSecretKey) -> String {
-    format!(
+/// `Zeroizing` so the encoded secret is wiped when the buffer drops.
+pub fn encode_secret_key(sk: &VaultSecretKey) -> zeroize::Zeroizing<String> {
+    let mut raw = sk.to_bytes();
+    let encoded = zeroize::Zeroizing::new(format!(
         "{}{}",
         SECRET_TAG,
-        base64::engine::general_purpose::STANDARD.encode(sk.to_bytes())
-    )
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    ));
+    raw.zeroize();
+    encoded
 }
 
 /// Encode a vault public key to a single-line `x25519-public:<b64>` string.
@@ -156,13 +161,19 @@ pub fn decode_secret_key(s: &str) -> Result<VaultSecretKey> {
         .strip_prefix(SECRET_TAG)
         .ok_or_else(|| anyhow!("missing `{SECRET_TAG}` prefix"))?
         .trim();
-    let bytes = base64::engine::general_purpose::STANDARD
+    let mut bytes = base64::engine::general_purpose::STANDARD
         .decode(b64)
         .context("base64 decode")?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected 32-byte X25519 secret key"))?;
-    Ok(VaultSecretKey::from_bytes(arr))
+    if bytes.len() != 32 {
+        bytes.zeroize();
+        bail!("expected 32-byte X25519 secret key");
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    bytes.zeroize();
+    let sk = VaultSecretKey::from_bytes(arr);
+    arr.zeroize();
+    Ok(sk)
 }
 
 /// Decode a vault public key written by [`encode_public_key`].
@@ -183,13 +194,16 @@ pub fn decode_public_key(s: &str) -> Result<VaultPublicKey> {
 
 /// Read a secret key from a file written by [`write_secret_key`].
 pub fn read_secret_key(path: &Path) -> Result<VaultSecretKey> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let raw = zeroize::Zeroizing::new(
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
+    );
     decode_secret_key(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
 /// Atomically write a vault secret key. File mode 0600 on Unix.
 pub fn write_secret_key(path: &Path, sk: &VaultSecretKey) -> Result<()> {
-    let body = encode_secret_key(sk) + "\n";
+    let mut body = encode_secret_key(sk);
+    body.push('\n');
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create parent {}", parent.display()))?;
@@ -262,8 +276,10 @@ pub fn seal(vault_pk: &VaultPublicKey, plaintext: &[u8]) -> Result<SealedEnvelop
         .encrypt(XNonce::from_slice(&data_nonce), plaintext)
         .map_err(|e| anyhow!("XChaCha20Poly1305 encrypt failed: {e}"))?;
 
-    // 3. Wrap the DEK to the vault public key.
-    let wrapped = wrap_dek(&dek, vault_pk)?;
+    // 3. Wrap the DEK to the vault public key, then wipe our copy.
+    let wrapped = wrap_dek(&dek, vault_pk);
+    dek.zeroize();
+    let wrapped = wrapped?;
 
     Ok(SealedEnvelope {
         version: ENVELOPE_VERSION,
@@ -302,12 +318,13 @@ pub fn open(vault_sk: &VaultSecretKey, env: &SealedEnvelope) -> Result<Vec<u8>> 
     let wrapped = base64::engine::general_purpose::STANDARD
         .decode(&env.wrapped_dek)
         .context("wrapped_dek base64")?;
-    let dek = unwrap_dek(&wrapped, vault_sk)?;
+    let mut dek = unwrap_dek(&wrapped, vault_sk)?;
 
     let data_nonce = base64::engine::general_purpose::STANDARD
         .decode(&env.nonce)
         .context("nonce base64")?;
     if data_nonce.len() != NONCE_LEN {
+        dek.zeroize();
         bail!("vault: nonce must be {NONCE_LEN} bytes");
     }
     let ciphertext = base64::engine::general_purpose::STANDARD
@@ -315,6 +332,7 @@ pub fn open(vault_sk: &VaultSecretKey, env: &SealedEnvelope) -> Result<Vec<u8>> 
         .context("ciphertext base64")?;
 
     let aead = XChaCha20Poly1305::new(&dek.into());
+    dek.zeroize();
     aead.decrypt(XNonce::from_slice(&data_nonce), ciphertext.as_ref())
         .map_err(|_| anyhow!("vault: AEAD decryption failed (tampered envelope or wrong key)"))
 }
@@ -328,10 +346,11 @@ fn wrap_dek(dek: &[u8; DEK_LEN], vault_pk: &VaultPublicKey) -> Result<Vec<u8>> {
     let eph_pk = PublicKey::from(&eph_sk);
     let shared = eph_sk.diffie_hellman(&vault_pk.0);
 
-    let key = derive_wrap_key(&eph_pk, vault_pk, shared.as_bytes());
+    let mut key = derive_wrap_key(&eph_pk, vault_pk, shared.as_bytes());
     let nonce = derive_wrap_nonce(&eph_pk, vault_pk);
 
     let aead = XChaCha20Poly1305::new(&key.into());
+    key.zeroize();
     let ciphertext = aead
         .encrypt(XNonce::from_slice(&nonce), dek.as_ref())
         .map_err(|e| anyhow!("DEK wrap AEAD encrypt failed: {e}"))?;
@@ -355,18 +374,21 @@ fn unwrap_dek(wrapped: &[u8], vault_sk: &VaultSecretKey) -> Result<[u8; DEK_LEN]
     let shared = vault_sk.0.diffie_hellman(&eph_pk);
     let vault_pk = vault_sk.public_key();
 
-    let key = derive_wrap_key(&eph_pk, &vault_pk, shared.as_bytes());
+    let mut key = derive_wrap_key(&eph_pk, &vault_pk, shared.as_bytes());
     let nonce = derive_wrap_nonce(&eph_pk, &vault_pk);
 
     let aead = XChaCha20Poly1305::new(&key.into());
-    let dek_bytes = aead
+    key.zeroize();
+    let mut dek_bytes = aead
         .decrypt(XNonce::from_slice(&nonce), ciphertext)
         .map_err(|_| anyhow!("vault: DEK unwrap failed (wrong key or tampered envelope)"))?;
     if dek_bytes.len() != DEK_LEN {
+        dek_bytes.zeroize();
         bail!("vault: unwrapped DEK has wrong length: {}", dek_bytes.len());
     }
     let mut dek = [0u8; DEK_LEN];
     dek.copy_from_slice(&dek_bytes);
+    dek_bytes.zeroize();
     Ok(dek)
 }
 

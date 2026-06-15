@@ -97,7 +97,8 @@ impl ProtocolRegistry {
             yaml_paths.sort();
 
             for path in &yaml_paths {
-                let verified = load_and_verify_protocol(path, root, *root_trust, trust_store)?;
+                let (verified, content_hash) =
+                    load_and_verify_protocol(path, root, *root_trust, trust_store)?;
 
                 if let Some(existing) = entries.get(&verified.canonical_ref) {
                     return Err(ProtocolError::DuplicateRef {
@@ -108,16 +109,7 @@ impl ProtocolRegistry {
 
                 fingerprint_parts.push(format!(
                     "{}|{}|{}",
-                    verified.canonical_ref,
-                    verified.descriptor.abi_version,
-                    // Use content hash from the signature verification step.
-                    // We'll compute it inline here.
-                    lillux::signature::content_hash(&lillux::signature::strip_signature_lines(
-                        &std::fs::read_to_string(path).map_err(|e| ProtocolError::Io {
-                            path: path.clone(),
-                            source: e,
-                        })?,
-                    ),),
+                    verified.canonical_ref, verified.descriptor.abi_version, content_hash,
                 ));
                 entries.insert(verified.canonical_ref.clone(), verified);
             }
@@ -195,12 +187,15 @@ fn collect_yaml_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Protocol
 
 /// Load a protocol descriptor from a YAML file: verify signature,
 /// parse, validate vocabulary invariants.
+///
+/// Also returns the verified body content hash so callers can
+/// fingerprint without re-reading and re-hashing the file.
 fn load_and_verify_protocol(
     yaml_path: &Path,
     bundle_root: &Path,
     root_trust: TrustClass,
     trust_store: &TrustStore,
-) -> Result<VerifiedProtocol, ProtocolError> {
+) -> Result<(VerifiedProtocol, String), ProtocolError> {
     let content = std::fs::read_to_string(yaml_path).map_err(|e| ProtocolError::Io {
         path: yaml_path.to_owned(),
         source: e,
@@ -260,13 +255,16 @@ fn load_and_verify_protocol(
     // Derive canonical ref from category + name.
     let canonical_ref = format!("protocol:{}/{}", descriptor.category, descriptor.name);
 
-    Ok(VerifiedProtocol {
-        canonical_ref,
-        descriptor,
-        trust_class: root_trust,
-        bundle_root: bundle_root.to_owned(),
-        descriptor_path: yaml_path.to_owned(),
-    })
+    Ok((
+        VerifiedProtocol {
+            canonical_ref,
+            descriptor,
+            trust_class: root_trust,
+            bundle_root: bundle_root.to_owned(),
+            descriptor_path: yaml_path.to_owned(),
+        },
+        actual_hash,
+    ))
 }
 
 /// Validate all vocabulary invariants on a protocol descriptor.

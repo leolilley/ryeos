@@ -30,26 +30,18 @@ pub struct Request {
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
-    let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
 
     let project_path = canonical_existing_project_path(&req.project_path)?;
     let canonical_project_path = project_path.to_string_lossy().to_string();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);
     let apply_lock = project_apply_lock(&project_hash);
-    let _apply_guard = apply_lock.lock().map_err(|_| {
-        anyhow!(
-            "project apply lock poisoned for '{}'",
-            canonical_project_path
-        )
-    })?;
+    let _apply_guard = apply_lock.lock_owned().await;
     let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|e| anyhow!("cannot acquire CAS write permit: {e}"))?;
 
-    let cas_root = state.state_store.cas_root()?;
-    let refs_root = state.state_store.refs_root()?;
-    let cas = CasStore::new(cas_root);
+    let (cas, refs_root) = state.cas_and_refs()?;
 
     let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint);
     let pushed_head =
@@ -89,6 +81,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     ryeos_state::project_sync::validate_project_manifest_paths(
         &manifest,
         ProjectSyncScope::AiOnly,
+        Some(state.ignore_matcher.as_ref()),
     )?;
 
     let current_ref = ryeos_state::refs::read_deployed_project_ref(&refs_root, &project_hash)?;
@@ -114,15 +107,16 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         }
     }
 
+    // Sweep staging dirs any crashed prior apply left behind. Safe under
+    // the per-project apply lock: no other apply for this project can be
+    // mid-flight, and live staging dirs only exist within an apply.
+    sweep_stale_staging_dirs(&project_path);
+
     let staging_root = unique_staging_root(&project_path);
-    if staging_root.exists() {
-        fs::remove_dir_all(&staging_root)
-            .with_context(|| format!("remove stale staging dir {}", staging_root.display()))?;
-    }
     fs::create_dir_all(&staging_root)
         .with_context(|| format!("create staging dir {}", staging_root.display()))?;
 
-    let apply_result = (|| -> Result<ApplyReport> {
+    let apply_result: Result<ApplyReport> = async {
         materialize_manifest_to_staging(&cas, &manifest, &staging_root)?;
         let deploy_ctx = ProjectDeployContext {
             project_path: &project_path,
@@ -133,6 +127,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             caller: &ctx,
             state: &state,
         };
+
+        // Serialize only the scheduler-visible window. plan() must see
+        // the same schedule state prepare_commit() mutates, so both sit
+        // under the gate, together with root swaps, ref advancement,
+        // and their rollbacks. Request validation, CAS reads, and
+        // staging materialization scale with project size and run
+        // before the gate so timer/recovery dispatch is not blocked
+        // behind large applies (per-project serialization is handled
+        // by `project_apply_lock` above).
+        let _scheduler_guard = state.scheduler_runtime_gate.clone().write_owned().await;
+
         let deploy_plan = project_deploy::plan(&deploy_ctx)?;
         let mut root_swap = replace_managed_roots(&project_path, &staging_root)?;
         let mut deploy_tx = match project_deploy::prepare_commit(&deploy_plan, &deploy_ctx) {
@@ -172,7 +177,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         let mut report = root_swap.report.clone();
         report.deploy = deploy_report;
         Ok(report)
-    })();
+    }
+    .await;
     let cleanup = fs::remove_dir_all(&staging_root);
     if let Err(err) = cleanup {
         tracing::warn!(path = %staging_root.display(), error = %err, "failed to remove project apply staging dir");
@@ -198,17 +204,23 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     }))
 }
 
-pub(crate) fn project_apply_lock(project_hash: &str) -> Arc<Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+/// Per-project apply serialization. A tokio mutex (not std) because
+/// holders await the scheduler runtime gate while holding it, and the
+/// handler future must stay `Send`. Lock order is always apply lock
+/// first, then the runtime gate — never the reverse.
+pub(crate) fn project_apply_lock(project_hash: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut locks = locks.lock().unwrap_or_else(|e| e.into_inner());
     locks
         .entry(project_hash.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone()
 }
 
-fn canonical_existing_project_path(project_path: &str) -> Result<PathBuf> {
+/// Shared by project handlers: absolute, canonicalized, existing
+/// directory — fail loud otherwise.
+pub(crate) fn canonical_existing_project_path(project_path: &str) -> Result<PathBuf> {
     let path = Path::new(project_path);
     if !path.is_absolute() {
         anyhow::bail!("project_path '{}' is not absolute", project_path);
@@ -230,6 +242,25 @@ fn unique_staging_root(project_path: &Path) -> PathBuf {
     project_path.join(format!(".ryeos-ai-sync-staging-{nonce:016x}"))
 }
 
+fn sweep_stale_staging_dirs(project_path: &Path) {
+    let Ok(entries) = fs::read_dir(project_path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with(".ryeos-ai-sync-staging-") {
+            if let Err(err) = fs::remove_dir_all(entry.path()) {
+                tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %err,
+                    "failed to remove stale staging dir"
+                );
+            }
+        }
+    }
+}
+
 fn materialize_manifest_to_staging(
     cas: &CasStore,
     manifest: &SourceManifest,
@@ -237,9 +268,12 @@ fn materialize_manifest_to_staging(
 ) -> Result<usize> {
     let mut count = 0usize;
     for (rel_path, item_hash) in &manifest.item_source_hashes {
+        // Floors (secrets/node-owned) are enforced regardless; ignore was
+        // already validated against the live matcher by the caller.
         ryeos_state::project_sync::validate_project_manifest_path(
             rel_path,
             ProjectSyncScope::AiOnly,
+            None,
         )?;
         let item_obj = cas.get_object(item_hash)?.ok_or_else(|| {
             anyhow!(

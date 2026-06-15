@@ -18,7 +18,6 @@ use serde_json::Value;
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::ItemSpace;
@@ -29,8 +28,6 @@ use ryeos_engine::item_resolution::{
 use ryeos_engine::kind_registry::{DelegationVia, KindSchema};
 use ryeos_engine::trust::verify_item_signature;
 use ryeos_executor::executor::ServiceAvailability;
-
-use crate::state::get_ui_state;
 
 #[derive(Debug, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -304,26 +301,24 @@ impl TopologyBuilder {
     }
 }
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
+pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
-pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx).ok_or_else(|| {
-        HandlerError::Forbidden("browser session required for topology graph".into())
-    })?;
+    let project_root = caller.project_root().map(String::from).or_else(|| {
+        params
+            .get("project_path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+    let root_surface = match &caller {
+        crate::seat_auth::SeatCaller::Session(session) => Some(session.surface_ref.clone()),
+        crate::seat_auth::SeatCaller::Operator { .. } => params
+            .get("surface_ref")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    };
 
-    let session = get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
-    let graph = build_topology(
-        &state,
-        session.project_root.clone(),
-        Some(session.surface_ref),
-    );
+    let graph = build_topology(&state, project_root, root_surface);
     serde_json::to_value(graph).map_err(Into::into)
 }
 

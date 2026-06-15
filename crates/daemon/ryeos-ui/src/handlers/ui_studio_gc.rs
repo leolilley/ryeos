@@ -12,11 +12,8 @@ use serde_json::Value;
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-
-use crate::state::get_ui_state;
 
 #[derive(Debug, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -34,19 +31,8 @@ const MAX_RECENT_EVENTS: usize = 10;
 /// Max bytes to read from the tail of the GC JSONL log.
 const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
 pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    get_ui_state(&state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+    crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let runtime_state_dir = state.config.runtime_state_dir();
 
@@ -120,14 +106,6 @@ fn read_recent_gc_events(log_path: &std::path::Path, limit: usize) -> Vec<Value>
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/studio/gc/status",
-    endpoint: "ui.studio.gc.status",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle(params, ctx, state).await }),
-};
-
-pub const STUDIO_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/studio/gc/status",
     endpoint: "ui.studio.gc.status",
     availability: ServiceAvailability::DaemonOnly,
