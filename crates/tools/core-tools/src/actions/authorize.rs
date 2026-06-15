@@ -9,7 +9,7 @@
 //! Delegates to the canonical `ryeos_app::identity::write_authorized_key_toml`
 //! so there is exactly one TOML emitter.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -33,6 +33,12 @@ pub struct AuthorizeClientParams {
     /// Allow wildcard `"*"` in scopes. Should only be `true` for
     /// operator bootstrap.
     pub allow_wildcard: bool,
+    /// When `true`, union `scopes` with any scopes already present in the
+    /// existing authorized-key file for this fingerprint instead of
+    /// replacing them. Mirrors the `--merge-scopes` CLI flag. Without it,
+    /// the write replaces the scope set (and any dropped scope is reported
+    /// in `AuthorizeClientResult::dropped_scopes`).
+    pub merge: bool,
 }
 
 /// Result of a successful authorize-client run.
@@ -41,6 +47,58 @@ pub struct AuthorizeClientResult {
     pub fingerprint: String,
     /// Path of the written TOML file.
     pub path: PathBuf,
+    /// Scopes that existed on the prior authorized-key file but are NOT in
+    /// the scope set just written. Empty when the file was new or when
+    /// `merge` preserved everything. The caller should warn loudly if this
+    /// is non-empty — it means an existing grant was narrowed.
+    pub dropped_scopes: Vec<String>,
+    /// Whether existing scopes were merged into the written set.
+    pub merged: bool,
+}
+
+/// Reconcile a requested scope set against the scopes already on disk.
+///
+/// Returns `(final_scopes, dropped_scopes)`. With `merge`, the result is
+/// `existing ∪ requested` (order-preserving) and nothing is dropped. Without
+/// `merge`, the result is exactly `requested` and `dropped` lists the existing
+/// scopes that are not being re-granted.
+fn reconcile_scopes(
+    existing: &[String],
+    requested: &[String],
+    merge: bool,
+) -> (Vec<String>, Vec<String>) {
+    if merge {
+        let mut final_scopes = existing.to_vec();
+        for s in requested {
+            if !final_scopes.contains(s) {
+                final_scopes.push(s.clone());
+            }
+        }
+        (final_scopes, Vec::new())
+    } else {
+        let dropped = existing
+            .iter()
+            .filter(|s| !requested.contains(s))
+            .cloned()
+            .collect();
+        (requested.to_vec(), dropped)
+    }
+}
+
+/// Read the `scopes` array from an existing signed authorized-key TOML.
+/// The signature line is a `#`-prefixed comment, so TOML parsing skips it.
+/// Returns an empty vec if the file is absent or unparseable.
+fn read_existing_scopes(entry_path: &Path) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Existing {
+        #[serde(default)]
+        scopes: Vec<String>,
+    }
+    std::fs::read_to_string(entry_path)
+        .ok()
+        .and_then(|c| toml::from_str::<Existing>(&c).ok())
+        .map(|e| e.scopes)
+        .unwrap_or_default()
 }
 
 pub struct MintAdmissionTokenParams {
@@ -128,11 +186,20 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
         ryeos_app::identity::WildcardPolicy::Reject
     };
 
+    // `authorize-client` writes one file per fingerprint and replaces it
+    // wholesale. To avoid silently narrowing an existing grant (the
+    // operator-bootstrap footgun), reconcile against the scopes already on
+    // disk: union them when `merge`, otherwise report what is being dropped.
+    let entry_path = auth_dir.join(format!("{fp}.toml"));
+    let existing_scopes = read_existing_scopes(&entry_path);
+    let (final_scopes, dropped_scopes) =
+        reconcile_scopes(&existing_scopes, &params.scopes, params.merge);
+
     let path = ryeos_app::identity::write_authorized_key_toml(
         &auth_dir,
         &fp,
         &key_b64,
-        &params.scopes,
+        &final_scopes,
         &params.label,
         "cli-authorize-key",
         &now,
@@ -144,6 +211,8 @@ pub fn run_authorize_client(params: AuthorizeClientParams) -> Result<AuthorizeCl
     Ok(AuthorizeClientResult {
         fingerprint: fp,
         path,
+        dropped_scopes,
+        merged: params.merge,
     })
 }
 
@@ -324,6 +393,36 @@ operations:
 "#
         );
         std::fs::write(path, lillux::signature::sign_content(&body, key, "#", None)).unwrap();
+    }
+
+    #[test]
+    fn reconcile_scopes_replace_reports_dropped() {
+        let existing = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let requested = vec!["a".to_string(), "d".to_string()];
+        let (final_scopes, dropped) = reconcile_scopes(&existing, &requested, false);
+        assert_eq!(final_scopes, vec!["a".to_string(), "d".to_string()]);
+        // b and c existed but were not re-granted.
+        assert_eq!(dropped, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_scopes_merge_unions_and_drops_nothing() {
+        let existing = vec!["a".to_string(), "b".to_string()];
+        let requested = vec!["b".to_string(), "c".to_string()];
+        let (final_scopes, dropped) = reconcile_scopes(&existing, &requested, true);
+        // existing order preserved, new appended, no duplicates.
+        assert_eq!(
+            final_scopes,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn reconcile_scopes_new_file_no_drops() {
+        let (final_scopes, dropped) = reconcile_scopes(&[], &["x".to_string()], false);
+        assert_eq!(final_scopes, vec!["x".to_string()]);
+        assert!(dropped.is_empty());
     }
 
     #[test]

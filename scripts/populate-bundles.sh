@@ -31,15 +31,35 @@ set -euo pipefail
 KEY=""
 OWNER=""
 BUNDLE_SET="full"
+JOBS=""            # cargo -j N; empty = cargo default (all cores)
+CRATES_OVERRIDE="" # space-separated crate list; empty = bundle-set default
+POPULATE_ALL=0     # explicit opt-in to rebuild the whole bundle set
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --key)   KEY="$2";   shift 2 ;;
     --owner) OWNER="$2"; shift 2 ;;
     --bundle-set) BUNDLE_SET="$2"; shift 2 ;;
+    --jobs)  JOBS="$2";  shift 2 ;;
+    # Rebuild only these crates instead of the whole bundle set. Staging still
+    # copies every bundle binary from target/release, so the others must already
+    # be built (e.g. from a prior populate). Use when iterating on one binary —
+    # `--crates ryeos-tools` rebuilds core-tools without the full workspace.
+    --crates) CRATES_OVERRIDE="$2"; shift 2 ;;
+    --all) POPULATE_ALL=1; shift ;;
     *) echo "populate-bundles.sh: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Refuse to build the whole workspace implicitly — that full release build is
+# what exhausts memory. The caller must be explicit: name the crates that
+# changed, or opt into the whole set with --all.
+if [[ -z "$CRATES_OVERRIDE" && "$POPULATE_ALL" -ne 1 ]]; then
+  echo "populate-bundles.sh: refusing to rebuild the full bundle set implicitly." >&2
+  echo "  Pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-tools)," >&2
+  echo "  or --all to rebuild the whole '$BUNDLE_SET' set." >&2
+  exit 2
+fi
 
 if [[ -z "$KEY"   ]]; then echo "populate-bundles.sh: --key <pem-path> is required"   >&2; exit 2; fi
 if [[ -z "$OWNER" ]]; then echo "populate-bundles.sh: --owner <label> is required"    >&2; exit 2; fi
@@ -199,53 +219,35 @@ esac
 
 # ── Build ────────────────────────────────────────────────────────────
 
+# Crate list per bundle set (the default when --crates is not given).
 case "$BUNDLE_SET" in
   full)
-    echo "[populate-bundles] building all release binaries (workspace)…"
-    "$CARGO" build --release \
-      -p ryeosd \
-      -p ryeos-directive-runtime \
-      -p ryeos-graph-runtime \
-      -p ryeos-knowledge-runtime \
-      -p ryeos-handler-bins \
-      -p ryeos-cli \
-      -p ryeos-tools \
-      -p ryeos-web-tools \
-      -p ryeos-browser-tools \
-      -p ryeos-ui-terminal \
-      -p ryeos-ui-web
+    pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-cli ryeos-tools ryeos-web-tools ryeos-browser-tools \
+          ryeos-ui-terminal ryeos-ui-web)
+    ;;
+  standard|hosted-workflow)
+    pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-cli ryeos-tools)
     ;;
   hosted-node)
-    echo "[populate-bundles] building hosted-node release binaries…"
-    "$CARGO" build --release \
-      -p ryeosd \
-      -p ryeos-handler-bins \
-      -p ryeos-cli \
-      -p ryeos-tools
-    ;;
-  standard)
-    echo "[populate-bundles] building standard release binaries…"
-    "$CARGO" build --release \
-      -p ryeosd \
-      -p ryeos-directive-runtime \
-      -p ryeos-graph-runtime \
-      -p ryeos-knowledge-runtime \
-      -p ryeos-handler-bins \
-      -p ryeos-cli \
-      -p ryeos-tools
-    ;;
-  hosted-workflow)
-    echo "[populate-bundles] building hosted-workflow release binaries…"
-    "$CARGO" build --release \
-      -p ryeosd \
-      -p ryeos-directive-runtime \
-      -p ryeos-graph-runtime \
-      -p ryeos-knowledge-runtime \
-      -p ryeos-handler-bins \
-      -p ryeos-cli \
-      -p ryeos-tools
+    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-tools)
     ;;
 esac
+
+# --crates overrides the build list (staging still copies all bundle binaries
+# from target/release, so unbuilt ones must already exist there).
+if [[ -n "$CRATES_OVERRIDE" ]]; then
+  read -ra pkgs <<< "$CRATES_OVERRIDE"
+fi
+
+build_args=()
+for p in "${pkgs[@]}"; do build_args+=(-p "$p"); done
+jobs_args=()
+[[ -n "$JOBS" ]] && jobs_args=(-j "$JOBS")
+
+echo "[populate-bundles] building release binaries${JOBS:+ (jobs=$JOBS)}: ${pkgs[*]}"
+"$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}"
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 

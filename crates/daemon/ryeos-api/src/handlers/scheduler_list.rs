@@ -29,7 +29,17 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let Some(filter_requester) = ctx.is_present().then_some(ctx.fingerprint.as_str()) else {
-        return Ok(serde_json::json!({ "schedules": [] }));
+        // Unverified callers own nothing, so the list is always empty. Say so
+        // explicitly — an empty `schedules` here is NOT "nothing is scheduled".
+        return Ok(serde_json::json!({
+            "schedules": [],
+            "identity_filtered": false,
+            "anonymous": true,
+            "note": "request was not identity-verified; scheduler.list only returns \
+                     schedules owned by the calling principal, so an unverified call \
+                     always returns []. This does NOT mean nothing is scheduled — sign \
+                     the request with the owning key.",
+        }));
     };
 
     let specs = state.scheduler_db.list_specs_filtered(
@@ -97,7 +107,25 @@ pub async fn handle(
         })
         .collect();
 
-    Ok(serde_json::json!({ "schedules": schedules }))
+    // Always report the filtering identity so an empty result is legible:
+    // schedules are owned per-principal (a node-owned schedule belongs to
+    // whatever key its signed `execution.requester_fingerprint` names), and the
+    // list is scoped to the caller. Without this, an empty list reads as
+    // "nothing scheduled" when it really means "nothing owned by you".
+    let mut response = serde_json::json!({
+        "schedules": schedules,
+        "identity_filtered": true,
+        "your_fingerprint": filter_requester,
+    });
+    if response["schedules"].as_array().is_some_and(|a| a.is_empty()) {
+        response["note"] = serde_json::Value::String(format!(
+            "no schedules owned by your fingerprint ({filter_requester}); results are \
+             scoped to the calling principal. An empty list does NOT mean nothing is \
+             scheduled — node-owned schedules belong to whatever principal their signed \
+             execution block names. Query as that principal to see them."
+        ));
+    }
+    Ok(response)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

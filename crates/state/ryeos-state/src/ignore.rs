@@ -21,10 +21,51 @@ pub struct IgnoreConfig {
 }
 
 /// Compiled ignore matcher.
+///
+/// Three pattern forms, chosen per entry in [`IgnoreMatcher::from_config`]:
+/// - **component** (`name/`, no internal `/`): matches any path segment named
+///   `name`, anywhere in the tree (e.g. `target/`).
+/// - **glob** (no trailing `/`): matches the filename component (e.g. `*.pyc`).
+/// - **anchored path prefix** (leading `/`, or an internal `/` before the
+///   trailing `/`): matches a path prefix rooted at the repo, on segment
+///   boundaries (e.g. `/.ai/config/remotes/` matches `.ai/config/remotes` and
+///   `.ai/config/remotes/foo`, but not `.ai/config/remotes2`).
 #[derive(Debug, Clone)]
 pub struct IgnoreMatcher {
     dir_patterns: Vec<String>,
     file_patterns: Vec<glob::Pattern>,
+    /// Normalized anchored prefixes (no leading/trailing `/`).
+    anchored_patterns: Vec<String>,
+}
+
+/// Decide which pattern form an entry is.
+fn is_anchored_pattern(pattern: &str) -> bool {
+    // A leading `/` is the explicit "anchored to repo root" sigil. An internal
+    // `/` (one that survives trimming the trailing slash) also implies a path,
+    // not a bare component name.
+    pattern.starts_with('/') || pattern.trim_start_matches('/').trim_end_matches('/').contains('/')
+}
+
+/// Validate + normalize an anchored prefix: strip the leading/trailing `/`,
+/// then reject anything that isn't a clean repo-relative path.
+fn normalize_anchored(pattern: &str) -> Result<String> {
+    let core = pattern.trim_start_matches('/').trim_end_matches('/');
+    anyhow::ensure!(!core.is_empty(), "empty anchored ignore pattern: {pattern:?}");
+    anyhow::ensure!(
+        !core.contains('\\'),
+        "anchored ignore pattern must use '/': {pattern:?}"
+    );
+    for seg in core.split('/') {
+        anyhow::ensure!(
+            !seg.is_empty(),
+            "anchored ignore pattern has an empty segment (duplicate '/'): {pattern:?}"
+        );
+        anyhow::ensure!(
+            seg != "." && seg != "..",
+            "anchored ignore pattern must not contain '.' or '..': {pattern:?}"
+        );
+    }
+    Ok(core.to_string())
 }
 
 impl IgnoreMatcher {
@@ -42,10 +83,14 @@ impl IgnoreMatcher {
     pub fn from_config(config: &IgnoreConfig) -> Result<Self> {
         let mut dir_patterns = Vec::new();
         let mut file_patterns = Vec::new();
+        let mut anchored_patterns = Vec::new();
 
         for pattern in &config.patterns {
-            if pattern.ends_with('/') {
-                // Directory pattern: match against any path component
+            if is_anchored_pattern(pattern) {
+                // Anchored path prefix (e.g. `/.ai/config/remotes/`).
+                anchored_patterns.push(normalize_anchored(pattern)?);
+            } else if pattern.ends_with('/') {
+                // Directory pattern: match against any path component.
                 let dir_name = &pattern[..pattern.len() - 1];
                 anyhow::ensure!(
                     !dir_name.is_empty(),
@@ -53,7 +98,7 @@ impl IgnoreMatcher {
                 );
                 dir_patterns.push(dir_name.to_string());
             } else {
-                // File/glob pattern: match against filename component
+                // File/glob pattern: match against filename component.
                 let compiled = glob::Pattern::new(pattern)
                     .with_context(|| format!("invalid glob pattern: {}", pattern))?;
                 file_patterns.push(compiled);
@@ -63,20 +108,31 @@ impl IgnoreMatcher {
         Ok(Self {
             dir_patterns,
             file_patterns,
+            anchored_patterns,
         })
     }
 
     /// Returns true if the relative path should be ignored.
     pub fn is_ignored(&self, rel_path: &str) -> bool {
-        // Check directory patterns against every path component
-        for component in rel_path.split(|c: char| c == '/' || c == '\\') {
+        // Normalize a stray leading slash so anchored matching is repo-relative.
+        let rel = rel_path.trim_start_matches('/');
+
+        // Anchored prefix patterns match on segment boundaries.
+        for prefix in &self.anchored_patterns {
+            if rel == prefix || rel.starts_with(&format!("{prefix}/")) {
+                return true;
+            }
+        }
+
+        // Check directory patterns against every path component.
+        for component in rel.split(|c: char| c == '/' || c == '\\') {
             if self.dir_patterns.contains(&component.to_string()) {
                 return true;
             }
         }
 
-        // Check file glob patterns against the filename
-        if let Some(filename) = rel_path.rsplit(|c: char| c == '/' || c == '\\').next() {
+        // Check file glob patterns against the filename.
+        if let Some(filename) = rel.rsplit(|c: char| c == '/' || c == '\\').next() {
             for pattern in &self.file_patterns {
                 if pattern.matches(filename) {
                     return true;
@@ -102,6 +158,11 @@ pub fn builtin_patterns() -> Vec<&'static str> {
         ".DS_Store",
         "*.pyc",
         ".env",
+        // Environment-specific: a project's remotes config points at *this*
+        // machine's nodes (e.g. the prod node a dev pushes to). The remote has
+        // no use for a copy, so never ship it. Anchored so it only matches the
+        // project's own `.ai/config/remotes/`, not any dir named `remotes`.
+        "/.ai/config/remotes/",
     ]
 }
 
@@ -188,6 +249,51 @@ mod tests {
             patterns: vec!["/".to_string()],
         };
         assert!(IgnoreMatcher::from_config(&config).is_err());
+    }
+
+    #[test]
+    fn anchored_prefix_matches_on_segment_boundary() {
+        let m = matcher_from_patterns(&["/.ai/config/remotes/"]);
+        // exact prefix and anything below it
+        assert!(m.is_ignored(".ai/config/remotes"));
+        assert!(m.is_ignored(".ai/config/remotes/remotes.yaml"));
+        assert!(m.is_ignored(".ai/config/remotes/sub/dir/x"));
+        // a stray leading slash on the candidate is normalized
+        assert!(m.is_ignored("/.ai/config/remotes/remotes.yaml"));
+        // sibling with a shared prefix must NOT match
+        assert!(!m.is_ignored(".ai/config/remotes2"));
+        assert!(!m.is_ignored(".ai/config/remotes2/x"));
+        // a same-named dir elsewhere must NOT match (anchored, not component)
+        assert!(!m.is_ignored("src/remotes/x"));
+        assert!(!m.is_ignored(".ai/other/config/remotes/x"));
+    }
+
+    #[test]
+    fn anchored_without_leading_slash_is_still_rooted() {
+        // An internal '/' makes it a path prefix even without the leading '/'.
+        let m = matcher_from_patterns(&[".ai/config/remotes/"]);
+        assert!(m.is_ignored(".ai/config/remotes/x"));
+        assert!(!m.is_ignored("src/.ai/config/remotes/x"));
+    }
+
+    #[test]
+    fn anchored_rejects_unsafe_patterns() {
+        for bad in ["/.ai/../secrets/", "/.ai//remotes/", "/a/b\\c/", "/"] {
+            let config = IgnoreConfig {
+                patterns: vec![bad.to_string()],
+            };
+            assert!(
+                IgnoreMatcher::from_config(&config).is_err(),
+                "pattern {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn component_pattern_still_matches_anywhere() {
+        // Single-component dir patterns keep their match-anywhere behavior.
+        let m = matcher_from_patterns(&["node_modules/"]);
+        assert!(m.is_ignored("a/b/node_modules/c"));
     }
 
     #[test]

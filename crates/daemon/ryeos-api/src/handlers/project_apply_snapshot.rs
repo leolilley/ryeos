@@ -81,6 +81,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     ryeos_state::project_sync::validate_project_manifest_paths(
         &manifest,
         ProjectSyncScope::AiOnly,
+        Some(state.ignore_matcher.as_ref()),
     )?;
 
     let current_ref = ryeos_state::refs::read_deployed_project_ref(&refs_root, &project_hash)?;
@@ -267,9 +268,12 @@ fn materialize_manifest_to_staging(
 ) -> Result<usize> {
     let mut count = 0usize;
     for (rel_path, item_hash) in &manifest.item_source_hashes {
+        // Floors (secrets/node-owned) are enforced regardless; ignore was
+        // already validated against the live matcher by the caller.
         ryeos_state::project_sync::validate_project_manifest_path(
             rel_path,
             ProjectSyncScope::AiOnly,
+            None,
         )?;
         let item_obj = cas.get_object(item_hash)?.ok_or_else(|| {
             anyhow!(

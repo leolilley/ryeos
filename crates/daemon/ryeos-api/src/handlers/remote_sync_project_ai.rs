@@ -86,7 +86,28 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             expected_deployed_hash.as_deref(),
             req.force,
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            // Push (CAS upload) already succeeded above; only the apply step
+            // failed. A 404 on /project/apply-snapshot specifically means the
+            // remote node has no such route — its node core predates the route,
+            // not that the request was malformed. Make that actionable instead
+            // of surfacing a bare HTTP 404.
+            if let Some(http) = e.downcast_ref::<crate::remote::client::RemoteHttpError>() {
+                if http.status.as_u16() == 404 && http.path.contains("apply-snapshot") {
+                    return anyhow::anyhow!(
+                        "AI content was uploaded to the remote (snapshot {hash}), but applying it \
+                         failed: the remote returned HTTP 404 for /project/apply-snapshot — that \
+                         route is absent, meaning the remote node core is older than the \
+                         apply-snapshot route. Upgrade/redeploy the remote node core, then re-run \
+                         `remote sync-project-ai`. The uploaded objects are already on the remote, \
+                         so nothing was lost.",
+                        hash = push.snapshot_hash,
+                    );
+                }
+            }
+            e
+        })?;
 
     Ok(serde_json::json!({
         "remote": req.remote,

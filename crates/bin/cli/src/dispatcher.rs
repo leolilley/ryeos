@@ -447,7 +447,16 @@ fn canonicalize_tokens_with_commands_policy_and_project(
     let resolution = command_project_resolution(&matched.command);
 
     if matched.command.forms.is_empty() && resolution == CommandProjectResolution::None {
-        return Ok(rest.to_vec());
+        // This command declares no args and takes no project, but a global
+        // `-p/--project/--no-project` may still be placed *after* the verb
+        // (e.g. `scheduler list -p /path`). Those are the project selector, not
+        // arguments to this command — strip them so they never leak to the
+        // handler as stray positionals. Accepting them here (rather than only
+        // before the verb) is what makes `-p` consistent around the verb.
+        let cleaned_tail = strip_project_control_flags(tail);
+        let mut out = rest[..matched.consumed].to_vec();
+        out.extend(cleaned_tail);
+        return Ok(out);
     }
 
     let bound = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(&matched.command))
@@ -485,6 +494,30 @@ fn canonicalize_tokens_with_commands_policy_and_project(
     let mut out = rest[..matched.consumed].to_vec();
     out.extend(canonical_tail);
     Ok(out)
+}
+
+/// Remove `-p`/`--project`/`--project=…`/`-p=…`/`--no-project` (and the value
+/// following the bare `-p`/`--project` form) from a command tail. Used for
+/// commands that take no project, so a project selector placed after the verb
+/// is accepted and dropped rather than leaking to the handler.
+fn strip_project_control_flags(tail: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(tail.len());
+    let mut i = 0;
+    while i < tail.len() {
+        let tok = &tail[i];
+        if tok == "--no-project" || tok.starts_with("--project=") || tok.starts_with("-p=") {
+            i += 1;
+            continue;
+        }
+        if tok == "--project" || tok == "-p" {
+            // Skip the flag and its value (if a value is present).
+            i += if i + 1 < tail.len() { 2 } else { 1 };
+            continue;
+        }
+        out.push(tok.clone());
+        i += 1;
+    }
+    out
 }
 
 fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {
@@ -682,6 +715,40 @@ mod tests {
             result.is_none(),
             "--input short-circuited without a declared input flag"
         );
+    }
+
+    #[test]
+    fn strip_project_control_flags_removes_all_forms() {
+        // bare `-p`/`--project` consume their following value
+        assert_eq!(
+            super::strip_project_control_flags(&s(&["-p", "/proj", "extra"])),
+            s(&["extra"])
+        );
+        assert!(super::strip_project_control_flags(&s(&["--project", "/proj"])).is_empty());
+        // `=` forms and `--no-project` are bare; other tokens pass through
+        assert_eq!(
+            super::strip_project_control_flags(&s(&[
+                "--project=/p",
+                "x",
+                "-p=/q",
+                "--no-project",
+                "y"
+            ])),
+            s(&["x", "y"])
+        );
+        // trailing bare `-p` with no value
+        assert!(super::strip_project_control_flags(&s(&["-p"])).is_empty());
+    }
+
+    #[test]
+    fn no_project_command_strips_trailing_dash_p() {
+        // A forms-empty, no-project command (e.g. `scheduler list`) must accept
+        // `-p <path>` after the verb and not forward it to the handler.
+        let cmd = command(&["scheduler", "list"], vec![], CommandProjectResolution::None);
+        let rest = s(&["scheduler", "list", "-p", "/data/projects/snap-track"]);
+        let out = canonicalize_tokens_with_commands(&rest, std::slice::from_ref(&cmd))
+            .expect("dispatch should accept -p after the verb");
+        assert_eq!(out, s(&["scheduler", "list"]));
     }
 
     fn direct_execute_command() -> CommandDef {
