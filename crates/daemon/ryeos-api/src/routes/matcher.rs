@@ -104,6 +104,36 @@ impl PathMatcher {
         }
         None
     }
+
+    /// Methods for which some route matches `path`, ignoring the request method.
+    /// Empty => the path matches no route at all (a true 404). Non-empty => the
+    /// path exists but not for the requested method (a 405, not a 404) — this is
+    /// what lets a GET probe of a POST-only route report "method not allowed"
+    /// instead of the misleading "not found".
+    pub fn allowed_methods_for_path(&self, path: &str) -> Vec<Method> {
+        let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut methods: Vec<Method> = Vec::new();
+        for entry in &self.entries {
+            if path_segments.len() != entry.segments.len() {
+                continue;
+            }
+            let matched = path_segments
+                .iter()
+                .zip(entry.segments.iter())
+                .all(|(path_seg, template_seg)| match template_seg {
+                    Segment::Literal(lit) => path_seg == lit,
+                    Segment::Capture(_) => true,
+                });
+            if matched {
+                for m in &entry.route.methods {
+                    if !methods.contains(m) {
+                        methods.push(m.clone());
+                    }
+                }
+            }
+        }
+        methods
+    }
 }
 
 fn patterns_can_collide(a: &[Segment], b: &[Segment]) -> bool {

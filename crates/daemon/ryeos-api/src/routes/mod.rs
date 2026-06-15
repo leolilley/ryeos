@@ -66,6 +66,11 @@ impl RouteTable {
         self.matcher.match_request(method, path)
     }
 
+    /// Methods a path accepts regardless of the request method (for 405 vs 404).
+    pub fn allowed_methods_for_path(&self, path: &str) -> Vec<Method> {
+        self.matcher.allowed_methods_for_path(path)
+    }
+
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
     }
