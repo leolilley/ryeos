@@ -159,6 +159,13 @@ enum Cmd {
         /// Human-readable label for the authorized key.
         #[arg(long, default_value = "cli-authorized")]
         label: String,
+
+        /// Union the given scopes with any already on the existing
+        /// authorized-key file instead of replacing them. Without this,
+        /// existing scopes not re-listed are dropped (and a warning is
+        /// printed).
+        #[arg(long)]
+        merge_scopes: bool,
     },
 
     /// Mint a one-time node-local admission token for remote bootstrap.
@@ -513,12 +520,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             public_key,
             scopes,
             label,
+            merge_scopes,
         } => {
             let scopes = scopes.ok_or_else(|| anyhow::anyhow!(
                 "--scopes required, comma-separated, in canonical form. \
                  Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
             ))?;
-            run_authorize_client(app_root, public_key, scopes, label, cli.stdin_json)
+            run_authorize_client(app_root, public_key, scopes, label, merge_scopes, cli.stdin_json)
         }
         Cmd::AdmissionToken {
             app_root,
@@ -1358,6 +1366,7 @@ fn run_authorize_client(
     public_key: Option<String>,
     scopes: String,
     label: String,
+    merge_scopes: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
@@ -1422,13 +1431,26 @@ fn run_authorize_client(
         scopes,
         label,
         allow_wildcard: false, // core-tools is not the bootstrap path
+        merge: merge_scopes,
     })?;
+
+    if !result.dropped_scopes.is_empty() {
+        eprintln!(
+            "warning: replaced the authorized-key scopes for {fp}; {n} existing scope(s) \
+             were dropped: {dropped}. Re-run with --merge-scopes to keep them.",
+            fp = result.fingerprint,
+            n = result.dropped_scopes.len(),
+            dropped = result.dropped_scopes.join(", "),
+        );
+    }
 
     println!(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "fingerprint": result.fingerprint,
             "path": result.path.to_string_lossy(),
+            "merged": result.merged,
+            "dropped_scopes": result.dropped_scopes,
         }))?
     );
 
