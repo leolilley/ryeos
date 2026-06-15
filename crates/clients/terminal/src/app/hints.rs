@@ -43,19 +43,32 @@ pub fn spawn_hint_listener(
     });
 }
 
-/// Tail one thread's event stream; every arrival pings the channel so
-/// the loop can coalesce refreshes to tick rate.
+/// Tail one thread's event stream, forwarding each frame's
+/// `(event_type, raw json data)` to the loop. The loop dispatches a
+/// `StudioEvent::ThreadTail`, so the shared reducer — not this client —
+/// applies ryeos semantics (the same path the web `EventSource` uses).
+/// The braid is the truth; this is it arriving now.
 pub fn spawn_thread_tail(
     client: Arc<DaemonClient>,
     thread_id: String,
-    tx: tokio::sync::mpsc::UnboundedSender<()>,
+    tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Ok(mut stream) = client.open_thread_events(&thread_id).await else {
             return;
         };
-        while let Some(_event) = stream.next_event().await {
-            if tx.send(()).is_err() {
+        while let Some(event) = stream.next_event().await {
+            let frame = match event {
+                SseEvent::Unknown { event_type, data } => (event_type, data),
+                SseEvent::TextDelta { text } => (
+                    "token_delta".to_string(),
+                    serde_json::json!({ "text": text }).to_string(),
+                ),
+                // The chain tail frames events by runtime type name (→
+                // Unknown); other parsed variants don't occur here.
+                _ => continue,
+            };
+            if tx.send(frame).is_err() {
                 break;
             }
         }

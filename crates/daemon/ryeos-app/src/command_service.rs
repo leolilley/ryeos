@@ -78,6 +78,11 @@ impl CommandService {
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
 
+        // AUTHZ NOTE: this control path gates on capability + verified
+        // caller + allowed_actions(kind,status), but does NOT check that the
+        // caller owns the thread (unlike the chain-tail read path). Whether
+        // per-thread ownership should be enforced here is an open
+        // cross-cutting question — see .tmp/thread-authorization-review.md.
         let allowed = self.kind_profiles.allowed_actions(
             &thread.kind,
             &thread.status,

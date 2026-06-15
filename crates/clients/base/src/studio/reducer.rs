@@ -30,6 +30,11 @@ impl StudioCore {
             StudioEvent::Ui { event } => self.dispatch_ui(event),
             StudioEvent::EffectResult { result } => self.apply_effect_result(result),
             StudioEvent::DaemonEvent { payload: _ } => self.initial_effects(),
+            StudioEvent::ThreadTail {
+                thread_id,
+                event_type,
+                payload,
+            } => self.apply_thread_tail(&thread_id, &event_type, &payload),
             StudioEvent::Tick { now_ms } => {
                 self.runtime.now_ms = now_ms;
                 // The frame clock advances `generation` so generation-keyed
@@ -486,6 +491,29 @@ impl StudioCore {
                     Vec::new()
                 } else {
                     vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
+                }
+            }
+            StudioAction::SubmitThreadCommand { command } => {
+                if self.is_read_only() {
+                    self.notice("This session is read-only.", StudioTone::Warn);
+                    Vec::new()
+                } else if let Some(thread_id) = self.seat.fold().input_route().thread {
+                    // Steer the head thread through the shared control channel.
+                    // Authority == the CLI's `commands submit`; see
+                    // .tmp/thread-authorization-review.md for the authz model.
+                    vec![self.emit(StudioEffectKind::Invoke {
+                        target: super::effect::InvokeRef::Ref {
+                            item_ref: "service:commands/submit".to_string(),
+                        },
+                        params: serde_json::json!({
+                            "thread_id": thread_id,
+                            "command_type": command,
+                        }),
+                        route_seq: None,
+                    })]
+                } else {
+                    self.notice(format!("No active thread to {command}."), StudioTone::Warn);
+                    Vec::new()
                 }
             }
         }
@@ -3486,5 +3514,88 @@ mod tests {
         assert!(core.data.dimension.is_none());
         assert!(core.data.items.is_none());
         assert_eq!(core.ui.notices.len(), 1);
+    }
+
+    #[test]
+    fn thread_tail_deltas_accumulate_then_clear_on_durable() {
+        let mut core = StudioCore::default();
+
+        // Streaming cognition deltas accumulate; no refetch while live.
+        let effects = core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "delta": "Hel" }),
+        });
+        assert!(effects.is_empty());
+        core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "delta": "lo" }),
+        });
+        assert_eq!(
+            core.data.live_delta.as_ref().map(|d| d.text.as_str()),
+            Some("Hello")
+        );
+
+        // The settled turn (content, no delta) supersedes the live buffer.
+        core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "content": "Hello", "turn": 1 }),
+        });
+        assert!(core.data.live_delta.is_none());
+    }
+
+    #[test]
+    fn thread_tail_ephemeral_nontext_is_noop() {
+        let mut core = StudioCore::default();
+        let effects = core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "stream_opened".to_string(),
+            payload: serde_json::json!({}),
+        });
+        assert!(effects.is_empty());
+        assert!(core.data.live_delta.is_none());
+    }
+
+    #[test]
+    fn submit_thread_command_targets_commands_submit_for_head_thread() {
+        let mut core = StudioCore::default();
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-1" }),
+        );
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SubmitThreadCommand {
+                    command: "interrupt".to_string(),
+                },
+            },
+        });
+        assert_eq!(effects.len(), 1);
+        let StudioEffectKind::Invoke { target, params, .. } = &effects[0].kind else {
+            panic!("expected an Invoke effect");
+        };
+        assert!(matches!(
+            target,
+            crate::studio::effect::InvokeRef::Ref { item_ref }
+                if item_ref == "service:commands/submit"
+        ));
+        assert_eq!(params["thread_id"], "T-1");
+        assert_eq!(params["command_type"], "interrupt");
+    }
+
+    #[test]
+    fn submit_thread_command_without_head_thread_notices() {
+        let mut core = StudioCore::default();
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SubmitThreadCommand {
+                    command: "interrupt".to_string(),
+                },
+            },
+        });
+        assert!(effects.is_empty());
+        assert!(!core.ui.notices.is_empty());
     }
 }

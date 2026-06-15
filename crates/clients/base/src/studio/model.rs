@@ -357,7 +357,16 @@ pub struct StudioDataState {
     /// system: open JSON, projected through view bindings).
     #[serde(default)]
     pub sources: HashMap<String, serde_json::Value>,
+    /// Transient live cognition stream for the tailed head thread —
+    /// ephemeral deltas accumulated between durable snapshots. Not truth;
+    /// the braid snapshot is. Cleared once a fresh snapshot supersedes it.
+    #[serde(default)]
+    pub live_delta: Option<StudioLiveDelta>,
 }
+
+// The live cognition buffer type + its accumulation logic live with the rest
+// of the thread-execution-stream concern in `super::timeline`.
+pub use super::timeline::StudioLiveDelta;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioRuntimeState {
