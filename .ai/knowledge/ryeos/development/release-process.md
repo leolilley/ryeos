@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-15T04:48:21Z:ff07780ad489397517a7b9e511e98c65da1fa1a5710841b92231b3c22d42d06b:SqyrHUlU+nDF6R1LM2UQqtDLtQ1n94brrX/YB6MgWTpPhX2VL3I5K8guyOwEW+KDe1NgGGVVD2MSX3KZgoA+Bg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-06-15T05:35:51Z:ba71436da4b872fc0f02101a6a5f5a22f526a5884ff75828a6a2e6455c8f6d22:WaCfa2Bu+rjoW3K/ViVtIWct61tkcWSgiuBPk0ZUoyZ5FV8p7dXyzxACaIoCmMwTb8g34rCz5vcWokrqkRJ4AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -72,13 +72,20 @@ tag, push, then switch back to `next`:
 ```bash
 cd /home/leo/projects/ryeos-next
 git fetch origin
-git checkout -b main origin/main           # only valid because main is checked out nowhere
+git branch -f main origin/main             # create OR reset local main to the remote tip
+git checkout main                          # (don't use `checkout -b main` — it errors if a
+                                           #  stale local main from a prior release exists)
 git merge --no-ff next -m "Merge next into main for v$new release"
 # ... validate, tag, push (sections 5–7) ...
 git checkout next                          # leave this worktree on next
+git branch -D main                         # delete the local main so the next release starts clean
 ```
 
-This was the path used for the v0.5.16 release.
+Tag and push from the resulting `main` HEAD (the merge commit). Watch out: if
+`checkout -b main` silently fails because a local `main` already exists, the
+merge runs as a no-op on `next` and the tag lands on a `next` commit while
+`origin/main` stays stale. `git branch -f` + deleting `main` afterward avoids
+this. This was the path used for the v0.5.16 / v0.5.17 releases.
 
 ## 1. Decide whether to move a tag or cut a new patch
 
