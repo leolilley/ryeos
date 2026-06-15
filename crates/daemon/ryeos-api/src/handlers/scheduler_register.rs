@@ -113,7 +113,9 @@ pub async fn handle(
         .join(&req.schedule_id);
     if fires_dir.exists() && existing_spec.is_none() {
         bail!(
-            "schedule_id '{}' reuse not allowed: fire history exists at {} — deregister first or use a different ID",
+            "schedule_id '{}' reuse not allowed: fire history exists at {} — \
+             deregister with purge_history=true to clear it (scheduler/deregister), \
+             or use a different ID",
             req.schedule_id,
             fires_dir.display()
         );

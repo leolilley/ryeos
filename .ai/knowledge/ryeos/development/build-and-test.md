@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-25T06:47:54Z:2881261b9ae61e6939f41fc669bbf22521bb06cf7fd4f1553bb2ee35b9c72bba:Gn9VT4M8S9/u+rUo2PZAu7U38ufVNX6zGZfdVUy40P5wfLTZAS6DXr0Nh2CI6WSnTv5tt4ucBOLRlNfVbaDhBA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-15T04:48:21Z:bb641fa1aa49a59893ec595c3d32da62738c75d454ebc1586504d251d9032fb0:pA8C29BLPnJ5NiL6LAmCwSR/5uGIxqrU9SsauAQJ3aLiQDcg3d2tcBPsko+6X7sI8cPlTRwNz1KHgvbPVHHaAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
@@ -49,8 +49,14 @@ call it directly:
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev
+  --owner ryeos-dev \
+  --all
 ```
+
+`--all` is required — populate refuses to rebuild the whole bundle set
+implicitly (exits 2 otherwise). Use `--crates "<crate ...>"` to rebuild only
+what changed (e.g. `--crates ryeos-tools`), and `--jobs N` to cap parallelism if
+a full release build runs the machine out of memory.
 
 It does all of this as one atomic authoring refresh:
 
