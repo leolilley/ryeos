@@ -118,22 +118,23 @@ pub fn run_sign(
 
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
 
-    // `sign` takes a canonical ref (`graph:foo/bar`), not a file path. Operators
-    // and LLMs routinely try the path they just edited; rather than a bare
-    // "malformed canonical ref", reverse-map a path-shaped arg to its ref and
-    // tell them exactly what to run. (We don't auto-sign the path — never sign
-    // a file the caller didn't name by ref.)
+    // `sign` canonically takes a ref (`graph:foo/bar`), but operators and LLMs
+    // routinely pass the file path they just edited. A path under the project's
+    // `.ai/` maps to exactly one canonical ref, so resolve it and sign that —
+    // no reason to make the caller retype what we already resolved.
     let target = match parse_sign_target(item_ref) {
         Ok(t) => t,
-        Err(e) => {
-            if let Some(hint) = path_arg_to_ref_hint(item_ref, source, project_path, &kinds) {
-                bail!(
-                    "`{item_ref}` is a file path; `sign` takes a canonical ref. Run:\n    \
-                     ryeos sign {hint}"
+        Err(e) => match resolve_path_to_ref(item_ref, source, project_path, &kinds) {
+            Some(resolved) => {
+                tracing::info!(
+                    path = %item_ref,
+                    canonical_ref = %resolved,
+                    "resolved file path to canonical ref for signing"
                 );
+                parse_sign_target(&resolved)?
             }
-            return Err(e);
-        }
+            None => return Err(e),
+        },
     };
 
     let kind_schema = kinds
@@ -403,9 +404,9 @@ fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
 /// Returns e.g. `graph:snap-track/daily_profile_pipeline` for
 /// `.ai/graphs/snap-track/daily_profile_pipeline.yaml`. `None` if the arg
 /// doesn't look like a path, isn't under the source `.ai/` root, or doesn't
-/// match a known kind directory + extension. Only used to produce a helpful
-/// error — it never causes signing.
-fn path_arg_to_ref_hint(
+/// match a known kind directory + extension. A path under the project `.ai/`
+/// maps to exactly one ref, so the caller signs the resolved ref directly.
+fn resolve_path_to_ref(
     arg: &str,
     source: SignSource,
     project_path: Option<&Path>,
