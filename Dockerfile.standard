@@ -21,7 +21,8 @@ RUN --mount=type=secret,id=publisher-key \
     ./scripts/populate-bundles.sh \
       --key /run/secrets/publisher-key \
       --owner ryeos-official \
-      --bundle-set standard
+      --bundle-set standard \
+      --all
 
 FROM debian:trixie-slim
 
