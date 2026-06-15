@@ -402,6 +402,24 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .with_context(|| format!("write ignore config {}", ignore_path.display()))?;
     }
 
+    // ── 8c. Generated sync-policy discovery file ──
+    // A read-only window on the effective sync policy: deployable surfaces and
+    // the two code-enforced floors, pointing at ignore.yaml as the one editable
+    // input. Regenerated (overwritten) on every init so it tracks the binary.
+    let sync_dir = opts
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node")
+        .join("sync");
+    fs::create_dir_all(&sync_dir)
+        .with_context(|| format!("create sync dir {}", sync_dir.display()))?;
+    let policy_path = sync_dir.join("policy.yaml");
+    let policy_yaml = ryeos_state::project_sync::render_effective_sync_policy_yaml(
+        ".ai/node/ingest/ignore.yaml",
+    );
+    fs::write(&policy_path, policy_yaml)
+        .with_context(|| format!("write sync policy {}", policy_path.display()))?;
+
     // ── 9. Post-init trust verification ──
     let post_trust =
         TrustStore::load(None, &operator_config_root).context("load post-init trust store")?;

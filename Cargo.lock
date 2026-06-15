@@ -2665,6 +2665,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
+ "ryeos-state",
  "serde",
  "serde_json",
  "serde_yaml",

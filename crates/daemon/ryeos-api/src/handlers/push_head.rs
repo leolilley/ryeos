@@ -52,6 +52,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     ryeos_state::project_sync::validate_project_manifest_paths(
         &manifest,
         snapshot.project_sync_scope,
+        Some(state.ignore_matcher.as_ref()),
     )?;
 
     // 3. Validate manifest entries don't contain ignored paths
