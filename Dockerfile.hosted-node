@@ -20,7 +20,8 @@ RUN --mount=type=secret,id=publisher-key \
     ./scripts/populate-bundles.sh \
       --key /run/secrets/publisher-key \
       --owner ryeos-official \
-      --bundle-set hosted-node
+      --bundle-set hosted-node \
+      --all
 
 FROM debian:trixie-slim
 

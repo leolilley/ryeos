@@ -20,7 +20,8 @@ RUN --mount=type=secret,id=publisher-key \
     test -s /run/secrets/publisher-key && \
     ./scripts/populate-bundles.sh \
       --key /run/secrets/publisher-key \
-      --owner ryeos-official
+      --owner ryeos-official \
+      --all
 
 # ── Stage 2: Runtime image ──
 # Keep the runtime Debian generation compatible with the Rust builder image;
