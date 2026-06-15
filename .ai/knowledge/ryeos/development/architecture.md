@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T23:10:37Z:7c6ac7b1bbfa0c3e90002918378e0e7f007a18696d79173b9f46ddefc307c13a:fkcSEskxhlycmK86BU/puO0HC1X7pHgNm4AE8xW7pHr1TQWRcqgWNOvjRIwJgU0ejCM3LsRsuXm1+6axKK95CQ==:d1184d41372333a4c8dfe854f355fcc74cf82b7a831698b705004536e4700414 -->
+<!-- ryeos:signed:2026-06-15T04:48:22Z:9e78b3f12f12f83fa978d73996201863c0a5ee0a54f12023be7e3bdc60311ac6:PHsEfvb7RFaCYz7X084Py541RgYZ0tYJJqp7lP7ustaW3x3ymUfkVv7TYl7kDbeqrz3bBpsDVDiNWTifSrfIBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
@@ -88,9 +88,28 @@ node-local/runtime-owned prefixes, unknown `.ai` paths, and non-`.ai` content.
 Current deployable project surfaces include item/config/trust content, project
 schedule declarations under `.ai/config/schedules`, and project-authored node
 extension declarations such as `.ai/node/engine/kinds` and `.ai/node/verbs`.
-Node-owned runtime paths such as `.ai/node/schedules`, `.ai/node/routes`,
-`.ai/state`, and signing keys remain local-only and must fail closed if a
-project snapshot tries to deploy them.
+
+What must NOT deploy is split into two reason-named code constants, both
+enforced as a **scope-independent floor** — they apply to `full_project` sync as
+well as `ai_only` (config can add to them but never remove):
+
+- `NEVER_DEPLOY_SECRETS` — credentials: `.ai/node/identity`, `.ai/node/auth`,
+  `.ai/node/vault`, `.ai/config/keys/signing`.
+- `NODE_OWNED` — node runtime state: `.ai/state`, `.ai/node/schedules`,
+  `.ai/node/routes`, `.ai/node/bundles`.
+
+Classification order is `never_deploy_secrets → ignore → node_owned →
+deployable → unknown/non-ai`, so an ignored file inside a deployable surface
+(e.g. `.ai/tools/x/__pycache__/y.pyc`) is dropped, not shipped. The ingest
+ignore matcher (`.ai/node/ingest/ignore.yaml`) supports **path-anchored**
+patterns (e.g. `/.ai/config/remotes/`, which is ignored by default for fresh
+inits — a project's remotes config is environment-specific and must not travel).
+
+`ryeos init` writes a generated, **read-only** `.ai/node/sync/policy.yaml` that
+documents the effective policy — deployable surfaces, both floors, and a pointer
+to the editable ignore source. It is a discovery window, not a control surface:
+floors and surfaces are enforced in code, and editing the file changes nothing.
+Source: `crates/state/ryeos-state/src/{project_sync,ignore}.rs`.
 
 `project.apply-snapshot` materializes an AI-only snapshot to staging, builds a
 `ryeos-api::project_deploy` plan from staged intent, swaps managed project roots,

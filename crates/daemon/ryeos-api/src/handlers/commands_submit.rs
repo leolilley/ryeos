@@ -4,13 +4,19 @@
 //! not from a client-supplied `requested_by` field. This prevents
 //! caller-forgery: only cryptographically verified callers get their
 //! fingerprint recorded as `requested_by`.
+//!
+//! Ownership check: callers can only submit control commands (cancel /
+//! kill / interrupt / continue) to threads they own. This mirrors the
+//! read path (`events/replay`, chain-tail) and the other control path
+//! (`threads/cancel`) — holding the capability is not enough; the caller
+//! must be the thread's owner.
 
 use std::sync::Arc;
 
-use anyhow::Result;
 use serde_json::Value;
 
 use crate::handler_context::HandlerContext;
+use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::command_service::CommandSubmitParams;
 use ryeos_app::state::AppState;
@@ -25,7 +31,22 @@ pub struct Request {
     pub params: Option<Value>,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value, HandlerError> {
+    // Ownership check: callers can only control their own threads. The
+    // service layer also loads the thread for its state-machine guard;
+    // we load here to keep authz in the API layer where the verified
+    // caller context lives.
+    let thread = state
+        .state_store
+        .get_thread(&req.thread_id)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .ok_or(HandlerError::NotFound)?;
+    ctx.require_owner(thread.requested_by.as_deref())?;
+
     // Derive requested_by from verified caller context.
     // Only cryptographically verified callers get recorded.
     let requested_by = if ctx.is_present() {
@@ -34,13 +55,16 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         None
     };
 
-    let record = state.commands.submit(&CommandSubmitParams {
-        thread_id: req.thread_id,
-        command_type: req.command_type,
-        requested_by,
-        params: req.params,
-    })?;
-    serde_json::to_value(record).map_err(Into::into)
+    let record = state
+        .commands
+        .submit(&CommandSubmitParams {
+            thread_id: req.thread_id,
+            command_type: req.command_type,
+            requested_by,
+            params: req.params,
+        })
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    serde_json::to_value(record).map_err(|e| HandlerError::Internal(e.to_string()))
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -51,7 +75,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, ctx, state).await
+            handle(req, ctx, state).await.map_err(Into::into)
         })
     },
 };
@@ -83,5 +107,34 @@ mod tests {
             result.is_err(),
             "spoofed requested_by should be rejected by deny_unknown_fields"
         );
+    }
+
+    #[test]
+    fn require_owner_blocks_non_owner_as_not_found() {
+        // The ownership guard the handler applies before submitting:
+        // a verified caller whose fingerprint differs from the thread's
+        // owner gets NotFound (never 403 — no existence leak).
+        let ctx = HandlerContext::new("fp:attacker".to_string(), Vec::new(), true);
+        let err = ctx
+            .require_owner(Some("fp:owner"))
+            .expect_err("non-owner must be rejected");
+        assert!(
+            matches!(err, HandlerError::NotFound),
+            "non-owner should get NotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn require_owner_allows_matching_owner() {
+        let ctx = HandlerContext::new("fp:owner".to_string(), Vec::new(), true);
+        assert!(ctx.require_owner(Some("fp:owner")).is_ok());
+    }
+
+    #[test]
+    fn require_owner_rejects_unverified_caller() {
+        // Even a fingerprint match must fail when the caller is not
+        // cryptographically verified (fail-closed).
+        let ctx = HandlerContext::new("fp:owner".to_string(), Vec::new(), false);
+        assert!(ctx.require_owner(Some("fp:owner")).is_err());
     }
 }

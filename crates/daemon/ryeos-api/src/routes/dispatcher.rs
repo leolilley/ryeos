@@ -23,6 +23,30 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
     let (route, captures) = match table.match_request(&method, &path) {
         Some(r) => r,
         None => {
+            // Distinguish "path exists but not for this method" (405) from "path
+            // matches no route" (404). A POST-only route hit with GET used to
+            // return 404, which reads as "route missing" and sent operators
+            // chasing phantom deploy/version problems — 405 + Allow makes it
+            // obvious the route is there.
+            let allowed = table.allowed_methods_for_path(&path);
+            if !allowed.is_empty() {
+                let allow = allowed
+                    .iter()
+                    .map(|m| m.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    [(axum::http::header::ALLOW, allow)],
+                    axum::Json(serde_json::json!({
+                        "error": "method not allowed",
+                        "path": path,
+                        "method": method.as_str(),
+                        "allowed_methods": allowed.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
+                    })),
+                )
+                    .into_response();
+            }
             return (
                 StatusCode::NOT_FOUND,
                 axum::Json(serde_json::json!({

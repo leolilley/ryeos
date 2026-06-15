@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-07T03:30:53Z:354fce363bdba7081fb53a4b60dadc4385fba506271062e658d9246955e3f7ae:blCGu+ZhQc7bK0GRWLjzq0AHS4oZGbpB6m2hdFwCuw6AG+yuwc4xDswwfp62CsKcR6Kp3WSAN3XMdD0dSle/Cg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-15T04:48:21Z:6401cb6a9f5fc8ec2f8663b41d5a22e86ad8249316f44b6432eef4280ae838b9:vQ5TnFq4MEIihEEkTqEUI146plFzX9ORoql9ZK1zTf/GDmQgIrkagqAGa6h0C91cpxzDNuGFVk7Cd7oTh400Dg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
@@ -18,11 +18,14 @@ by hand.
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev
+  --owner ryeos-dev \
+  --all
 ```
 
 This builds release binaries, stages them into bundle bin trees, signs all
 signable bundle items, rebuilds CAS manifests, and emits `PUBLISHER_TRUST.toml`.
+`--all` is required (or `--crates "<crate ...>"` to rebuild a subset, `--jobs N`
+to cap parallelism) — populate refuses to rebuild the full set implicitly.
 
 Run it after:
 
@@ -98,6 +101,29 @@ Use this for project knowledge/directive/tool/node files. The `sign` verb takes
 canonical refs, and it accepts `*`/`?` globs in the bare-id part for batch
 project signing. Quote globs so the shell does not expand them. Use
 `populate-bundles.sh` for `bundles/`.
+
+A file **path** under the project `.ai/` also works — `sign` resolves it to its
+single canonical ref and signs that, so you can sign the file you just edited
+without retyping the ref:
+
+```bash
+ryeos sign .ai/graphs/foo/bar.yaml      # == ryeos sign graph:foo/bar
+```
+
+Signing a graph-shaped file as a `tool:` (e.g. one under `.ai/tools/**/graphs/`,
+which resolves as `tool:` not `graph:`) now emits a warning pointing at the
+canonical `.ai/graphs/` location.
+
+## Authorized-key scopes
+
+`authorize-client` writes one authorized-key file per fingerprint and, by
+default, **replaces** its scope set (dropped scopes are warned). To add scopes
+without losing existing ones, pass `--merge-scopes` (it unions with the file's
+current scopes):
+
+```bash
+ryeos-core-tools authorize-client --public-key <b64> --scopes <a,b> --merge-scopes
+```
 
 ## Do not do these
 

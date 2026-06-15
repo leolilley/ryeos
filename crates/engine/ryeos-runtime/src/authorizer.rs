@@ -251,8 +251,12 @@ impl AuthorizationPolicy {
 /// Authorization failure detail.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthorizationError {
-    #[error("unauthorized: missing required capabilities")]
-    Unauthorized,
+    /// The caller's scopes did not satisfy a required clause. The payload names
+    /// the capabilities that would have satisfied it, so the operator knows
+    /// exactly which scope to grant (e.g. `ryeos.execute.service.project/apply-snapshot`)
+    /// instead of a bare "unauthorized".
+    #[error("unauthorized: caller is missing a required capability (need one of: {0})")]
+    Unauthorized(String),
 }
 
 // ── Authorizer ───────────────────────────────────────────────────────
@@ -287,7 +291,7 @@ impl Authorizer {
                         .iter()
                         .any(|req| self.check_single(principal_scopes, req));
                     if !satisfied {
-                        return Err(AuthorizationError::Unauthorized);
+                        return Err(AuthorizationError::Unauthorized(clause.any_of.join(", ")));
                     }
                 }
                 Ok(())

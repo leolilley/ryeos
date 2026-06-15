@@ -89,20 +89,25 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .await
         .map_err(|e| {
             // Push (CAS upload) already succeeded above; only the apply step
-            // failed. A 404 on /project/apply-snapshot specifically means the
-            // remote node has no such route — its node core predates the route,
-            // not that the request was malformed. Make that actionable instead
-            // of surfacing a bare HTTP 404.
+            // failed. A 404 on apply-snapshot does NOT necessarily mean the route
+            // is missing — by far the most common cause is the remotes-config URL
+            // pointing at the wrong host, so the route isn't there *at that URL*.
+            // Surface the actual URL and both likely causes instead of asserting
+            // "node too old" (which is misleading when the route exists and a
+            // direct probe returns 401/403).
             if let Some(http) = e.downcast_ref::<crate::remote::client::RemoteHttpError>() {
-                if http.status.as_u16() == 404 && http.path.contains("apply-snapshot") {
+                if http.status.as_u16() == 404 && http.url.contains("apply-snapshot") {
                     return anyhow::anyhow!(
                         "AI content was uploaded to the remote (snapshot {hash}), but applying it \
-                         failed: the remote returned HTTP 404 for /project/apply-snapshot — that \
-                         route is absent, meaning the remote node core is older than the \
-                         apply-snapshot route. Upgrade/redeploy the remote node core, then re-run \
-                         `remote sync-project-ai`. The uploaded objects are already on the remote, \
-                         so nothing was lost.",
+                         failed: {url} returned HTTP 404 — the /project/apply-snapshot route did \
+                         not match at that URL. Likely causes, in order:\n  \
+                         1. The remote URL in your remotes config points at the wrong host (verify \
+                            it resolves to the RyeOS node — a 401/403 instead would confirm the \
+                            route exists and only auth/trust is the issue).\n  \
+                         2. The remote node core predates the apply-snapshot route — upgrade/redeploy it.\n\
+                         The uploaded objects are already on the remote, so nothing was lost.",
                         hash = push.snapshot_hash,
+                        url = http.url,
                     );
                 }
             }

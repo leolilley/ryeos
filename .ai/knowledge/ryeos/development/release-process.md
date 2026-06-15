@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T06:33:55Z:e41dd8958c8cf9fc4686f72bf2e4f968793a0274d910b9355b5e32aaaa5a458d:+CuUAdh51NsE+7WYfr0u15zCUJfaJJYknPf5nVRFTOWhjaKd9CxaHKhZTuzgYSTGyEYiC2Wrnu4c4j8GzyN+AA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-15T05:35:51Z:ba71436da4b872fc0f02101a6a5f5a22f526a5884ff75828a6a2e6455c8f6d22:WaCfa2Bu+rjoW3K/ViVtIWct61tkcWSgiuBPk0ZUoyZ5FV8p7dXyzxACaIoCmMwTb8g34rCz5vcWokrqkRJ4AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -63,6 +63,29 @@ Expected:
 If `main` is already checked out in `/home/leo/projects/ryeos`, do not run
 `git checkout main` in `/home/leo/projects/ryeos-next`; Git will reject it
 because a branch can only be checked out in one worktree at a time.
+
+**Fallback if the `/home/leo/projects/ryeos` worktree does not exist** (it may
+not — `main` is then checked out nowhere): do the merge in-place from the
+`ryeos-next` checkout instead. Create a local `main` from the remote, merge,
+tag, push, then switch back to `next`:
+
+```bash
+cd /home/leo/projects/ryeos-next
+git fetch origin
+git branch -f main origin/main             # create OR reset local main to the remote tip
+git checkout main                          # (don't use `checkout -b main` — it errors if a
+                                           #  stale local main from a prior release exists)
+git merge --no-ff next -m "Merge next into main for v$new release"
+# ... validate, tag, push (sections 5–7) ...
+git checkout next                          # leave this worktree on next
+git branch -D main                         # delete the local main so the next release starts clean
+```
+
+Tag and push from the resulting `main` HEAD (the merge commit). Watch out: if
+`checkout -b main` silently fails because a local `main` already exists, the
+merge runs as a no-op on `next` and the tag lands on a `next` commit while
+`origin/main` stays stale. `git branch -f` + deleting `main` afterward avoids
+this. This was the path used for the v0.5.16 / v0.5.17 releases.
 
 ## 1. Decide whether to move a tag or cut a new patch
 
@@ -173,8 +196,15 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev
+  --owner ryeos-dev \
+  --all
 ```
+
+`--all` is REQUIRED: `populate-bundles.sh` refuses to rebuild the whole bundle
+set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
+`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-tools`
+for core-tools). `--jobs N` caps cargo parallelism if a full release build
+exhausts memory. The release Dockerfiles already pass `--all`.
 
 Do not manually copy binaries into bundle trees or hand-edit signed bundle YAML
 as a release fix.
@@ -387,11 +417,14 @@ refresh/sign bundles as bundles:
 ```bash
 ./scripts/populate-bundles.sh \
   --key .dev-keys/PUBLISHER_DEV.pem \
-  --owner ryeos-dev
+  --owner ryeos-dev \
+  --all
 ```
 
 This builds release binaries, stages bundle bin trees, signs signable bundle
-items, rebuilds CAS manifests, and emits trust documents.
+items, rebuilds CAS manifests, and emits trust documents. `--all` is required
+(or `--crates "<crate ...>"` to rebuild a subset) — populate refuses an implicit
+full build.
 
 Do not:
 

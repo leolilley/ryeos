@@ -57,7 +57,9 @@ if [[ "$refresh_bundles" == "1" ]]; then
         exit 2
     fi
     echo "gate: explicitly refreshing bundles (bundle-set: $bundle_set)"
-    "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set"
+    # --all: gate is a deliberate full bundle-set refresh; populate-bundles.sh
+    # refuses an implicit full build without it.
+    "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
 elif [[ "$skip_tests" == "1" ]]; then
     echo "gate: --no-tests without --refresh-bundles has nothing to do" >&2
     echo "gate: pass --refresh-bundles --no-tests for the old populate-only behavior" >&2
