@@ -18,6 +18,30 @@ use ryeos_state::ignore::IgnoreConfig;
 
 const HASH_REQUEST_BODY_BUDGET_BYTES: usize = 900 * 1024;
 
+/// HTTP error from a remote-node call, carrying the status code and request
+/// path so callers can react to a specific failure — e.g. a 404 that means a
+/// route is simply absent on an out-of-date remote node — instead of
+/// string-matching a formatted message.
+#[derive(Debug)]
+pub struct RemoteHttpError {
+    pub method: &'static str,
+    pub path: String,
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for RemoteHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {} returned {}: {}",
+            self.method, self.path, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for RemoteHttpError {}
+
 /// Cap on establishing a TCP/TLS connection to a remote. Applies to
 /// every request; without it a dead or filtered remote hangs callers
 /// for the OS connect timeout (minutes).
@@ -713,7 +737,13 @@ impl RemoteClient {
             .with_context(|| format!("failed to parse response from POST {}", url))?;
 
         if !status.is_success() {
-            anyhow::bail!("POST {} returned {}: {}", url, status, resp_body);
+            return Err(RemoteHttpError {
+                method: "POST",
+                path: path.to_string(),
+                status,
+                body: resp_body.to_string(),
+            }
+            .into());
         }
 
         Ok(resp_body)
@@ -740,7 +770,13 @@ impl RemoteClient {
             .with_context(|| format!("failed to parse response from POST {}", url))?;
 
         if !status.is_success() {
-            anyhow::bail!("POST {} returned {}: {}", url, status, resp_body);
+            return Err(RemoteHttpError {
+                method: "POST",
+                path: path.to_string(),
+                status,
+                body: resp_body.to_string(),
+            }
+            .into());
         }
 
         Ok(resp_body)
