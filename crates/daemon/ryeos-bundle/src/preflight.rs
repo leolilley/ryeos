@@ -480,12 +480,17 @@ pub fn verify_manifest_signature(
                 .and_then(|signer| signer.label.as_deref())
             {
                 if store_owner != trust_doc.owner {
-                    bail!(
-                        "publisher trust owner mismatch for fingerprint {}: \
-                         PUBLISHER_TRUST.toml says '{}', operator trust store says '{}'",
-                        sig_header.signer_fingerprint,
-                        trust_doc.owner,
-                        store_owner
+                    // The owner label is informational — the trust anchor is the
+                    // fingerprint, which is already verified as trusted above and
+                    // checked cryptographically below. A label rename (e.g.
+                    // `official-publisher` -> `ryeos-official`) must not brick a
+                    // node whose pinned key still matches. Warn, don't fail.
+                    tracing::warn!(
+                        fingerprint = %sig_header.signer_fingerprint,
+                        bundle_owner = %trust_doc.owner,
+                        store_owner = %store_owner,
+                        "publisher trust owner label differs from the pinned trust doc \
+                         (informational only — the key fingerprint is what's trusted)"
                     );
                 }
             }
@@ -1738,23 +1743,22 @@ description: "fixed parser handler for preflight tests"
     }
 
     #[test]
-    fn verify_manifest_rejects_publisher_trust_owner_mismatch() {
+    fn verify_manifest_owner_label_mismatch_is_non_fatal() {
+        // The owner label is informational; the trust anchor is the fingerprint
+        // (verified trusted + cryptographically). A label mismatch for an
+        // otherwise-trusted, validly-signed publisher key must NOT fail
+        // verification — it logs a warning instead. Renaming the owner label
+        // (e.g. official-publisher -> ryeos-official) must never brick a node.
         let layout = BundleLayout::new("test-bundle");
         layout.add_kind_schema("mykind");
         layout.write_signed_manifest(
             "name: test-bundle\nversion: '1.0'\nprovides_kinds:\n  - mykind\nrequires_kinds: []\n",
         );
-        layout.write_publisher_trust_doc("local-dev");
+        layout.write_publisher_trust_doc("local-dev"); // store owner is "test-publisher"
         let ts = layout.trust_store();
 
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("publisher trust owner mismatch")
-                && msg.contains("local-dev")
-                && msg.contains("test-publisher"),
-            "should reject owner mismatch: {msg}"
-        );
+        verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
+            .expect("owner-label mismatch should be a warning, not a verification failure");
     }
 
     #[test]

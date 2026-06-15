@@ -211,10 +211,14 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
 
     // ── 5. Pin official publisher key ──
+    // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
+    // ryeos-official`, all release Dockerfiles). The label is informational, but
+    // bundle preflight compares it, so a divergence used to brick boot (the
+    // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
     let official_publisher_vk = decode_official_publisher_pubkey()?;
     let pinned_fp = pin_key(
         &official_publisher_vk,
-        "official-publisher",
+        "ryeos-official",
         &trust_dir,
         None,
     )
