@@ -45,7 +45,10 @@ Examples:
 EOF
 }
 
-SURFACE="surface:ryeos/studio/base"
+# Default to the directive-thread surface: a single timeline tile that
+# starts empty and fills as you submit/execute against it — the fastest way
+# to watch a thread stream. Pass `surface:ryeos/studio/base` to get the home.
+SURFACE="surface:ryeos/studio/thread"
 PROFILE="debug"
 PROJECT="$PWD"
 READ_ONLY=0

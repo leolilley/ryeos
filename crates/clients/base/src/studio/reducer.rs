@@ -3560,7 +3560,7 @@ mod tests {
 
     #[test]
     fn submit_thread_command_targets_commands_submit_for_head_thread() {
-        let mut core = StudioCore::default();
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.seat.append_facet(
             crate::studio::seat::KEY_INPUT_ROUTE,
             serde_json::json!({ "thread": "T-1" }),
@@ -3587,7 +3587,7 @@ mod tests {
 
     #[test]
     fn submit_thread_command_without_head_thread_notices() {
-        let mut core = StudioCore::default();
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
