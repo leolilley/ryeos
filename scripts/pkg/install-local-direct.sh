@@ -38,6 +38,14 @@ Options:
                         (core+standard), hosted-node, or hosted-workflow
                         (core+standard+hosted-node)
                         (default: full)
+  --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
+                        Use a smaller N if a full release build exhausts memory.
+  --crates "A B C"      With --populate, rebuild only these crates (e.g.
+                        --crates ryeos-tools to refresh just core-tools). Other
+                        bundle binaries must already exist in target/release.
+  --all                 With --populate, rebuild the whole bundle set. Required to
+                        do a full rebuild — --populate refuses to build everything
+                        implicitly (that full release build is what exhausts memory).
   -h, --help            Show this help
 
 Default behavior is incremental: install already-built binaries and bundle
@@ -219,6 +227,9 @@ cleanup_shadows=1
 key="$repo_root/.dev-keys/PUBLISHER_DEV.pem"
 owner="ryeos-dev"
 bundle_set="full"
+jobs=""            # forwarded to populate as cargo -j N
+crates=""          # forwarded to populate to rebuild only these crates
+populate_all=0     # explicit opt-in to rebuild the whole bundle set
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -252,6 +263,20 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "--bundle-set requires a value"
             bundle_set="$2"
             shift 2
+            ;;
+        --jobs)
+            [[ $# -ge 2 ]] || die "--jobs requires a number"
+            jobs="$2"
+            shift 2
+            ;;
+        --crates)
+            [[ $# -ge 2 ]] || die "--crates requires a space-separated crate list"
+            crates="$2"
+            shift 2
+            ;;
+        --all)
+            populate_all=1
+            shift
             ;;
         -h|--help)
             usage
@@ -310,11 +335,16 @@ optional_bins=(lillux)
 
 if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
+    # Be explicit about scope — never trigger a full workspace rebuild implicitly.
+    if [[ -z "$crates" && $populate_all -eq 0 ]]; then
+        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-tools), or --all to rebuild the whole '$bundle_set' set"
+    fi
     echo "[install-local-direct] populating bundles"
-    "$repo_root/scripts/populate-bundles.sh" \
-        --key "$key" \
-        --owner "$owner" \
-        --bundle-set "$bundle_set"
+    populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")
+    [[ -n "$jobs" ]] && populate_args+=(--jobs "$jobs")
+    [[ -n "$crates" ]] && populate_args+=(--crates "$crates")
+    [[ $populate_all -eq 1 ]] && populate_args+=(--all)
+    "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}"
 fi
 
 daemon_was_running=0
