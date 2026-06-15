@@ -128,29 +128,33 @@ pub fn parse_input_arg(tail: &[String]) -> Result<Option<Value>, CliDispatchErro
                 detail: "--input requires an argument (file path or '-' for stdin)".into(),
             })
         })?;
-        let json_str = read_input_source(input_arg)?;
-        let value = serde_json::from_str(&json_str).map_err(|e| {
-            CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
-                path: input_arg.clone(),
-                item_ref: "--input".into(),
-                detail: format!("failed to parse --input as JSON: {e}"),
-            })
-        })?;
-        Ok(Some(value))
+        let text = read_input_source(input_arg)?;
+        Ok(Some(parse_input_value(&text, input_arg)?))
     } else if let Some(arg) = tail.iter().find(|t| t.starts_with("--input=")) {
         let path = &arg["--input=".len()..];
-        let json_str = read_input_source(path)?;
-        let value = serde_json::from_str(&json_str).map_err(|e| {
-            CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
-                path: path.to_string(),
-                item_ref: "--input".into(),
-                detail: format!("failed to parse --input as JSON: {e}"),
-            })
-        })?;
-        Ok(Some(value))
+        let text = read_input_source(path)?;
+        Ok(Some(parse_input_value(&text, path)?))
     } else {
         Ok(None)
     }
+}
+
+/// Parse `--input` content as JSON, falling back to YAML. Accepting YAML lets
+/// operators feed a spec straight from a `.yaml` file (e.g.
+/// `scheduler register --input spec.yaml`) instead of hand-quoting a JSON
+/// object on the shell — the SSH quoting trap. JSON is a YAML subset, so JSON
+/// input keeps working unchanged.
+fn parse_input_value(text: &str, source: &str) -> Result<Value, CliDispatchError> {
+    if let Ok(value) = serde_json::from_str::<Value>(text) {
+        return Ok(value);
+    }
+    serde_yaml::from_str::<Value>(text).map_err(|e| {
+        CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
+            path: source.to_string(),
+            item_ref: "--input".into(),
+            detail: format!("failed to parse --input as JSON or YAML: {e}"),
+        })
+    })
 }
 
 fn read_input_source(source: &str) -> Result<String, CliDispatchError> {
@@ -179,6 +183,23 @@ fn read_input_source(source: &str) -> Result<String, CliDispatchError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_input_value_accepts_json_and_yaml() {
+        // JSON still parses (it's a YAML subset and JSON is tried first).
+        let json = parse_input_value(r#"{"schedule_id":"s","enabled":true}"#, "x").unwrap();
+        assert_eq!(json["schedule_id"], "s");
+        assert_eq!(json["enabled"], true);
+
+        // YAML now parses too — the shell-quoting-free path.
+        let yaml = parse_input_value("schedule_id: s\nenabled: true\n", "x").unwrap();
+        assert_eq!(yaml["schedule_id"], "s");
+        assert_eq!(yaml["enabled"], true);
+
+        // Garbage fails with a JSON-or-YAML message.
+        let err = parse_input_value("{ this: is: not valid", "x").unwrap_err();
+        assert!(format!("{err:?}").contains("JSON or YAML"));
+    }
 
     #[test]
     fn bind_key_value() {
