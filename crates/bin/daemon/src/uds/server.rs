@@ -883,6 +883,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_thread_events_publishes_to_live_subscriber() {
+        // Seat braids append directly through the lifecycle service; a
+        // `thread_events` subscriber attached before the append must receive
+        // the seat event live, not only via replay.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-seat", "T-seat"))
+            .unwrap();
+        state.threads.mark_running("T-seat").unwrap();
+
+        let mut rx = state.event_streams.subscribe("T-seat");
+        let persisted = state
+            .threads
+            .append_thread_events(
+                "T-seat",
+                "T-seat",
+                &[ryeos_app::state_store::NewEventRecord {
+                    event_type: "seat.note".to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: serde_json::json!({ "text": "hello" }),
+                }],
+            )
+            .unwrap()
+            .expect("append accepted on a running thread");
+        assert_eq!(persisted.len(), 1);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("seat event delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "seat.note");
+        assert_eq!(event.thread_id, "T-seat");
+    }
+
+    #[tokio::test]
     async fn runtime_finalize_missing_token_returns_error() {
         let (_tmp, state) = setup_app_state();
         state

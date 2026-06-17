@@ -426,7 +426,7 @@ async fn main() -> Result<()> {
                 match rx.recv().await {
                     Ok(event) => {
                         let lifecycle = event.event_type == "thread_created"
-                            || event.event_type == "thread_running"
+                            || event.event_type == "thread_started"
                             || ryeos_api::routes::invokers::stream_helpers::is_terminal(
                                 &event.event_type,
                             );

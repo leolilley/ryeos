@@ -13,8 +13,8 @@ use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
-    FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, PersistedEventRecord, StateStore,
-    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
+    FinalizeThreadRecord, NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord,
+    StateStore, ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
@@ -668,6 +668,26 @@ impl ThreadLifecycleService {
         )?;
         self.publish_records(std::slice::from_ref(&persisted));
         Ok(artifact)
+    }
+
+    /// Append caller-supplied events to a running thread, then publish the
+    /// persisted records live (persist-then-publish, same invariant as the
+    /// lifecycle paths). Returns `None` when the thread is no longer running,
+    /// so callers keep their own running-state error message. Routes seat
+    /// braids and any other direct-append surface through one publish site.
+    pub fn append_thread_events(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        events: &[NewEventRecord],
+    ) -> Result<Option<Vec<PersistedEventRecord>>> {
+        let persisted =
+            self.state_store
+                .append_events_if_thread_running(chain_root_id, thread_id, events)?;
+        if let Some(records) = &persisted {
+            self.publish_records(records);
+        }
+        Ok(persisted)
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {

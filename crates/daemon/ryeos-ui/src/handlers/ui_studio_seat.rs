@@ -208,8 +208,8 @@ pub async fn handle_append(
         })
         .collect();
     let persisted = state
-        .state_store
-        .append_events_if_thread_running(&detail.chain_root_id, &detail.thread_id, &records)?
+        .threads
+        .append_thread_events(&detail.chain_root_id, &detail.thread_id, &records)?
         .ok_or_else(|| {
             HandlerError::BadRequest(
                 "seat session is no longer running; only running seats accept events".into(),
