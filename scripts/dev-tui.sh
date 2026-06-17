@@ -45,10 +45,11 @@ Examples:
 EOF
 }
 
-# Default to the directive-thread surface: a single timeline tile that
-# starts empty and fills as you submit/execute against it — the fastest way
-# to watch a thread stream. Pass `surface:ryeos/studio/base` to get the home.
-SURFACE="surface:ryeos/studio/thread"
+# Default to the home surface. The directive-thread surface
+# (`surface:ryeos/studio/thread` — a single timeline tile that fills as you
+# submit) is staged but needs a full `populate-bundles --all` to be signed +
+# resolvable; once populated, pass it explicitly or flip this default to it.
+SURFACE="surface:ryeos/studio/base"
 PROFILE="debug"
 PROJECT="$PWD"
 READ_ONLY=0

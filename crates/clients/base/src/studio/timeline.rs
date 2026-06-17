@@ -190,11 +190,11 @@ fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
     let (primary, meta, tone) = match event_type {
         "thread_completed" => ("completed".to_string(), None, StudioTone::Good),
         "thread_failed" => (
-            "failed".to_string(),
-            payload
-                .and_then(|p| p.get("message").or_else(|| p.get("error")))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            match failure_reason(payload) {
+                Some(reason) => format!("failed — {reason}"),
+                None => "failed".to_string(),
+            },
+            None,
             StudioTone::Danger,
         ),
         "thread_cancelled" => ("cancelled".to_string(), None, StudioTone::Warn),
@@ -250,6 +250,20 @@ fn child_thread_ref(payload: &Value) -> Option<String> {
     ["child_thread_id", "thread_id", "child", "chain_root_id"]
         .iter()
         .find_map(|k| payload.get(*k).and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// Pull a human reason from a `thread_failed` payload across the shapes
+/// finalizers use: `error: { message }`, `error: "…"`, `message`, or the
+/// stable `outcome_code` fallback.
+fn failure_reason(payload: Option<&Value>) -> Option<String> {
+    let p = payload?;
+    p.get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| p.get("error").and_then(Value::as_str))
+        .or_else(|| p.get("message").and_then(Value::as_str))
+        .or_else(|| p.get("outcome_code").and_then(Value::as_str))
         .map(str::to_string)
 }
 
@@ -343,15 +357,35 @@ mod tests {
 
     #[test]
     fn execution_entry_carries_failure_message() {
-        let entry = execution_entry(&raw_record(
-            json!({ "event_type": "thread_failed", "payload": { "message": "boom" } }),
-        ));
-        let Some(StudioTimelineEntryVm::Line { primary, meta, tone }) = entry else {
+        // Real shape: state_store surfaces the reason under `error` in the
+        // thread_failed event payload (+ a stable outcome_code).
+        let entry = execution_entry(&raw_record(json!({
+            "event_type": "thread_failed",
+            "payload": { "error": { "message": "boom" }, "outcome_code": "launch_augmentation_failed" }
+        })));
+        let Some(StudioTimelineEntryVm::Line { primary, tone, .. }) = entry else {
             panic!("expected a failure line");
         };
-        assert_eq!(primary, "failed");
-        assert_eq!(meta.as_deref(), Some("boom"));
+        assert_eq!(primary, "failed — boom");
         assert!(matches!(tone, StudioTone::Danger));
+    }
+
+    #[test]
+    fn execution_entry_failure_falls_back_to_outcome_code_then_plain() {
+        let coded = execution_entry(&raw_record(json!({
+            "event_type": "thread_failed",
+            "payload": { "outcome_code": "timed_out" }
+        })));
+        assert!(matches!(
+            coded,
+            Some(StudioTimelineEntryVm::Line { primary, .. }) if primary == "failed — timed_out"
+        ));
+
+        let bare = execution_entry(&raw_record(json!({ "event_type": "thread_failed" })));
+        assert!(matches!(
+            bare,
+            Some(StudioTimelineEntryVm::Line { primary, .. }) if primary == "failed"
+        ));
     }
 
     #[test]
