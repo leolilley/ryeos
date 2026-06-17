@@ -25,7 +25,7 @@
 //!   receivers remain, called by the SSE endpoint on disconnect.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
@@ -147,6 +147,41 @@ impl ThreadEventHub {
     }
 }
 
+/// RAII subscription guard for stream endpoints. Holds the hub and the
+/// threads a stream is following; on drop it reclaims each thread's sender
+/// via `remove_if_idle`, so a stream that ends (client disconnect, thread
+/// completion) leaves no idle broadcast sender behind. A chain tail that
+/// follows successive heads records each, and all are reclaimed at end.
+pub struct HubSubscription {
+    hub: Arc<ThreadEventHub>,
+    threads: Vec<String>,
+}
+
+impl HubSubscription {
+    pub fn new(hub: Arc<ThreadEventHub>) -> Self {
+        Self {
+            hub,
+            threads: Vec::new(),
+        }
+    }
+
+    /// Subscribe to a thread's live lane and record it for reclamation.
+    pub fn subscribe(&mut self, thread_id: &str) -> broadcast::Receiver<PersistedEventRecord> {
+        if !self.threads.iter().any(|existing| existing == thread_id) {
+            self.threads.push(thread_id.to_owned());
+        }
+        self.hub.subscribe(thread_id)
+    }
+}
+
+impl Drop for HubSubscription {
+    fn drop(&mut self) {
+        for thread_id in &self.threads {
+            self.hub.remove_if_idle(thread_id);
+        }
+    }
+}
+
 impl std::fmt::Debug for ThreadEventHub {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let count = self.inner.lock().map(|g| g.len()).unwrap_or(0);
@@ -248,5 +283,30 @@ mod tests {
         hub.remove_if_idle("T-b");
         let count = hub.inner.lock().unwrap().len();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn hub_subscription_reclaims_senders_on_drop() {
+        let hub = Arc::new(ThreadEventHub::new(8));
+        {
+            let mut sub = HubSubscription::new(hub.clone());
+            let _rx1 = sub.subscribe("T-1");
+            let _rx2 = sub.subscribe("T-2");
+            assert_eq!(hub.inner.lock().unwrap().len(), 2);
+            // Receivers drop with the guard; the guard reclaims both senders.
+        }
+        assert_eq!(hub.inner.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn hub_subscription_keeps_senders_with_a_live_receiver() {
+        let hub = Arc::new(ThreadEventHub::new(8));
+        let mut sub = HubSubscription::new(hub.clone());
+        let rx = sub.subscribe("T-live");
+        drop(sub);
+        // The guard tried to reclaim, but a live receiver remains, so the
+        // sender stays.
+        assert_eq!(hub.inner.lock().unwrap().len(), 1);
+        drop(rx);
     }
 }

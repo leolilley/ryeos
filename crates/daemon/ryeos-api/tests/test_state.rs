@@ -51,6 +51,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
             state_store.clone(),
             kind_profiles.clone(),
             events.clone(),
+            Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
         )
         .expect("HOSTNAME not set in test environment"),
     );

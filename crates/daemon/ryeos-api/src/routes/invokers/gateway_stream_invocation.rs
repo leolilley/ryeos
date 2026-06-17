@@ -330,7 +330,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         );
 
         let hub = ctx.state.event_streams.clone();
-        let mut rx = hub.subscribe(&thread_id);
+        // Subscribe before launch so no live event is missed; the guard
+        // (moved into the stream below) reclaims the sender at stream end.
+        let mut sub = ryeos_app::event_stream::HubSubscription::new(hub);
+        let mut rx = sub.subscribe(&thread_id);
 
         let options = crate::routes::launch::DispatchLaunchOptions {
             launch_mode: req.launch_mode,
@@ -361,6 +364,9 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
         let stream = async_stream::stream! {
             let _guard = span.enter();
+            // Move the subscription guard into the stream so the sender is
+            // reclaimed when the stream ends.
+            let _sub = sub;
             yield Ok(
                 RouteStreamEnvelope::new(
                     "stream_started",

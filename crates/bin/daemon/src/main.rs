@@ -306,10 +306,15 @@ async fn main() -> Result<()> {
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
 
     let events = Arc::new(EventStoreService::new(state_store.clone()));
+    // The hub is shared with the lifecycle service so its create/start/
+    // finalize/continuation writes publish live (persist-then-publish),
+    // and stored as `event_streams` for the SSE endpoints + events.append.
+    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
     let threads = Arc::new(ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
+        event_streams.clone(),
     )?);
     threads.set_scheduler_db(scheduler_db.clone(), config.app_root.clone());
     let commands = Arc::new(CommandService::new(
@@ -366,7 +371,7 @@ async fn main() -> Result<()> {
         identity: Arc::new(identity),
         threads,
         events,
-        event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+        event_streams,
         commands,
         callback_tokens,
         thread_auth,
@@ -781,10 +786,12 @@ async fn run_service_standalone(
     let events = Arc::new(event_store_service::EventStoreService::new(
         state_store.clone(),
     ));
+    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
     let threads = Arc::new(thread_lifecycle::ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
+        event_streams.clone(),
     )?);
     let commands = Arc::new(command_service::CommandService::new(
         state_store.clone(),
@@ -812,7 +819,7 @@ async fn run_service_standalone(
         identity: Arc::new(identity),
         threads,
         events,
-        event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+        event_streams,
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),

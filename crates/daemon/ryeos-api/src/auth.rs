@@ -700,6 +700,7 @@ mod tests {
                 state_store.clone(),
                 kind_profiles.clone(),
                 events.clone(),
+                Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
             )
             .expect("HOSTNAME not set in test environment"),
         );

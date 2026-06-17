@@ -87,7 +87,8 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
             let mut cursor: i64 = last_event_id.unwrap_or(0);
             // The thread the live subscription currently follows.
             let mut head_thread = chain_root_id.clone();
-            let mut rx = hub.subscribe(&head_thread);
+            let mut sub = ryeos_app::event_stream::HubSubscription::new(hub);
+            let mut rx = sub.subscribe(&head_thread);
 
             loop {
                 // Replay everything past the cursor, chain-scoped. This
@@ -112,7 +113,7 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
                                     // The chain advanced: follow the new
                                     // head's live events.
                                     head_thread = ev.thread_id.clone();
-                                    rx = hub.subscribe(&head_thread);
+                                    rx = sub.subscribe(&head_thread);
                                 }
                                 yield Ok(envelope_for_persisted(ev));
                             }

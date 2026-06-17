@@ -10,10 +10,11 @@ use serde_json::{json, Value};
 
 use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail, EnvSourceKind};
 use crate::event_store_service::EventStoreService;
+use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
-    FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, StateStore, ThreadArtifactRecord,
-    ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
+    FinalizeThreadRecord, NewArtifactRecord, NewThreadRecord, PersistedEventRecord, StateStore,
+    ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
@@ -28,6 +29,13 @@ pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
     kind_profiles: Arc<KindProfileRegistry>,
     _events: Arc<EventStoreService>,
+    /// Live broadcast hub. Lifecycle writes (create / start / finalize /
+    /// continuation) persist through `state_store` and THEN publish the
+    /// resulting records here, so SSE subscribers see the same persisted
+    /// events — including terminal ones — live, not only via replay. This
+    /// is the "persist then publish" invariant in one place rather than
+    /// re-derived per call site (see `publish_records`).
+    event_hub: Arc<ThreadEventHub>,
     current_site_id: String,
     scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
     app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
@@ -176,6 +184,7 @@ impl ThreadLifecycleService {
         state_store: Arc<StateStore>,
         kind_profiles: Arc<KindProfileRegistry>,
         _events: Arc<EventStoreService>,
+        event_hub: Arc<ThreadEventHub>,
     ) -> anyhow::Result<Self> {
         let hostname = env::var("HOSTNAME")
             .or_else(|_| hostname::get().map(|h| h.to_string_lossy().into_owned()))
@@ -197,10 +206,33 @@ impl ThreadLifecycleService {
             state_store,
             kind_profiles,
             _events,
+            event_hub,
             current_site_id: format!("site:{hostname}"),
             scheduler_db: std::sync::RwLock::new(None),
             app_root: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Publish persisted lifecycle records to live subscribers after the
+    /// state-store write succeeded (persistence-first). Records are grouped
+    /// by thread — a continuation touches both the source and successor
+    /// threads — so each thread's subscribers receive its events in
+    /// persisted (`chain_seq`) order under one hub lock. No-op when empty.
+    fn publish_records(&self, records: &[PersistedEventRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let mut by_thread: std::collections::HashMap<&str, Vec<PersistedEventRecord>> =
+            std::collections::HashMap::new();
+        for record in records {
+            by_thread
+                .entry(record.thread_id.as_str())
+                .or_default()
+                .push(record.clone());
+        }
+        for (thread_id, thread_records) in by_thread {
+            self.event_hub.publish_batch(thread_id, &thread_records);
+        }
     }
 
     /// Wire the scheduler DB for thread completion tracking.
@@ -258,7 +290,8 @@ impl ThreadLifecycleService {
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         };
 
-        let _persisted = self.state_store.create_thread(&thread_record)?;
+        let persisted = self.state_store.create_thread(&thread_record)?;
+        self.publish_records(&persisted);
 
         self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
@@ -294,7 +327,8 @@ impl ThreadLifecycleService {
             usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
         };
 
-        let _persisted = self.state_store.create_thread(&thread_record)?;
+        let persisted = self.state_store.create_thread(&thread_record)?;
+        self.publish_records(&persisted);
 
         self.get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("created thread missing from database: {}", params.thread_id))
@@ -307,7 +341,8 @@ impl ThreadLifecycleService {
         fields(thread_id = %thread_id)
     )]
     pub fn mark_running(&self, thread_id: &str) -> Result<ThreadDetail> {
-        let _persisted = self.state_store.mark_thread_running(thread_id, None)?;
+        let persisted = self.state_store.mark_thread_running(thread_id, None)?;
+        self.publish_records(&persisted);
         self.get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found after mark_running: {thread_id}"))
     }
@@ -363,7 +398,7 @@ impl ThreadLifecycleService {
             })
         });
 
-        let _persisted = self.state_store.finalize_thread(
+        let persisted = self.state_store.finalize_thread(
             thread_id,
             &FinalizeThreadRecord {
                 status: terminal_status.to_string(),
@@ -378,6 +413,7 @@ impl ThreadLifecycleService {
                 final_cost: completion.final_cost.clone(),
             },
         )?;
+        self.publish_records(&persisted);
 
         self.update_scheduler_fire_on_thread_terminal(
             thread_id,
@@ -428,7 +464,7 @@ impl ThreadLifecycleService {
         )
     )]
     pub fn finalize_thread(&self, params: &ThreadFinalizeParams) -> Result<ThreadDetail> {
-        let _persisted = self.state_store.finalize_thread(
+        let persisted = self.state_store.finalize_thread(
             &params.thread_id,
             &FinalizeThreadRecord {
                 status: normalize_terminal_status(&params.status)?.to_string(),
@@ -439,6 +475,7 @@ impl ThreadLifecycleService {
                 final_cost: params.final_cost.clone(),
             },
         )?;
+        self.publish_records(&persisted);
 
         let terminal_status = normalize_terminal_status(&params.status)?;
         self.update_scheduler_fire_on_thread_terminal(
@@ -600,12 +637,13 @@ impl ThreadLifecycleService {
         };
 
         // Create successor, write continued edge, finalize source — all in one transaction
-        let _persisted = self.state_store.create_continuation(
+        let persisted = self.state_store.create_continuation(
             &successor_record,
             &source.thread_id,
             &source.chain_root_id,
             params.reason.as_deref(),
         )?;
+        self.publish_records(&persisted);
 
         let successor = self
             .get_thread(&successor_id)?

@@ -576,9 +576,15 @@ mod tests {
         );
         let kind_profiles = Arc::new(KindProfileRegistry::build(None));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
+        let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
-            ThreadLifecycleService::new(state_store.clone(), kind_profiles.clone(), events.clone())
-                .expect("HOSTNAME not set in test environment"),
+            ThreadLifecycleService::new(
+                state_store.clone(),
+                kind_profiles.clone(),
+                events.clone(),
+                event_streams.clone(),
+            )
+            .expect("HOSTNAME not set in test environment"),
         );
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
@@ -609,7 +615,7 @@ mod tests {
             identity: Arc::new(identity),
             threads,
             events,
-            event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+            event_streams,
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
@@ -805,6 +811,40 @@ mod tests {
         )
         .await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
+    }
+
+    #[tokio::test]
+    async fn finalize_publishes_terminal_event_to_live_subscriber() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-pub", "T-pub"))
+            .unwrap();
+
+        // A subscriber attached before finalization must receive the
+        // terminal event live, not only via event-store replay.
+        let mut rx = state.event_streams.subscribe("T-pub");
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-pub".to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: None,
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("terminal event delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "thread_completed");
+        assert_eq!(event.thread_id, "T-pub");
     }
 
     #[tokio::test]
