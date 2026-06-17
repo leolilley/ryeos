@@ -125,18 +125,27 @@ pub enum StudioUiEvent {
         path: String,
     },
     SetAtlasLayerVisible {
+        /// Target tile; `None` (default) targets the ambient backdrop atlas.
+        #[serde(default)]
+        tile_id: Option<String>,
         kind: AtlasItemKind,
         visible: bool,
     },
     SetAtlasLens {
+        #[serde(default)]
+        tile_id: Option<String>,
         lens: AtlasLensVm,
     },
     SetAtlasProjection {
+        #[serde(default)]
+        tile_id: Option<String>,
         projection: AtlasProjectionVm,
         #[serde(default)]
         root: Option<String>,
     },
     SetAtlasFileSpacePath {
+        #[serde(default)]
+        tile_id: Option<String>,
         root: String,
         path: String,
     },

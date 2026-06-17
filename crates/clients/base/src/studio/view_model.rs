@@ -522,7 +522,7 @@ fn presentation_metrics_vm(
         .as_ref()
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
-    let scene_object_count = build_scene_model(core).objects.len();
+    let scene_object_count = build_scene_model(core, &core.ui.atlas).objects.len();
     let activity_level = presentation_activity_level(
         workspace.tile_count,
         core.ui.motion.len(),
@@ -729,7 +729,7 @@ fn dock_tile_vm(
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
-        view: bound_view_vm_keyed(core, &source_key, None, view_ref),
+        view: bound_view_vm_keyed(core, &source_key, None, view_ref, &core.ui.atlas),
         input: instance_input_vm(core, &source_key, view_ref),
     })
 }
@@ -755,6 +755,7 @@ fn bound_view_vm(core: &StudioCore, tile_id: TileId, view_ref: &str) -> StudioVi
         &tile_id.0.to_string(),
         selected_cursor(core, tile_id),
         view_ref,
+        core.tile_atlas_state(tile_id),
     )
 }
 
@@ -763,6 +764,7 @@ fn bound_view_vm_keyed(
     source_key: &str,
     cursor: Option<usize>,
     view_ref: &str,
+    atlas: &crate::atlas::AtlasUiStateVm,
 ) -> StudioViewVm {
     let Some(binding) = core.views.get(view_ref) else {
         return StudioViewVm::Placeholder {
@@ -777,6 +779,22 @@ fn bound_view_vm_keyed(
             title: view_ref.to_string(),
             message: reason.clone(),
         };
+    }
+    // Engine scene widgets render from shared topology/item data + this
+    // tile's atlas arrangement, not from a per-tile source response — so
+    // they dispatch before the source-required arms below.
+    match binding.widget.as_str() {
+        "atlas" => {
+            return StudioViewVm::Atlas {
+                scene: build_scene_model(core, atlas),
+            }
+        }
+        "graph" => {
+            return StudioViewVm::Map {
+                scene: build_scene_model(core, atlas),
+            }
+        }
+        _ => {}
     }
     let response = core.data.sources.get(source_key);
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
@@ -1075,11 +1093,8 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
                 .workspace
                 .tiles
                 .get(tile_id)
-                .and_then(|tile| match &tile.view {
-                    ViewSpec::Bound { view_ref } => {
-                        instance_input_vm(core, &tile_id.0.to_string(), view_ref)
-                    }
-                    _ => None,
+                .and_then(|tile| {
+                    instance_input_vm(core, &tile_id.0.to_string(), &tile.view.view_ref)
                 });
             StudioLayoutNodeVm::Tile {
                 tile_id: tile_id_text(*tile_id),
@@ -1108,15 +1123,9 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
 }
 
 fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
-    match &tile.view {
-        ViewSpec::Bound { view_ref } => bound_view_vm(core, tile_id, view_ref),
-        ViewSpec::Atlas => StudioViewVm::Atlas {
-            scene: build_scene_model(core),
-        },
-        ViewSpec::Graph { .. } => StudioViewVm::Map {
-            scene: build_scene_model(core),
-        },
-    }
+    // Every tile is a bound view; the scene widgets (graph/atlas) dispatch
+    // by `widget` inside `bound_view_vm`.
+    bound_view_vm(core, tile_id, &tile.view.view_ref)
 }
 
 fn session_vm(core: &StudioCore) -> StudioSessionVm {
@@ -1190,29 +1199,13 @@ fn ambient_vm(core: &StudioCore) -> StudioAmbientVm {
     }
 }
 
-/// Launchable views: the surface's embedded content library plus the
-/// two engine ambient views (graph topology, atlas). Nothing here names
-/// a product concept — labels and hints come from the view items.
+/// Launchable views: every view embedded in the effective surface,
+/// graph/atlas included (they are ordinary `view:` items now). Nothing
+/// here names a product concept — labels and hints come from the items.
 pub(crate) fn launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
-    let mut items: Vec<StudioLauncherItemVm> = [
-        (
-            "Graph",
-            "RyeOS topology",
-            ViewSpec::Graph { graph_id: None },
-        ),
-        ("Atlas", "2D namespace map", ViewSpec::Atlas),
-    ]
-    .into_iter()
-    .map(|(label, hint, view)| StudioLauncherItemVm {
-        label: label.to_string(),
-        hint: hint.to_string(),
-        action: StudioAction::OpenView { view: view.clone() },
-        secondary_action: Some(StudioAction::OpenNewView { view }),
-        enabled: true,
-    })
-    .collect();
+    let mut items: Vec<StudioLauncherItemVm> = Vec::new();
     for (view_ref, binding) in &core.views {
-        let view = ViewSpec::Bound {
+        let view = ViewSpec {
             view_ref: view_ref.clone(),
         };
         items.push(StudioLauncherItemVm {
@@ -1392,12 +1385,11 @@ pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> 
 /// project their fetched source; the thread view projects the threads
 /// DTO; ambient views have no rows.
 fn focused_rows(core: &StudioCore, view: &ViewSpec, tile_id: TileId) -> Vec<StudioRowVm> {
-    match view {
-        ViewSpec::Bound { view_ref } => match bound_view_vm(core, tile_id, view_ref) {
-            StudioViewVm::Rows { rows, .. } => rows,
-            _ => Vec::new(),
-        },
-        ViewSpec::Atlas | ViewSpec::Graph { .. } => Vec::new(),
+    // Scene widgets (graph/atlas) render an Atlas/Map VM, not Rows, so the
+    // non-Rows fallback already yields no rows for them.
+    match bound_view_vm(core, tile_id, &view.view_ref) {
+        StudioViewVm::Rows { rows, .. } => rows,
+        _ => Vec::new(),
     }
 }
 

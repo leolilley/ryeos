@@ -1,0 +1,12 @@
+# ryeos:signed:2026-06-17T01:35:08Z:b1227cf88360a384d967418f801fff205401f57bb570ebdc6e28704ea830354f:0KnUhKebMX63lG63VPN/BqXlJ2eXbBeLyn2R6yX2/0CTpxqEffAfyPDGngb3VXZeuB3peOm2NOxbnUznxS9KBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: atlas
+version: "1.0.0"
+description: >-
+  The 2D namespace atlas — items laid out by namespace and kind across the
+  AI-space and file-space projections — built by the engine from live item
+  data. Each atlas tile keeps its own arrangement: which layers are
+  visible, the active lens, and the projection are per-tile, so one surface
+  can host several independent atlas views. The atlas is content (an
+  `atlas` widget), drawn by the one generic scene renderer.
+
+widget: atlas

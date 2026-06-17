@@ -67,7 +67,8 @@ pub struct SurfaceSpec {
     /// COMPUTED from this plus the ordered tile list — never authored.
     #[serde(default)]
     pub tiling: TilingSpec,
-    /// Ordered initial center tiles (`view:<ref>` | `atlas` | `graph`).
+    /// Ordered initial center tiles, each a `view:<ref>` (graph/atlas
+    /// included — they are ordinary `view:` items).
     #[serde(default)]
     pub tiles: Vec<ViewKindSpec>,
     /// Fixed edge slots; an absent edge has no slot.
@@ -357,62 +358,36 @@ impl BorderStyleSpec {
 // View kinds
 // ---------------------------------------------------------------------------
 
-/// Supported view kinds for center tiles. `Bound` carries a `view:` item
-/// ref — views-as-content; the remaining named kinds are sanctioned
-/// structural views.
+/// A center tile as authored in a surface: a `view:` item ref. Every
+/// tile is views-as-content — graph/atlas are ordinary `view:` items
+/// (their `widget:` does the rest), so there are no named structural
+/// kinds. Serializes as the bare ref string the surface YAML carries.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ViewKindSpec {
-    Atlas,
-    Graph,
-    /// A `view:` item reference (views-as-content).
-    Bound(String),
-}
-
-const VIEW_KIND_NAMES: &[(&str, fn() -> ViewKindSpec)] = &[
-    ("atlas", || ViewKindSpec::Atlas),
-    ("graph", || ViewKindSpec::Graph),
-];
+pub struct ViewKindSpec(pub String);
 
 impl Serialize for ViewKindSpec {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if let ViewKindSpec::Bound(view_ref) = self {
-            return serializer.serialize_str(view_ref);
-        }
-        for (name, make) in VIEW_KIND_NAMES {
-            if make() == *self {
-                return serializer.serialize_str(name);
-            }
-        }
-        unreachable!("every non-Bound view kind has a name")
+        serializer.serialize_str(&self.0)
     }
 }
 
 impl<'de> Deserialize<'de> for ViewKindSpec {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        for (name, make) in VIEW_KIND_NAMES {
-            if *name == raw {
-                return Ok(make());
-            }
-        }
         if raw.starts_with("view:") {
-            return Ok(ViewKindSpec::Bound(raw));
+            return Ok(ViewKindSpec(raw));
         }
         Err(serde::de::Error::custom(format!(
-            "unknown pane view `{raw}` (named kind or view: ref expected)"
+            "unknown pane view `{raw}` (view: ref expected)"
         )))
     }
 }
 
 impl ViewKindSpec {
-    /// Convert to a ViewSpec with no ID binding.
+    /// Convert to a runtime ViewSpec.
     pub fn to_view_spec(&self) -> ViewSpec {
-        match self {
-            ViewKindSpec::Atlas => ViewSpec::Atlas,
-            ViewKindSpec::Graph => ViewSpec::Graph { graph_id: None },
-            ViewKindSpec::Bound(view_ref) => ViewSpec::Bound {
-                view_ref: view_ref.clone(),
-            },
+        ViewSpec {
+            view_ref: self.0.clone(),
         }
     }
 
@@ -1042,8 +1017,8 @@ tiling:
   insert: end
 tiles:
   - "view:ryeos/chain/timeline"
-  - atlas
-  - graph
+  - "view:ryeos/atlas"
+  - "view:ryeos/graph/topology"
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
   left: { content: "view:ryeos/threads/list", open: false, size: 32 }
@@ -1059,9 +1034,9 @@ style:
         assert_eq!(spec.tiles.len(), 3);
         assert_eq!(
             spec.tiles[0],
-            ViewKindSpec::Bound("view:ryeos/chain/timeline".into())
+            ViewKindSpec("view:ryeos/chain/timeline".into())
         );
-        assert_eq!(spec.tiles[1], ViewKindSpec::Atlas);
+        assert_eq!(spec.tiles[1], ViewKindSpec("view:ryeos/atlas".into()));
         // Edges not named have no slot.
         assert!(spec.slots.right.is_none());
         assert!(spec.slots.top.is_none());
@@ -1128,22 +1103,24 @@ style:
 
     #[test]
     fn to_workspace_preserves_tile_order() {
-        let spec: SurfaceSpec =
-            serde_yaml::from_str("name: x\ntiles: [\"view:a/b\", graph, atlas]\n").unwrap();
+        let spec: SurfaceSpec = serde_yaml::from_str(
+            "name: x\ntiles: [\"view:a/b\", \"view:ryeos/graph/topology\", \"view:ryeos/atlas\"]\n",
+        )
+        .unwrap();
         let ws = spec.to_workspace();
         let ids = ws.tile_ids();
         assert_eq!(ids.len(), 3);
         assert!(matches!(
             ws.tiles.get(&ids[0]).map(|t| &t.view),
-            Some(ViewSpec::Bound { view_ref }) if view_ref == "view:a/b"
+            Some(ViewSpec { view_ref }) if view_ref == "view:a/b"
         ));
         assert!(matches!(
             ws.tiles.get(&ids[1]).map(|t| &t.view),
-            Some(ViewSpec::Graph { .. })
+            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/graph/topology"
         ));
         assert!(matches!(
             ws.tiles.get(&ids[2]).map(|t| &t.view),
-            Some(ViewSpec::Atlas)
+            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/atlas"
         ));
         assert_eq!(ws.focused_tile, ids[0]);
         // Bound tiles carry generic list local state.
@@ -1231,13 +1208,14 @@ tiles = ["view:ryeos/threads/list"]
 
     #[test]
     fn view_kind_initial_local_state() {
+        // Every tile is a bound view and gets list-local state.
         assert!(matches!(
-            ViewKindSpec::Bound("view:test/x".into()).initial_local_state(),
+            ViewKindSpec("view:test/x".into()).initial_local_state(),
             ViewLocalState::GenericList { .. }
         ));
         assert!(matches!(
-            ViewKindSpec::Atlas.initial_local_state(),
-            ViewLocalState::None
+            ViewKindSpec("view:ryeos/atlas".into()).initial_local_state(),
+            ViewLocalState::GenericList { .. }
         ));
     }
 
@@ -1268,14 +1246,14 @@ tiles = ["view:ryeos/threads/list"]
 
     #[test]
     fn view_kind_to_view_spec_roundtrip() {
-        assert!(matches!(
-            ViewKindSpec::Bound("view:test/x".into()).to_view_spec(),
-            ViewSpec::Bound { .. }
-        ));
-        assert!(matches!(
-            ViewKindSpec::Graph.to_view_spec(),
-            ViewSpec::Graph { .. }
-        ));
+        assert_eq!(
+            ViewKindSpec("view:test/x".into()).to_view_spec(),
+            ViewSpec::bound("view:test/x")
+        );
+        assert_eq!(
+            ViewKindSpec("view:ryeos/graph/topology".into()).to_view_spec(),
+            ViewSpec::bound("view:ryeos/graph/topology")
+        );
     }
 
     #[test]
@@ -1325,9 +1303,21 @@ tiles = ["view:ryeos/threads/list"]
                 "legacy pane name `{legacy}` must be rejected"
             );
         }
-        for kept in ["atlas", "graph", "view:ryeos/threads/list"] {
+        // Bare named kinds are gone — graph/atlas are `view:` refs now.
+        for rejected in ["atlas", "graph"] {
+            let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{rejected}\""));
+            assert!(
+                parsed.is_err(),
+                "bare named kind `{rejected}` must be rejected"
+            );
+        }
+        for kept in [
+            "view:ryeos/threads/list",
+            "view:ryeos/atlas",
+            "view:ryeos/graph/topology",
+        ] {
             let parsed: Result<ViewKindSpec, _> = serde_yaml::from_str(&format!("\"{kept}\""));
-            assert!(parsed.is_ok(), "pane name `{kept}` must parse");
+            assert!(parsed.is_ok(), "view ref `{kept}` must parse");
         }
     }
 
@@ -1349,7 +1339,7 @@ tiles = ["view:ryeos/threads/list"]
         assert!(
             spec.tiles
                 .iter()
-                .any(|tile| matches!(tile, ViewKindSpec::Bound(view_ref)
+                .any(|tile| matches!(tile, ViewKindSpec(view_ref)
                     if view_ref == "view:ryeos/threads/list")),
             "workbench must bind the threads view by ref"
         );
@@ -1522,7 +1512,7 @@ id = "test"
             "provenance": provenance_json("surface:ryeos/studio/graph", []),
             "composed_value": {
                 "name": "graph",
-                "tiles": ["graph"],
+                "tiles": ["view:ryeos/graph/topology"],
                 "affordances": []
             },
             "derived": {},
