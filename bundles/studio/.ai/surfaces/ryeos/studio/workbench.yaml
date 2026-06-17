@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T05:38:46Z:64714c11fe756ced083a2a44b2f89be58aa868bfb756827c01512b01a055b13c:MnWFwrYeyywvVmq0Tzc+ZWIpX3K0bYn6CzPlKMJUId+jJ4SOSY/vjcKLIQpqIhT4cVNE9s/zgT6Z9vVQOG3YDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-17T01:35:08Z:14c93d73342d11d42144edf173211e4c1d47c6200e0962679a737ecf53121e41:Yfo5h2/G9SFeKlWJxm6/jan0huaTFPEX/UraP6OvNNj+nqQamsvu3SHhuS6rqTp2elzTlmMmohU58fkADwSCAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
@@ -10,7 +10,7 @@ tiling:
   insert: end
 
 tiles:
-  - graph
+  - "view:ryeos/graph/topology"
   - "view:ryeos/threads/list"
 
 slots:
@@ -21,6 +21,8 @@ style:
   border: thin
 
 library:
+  - view:ryeos/graph/topology
+  - view:ryeos/atlas
   - view:ryeos/threads/list
   - view:ryeos/item/inspector
   - view:ryeos/chain/timeline

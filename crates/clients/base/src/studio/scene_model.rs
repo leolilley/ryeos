@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::atlas::{
     build_file_space_atlas, build_namespace_atlas, AtlasFileInput, AtlasFileSpaceInput, AtlasInput,
-    AtlasItemInput, AtlasProjectionVm, NamespaceAtlasVm,
+    AtlasItemInput, AtlasProjectionVm, AtlasUiStateVm, NamespaceAtlasVm,
 };
 
 use super::event::StudioAction;
@@ -80,7 +80,12 @@ impl Default for StudioSceneModel {
 
 use super::model::StudioCore;
 
-pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
+/// Build the scene for one atlas arrangement. `atlas` is the relevant
+/// arrangement state: the ambient backdrop (`core.ui.atlas`) for the
+/// empty-center namespace_atlas, or a tile's per-tile state for an Atlas
+/// center tile. The underlying topology/item/file data is shared (global
+/// in `core.data`); `atlas` selects the projection, layers, and lens.
+pub fn build_scene_model(core: &StudioCore, atlas: &AtlasUiStateVm) -> StudioSceneModel {
     let mut scene = StudioSceneModel {
         generation: core.generation,
         ..StudioSceneModel::default()
@@ -321,7 +326,7 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
         capabilities.sort();
         capabilities.dedup();
 
-        if core.ui.atlas.active_projection == AtlasProjectionVm::AiSpace {
+        if atlas.active_projection == AtlasProjectionVm::AiSpace {
             scene.atlas = Some(build_namespace_atlas(AtlasInput {
                 generation: core.generation,
                 root_label: ".ai".to_string(),
@@ -341,12 +346,12 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
                 capabilities,
                 selected_ref,
                 context_refs: atlas_context_refs(core),
-                ui: core.ui.atlas.clone(),
+                ui: atlas.clone(),
             }));
         }
     }
 
-    if core.ui.atlas.active_projection == AtlasProjectionVm::FileSpace {
+    if atlas.active_projection == AtlasProjectionVm::FileSpace {
         let file_space = core.data.file_space.as_ref();
         let selected_ref = core
             .seat
@@ -385,7 +390,7 @@ pub fn build_scene_model(core: &StudioCore) -> StudioSceneModel {
                 })
                 .unwrap_or_default(),
             selected_ref,
-            ui: core.ui.atlas.clone(),
+            ui: atlas.clone(),
         }));
     }
 
@@ -688,7 +693,7 @@ mod tests {
             ..StudioItemsDto::default()
         });
 
-        let scene = build_scene_model(&core);
+        let scene = build_scene_model(&core, &core.ui.atlas);
         let atlas = scene.atlas.expect("atlas");
         assert_eq!(atlas.generation, 42);
         let stack_node = atlas
@@ -722,7 +727,7 @@ mod tests {
             ..Default::default()
         });
 
-        let scene = build_scene_model(&core);
+        let scene = build_scene_model(&core, &core.ui.atlas);
         let node = scene
             .objects
             .iter()
@@ -774,7 +779,7 @@ mod tests {
             ..Default::default()
         });
 
-        let scene = build_scene_model(&core);
+        let scene = build_scene_model(&core, &core.ui.atlas);
         let edge = scene
             .objects
             .iter()

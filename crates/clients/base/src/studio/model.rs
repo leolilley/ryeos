@@ -298,8 +298,17 @@ pub struct StudioUiState {
     pub input_buffers: BTreeMap<String, StudioInputState>,
     #[serde(default)]
     pub docks: StudioDockState,
+    /// Ambient/backdrop atlas state — the empty-center `namespace_atlas`
+    /// background. Surface-level, not a tile. Per-tile Atlas tiles keep
+    /// their own arrangement in [`Self::tile_atlas`].
     #[serde(default)]
     pub atlas: AtlasUiStateVm,
+    /// Per-tile atlas arrangements, keyed by tile id (string). Atlas/graph
+    /// were never meant to show one fixed thing — a surface can host
+    /// several independent atlas tiles, each with its own layers, lens,
+    /// and projection. A tile with no entry falls back to [`Self::atlas`].
+    #[serde(default)]
+    pub tile_atlas: BTreeMap<String, AtlasUiStateVm>,
     pub motion: Vec<StudioMotionEventVm>,
     pub loading: BTreeMap<String, bool>,
     pub notices: Vec<StudioNotice>,
@@ -319,6 +328,7 @@ impl Default for StudioUiState {
             input_buffers: BTreeMap::new(),
             docks: StudioDockState::default(),
             atlas: AtlasUiStateVm::default(),
+            tile_atlas: BTreeMap::new(),
             motion: Vec::new(),
             loading: BTreeMap::new(),
             notices: Vec::new(),
@@ -477,18 +487,21 @@ impl StudioCore {
             let Some(tile) = self.workspace.tiles.get(&tile_id) else {
                 continue;
             };
-            match &tile.view {
-                ViewSpec::Bound { view_ref } => {
-                    bound_tiles.push((tile_id, view_ref.clone()));
-                }
-                ViewSpec::Atlas => {
-                    match self.ui.atlas.active_projection {
+            let view_ref = tile.view.view_ref.clone();
+            bound_tiles.push((tile_id, view_ref.clone()));
+            // The scene widgets need engine data the generic source path
+            // doesn't carry: graph wants topology, atlas wants topology plus
+            // items or file space (per this tile's projection).
+            match self.views.get(&view_ref).map(|binding| binding.widget.as_str()) {
+                Some("atlas") => {
+                    match self.tile_atlas_state(tile_id).active_projection {
                         crate::atlas::AtlasProjectionVm::AiSpace => needs_atlas_items = true,
                         crate::atlas::AtlasProjectionVm::FileSpace => needs_file_space = true,
                     }
                     needs_topology = true;
                 }
-                ViewSpec::Graph { .. } => needs_topology = true,
+                Some("graph") => needs_topology = true,
+                _ => {}
             }
         }
 
@@ -538,9 +551,7 @@ impl StudioCore {
             .into_iter()
             .filter_map(|tile_id| {
                 let tile = self.workspace.tiles.get(&tile_id)?;
-                let ViewSpec::Bound { view_ref } = &tile.view else {
-                    return None;
-                };
+                let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
                 (binding.refresh.get("on_hint").and_then(|v| v.as_str()) == Some(kind))
                     .then(|| (tile_id, view_ref.clone()))
@@ -643,6 +654,15 @@ impl StudioCore {
         self.generation = self.generation.saturating_add(1);
     }
 
+    /// Atlas arrangement for a specific tile, falling back to the ambient
+    /// backdrop state when the tile has no per-tile entry yet.
+    pub(crate) fn tile_atlas_state(&self, tile_id: crate::ids::TileId) -> &AtlasUiStateVm {
+        self.ui
+            .tile_atlas
+            .get(&tile_id.0.to_string())
+            .unwrap_or(&self.ui.atlas)
+    }
+
     pub fn notice(&mut self, message: impl Into<String>, tone: StudioTone) {
         let id = format!("notice:{}", self.generation.saturating_add(1));
         self.ui.notices.push(StudioNotice {
@@ -663,7 +683,7 @@ impl StudioCore {
             schema_version: "ryeos.studio.envelope.v1".to_string(),
             generation: self.generation,
             view_model: super::view_model::build_view_model(self),
-            scene_model: super::scene_model::build_scene_model(self),
+            scene_model: super::scene_model::build_scene_model(self, &self.ui.atlas),
             effects,
         }
     }
@@ -688,7 +708,7 @@ impl StudioCore {
     pub fn focused_input_instance(&self) -> Option<(InputBufferKey, String)> {
         // Focused center tile first.
         let focused = self.workspace.focused_tile;
-        if let Some(ViewSpec::Bound { view_ref }) =
+        if let Some(ViewSpec { view_ref }) =
             self.workspace.tiles.get(&focused).map(|tile| &tile.view)
         {
             if let Some(input) = self.views.get(view_ref).and_then(|b| b.input.as_ref()) {
