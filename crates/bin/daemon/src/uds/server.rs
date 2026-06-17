@@ -848,6 +848,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_publishes_thread_cancelled_to_live_subscriber() {
+        // Cancellation finalizes through the same publish path; a subscriber
+        // attached after prior events still receives `thread_cancelled`.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-cancel", "T-cancel"))
+            .unwrap();
+        state.threads.mark_running("T-cancel").unwrap();
+
+        let mut rx = state.event_streams.subscribe("T-cancel");
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-cancel".to_string(),
+                status: "cancelled".to_string(),
+                outcome_code: Some("cancelled".to_string()),
+                result: None,
+                error: Some(serde_json::json!({ "reason": "cancelled_by_request" })),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cancellation delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "thread_cancelled");
+        assert_eq!(event.thread_id, "T-cancel");
+    }
+
+    #[tokio::test]
     async fn runtime_finalize_missing_token_returns_error() {
         let (_tmp, state) = setup_app_state();
         state
