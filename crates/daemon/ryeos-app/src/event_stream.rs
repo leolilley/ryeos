@@ -147,36 +147,82 @@ impl ThreadEventHub {
     }
 }
 
-/// RAII subscription guard for stream endpoints. Holds the hub and the
-/// threads a stream is following; on drop it reclaims each thread's sender
-/// via `remove_if_idle`, so a stream that ends (client disconnect, thread
-/// completion) leaves no idle broadcast sender behind. A chain tail that
-/// follows successive heads records each, and all are reclaimed at end.
+/// RAII subscription guard for stream endpoints. It OWNS the receiver so
+/// cleanup order is guaranteed: reclamation only runs after the receiver is
+/// dropped, so `remove_if_idle` sees the true receiver count. A stream that
+/// ends (client disconnect, thread completion) therefore leaves no idle
+/// broadcast sender behind, even on the common single-subscriber path.
+///
+/// A chain tail follows successive heads with [`Self::follow`], which drops
+/// the previous head's receiver and reclaims it immediately rather than
+/// holding idle senders for the life of a long chain; every followed head is
+/// also reclaimed as a backstop on drop.
 pub struct HubSubscription {
     hub: Arc<ThreadEventHub>,
-    threads: Vec<String>,
+    followed: Vec<String>,
+    current: String,
+    rx: Option<broadcast::Receiver<PersistedEventRecord>>,
 }
 
 impl HubSubscription {
-    pub fn new(hub: Arc<ThreadEventHub>) -> Self {
+    /// Subscribe to `thread_id` and take ownership of the receiver.
+    pub fn new(hub: Arc<ThreadEventHub>, thread_id: &str) -> Self {
+        let rx = hub.subscribe(thread_id);
         Self {
             hub,
-            threads: Vec::new(),
+            followed: vec![thread_id.to_owned()],
+            current: thread_id.to_owned(),
+            rx: Some(rx),
         }
     }
 
-    /// Subscribe to a thread's live lane and record it for reclamation.
-    pub fn subscribe(&mut self, thread_id: &str) -> broadcast::Receiver<PersistedEventRecord> {
-        if !self.threads.iter().any(|existing| existing == thread_id) {
-            self.threads.push(thread_id.to_owned());
+    /// Receive the next live event for the current head.
+    pub async fn recv(
+        &mut self,
+    ) -> Result<PersistedEventRecord, broadcast::error::RecvError> {
+        self.rx
+            .as_mut()
+            .expect("receiver present until drop")
+            .recv()
+            .await
+    }
+
+    /// Non-blocking receive for draining buffered events (e.g. after a launch
+    /// task joins).
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<PersistedEventRecord, broadcast::error::TryRecvError> {
+        self.rx
+            .as_mut()
+            .expect("receiver present until drop")
+            .try_recv()
+    }
+
+    /// Follow a new head: drop the previous receiver, reclaim the previous
+    /// head's sender if now idle, then subscribe to the new head. No-op when
+    /// already on `thread_id`.
+    pub fn follow(&mut self, thread_id: &str) {
+        if thread_id == self.current {
+            return;
         }
-        self.hub.subscribe(thread_id)
+        // Subscribe first, then replace — dropping the old receiver — and
+        // reclaim the old head before recording the new one.
+        let new_rx = self.hub.subscribe(thread_id);
+        self.rx = Some(new_rx);
+        let previous = std::mem::replace(&mut self.current, thread_id.to_owned());
+        self.hub.remove_if_idle(&previous);
+        if !self.followed.iter().any(|existing| existing == thread_id) {
+            self.followed.push(thread_id.to_owned());
+        }
     }
 }
 
 impl Drop for HubSubscription {
     fn drop(&mut self) {
-        for thread_id in &self.threads {
+        // Drop the receiver FIRST so `remove_if_idle` sees the decremented
+        // count; otherwise the still-live receiver would keep the sender.
+        self.rx = None;
+        for thread_id in &self.followed {
             self.hub.remove_if_idle(thread_id);
         }
     }
@@ -286,27 +332,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hub_subscription_reclaims_senders_on_drop() {
+    async fn hub_subscription_reclaims_owned_sender_on_drop() {
         let hub = Arc::new(ThreadEventHub::new(8));
         {
-            let mut sub = HubSubscription::new(hub.clone());
-            let _rx1 = sub.subscribe("T-1");
-            let _rx2 = sub.subscribe("T-2");
-            assert_eq!(hub.inner.lock().unwrap().len(), 2);
-            // Receivers drop with the guard; the guard reclaims both senders.
+            let _sub = HubSubscription::new(hub.clone(), "T-1");
+            assert_eq!(hub.inner.lock().unwrap().len(), 1);
+            // The guard owns the receiver, so its drop reclaims the sender
+            // (no separate live receiver can keep it).
         }
         assert_eq!(hub.inner.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
-    async fn hub_subscription_keeps_senders_with_a_live_receiver() {
+    async fn hub_subscription_follow_reclaims_old_head_immediately() {
         let hub = Arc::new(ThreadEventHub::new(8));
-        let mut sub = HubSubscription::new(hub.clone());
-        let rx = sub.subscribe("T-live");
-        drop(sub);
-        // The guard tried to reclaim, but a live receiver remains, so the
-        // sender stays.
+        let mut sub = HubSubscription::new(hub.clone(), "T-head1");
         assert_eq!(hub.inner.lock().unwrap().len(), 1);
-        drop(rx);
+        sub.follow("T-head2");
+        // Old head reclaimed on switch (not held until stream end); only the
+        // new head's sender remains.
+        let keys: Vec<String> = hub.inner.lock().unwrap().keys().cloned().collect();
+        assert_eq!(keys, vec!["T-head2".to_string()]);
+        drop(sub);
+        assert_eq!(hub.inner.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn hub_subscription_keeps_sender_for_another_live_subscriber() {
+        let hub = Arc::new(ThreadEventHub::new(8));
+        let other = hub.subscribe("T-shared");
+        {
+            let _sub = HubSubscription::new(hub.clone(), "T-shared");
+            assert_eq!(hub.inner.lock().unwrap().len(), 1);
+        }
+        // The guard dropped its own receiver, but another subscriber remains,
+        // so the sender is kept.
+        assert_eq!(hub.inner.lock().unwrap().len(), 1);
+        drop(other);
     }
 }

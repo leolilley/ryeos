@@ -214,24 +214,14 @@ impl ThreadLifecycleService {
     }
 
     /// Publish persisted lifecycle records to live subscribers after the
-    /// state-store write succeeded (persistence-first). Records are grouped
-    /// by thread — a continuation touches both the source and successor
-    /// threads — so each thread's subscribers receive its events in
-    /// persisted (`chain_seq`) order under one hub lock. No-op when empty.
+    /// state-store write succeeded (persistence-first). Records are published
+    /// in their original (`chain_seq`) order, each to its OWN thread's lane —
+    /// a continuation touches both the source (`thread_continued`) and
+    /// successor (`thread_created`) threads, and the firehose lane must see
+    /// them in persisted order, so no per-thread regrouping. No-op when empty.
     fn publish_records(&self, records: &[PersistedEventRecord]) {
-        if records.is_empty() {
-            return;
-        }
-        let mut by_thread: std::collections::HashMap<&str, Vec<PersistedEventRecord>> =
-            std::collections::HashMap::new();
         for record in records {
-            by_thread
-                .entry(record.thread_id.as_str())
-                .or_default()
-                .push(record.clone());
-        }
-        for (thread_id, thread_records) in by_thread {
-            self.event_hub.publish_batch(thread_id, &thread_records);
+            self.event_hub.publish(&record.thread_id, record.clone());
         }
     }
 
@@ -667,7 +657,7 @@ impl ThreadLifecycleService {
         )
     )]
     pub fn publish_artifact(&self, params: &ArtifactPublishParams) -> Result<ThreadArtifactRecord> {
-        let (artifact, _persisted) = self.state_store.publish_artifact(
+        let (artifact, persisted) = self.state_store.publish_artifact(
             &params.thread_id,
             &NewArtifactRecord {
                 artifact_type: params.artifact_type.clone(),
@@ -676,6 +666,7 @@ impl ThreadLifecycleService {
                 metadata: params.metadata.clone(),
             },
         )?;
+        self.publish_records(std::slice::from_ref(&persisted));
         Ok(artifact)
     }
 

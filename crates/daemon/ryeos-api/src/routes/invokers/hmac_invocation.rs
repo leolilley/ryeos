@@ -1276,12 +1276,13 @@ mod tests {
         let events = std::sync::Arc::new(ryeos_app::event_store_service::EventStoreService::new(
             state_store.clone(),
         ));
+        let event_streams = std::sync::Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16));
         let threads = std::sync::Arc::new(
             ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
                 state_store.clone(),
                 kind_profiles.clone(),
                 events.clone(),
-                std::sync::Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
+                event_streams.clone(),
             )
             .expect("HOSTNAME not set in test environment"),
         );
@@ -1319,7 +1320,7 @@ mod tests {
             identity: std::sync::Arc::new(identity),
             threads,
             events,
-            event_streams: std::sync::Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
+            event_streams,
             commands,
             callback_tokens: std::sync::Arc::new(
                 ryeos_app::callback_token::CallbackCapabilityStore::new(),

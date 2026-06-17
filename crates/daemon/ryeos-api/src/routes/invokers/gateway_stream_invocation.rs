@@ -332,8 +332,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let hub = ctx.state.event_streams.clone();
         // Subscribe before launch so no live event is missed; the guard
         // (moved into the stream below) reclaims the sender at stream end.
-        let mut sub = ryeos_app::event_stream::HubSubscription::new(hub);
-        let mut rx = sub.subscribe(&thread_id);
+        let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
         let options = crate::routes::launch::DispatchLaunchOptions {
             launch_mode: req.launch_mode,
@@ -364,9 +363,9 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
         let stream = async_stream::stream! {
             let _guard = span.enter();
-            // Move the subscription guard into the stream so the sender is
-            // reclaimed when the stream ends.
-            let _sub = sub;
+            // Move the subscription guard (which owns the receiver) into the
+            // stream so the sender is reclaimed when the stream ends.
+            let mut sub = sub;
             yield Ok(
                 RouteStreamEnvelope::new(
                     "stream_started",
@@ -379,7 +378,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
             loop {
                 tokio::select! {
-                    recv_result = rx.recv() => {
+                    recv_result = sub.recv() => {
                         match recv_result {
                             Ok(ev) => {
                                 let event_type = ev.event_type.clone();
@@ -461,7 +460,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                         match join_result {
                             Ok(Ok(())) => {
                                 loop {
-                                    match rx.try_recv() {
+                                    match sub.try_recv() {
                                         Ok(ev) => {
                                             if is_ephemeral(&ev) {
                                                 yield Ok(envelope_for_persisted(&ev));

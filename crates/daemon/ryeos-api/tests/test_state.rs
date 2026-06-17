@@ -46,12 +46,13 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));
+    let event_streams = Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16));
     let threads = Arc::new(
         ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
             state_store.clone(),
             kind_profiles.clone(),
             events.clone(),
-            Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
+            event_streams.clone(),
         )
         .expect("HOSTNAME not set in test environment"),
     );
@@ -80,6 +81,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         events,
         commands,
         write_barrier,
+        event_streams,
     )
 }
 
@@ -150,6 +152,7 @@ fn build_app_state(
     events: Arc<ryeos_app::event_store_service::EventStoreService>,
     commands: Arc<ryeos_app::command_service::CommandService>,
     write_barrier: ryeos_app::write_barrier::WriteBarrier,
+    event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
 ) -> (tempfile::TempDir, AppState) {
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         bundles: vec![],
@@ -172,7 +175,7 @@ fn build_app_state(
         identity: Arc::new(identity),
         threads,
         events,
-        event_streams: Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16)),
+        event_streams,
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
