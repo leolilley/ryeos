@@ -121,6 +121,7 @@ impl StudioCore {
                                 (atlas.file_space_root.clone(), atlas.file_space_path.clone())
                             };
                             vec![self.emit(StudioEffectKind::FetchFileSpace {
+                                tile_id: tile_id.clone(),
                                 root,
                                 path,
                                 max_depth: 8,
@@ -151,6 +152,7 @@ impl StudioCore {
                         (atlas.file_space_root.clone(), atlas.file_space_path.clone())
                     };
                     vec![self.emit(StudioEffectKind::FetchFileSpace {
+                        tile_id: tile_id.clone(),
                         root,
                         path,
                         max_depth: 8,
@@ -820,6 +822,7 @@ impl StudioCore {
         self.active_workspace = index;
         self.data.tile_items.clear();
         self.data.tile_files.clear();
+        self.data.tile_file_space.clear();
         self.data.file_read = None;
         self.push_motion(StudioMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -1309,6 +1312,7 @@ impl StudioCore {
                 self.data.items = None;
                 self.data.file_space = None;
                 self.data.tile_items.clear();
+                self.data.tile_file_space.clear();
                 self.data.files = None;
                 self.data.tile_files.clear();
                 self.data.file_read = None;
@@ -1357,7 +1361,17 @@ impl StudioCore {
             StudioEffectResultKind::FileSpace => {
                 self.apply_parsed::<StudioFileSpaceDto>(data, "file_space", |core, file_space| {
                     if effect_matches_current_file_space(Some(&expected), core, &file_space) {
-                        core.data.file_space = Some(file_space);
+                        if let StudioEffectKind::FetchFileSpace {
+                            tile_id: Some(tile_id),
+                            ..
+                        } = &expected
+                        {
+                            core.data
+                                .tile_file_space
+                                .insert(tile_id.clone(), file_space);
+                        } else {
+                            core.data.file_space = Some(file_space);
+                        }
                     }
                 });
             }
@@ -1614,16 +1628,30 @@ fn effect_matches_current_items(expected: Option<&StudioEffectKind>, core: &Stud
     else {
         return true;
     };
-    if tile_id.is_none() {
+    let Some(tile_id) = tile_id.as_deref() else {
+        // The shared/ambient fetch is unscoped.
         return query.is_none() && kind.is_none();
-    }
-    let Some(tile_id) = tile_id.as_deref().and_then(parse_tile_id) else {
+    };
+    // A tile-scoped fetch is current iff that tile still binds an atlas view
+    // whose declared `body.scope` still matches this fetch's (query, kind) —
+    // content is the scope, so a re-bound or re-scoped tile drops the stale
+    // response instead of caching it.
+    let Some(tile_id) = parse_tile_id(tile_id) else {
         return false;
     };
-    // Tile-scoped item filters died with the legacy item tiles; only
-    // untargeted (atlas) fetches remain valid.
-    let _ = (core, tile_id);
-    query.is_none() && kind.is_none()
+    let Some(binding) = core
+        .workspace
+        .tiles
+        .get(&tile_id)
+        .and_then(|tile| core.views.get(&tile.view.view_ref))
+    else {
+        return false;
+    };
+    if binding.widget != "atlas" {
+        return false;
+    }
+    let (want_query, want_kind) = super::model::atlas_item_scope(binding);
+    &want_query == query && &want_kind == kind
 }
 
 fn effect_matches_current_files(
@@ -1652,14 +1680,24 @@ fn effect_matches_current_file_space(
     core: &StudioCore,
     file_space: &StudioFileSpaceDto,
 ) -> bool {
-    let Some(StudioEffectKind::FetchFileSpace { root, path, .. }) = expected else {
+    let Some(StudioEffectKind::FetchFileSpace {
+        tile_id, root, path, ..
+    }) = expected
+    else {
         return true;
     };
-    core.ui.atlas.active_projection.is_file_space()
-        && root == &core.ui.atlas.file_space_root
-        && path == &core.ui.atlas.file_space_path
-        && root == &file_space.root
-        && path == &file_space.path
+    let response_matches = root == &file_space.root && path == &file_space.path;
+    // Per-tile fetch: validate against THIS tile's file-space arrangement;
+    // the shared fetch validates against the ambient atlas state.
+    let atlas = match tile_id.as_deref().map(parse_tile_id) {
+        Some(Some(tile_id)) => core.tile_atlas_state(tile_id),
+        Some(None) => return false,
+        None => &core.ui.atlas,
+    };
+    atlas.active_projection.is_file_space()
+        && root == &atlas.file_space_root
+        && path == &atlas.file_space_path
+        && response_matches
 }
 
 fn effect_matches_current_file_read(
@@ -1980,7 +2018,7 @@ mod tests {
             },
         });
 
-        let scene = crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas);
+        let scene = crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas surface should build scene atlas");
         assert_eq!(atlas.root_label, ".ai");
         assert!(atlas

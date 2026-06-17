@@ -535,7 +535,9 @@ fn presentation_metrics_vm(
         .as_ref()
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
-    let scene_object_count = build_scene_model(core, &core.ui.atlas).objects.len();
+    let scene_object_count = build_scene_model(core, &core.ui.atlas, None, None)
+        .objects
+        .len();
     let activity_level = presentation_activity_level(
         workspace.tile_count,
         core.ui.motion.len(),
@@ -798,13 +800,21 @@ fn bound_view_vm_keyed(
     // they dispatch before the source-required arms below.
     match binding.widget.as_str() {
         "atlas" => {
+            // This tile's own scoped dataset when it has one (keyed by tile
+            // id == source_key); otherwise None falls back to the shared data.
             return StudioViewVm::Atlas {
-                scene: build_scene_model(core, atlas),
+                scene: build_scene_model(
+                    core,
+                    atlas,
+                    core.data.tile_items.get(source_key),
+                    core.data.tile_file_space.get(source_key),
+                ),
             }
         }
         "graph" => {
+            // Graph renders shared topology; no per-tile content scope yet.
             return StudioViewVm::Map {
-                scene: build_scene_model(core, atlas),
+                scene: build_scene_model(core, atlas, None, None),
             }
         }
         _ => {}

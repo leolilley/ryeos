@@ -358,6 +358,10 @@ pub struct StudioDataState {
     pub files: Option<StudioFilesDto>,
     pub file_space: Option<StudioFileSpaceDto>,
     pub tile_files: HashMap<String, StudioFilesDto>,
+    /// Per-tile file-space, keyed by tile id, for atlas tiles whose
+    /// `body.scope` declares a file-space root/path. Absent tile → the
+    /// shared `file_space` (ambient / scopeless tiles).
+    pub tile_file_space: HashMap<String, StudioFileSpaceDto>,
     pub file_read: Option<StudioFileReadDto>,
     /// Command records from `service:commands/list` (completion data;
     /// open JSON — projected, never typed per-command).
@@ -377,6 +381,25 @@ pub struct StudioDataState {
 // The live cognition buffer type + its accumulation logic live with the rest
 // of the thread-execution-stream concern in `super::timeline`.
 pub use super::timeline::StudioLiveDelta;
+
+/// An atlas tile's content scope is declared in its view `body.scope`
+/// (content, not engine code): `{ kind, query }` narrow the AiSpace items.
+/// Returns `(query, kind)`; either/both `None` when undeclared — such a
+/// tile shares the global atlas dataset rather than fetching its own.
+pub(crate) fn atlas_item_scope(
+    binding: &super::content::ViewBinding,
+) -> (Option<String>, Option<String>) {
+    let scope = binding.body.get("scope");
+    let field = |key: &str| {
+        scope
+            .and_then(|s| s.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    (field("query"), field("kind"))
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioRuntimeState {
@@ -485,12 +508,21 @@ impl StudioCore {
     pub fn initial_effects(&mut self) -> Vec<StudioEffect> {
         let needs_atlas = self.surface_uses_atlas_ambient();
         let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
-        let mut needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
+        let needs_file_space = needs_atlas && self.ui.atlas.active_projection.is_file_space();
         // An empty center can host the ambient topology background; the
         // backdrop scene itself is client-side, but the atlas ambient
         // still wants topology when no tiles occupy the center.
         let mut needs_topology = self.workspace.center_is_empty();
         let mut bound_tiles: Vec<(crate::ids::TileId, String)> = Vec::new();
+        // Per-tile scene-data fetches: an atlas tile whose `body.scope`
+        // declares an item scope, or whose file-space projection has its own
+        // arrangement, fetches its OWN data keyed to the tile — so two atlas
+        // tiles can show genuinely different content, not just different
+        // projections of one shared dataset. Scopeless tiles fall through to
+        // the shared global fetch below (no regression).
+        let mut tile_item_fetches: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        let mut tile_file_fetches: Vec<(String, String, String)> = Vec::new();
+        let has_project = self.has_project_bound();
 
         for tile_id in self.workspace.tile_ids() {
             let Some(tile) = self.workspace.tiles.get(&tile_id) else {
@@ -503,11 +535,35 @@ impl StudioCore {
             // items or file space (per this tile's projection).
             match self.views.get(&view_ref).map(|binding| binding.widget.as_str()) {
                 Some("atlas") => {
-                    match self.tile_atlas_state(tile_id).active_projection {
-                        crate::atlas::AtlasProjectionVm::AiSpace => needs_atlas_items = true,
-                        crate::atlas::AtlasProjectionVm::FileSpace => needs_file_space = true,
-                    }
                     needs_topology = true;
+                    match self.tile_atlas_state(tile_id).active_projection {
+                        crate::atlas::AtlasProjectionVm::AiSpace => {
+                            let scope = self
+                                .views
+                                .get(&view_ref)
+                                .map(atlas_item_scope)
+                                .unwrap_or_default();
+                            if scope.0.is_some() || scope.1.is_some() {
+                                tile_item_fetches.push((
+                                    tile_id.0.to_string(),
+                                    scope.0,
+                                    scope.1,
+                                ));
+                            } else {
+                                needs_atlas_items = true;
+                            }
+                        }
+                        crate::atlas::AtlasProjectionVm::FileSpace => {
+                            if has_project {
+                                let atlas = self.tile_atlas_state(tile_id);
+                                tile_file_fetches.push((
+                                    tile_id.0.to_string(),
+                                    atlas.file_space_root.clone(),
+                                    atlas.file_space_path.clone(),
+                                ));
+                            }
+                        }
+                    }
                 }
                 Some("graph") => needs_topology = true,
                 _ => {}
@@ -529,6 +585,23 @@ impl StudioCore {
                 effects.push(effect);
             }
         }
+        for (tile_id, query, kind) in tile_item_fetches {
+            effects.push(self.emit(StudioEffectKind::FetchItems {
+                tile_id: Some(tile_id),
+                query,
+                kind,
+                limit: 1000,
+            }));
+        }
+        for (tile_id, root, path) in tile_file_fetches {
+            effects.push(self.emit(StudioEffectKind::FetchFileSpace {
+                tile_id: Some(tile_id),
+                root,
+                path,
+                max_depth: 8,
+                max_entries: 3000,
+            }));
+        }
         if needs_atlas_items {
             effects.push(self.emit(StudioEffectKind::FetchItems {
                 tile_id: None,
@@ -539,6 +612,7 @@ impl StudioCore {
         }
         if needs_file_space && self.has_project_bound() {
             effects.push(self.emit(StudioEffectKind::FetchFileSpace {
+                tile_id: None,
                 root: self.ui.atlas.file_space_root.clone(),
                 path: self.ui.atlas.file_space_path.clone(),
                 max_depth: 8,
@@ -692,7 +766,7 @@ impl StudioCore {
             schema_version: "ryeos.studio.envelope.v1".to_string(),
             generation: self.generation,
             view_model: super::view_model::build_view_model(self),
-            scene_model: super::scene_model::build_scene_model(self, &self.ui.atlas),
+            scene_model: super::scene_model::build_scene_model(self, &self.ui.atlas, None, None),
             effects,
         }
     }
@@ -868,6 +942,68 @@ mod tests {
         let (source_ref, params) = fetch.expect("bound tile emits FetchSource");
         assert_eq!(source_ref, "service:ui/studio/threads");
         assert_eq!(params["limit"], 5);
+    }
+
+    #[test]
+    fn scoped_atlas_tiles_emit_independent_per_tile_item_fetches() {
+        // Two atlas tiles, each a distinct view item declaring its own
+        // `body.scope` — content-addressed scope. Each must fetch its OWN
+        // items (tile-scoped), so the tiles can show different content sets.
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/atlas/knowledge", "view:ryeos/atlas/services"],
+                "views": {
+                    "view:ryeos/atlas/knowledge": { "widget": "atlas", "body": { "scope": { "kind": "knowledge" } } },
+                    "view:ryeos/atlas/services": { "widget": "atlas", "body": { "scope": { "kind": "service" } } }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let fetches: Vec<(Option<String>, Option<String>)> = core
+            .initial_effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchItems { tile_id, kind, .. } => {
+                    Some((tile_id.clone(), kind.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        // One tile-scoped fetch per atlas tile, each carrying its kind; no
+        // unscoped/global fetch (both tiles declare a scope).
+        assert_eq!(fetches.len(), 2, "{fetches:?}");
+        assert!(fetches.iter().all(|(tile_id, _)| tile_id.is_some()));
+        let kinds: Vec<String> = fetches.iter().filter_map(|(_, k)| k.clone()).collect();
+        assert!(kinds.contains(&"knowledge".to_string()), "{kinds:?}");
+        assert!(kinds.contains(&"service".to_string()), "{kinds:?}");
+    }
+
+    #[test]
+    fn scopeless_atlas_tile_falls_back_to_the_shared_item_fetch() {
+        // An atlas tile with no declared scope shares the global dataset —
+        // one unscoped (tile_id: None) fetch, no regression.
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/atlas"],
+                "views": { "view:ryeos/atlas": { "widget": "atlas" } }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let fetches: Vec<Option<String>> = core
+            .initial_effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchItems { tile_id, .. } => Some(tile_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fetches, vec![None]);
     }
 
     #[test]

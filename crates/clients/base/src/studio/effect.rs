@@ -46,6 +46,10 @@ pub enum StudioEffectKind {
         path: String,
     },
     FetchFileSpace {
+        /// Present when this fetch is scoped to a single atlas tile (its
+        /// `body.scope` declares a file-space root/path); the response is
+        /// cached per tile. Absent = the shared/ambient file space.
+        tile_id: Option<String>,
         root: String,
         path: String,
         max_depth: usize,
