@@ -465,8 +465,21 @@ fn focused_tile_title(core: &StudioCore) -> String {
     core.workspace
         .tiles
         .get(&core.workspace.focused_tile)
-        .map(|tile| tile.view.title())
+        .map(|tile| tile_title(core, &tile.view))
         .unwrap_or_else(|| "home".to_string())
+}
+
+/// Tile/launcher title for a bound view: prefer the view item's authored
+/// `name:` (content), fall back to the ref tail when none is declared. The
+/// authored label is content too — "views are content" extends to the title.
+fn tile_title(core: &StudioCore, view: &crate::workspace::ViewSpec) -> String {
+    core.views
+        .get(&view.view_ref)
+        .and_then(|binding| binding.name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| view.title())
 }
 
 fn layout_symbol(core: &StudioCore) -> String {
@@ -1087,7 +1100,7 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
                 .workspace
                 .tiles
                 .get(tile_id)
-                .map(|tile| tile.view.title())
+                .map(|tile| tile_title(core, &tile.view))
                 .unwrap_or_else(|| "Missing".to_string());
             let input = core
                 .workspace
@@ -1209,10 +1222,20 @@ pub(crate) fn launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
             view_ref: view_ref.clone(),
         };
         items.push(StudioLauncherItemVm {
-            label: view_ref
-                .strip_prefix("view:")
-                .unwrap_or(view_ref)
-                .to_string(),
+            // Prefer the view item's authored name; fall back to the ref
+            // (sans `view:` prefix) so unnamed views still identify.
+            label: binding
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    view_ref
+                        .strip_prefix("view:")
+                        .unwrap_or(view_ref)
+                        .to_string()
+                }),
             hint: binding
                 .description
                 .clone()
@@ -1542,6 +1565,63 @@ mod tests {
         let vm = build_view_model(&core);
         assert!(vm.workspace.center_is_empty);
         assert!(vm.workspace.backdrop.is_none());
+    }
+
+    fn session_with_views(views: serde_json::Value, tiles: serde_json::Value) -> StudioCore {
+        let session = crate::studio::model::BrowserSession {
+            session_id: "S-title".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            effective_surface: Some(json!({
+                "name": "studio-base",
+                "tiles": tiles,
+                "views": views,
+            })),
+            ..Default::default()
+        };
+        StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn tile_title_prefers_authored_name_over_ref_tail() {
+        let core = session_with_views(
+            json!({ "view:ryeos/graph/topology": { "widget": "graph", "name": "Topology" } }),
+            json!(["view:ryeos/graph/topology"]),
+        );
+        // Authored name wins over the ref tail ("topology").
+        assert_eq!(focused_tile_title(&core), "Topology");
+    }
+
+    #[test]
+    fn tile_title_falls_back_to_ref_tail_when_name_absent_or_blank() {
+        let absent = session_with_views(
+            json!({ "view:ryeos/graph/topology": { "widget": "graph" } }),
+            json!(["view:ryeos/graph/topology"]),
+        );
+        assert_eq!(focused_tile_title(&absent), "topology");
+
+        let blank = session_with_views(
+            json!({ "view:ryeos/graph/topology": { "widget": "graph", "name": "  " } }),
+            json!(["view:ryeos/graph/topology"]),
+        );
+        assert_eq!(focused_tile_title(&blank), "topology");
+    }
+
+    #[test]
+    fn launcher_label_prefers_authored_name_else_stripped_ref() {
+        let core = session_with_views(
+            json!({
+                "view:ryeos/atlas": { "widget": "atlas", "name": "Atlas", "description": "the namespace atlas" },
+                "view:ryeos/x/raw": { "widget": "rows" },
+            }),
+            json!([]),
+        );
+        let items = launcher_items(&core);
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(labels.contains(&"Atlas"), "named view uses its name: {labels:?}");
+        assert!(
+            labels.contains(&"ryeos/x/raw"),
+            "unnamed view falls back to stripped ref: {labels:?}"
+        );
     }
 
     #[test]
