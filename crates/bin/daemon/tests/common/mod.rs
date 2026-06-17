@@ -184,6 +184,7 @@ pub fn ensure_bundles_fresh() {
             .arg(root.join("scripts/populate-bundles.sh"))
             .arg("--key").arg(&key)
             .arg("--owner").arg("ryeos-dev")
+            .arg("--all")
             .current_dir(&root)
             .status()
             .expect("failed to invoke scripts/populate-bundles.sh");
