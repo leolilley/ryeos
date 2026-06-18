@@ -632,7 +632,9 @@ async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> R
     let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
     let url = format!("{daemon_url}{route_path}");
 
-    let mut failure: Option<String> = None;
+    // Track the explicit terminal outcome: `Some(Ok)` success, `Some(Err)`
+    // failure, `None` means the stream ended without any terminal event.
+    let mut terminal: Option<Result<(), String>> = None;
     let mut thread_id: Option<String> = None;
     crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
         if ev.event == "stream_started" {
@@ -645,30 +647,63 @@ async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> R
         }
         match crate::exec_stream::render_event(ev) {
             StreamOutcome::Continue => false,
-            StreamOutcome::Done => true,
+            StreamOutcome::Done => {
+                terminal = Some(Ok(()));
+                true
+            }
             StreamOutcome::Failed(detail) => {
-                failure = Some(detail);
+                terminal = Some(Err(detail));
                 true
             }
         }
     })
     .await?;
 
-    if let Some(detail) = failure {
-        return Err(CliError::Local { detail });
+    match terminal {
+        Some(Err(detail)) => return Err(CliError::Local { detail }),
+        None => {
+            return Err(CliError::Local {
+                detail: "execute stream ended before a terminal event".into(),
+            })
+        }
+        Some(Ok(())) => {}
     }
 
     // Parity with `/execute`: print the final result after a successful run.
-    if let Some(tid) = thread_id {
-        let result_path = format!("/threads/{tid}");
-        let headers = signer.sign("GET", &result_path, &[], &audience)?;
-        let url = format!("{daemon_url}{result_path}");
-        match crate::transport::http::get_json(&url, &headers).await {
-            Ok(payload) => print_result(payload),
-            Err(e) => tracing::warn!("could not fetch final result for {tid}: {e}"),
-        }
-    }
+    // Missing thread_id or a failed fetch is an error, not a silent exit-0.
+    let tid = thread_id.ok_or_else(|| CliError::Local {
+        detail: "execute stream completed but stream_started carried no thread_id".into(),
+    })?;
+    let result_path = format!("/threads/{tid}");
+    let headers = signer.sign("GET", &result_path, &[], &audience)?;
+    let url = format!("{daemon_url}{result_path}");
+    let payload = crate::transport::http::get_json(&url, &headers)
+        .await
+        .map_err(|e| CliError::Local {
+            detail: format!("execute stream completed but final result fetch failed for {tid}: {e}"),
+        })?;
+    print_result(thread_get_payload_to_execute_result(payload));
     Ok(())
+}
+
+/// Normalize a `GET /threads/{id}` payload into the `/execute` result envelope
+/// (`{ "result": { outcome_code, result, error, artifacts } }`) so the streamed
+/// TTY path prints the same shape `/execute` does — including `artifacts`, which
+/// `threads.get` returns as a sibling of `result` (a `ThreadResultRecord`).
+fn thread_get_payload_to_execute_result(payload: Value) -> Value {
+    let result = payload.get("result").cloned().unwrap_or(Value::Null);
+    let artifacts = payload
+        .get("artifacts")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(vec![]));
+    serde_json::json!({
+        "result": {
+            "outcome_code": result.get("outcome_code").cloned().unwrap_or(Value::Null),
+            "result": result.get("result").cloned().unwrap_or(Value::Null),
+            "error": result.get("error").cloned().unwrap_or(Value::Null),
+            "artifacts": artifacts,
+        }
+    })
 }
 
 async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError> {
@@ -753,6 +788,31 @@ mod tests {
         let flags = strip_execute_control_flags(&mut plain).unwrap();
         assert!(!flags.no_stream && !flags.async_launch);
         assert_eq!(plain, vec!["--other".to_string()]);
+    }
+
+    #[test]
+    fn thread_get_payload_normalizes_to_execute_result_shape() {
+        let threads_get = serde_json::json!({
+            "thread": {"thread_id": "T-1"},
+            "result": {
+                "outcome_code": "success",
+                "result": {"text": "hi"},
+                "error": null,
+                "metadata": {}
+            },
+            "artifacts": [{"uri": "cas://x"}],
+            "facets": []
+        });
+        let normalized = thread_get_payload_to_execute_result(threads_get);
+        let result = normalized.get("result").expect("result envelope");
+        assert_eq!(result.get("outcome_code").unwrap(), "success");
+        assert_eq!(result.get("result").unwrap(), &serde_json::json!({"text": "hi"}));
+        // artifacts (a sibling in threads.get) are carried into the envelope.
+        assert_eq!(
+            result.get("artifacts").unwrap(),
+            &serde_json::json!([{"uri": "cas://x"}])
+        );
+        assert!(result.get("error").unwrap().is_null());
     }
 
     fn with_app_root<T>(f: impl FnOnce() -> T) -> T {
