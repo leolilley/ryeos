@@ -104,6 +104,10 @@ impl MockResponse {
 struct MockState {
     queue: Vec<MockResponse>,
     captured_headers: Vec<HashMap<String, String>>,
+    /// Artificial latency applied before each response is served. Lets a
+    /// test keep a thread observably `running` long enough to attach an SSE
+    /// subscriber before the thread settles. Zero by default.
+    response_delay: std::time::Duration,
 }
 
 /// A live mock provider. Drop signals shutdown to the server task.
@@ -124,9 +128,20 @@ impl MockProvider {
     /// Binds `127.0.0.1:0` directly and reads back the kernel-assigned
     /// port — no `next_port()` TOCTOU window between port-pick and bind.
     pub async fn start(canned: Vec<MockResponse>) -> Self {
+        Self::start_with_response_delay(canned, std::time::Duration::ZERO).await
+    }
+
+    /// Like [`start`] but sleeps `response_delay` before serving each
+    /// response, so the thread under test stays `running` long enough for a
+    /// test to attach an SSE subscriber before it settles.
+    pub async fn start_with_response_delay(
+        canned: Vec<MockResponse>,
+        response_delay: std::time::Duration,
+    ) -> Self {
         let state = Arc::new(Mutex::new(MockState {
             queue: canned,
             captured_headers: Vec::new(),
+            response_delay,
         }));
 
         let app = Router::new()
@@ -195,16 +210,25 @@ async fn handle_chat_completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let mut g = state.lock().await;
-    g.captured_headers.push(flatten_headers(&headers));
-    if g.queue.is_empty() {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "mock_provider: canned response queue exhausted".to_string(),
-        )
-            .into_response();
+    let (next, response_delay) = {
+        let mut g = state.lock().await;
+        g.captured_headers.push(flatten_headers(&headers));
+        if g.queue.is_empty() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "mock_provider: canned response queue exhausted".to_string(),
+            )
+                .into_response();
+        }
+        let next = g.queue.remove(0);
+        let delay = g.response_delay;
+        (next, delay)
+    };
+    // Sleep WITHOUT holding the state lock so concurrent requests aren't
+    // serialized by one slow response.
+    if !response_delay.is_zero() {
+        tokio::time::sleep(response_delay).await;
     }
-    let next = g.queue.remove(0);
     let streaming = body
         .get("stream")
         .and_then(|v| v.as_bool())

@@ -274,19 +274,10 @@ fn handle_append_event_batch(
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
     let result = state.events.append_batch(&params)?;
-    // Group by thread_id and bulk-publish so each thread's
-    // subscribers receive its events in persisted order under a
-    // single hub lock acquisition per thread.
-    let mut by_thread: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
-    for ev in &result.persisted {
-        by_thread
-            .entry(ev.thread_id.clone())
-            .or_default()
-            .push(ev.clone());
-    }
-    for (thread_id, events) in &by_thread {
-        state.event_streams.publish_batch(thread_id, events);
-    }
+    // Publish the whole batch in persisted order under one hub-lock acquire:
+    // each thread's lane sees its events in order, and the firehose sees the
+    // batch contiguously without interleaving a concurrent publisher.
+    state.event_streams.publish_ordered(&result.persisted);
     serde_json::to_value(result).context("failed to encode events.append_batch result")
 }
 
@@ -576,9 +567,15 @@ mod tests {
         );
         let kind_profiles = Arc::new(KindProfileRegistry::build(None));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
+        let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
-            ThreadLifecycleService::new(state_store.clone(), kind_profiles.clone(), events.clone())
-                .expect("HOSTNAME not set in test environment"),
+            ThreadLifecycleService::new(
+                state_store.clone(),
+                kind_profiles.clone(),
+                events.clone(),
+                event_streams.clone(),
+            )
+            .expect("HOSTNAME not set in test environment"),
         );
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
@@ -609,7 +606,7 @@ mod tests {
             identity: Arc::new(identity),
             threads,
             events,
-            event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+            event_streams,
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
@@ -805,6 +802,111 @@ mod tests {
         )
         .await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
+    }
+
+    #[tokio::test]
+    async fn finalize_publishes_terminal_event_to_live_subscriber() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-pub", "T-pub"))
+            .unwrap();
+
+        // A subscriber attached before finalization must receive the
+        // terminal event live, not only via event-store replay.
+        let mut rx = state.event_streams.subscribe("T-pub");
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-pub".to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: None,
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("terminal event delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "thread_completed");
+        assert_eq!(event.thread_id, "T-pub");
+    }
+
+    #[tokio::test]
+    async fn cancel_publishes_thread_cancelled_to_live_subscriber() {
+        // Cancellation finalizes through the same publish path; a subscriber
+        // attached after prior events still receives `thread_cancelled`.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-cancel", "T-cancel"))
+            .unwrap();
+        state.threads.mark_running("T-cancel").unwrap();
+
+        let mut rx = state.event_streams.subscribe("T-cancel");
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-cancel".to_string(),
+                status: "cancelled".to_string(),
+                outcome_code: Some("cancelled".to_string()),
+                result: None,
+                error: Some(serde_json::json!({ "reason": "cancelled_by_request" })),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cancellation delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "thread_cancelled");
+        assert_eq!(event.thread_id, "T-cancel");
+    }
+
+    #[tokio::test]
+    async fn append_thread_events_publishes_to_live_subscriber() {
+        // Seat braids append directly through the lifecycle service; a
+        // `thread_events` subscriber attached before the append must receive
+        // the seat event live, not only via replay.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-seat", "T-seat"))
+            .unwrap();
+        state.threads.mark_running("T-seat").unwrap();
+
+        let mut rx = state.event_streams.subscribe("T-seat");
+        let persisted = state
+            .threads
+            .append_thread_events(
+                "T-seat",
+                "T-seat",
+                &[ryeos_app::state_store::NewEventRecord {
+                    event_type: "seat.note".to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: serde_json::json!({ "text": "hello" }),
+                }],
+            )
+            .unwrap()
+            .expect("append accepted on a running thread");
+        assert_eq!(persisted.len(), 1);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("seat event delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "seat.note");
+        assert_eq!(event.thread_id, "T-seat");
     }
 
     #[tokio::test]

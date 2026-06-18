@@ -25,7 +25,7 @@
 //!   receivers remain, called by the SSE endpoint on disconnect.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
@@ -133,6 +133,38 @@ impl ThreadEventHub {
         }
     }
 
+    /// Publish a slice of persisted records to live subscribers in slice
+    /// order, holding the hub lock once for the whole slice. Each record goes
+    /// to its OWN thread's lane (records may span threads — a continuation
+    /// touches source and successor) plus the firehose. Holding the lock for
+    /// the whole slice means no concurrent publisher can interleave a
+    /// higher-`chain_seq` event between two records of this slice — which a
+    /// per-thread subscriber would otherwise drop as already-seen.
+    pub fn publish_ordered(&self, records: &[PersistedEventRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let mut guard = self.lock_inner();
+        for ev in records {
+            let sender = guard.entry(ev.thread_id.clone()).or_insert_with(|| {
+                let (tx, _rx) = broadcast::channel(self.capacity);
+                tx
+            });
+            let _ = self.all.send(ev.clone());
+            let _ = sender.send(ev.clone());
+        }
+        // Lazy cleanup: reclaim any lane we created (or already held) that has
+        // no live subscribers. Records can repeat a thread, so dedupe via the
+        // map state rather than the slice.
+        for ev in records {
+            if let Some(sender) = guard.get(&ev.thread_id) {
+                if sender.receiver_count() == 0 {
+                    guard.remove(&ev.thread_id);
+                }
+            }
+        }
+    }
+
     /// Reclaim a per-thread sender if no receivers remain. Called by
     /// the SSE endpoint when a subscriber disconnects so a long-lived
     /// daemon doesn't accumulate zombie channels for completed
@@ -143,6 +175,87 @@ impl ThreadEventHub {
             if sender.receiver_count() == 0 {
                 guard.remove(thread_id);
             }
+        }
+    }
+}
+
+/// RAII subscription guard for stream endpoints. It OWNS the receiver so
+/// cleanup order is guaranteed: reclamation only runs after the receiver is
+/// dropped, so `remove_if_idle` sees the true receiver count. A stream that
+/// ends (client disconnect, thread completion) therefore leaves no idle
+/// broadcast sender behind, even on the common single-subscriber path.
+///
+/// A chain tail follows successive heads with [`Self::follow`], which drops
+/// the previous head's receiver and reclaims it immediately rather than
+/// holding idle senders for the life of a long chain; every followed head is
+/// also reclaimed as a backstop on drop.
+pub struct HubSubscription {
+    hub: Arc<ThreadEventHub>,
+    followed: Vec<String>,
+    current: String,
+    rx: Option<broadcast::Receiver<PersistedEventRecord>>,
+}
+
+impl HubSubscription {
+    /// Subscribe to `thread_id` and take ownership of the receiver.
+    pub fn new(hub: Arc<ThreadEventHub>, thread_id: &str) -> Self {
+        let rx = hub.subscribe(thread_id);
+        Self {
+            hub,
+            followed: vec![thread_id.to_owned()],
+            current: thread_id.to_owned(),
+            rx: Some(rx),
+        }
+    }
+
+    /// Receive the next live event for the current head.
+    pub async fn recv(
+        &mut self,
+    ) -> Result<PersistedEventRecord, broadcast::error::RecvError> {
+        self.rx
+            .as_mut()
+            .expect("receiver present until drop")
+            .recv()
+            .await
+    }
+
+    /// Non-blocking receive for draining buffered events (e.g. after a launch
+    /// task joins).
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<PersistedEventRecord, broadcast::error::TryRecvError> {
+        self.rx
+            .as_mut()
+            .expect("receiver present until drop")
+            .try_recv()
+    }
+
+    /// Follow a new head: drop the previous receiver, reclaim the previous
+    /// head's sender if now idle, then subscribe to the new head. No-op when
+    /// already on `thread_id`.
+    pub fn follow(&mut self, thread_id: &str) {
+        if thread_id == self.current {
+            return;
+        }
+        // Subscribe first, then replace — dropping the old receiver — and
+        // reclaim the old head before recording the new one.
+        let new_rx = self.hub.subscribe(thread_id);
+        self.rx = Some(new_rx);
+        let previous = std::mem::replace(&mut self.current, thread_id.to_owned());
+        self.hub.remove_if_idle(&previous);
+        if !self.followed.iter().any(|existing| existing == thread_id) {
+            self.followed.push(thread_id.to_owned());
+        }
+    }
+}
+
+impl Drop for HubSubscription {
+    fn drop(&mut self) {
+        // Drop the receiver FIRST so `remove_if_idle` sees the decremented
+        // count; otherwise the still-live receiver would keep the sender.
+        self.rx = None;
+        for thread_id in &self.followed {
+            self.hub.remove_if_idle(thread_id);
         }
     }
 }
@@ -232,6 +345,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_ordered_delivers_each_record_to_its_own_thread_lane() {
+        // A continuation touches two threads; each subscriber sees only its
+        // own record, and the firehose sees both in slice order.
+        let hub = ThreadEventHub::new(8);
+        let mut rx_src = hub.subscribe("T-src");
+        let mut rx_succ = hub.subscribe("T-succ");
+        let mut rx_all = hub.subscribe_all();
+
+        let records = vec![
+            sample_event("T-src", 5, "thread_continued"),
+            sample_event("T-succ", 6, "thread_created"),
+        ];
+        hub.publish_ordered(&records);
+
+        assert_eq!(rx_src.recv().await.unwrap().event_type, "thread_continued");
+        assert_eq!(rx_succ.recv().await.unwrap().event_type, "thread_created");
+        // Firehose preserves slice order.
+        assert_eq!(rx_all.recv().await.unwrap().chain_seq, 5);
+        assert_eq!(rx_all.recv().await.unwrap().chain_seq, 6);
+    }
+
+    #[tokio::test]
+    async fn publish_ordered_reclaims_lanes_without_subscribers() {
+        let hub = ThreadEventHub::new(8);
+        // No subscribers on either thread: both lazily-created lanes reclaimed.
+        hub.publish_ordered(&[
+            sample_event("T-1", 1, "thread_created"),
+            sample_event("T-2", 2, "thread_created"),
+        ]);
+        assert_eq!(hub.inner.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
     async fn remove_if_idle_reclaims_when_no_receivers() {
         let hub = ThreadEventHub::new(8);
         let rx = hub.subscribe("T-a");
@@ -248,5 +394,45 @@ mod tests {
         hub.remove_if_idle("T-b");
         let count = hub.inner.lock().unwrap().len();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn hub_subscription_reclaims_owned_sender_on_drop() {
+        let hub = Arc::new(ThreadEventHub::new(8));
+        {
+            let _sub = HubSubscription::new(hub.clone(), "T-1");
+            assert_eq!(hub.inner.lock().unwrap().len(), 1);
+            // The guard owns the receiver, so its drop reclaims the sender
+            // (no separate live receiver can keep it).
+        }
+        assert_eq!(hub.inner.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn hub_subscription_follow_reclaims_old_head_immediately() {
+        let hub = Arc::new(ThreadEventHub::new(8));
+        let mut sub = HubSubscription::new(hub.clone(), "T-head1");
+        assert_eq!(hub.inner.lock().unwrap().len(), 1);
+        sub.follow("T-head2");
+        // Old head reclaimed on switch (not held until stream end); only the
+        // new head's sender remains.
+        let keys: Vec<String> = hub.inner.lock().unwrap().keys().cloned().collect();
+        assert_eq!(keys, vec!["T-head2".to_string()]);
+        drop(sub);
+        assert_eq!(hub.inner.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn hub_subscription_keeps_sender_for_another_live_subscriber() {
+        let hub = Arc::new(ThreadEventHub::new(8));
+        let other = hub.subscribe("T-shared");
+        {
+            let _sub = HubSubscription::new(hub.clone(), "T-shared");
+            assert_eq!(hub.inner.lock().unwrap().len(), 1);
+        }
+        // The guard dropped its own receiver, but another subscriber remains,
+        // so the sender is kept.
+        assert_eq!(hub.inner.lock().unwrap().len(), 1);
+        drop(other);
     }
 }

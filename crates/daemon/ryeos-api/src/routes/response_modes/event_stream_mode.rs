@@ -197,6 +197,27 @@ struct RawGatewaySourceConfig {
     keep_alive_secs: u64,
 }
 
+/// Default SSE keep-alive interval for the path-capture stream sources.
+fn default_keep_alive_secs() -> u64 {
+    15
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSubscriptionSourceConfig {
+    thread_id: String,
+    #[serde(default = "default_keep_alive_secs")]
+    keep_alive_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawChainTailSourceConfig {
+    chain_root_id: String,
+    #[serde(default = "default_keep_alive_secs")]
+    keep_alive_secs: u64,
+}
+
 fn compile_gateway(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteConfigError> {
     if raw.auth != GATEWAY_REQUIRED_AUTH {
         return Err(RouteConfigError::SourceAuthRequirement {
@@ -253,30 +274,24 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
         });
     }
 
-    let source_config = &raw.response.source_config;
-
-    let thread_id_template = source_config
-        .get("thread_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-            id: raw.id.clone(),
-            src: "thread_events".into(),
-            reason: "missing 'thread_id' in source_config".into(),
+    let cfg: RawSubscriptionSourceConfig =
+        serde_json::from_value(raw.response.source_config.clone()).map_err(|e| {
+            RouteConfigError::InvalidSourceConfig {
+                id: raw.id.clone(),
+                src: "thread_events".into(),
+                reason: format!("invalid source_config: {e}"),
+            }
         })?;
 
     let capture_name = validate_and_extract_path_capture(
-        thread_id_template,
+        &cfg.thread_id,
         "thread_events",
         "thread_id",
         &raw.id,
         &raw.path,
     )?;
 
-    let keep_alive_secs = source_config
-        .get("keep_alive_secs")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(15);
-    if keep_alive_secs == 0 {
+    if cfg.keep_alive_secs == 0 {
         return Err(RouteConfigError::InvalidSourceConfig {
             id: raw.id.clone(),
             src: "thread_events".into(),
@@ -286,7 +301,7 @@ fn compile_subscription(raw: &RawRouteSpec) -> Result<EventStreamStrategy, Route
 
     let invoker = Arc::new(
         crate::routes::invokers::subscription_stream_invocation::CompiledSubscriptionStreamInvocation {
-            keep_alive_secs,
+            keep_alive_secs: cfg.keep_alive_secs,
         },
     );
 
@@ -306,27 +321,22 @@ fn compile_chain_tail(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteCo
             got: raw.auth.clone(),
         });
     }
-    let source_config = &raw.response.source_config;
-    let template = source_config
-        .get("chain_root_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| RouteConfigError::InvalidSourceConfig {
-            id: raw.id.clone(),
-            src: "chain_tail".into(),
-            reason: "missing 'chain_root_id' in source_config".into(),
+    let cfg: RawChainTailSourceConfig =
+        serde_json::from_value(raw.response.source_config.clone()).map_err(|e| {
+            RouteConfigError::InvalidSourceConfig {
+                id: raw.id.clone(),
+                src: "chain_tail".into(),
+                reason: format!("invalid source_config: {e}"),
+            }
         })?;
     let capture_name = validate_and_extract_path_capture(
-        template,
+        &cfg.chain_root_id,
         "chain_tail",
         "chain_root_id",
         &raw.id,
         &raw.path,
     )?;
-    let keep_alive_secs = source_config
-        .get("keep_alive_secs")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(15);
-    if keep_alive_secs == 0 {
+    if cfg.keep_alive_secs == 0 {
         return Err(RouteConfigError::InvalidSourceConfig {
             id: raw.id.clone(),
             src: "chain_tail".into(),
@@ -335,7 +345,7 @@ fn compile_chain_tail(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteCo
     }
     let invoker = Arc::new(
         crate::routes::invokers::chain_tail_invocation::CompiledChainTailInvocation {
-            keep_alive_secs,
+            keep_alive_secs: cfg.keep_alive_secs,
         },
     );
     Ok(EventStreamStrategy::PathCaptureInput {
@@ -935,6 +945,133 @@ mod tests {
         };
         let msg = format!("{err}");
         assert!(msg.contains("keep_alive_secs must be > 0"), "got: {msg}");
+    }
+
+    /// Compile `raw`, expecting an error, and return its rendered message.
+    /// (`Ok` holds `Arc<dyn CompiledResponseMode>`, which is not `Debug`, so
+    /// `unwrap_err` is unavailable.)
+    fn compile_err(raw: &RawRouteSpec) -> String {
+        match EventStreamMode::default().compile(raw) {
+            Err(e) => format!("{e}"),
+            Ok(_) => panic!("expected a compile error"),
+        }
+    }
+
+    #[test]
+    fn subscription_rejects_unknown_source_config_key() {
+        let mut raw = make_subscription_raw("r1", "/threads/{id}/stream");
+        raw.response.source_config = serde_json::json!({
+            "thread_id": "${path.id}",
+            "keep_alive_secs": 15,
+            "bogus": true,
+        });
+        let msg = compile_err(&raw);
+        assert!(
+            msg.contains("unknown field") && msg.contains("bogus"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn subscription_defaults_keep_alive_when_omitted() {
+        let mut raw = make_subscription_raw("r1", "/threads/{id}/stream");
+        raw.response.source_config = serde_json::json!({ "thread_id": "${path.id}" });
+        assert!(EventStreamMode::default().compile(&raw).is_ok());
+    }
+
+    // ── Chain-tail-specific compile tests ──────
+
+    fn make_chain_tail_raw(id: &str, path: &str) -> RawRouteSpec {
+        RawRouteSpec {
+            section: "routes".into(),
+            category: None,
+            id: id.into(),
+            path: path.into(),
+            methods: ["GET".into()].into_iter().collect(),
+            auth: "ryeos_signed".into(),
+            auth_config: None,
+            limits: RawLimits::default(),
+            response: RawResponseSpec {
+                mode: "event_stream".into(),
+                source: Some("chain_tail".into()),
+                source_config: serde_json::json!({
+                    "chain_root_id": "${path.id}",
+                    "keep_alive_secs": 15,
+                }),
+                status: None,
+                content_type: None,
+                body_b64: None,
+            },
+            execute: None,
+            request: RawRequest {
+                body: RawRequestBody::None,
+            },
+            source_file: std::path::PathBuf::from(format!("/test/{id}.yaml")),
+        }
+    }
+
+    #[test]
+    fn compile_chain_tail_succeeds() {
+        let raw = make_chain_tail_raw("r1", "/chains/{id}/events/stream");
+        assert!(EventStreamMode::default().compile(&raw).is_ok());
+    }
+
+    #[test]
+    fn chain_tail_rejects_auth_none() {
+        let mut raw = make_chain_tail_raw("r1", "/chains/{id}/events/stream");
+        raw.auth = "none".into();
+        assert!(compile_err(&raw).contains("requires auth 'ryeos_signed'"));
+    }
+
+    #[test]
+    fn chain_tail_rejects_non_path_interpolation() {
+        let mut raw = make_chain_tail_raw("r1", "/chains/{id}/events/stream");
+        raw.response.source_config = serde_json::json!({
+            "chain_root_id": "${query.id}",
+            "keep_alive_secs": 15,
+        });
+        assert!(compile_err(&raw).contains("must use ${path."));
+    }
+
+    #[test]
+    fn chain_tail_rejects_undeclared_capture() {
+        let mut raw = make_chain_tail_raw("r1", "/chains/{cid}/events/stream");
+        raw.response.source_config = serde_json::json!({
+            "chain_root_id": "${path.wrong}",
+            "keep_alive_secs": 15,
+        });
+        assert!(compile_err(&raw).contains("undeclared path capture"));
+    }
+
+    #[test]
+    fn chain_tail_rejects_keep_alive_zero() {
+        let mut raw = make_chain_tail_raw("r1", "/chains/{id}/events/stream");
+        raw.response.source_config = serde_json::json!({
+            "chain_root_id": "${path.id}",
+            "keep_alive_secs": 0,
+        });
+        assert!(compile_err(&raw).contains("keep_alive_secs must be > 0"));
+    }
+
+    #[test]
+    fn chain_tail_rejects_unknown_source_config_key() {
+        let mut raw = make_chain_tail_raw("r1", "/chains/{id}/events/stream");
+        raw.response.source_config = serde_json::json!({
+            "chain_root_id": "${path.id}",
+            "bogus": true,
+        });
+        let msg = compile_err(&raw);
+        assert!(
+            msg.contains("unknown field") && msg.contains("bogus"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn chain_tail_defaults_keep_alive_when_omitted() {
+        let mut raw = make_chain_tail_raw("r1", "/chains/{id}/events/stream");
+        raw.response.source_config = serde_json::json!({ "chain_root_id": "${path.id}" });
+        assert!(EventStreamMode::default().compile(&raw).is_ok());
     }
 
     // ── Shared helpers ─────────────────────────

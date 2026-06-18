@@ -1269,6 +1269,17 @@ impl StateStore {
         append_events_locked(&g, chain_root_id, thread_id, events).map(Some)
     }
 
+    /// The thread a live tail of `chain_root_id` should currently follow: the
+    /// owner of the chain's highest-`chain_seq` event. `None` when the chain
+    /// has no events yet.
+    pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        Ok(queries::chain_head_thread(
+            g.state_db.projection(),
+            chain_root_id,
+        )?)
+    }
+
     pub fn replay_events(
         &self,
         chain_root_id: &str,

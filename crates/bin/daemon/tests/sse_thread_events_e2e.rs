@@ -193,11 +193,8 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let mock_url = mock.base_url.clone();
 
     let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
             // thread/events-stream route is provided by the standard bundle.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. The SSE GET must be
@@ -211,6 +208,7 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + route YAML");
@@ -219,7 +217,12 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
+    // Dispatch resolves items from the project root, not HOME.
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/sse_e2e", "Say hello.", &fixture.publisher)
+        .expect("plant directive");
     let (status, body) = match tokio::time::timeout(
         Duration::from_secs(30),
         h.post_execute(
@@ -349,11 +352,8 @@ async fn boot_and_run_directive_with_extra_keys(
     let extra_key_bytes: Vec<[u8; 32]> = extra_keys.iter().map(|sk| sk.to_bytes()).collect();
 
     let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_directive(user, "test/sse_e2e", "Say hello.", &fixture.publisher)?;
             // thread/events-stream route is provided by the standard bundle.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. Authorize the user key
@@ -375,6 +375,7 @@ async fn boot_and_run_directive_with_extra_keys(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + route YAML");
@@ -383,7 +384,12 @@ async fn boot_and_run_directive_with_extra_keys(
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
+    // Dispatch resolves items from the project root, not HOME.
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(project.path(), "test/sse_e2e", "Say hello.", &fixture.publisher)
+        .expect("plant directive");
     let project_path = project.path().to_str().unwrap().to_string();
     let (status, body) = tokio::time::timeout(
         Duration::from_secs(30),
