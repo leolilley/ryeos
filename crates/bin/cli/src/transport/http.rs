@@ -279,29 +279,35 @@ pub async fn post_json_streaming(
     Ok(())
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+/// Match an SSE line terminator at `i`: `\r\n` (2 bytes), or a bare `\n`/`\r`
+/// (1 byte). `None` if no terminator starts at `i`.
+fn match_terminator(buf: &[u8], i: usize) -> Option<usize> {
+    if i + 1 < buf.len() && buf[i] == b'\r' && buf[i + 1] == b'\n' {
+        Some(2)
+    } else if i < buf.len() && (buf[i] == b'\n' || buf[i] == b'\r') {
+        Some(1)
+    } else {
+        None
+    }
 }
 
-/// Index just past the first SSE event boundary (blank line), accepting both
-/// LF (`\n\n`) and CRLF (`\r\n\r\n`). Returns the earliest boundary by start.
+/// Index just past the first SSE event boundary — a blank line, i.e. two
+/// consecutive line terminators. Each terminator may be `\r\n`, `\n`, or `\r`,
+/// so this accepts `\n\n`, `\r\n\r\n`, and mixed forms like `\n\r\n`. Returns
+/// `None` when no complete boundary is present yet (partial frame).
 fn find_event_end(buf: &[u8]) -> Option<usize> {
-    let lf = find_subslice(buf, b"\n\n");
-    let crlf = find_subslice(buf, b"\r\n\r\n");
-    match (lf, crlf) {
-        (Some(a), Some(b)) => {
-            if a <= b {
-                Some(a + 2)
-            } else {
-                Some(b + 4)
+    let mut i = 0;
+    while i < buf.len() {
+        if let Some(first) = match_terminator(buf, i) {
+            if let Some(second) = match_terminator(buf, i + first) {
+                return Some(i + first + second);
             }
+            i += first;
+        } else {
+            i += 1;
         }
-        (Some(a), None) => Some(a + 2),
-        (None, Some(b)) => Some(b + 4),
-        (None, None) => None,
     }
+    None
 }
 
 fn parse_sse_block(block: &[u8]) -> Option<SseEvent> {
@@ -396,20 +402,24 @@ mod tests {
     }
 
     #[test]
-    fn find_subslice_locates_boundary() {
-        assert_eq!(find_subslice(b"abc\n\ndef", b"\n\n"), Some(3));
-        assert_eq!(find_subslice(b"abc", b"\n\n"), None);
-    }
-
-    #[test]
-    fn find_event_end_supports_lf_and_crlf() {
-        // LF: boundary ends just past "\n\n".
-        assert_eq!(find_event_end(b"event: x\ndata: y\n\nrest"), Some(18));
-        // CRLF: "\n\n" never appears; must detect "\r\n\r\n".
-        let crlf = b"event: x\r\ndata: y\r\n\r\nrest";
-        let end = find_event_end(crlf).expect("crlf boundary");
-        assert_eq!(&crlf[..end], b"event: x\r\ndata: y\r\n\r\n");
-        // No boundary yet.
-        assert_eq!(find_event_end(b"event: x\ndata: y\n"), None);
+    fn find_event_end_supports_lf_crlf_and_mixed() {
+        let cases: &[&[u8]] = &[
+            b"data: y\n\nrest",        // LF
+            b"data: y\r\n\r\nrest",    // CRLF
+            b"data: y\n\r\nrest",      // mixed LF then CRLF
+            b"data: y\r\n\nrest",      // mixed CRLF then LF
+            b"data: y\r\rrest",        // bare CR pair
+        ];
+        for raw in cases {
+            let end = find_event_end(raw).unwrap_or_else(|| panic!("boundary in {raw:?}"));
+            // Everything before the boundary, with terminators stripped, is the event.
+            assert!(
+                String::from_utf8_lossy(&raw[..end]).contains("data: y"),
+                "boundary too short for {raw:?}"
+            );
+            assert_eq!(&raw[end..], b"rest", "boundary wrong for {raw:?}");
+        }
+        // No complete boundary yet (single trailing terminator).
+        assert_eq!(find_event_end(b"data: y\n"), None);
     }
 }

@@ -156,12 +156,15 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // the buffered JSON result (machine-friendly, unchanged behavior).
     // `/execute/stream` requires a project_path (unlike `/execute`, which falls
     // back to the app root), so fall back to the buffered path when none was
-    // resolved (`--no-project` / outside a project).
+    // resolved (`--no-project` / outside a project). `--stream`/`--no-stream`
+    // force the choice; otherwise auto-detect a terminal.
+    let want_stream = resolved
+        .stream
+        .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let stream_live = resolved.direct_execute
         && !resolved.async_launch
-        && !resolved.no_stream
         && resolved.project_path.is_some()
-        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+        && want_stream;
     if stream_live {
         return post_to_daemon_streaming(&app_root, &body).await;
     }
@@ -184,15 +187,17 @@ struct CliResolvedExecute {
     /// True when this is the `execute` command (`direct_execute_item_ref`) —
     /// the only path that streams a live execution log.
     direct_execute: bool,
-    /// True when the caller opted out of streaming (`--no-stream`/`--json`).
-    no_stream: bool,
+    /// Streaming preference: `None` = auto (TTY-detect), `Some(true)` =
+    /// `--stream` (force on), `Some(false)` = `--no-stream`/`--json` (force off).
+    stream: Option<bool>,
 }
 
 /// Control flags stripped from an `execute` command tail before parameter bind.
 #[derive(Default)]
 struct ExecuteControlFlags {
     async_launch: bool,
-    no_stream: bool,
+    /// See `CliResolvedExecute::stream`.
+    stream: Option<bool>,
 }
 
 fn resolve_command_for_daemon(
@@ -280,7 +285,7 @@ fn resolve_command_for_daemon_with_commands(
         project_path,
         async_launch: control.async_launch,
         direct_execute,
-        no_stream: control.no_stream,
+        stream: control.stream,
     })
 }
 
@@ -298,9 +303,23 @@ fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<ExecuteControlF
                     detail: format!("invalid execute control flag value: {token}"),
                 });
             }
+            // Force the live stream on (useful when piping to a pager).
+            "--stream" => {
+                if flags.stream == Some(false) {
+                    return Err(CliError::Local {
+                        detail: "conflicting flags: --stream and --no-stream/--json".into(),
+                    });
+                }
+                flags.stream = Some(true);
+            }
             // Both opt out of the live stream and print the final JSON result.
             "--no-stream" | "--json" => {
-                flags.no_stream = true;
+                if flags.stream == Some(true) {
+                    return Err(CliError::Local {
+                        detail: "conflicting flags: --stream and --no-stream/--json".into(),
+                    });
+                }
+                flags.stream = Some(false);
             }
             _ => out.push(token),
         }
@@ -764,7 +783,7 @@ mod tests {
     use ryeos_runtime::CommandArgumentKind;
 
     #[test]
-    fn strip_execute_control_flags_parses_stream_opt_outs() {
+    fn strip_execute_control_flags_parses_stream_prefs() {
         let mut tail = vec![
             "item:x".to_string(),
             "--async".to_string(),
@@ -773,21 +792,34 @@ mod tests {
         ];
         let flags = strip_execute_control_flags(&mut tail).unwrap();
         assert!(flags.async_launch);
-        assert!(flags.no_stream);
+        assert_eq!(flags.stream, Some(false));
         // Non-control tokens survive untouched.
         assert_eq!(tail, vec!["item:x".to_string(), "--keep".to_string()]);
 
+        // --json is an alias for force-off.
         let mut json_tail = vec!["--json".to_string()];
-        let flags = strip_execute_control_flags(&mut json_tail).unwrap();
-        assert!(flags.no_stream);
-        assert!(!flags.async_launch);
-        assert!(json_tail.is_empty());
+        assert_eq!(
+            strip_execute_control_flags(&mut json_tail).unwrap().stream,
+            Some(false)
+        );
 
-        // Default: nothing stripped, no flags set.
+        // --stream forces on.
+        let mut stream_tail = vec!["--stream".to_string()];
+        assert_eq!(
+            strip_execute_control_flags(&mut stream_tail).unwrap().stream,
+            Some(true)
+        );
+
+        // Default: auto (None), nothing set.
         let mut plain = vec!["--other".to_string()];
         let flags = strip_execute_control_flags(&mut plain).unwrap();
-        assert!(!flags.no_stream && !flags.async_launch);
+        assert_eq!(flags.stream, None);
+        assert!(!flags.async_launch);
         assert_eq!(plain, vec!["--other".to_string()]);
+
+        // Conflicting flags error.
+        let mut conflict = vec!["--stream".to_string(), "--no-stream".to_string()];
+        assert!(strip_execute_control_flags(&mut conflict).is_err());
     }
 
     #[test]
