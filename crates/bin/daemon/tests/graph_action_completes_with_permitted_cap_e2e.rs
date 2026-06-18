@@ -15,15 +15,13 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_standard_bundle};
 use lillux::crypto::SigningKey;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
-/// Plant ZEN_API_KEY in the sealed vault so the preflight passes.
-/// The graph's top-level execution goes through the directive dispatch
-/// path which runs `preflight_inject_provider_secret`. Without this
-/// vault entry the preflight fails with `required_secret_missing`.
+/// Plant ZEN_API_KEY in the sealed vault for any directive work the graph may
+/// trigger. Graph launch itself does not require provider auth.
 fn plant_vault_with_zen_key(state_path: &Path) -> anyhow::Result<()> {
     use std::collections::HashMap;
     let pub_path = state_path

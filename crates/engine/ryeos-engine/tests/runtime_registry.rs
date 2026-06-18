@@ -14,7 +14,7 @@ use ryeos_engine::error::EngineError;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::runtime_registry::{RuntimeRegistry, RuntimeYaml};
-use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
 // ── Test helpers ─────────────────────────────────────────────────────
 
@@ -104,6 +104,8 @@ binary_ref: bin/{host_triple}/directive_runner
 abi_version: v1
 required_caps:
   - ryeos.read.directive.*
+required_envelope_fields:
+  - provider_snapshot
 description: Default directive runtime
 schema:
   envelope: LaunchEnvelope
@@ -156,6 +158,10 @@ fn parse_runtime_yaml_success() {
     assert_eq!(
         yaml.required_caps,
         vec!["ryeos.read.directive.*".to_string()]
+    );
+    assert_eq!(
+        yaml.required_envelope_fields,
+        vec!["provider_snapshot".to_string()]
     );
     assert_eq!(
         yaml.description.as_deref(),

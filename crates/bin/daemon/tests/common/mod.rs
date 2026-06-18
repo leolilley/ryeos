@@ -983,7 +983,7 @@ impl DaemonHarness {
                 return s;
             }
         }
-        use tokio::time::{timeout, Duration};
+        use tokio::time::{Duration, timeout};
         let Some(mut stderr) = self.child.stderr.take() else {
             return String::new();
         };
