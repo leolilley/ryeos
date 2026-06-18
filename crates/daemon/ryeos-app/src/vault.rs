@@ -675,6 +675,18 @@ pub fn resolve_secret_sources(
     names: &[String],
     dotenv_search_dirs: &[PathBuf],
 ) -> Result<Vec<(String, SecretSource)>> {
+    // Same boundary checks as `read_required_secrets`, so a report reflects
+    // exactly what a real launch would do: empty fast-path (no source reads),
+    // and reject invalid/blocked declared names up front rather than
+    // misreporting them as `host_env`/`missing`.
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    for name in names {
+        validate_operator_secret_name(name)?;
+        crate::process::validate_spawn_secret_name(name)
+            .map_err(|e| anyhow!("vault: invalid declared secret `{name}`: {e:#}"))?;
+    }
     let vault_map = vault.read_all(principal)?;
     let host_env_map = read_declared_host_env(names)?;
     // Only the names the higher-precedence sources did not satisfy reach the
@@ -1170,15 +1182,17 @@ mod tests {
         // Provider-key path: an unrelated blocked control key in `.env` must
         // not fail resolution of the provider's auth secret.
         let tmp = tempfile::tempdir().unwrap();
+        // Unique key name (not ZEN_API_KEY) so a concurrent host-env test can't
+        // shadow it — this test reads host env but takes no ENV_LOCK.
         std::fs::write(
             tmp.path().join(".env"),
-            "RYEOSD_URL=https://x\nZEN_API_KEY=zk\n",
+            "RYEOSD_URL=https://x\nPROVIDER_IGNORE_KEY=zk\n",
         )
         .unwrap();
 
         let v = FixedVault(HashMap::new());
         let dirs = vec![tmp.path().to_path_buf()];
-        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        let got = read_explicit_secret(&v, "op", "PROVIDER_IGNORE_KEY", &dirs).unwrap();
         assert_eq!(got, Some("zk".to_string()));
     }
 
@@ -1273,6 +1287,28 @@ mod tests {
         assert!(
             matches!(dotenv, SecretSource::Dotenv(d) if d == project.path()),
             "expected project dotenv dir, got: {dotenv:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_secret_sources_empty_names_reads_nothing() {
+        // No declared secrets: report is empty and no source is consulted —
+        // matches `read_required_secrets`' empty fast-path.
+        let v = FixedVault(HashMap::new());
+        let report = resolve_secret_sources(&v, "op", &[], &[]).unwrap();
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn resolve_secret_sources_rejects_blocked_name_like_launch() {
+        // A blocked name can never be a declared secret; env-check must reject
+        // it up front (as a real launch would), not report it as host_env.
+        let _env = EnvVarGuard::set(&[("PATH", Some("/evil"))]);
+        let v = FixedVault(HashMap::new());
+        let err = resolve_secret_sources(&v, "op", &["PATH".to_string()], &[]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PATH") || format!("{err:#}").contains("blocked"),
+            "got: {err:#}"
         );
     }
 

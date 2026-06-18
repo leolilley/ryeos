@@ -1,0 +1,8 @@
+kind: service
+endpoint: tool.env-check
+availability: daemon_only
+required_caps: ["ryeos.execute.service.tool/env-check"]
+schema:
+  item_ref: string
+  project_path: string?
+description: "Report which source would satisfy each declared required_secret of an item (vault / host env / .env / missing), without running it. Names and sources only, never values."

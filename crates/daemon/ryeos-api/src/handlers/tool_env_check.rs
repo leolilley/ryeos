@@ -45,6 +45,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         )
     })?;
 
+    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid item_ref `{}`: {e}", req.item_ref)))?;
+
+    // The report leaks secret presence/source, so the caller must hold the same
+    // execute capability for the TARGET item that a real launch requires — being
+    // allowed to call env-check is not enough on its own.
+    let required_cap =
+        ryeos_runtime::authorizer::canonical_cap(&canonical.kind, &canonical.bare_id, "execute");
+    let policy =
+        ryeos_runtime::authorizer::AuthorizationPolicy::require_all(&[required_cap.as_str()]);
+    state
+        .authorizer
+        .authorize(&ctx.scopes, &policy)
+        .map_err(|_| HandlerError::Forbidden(format!("missing required capability: {required_cap}")))?;
+
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
@@ -60,13 +75,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         validate_only: true,
     };
 
-    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid item_ref `{}`: {e}", req.item_ref)))?;
-    let resolved = state.engine.resolve(&plan_ctx, &canonical).map_err(|e| {
-        HandlerError::BadRequest(format!("could not resolve `{}`: {e}", req.item_ref))
-    })?;
+    // Resolve AND verify the trust chain, exactly like a real launch, before
+    // reading declared metadata.
+    let verified = ryeos_executor::executor::resolve_and_verify(
+        &state.engine,
+        &plan_ctx,
+        &req.item_ref,
+        Some("env-check target"),
+    )
+    .map_err(|e| HandlerError::BadRequest(format!("could not verify `{}`: {e:#}", req.item_ref)))?;
 
-    let names = resolved.metadata.required_secrets.clone();
+    let names = verified.resolved.metadata.required_secrets.clone();
     let dotenv_dirs =
         ryeos_app::vault::dotenv_search_dirs(Some(std::path::Path::new(&project_path)));
     let report = ryeos_app::vault::resolve_secret_sources(
@@ -95,8 +114,13 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     Ok(serde_json::json!({
         "item_ref": req.item_ref,
+        "kind": canonical.kind,
         "secrets": secrets,
         "missing": missing,
+        // v1 reports declared `required_secrets` only. A directive's provider
+        // `auth.env_var` is resolved at launch (preflight) and is not yet
+        // enumerated here — surfaced so clients don't assume it was checked.
+        "provider_auth_checked": false,
     }))
 }
 

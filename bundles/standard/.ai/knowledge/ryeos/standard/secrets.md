@@ -66,9 +66,14 @@ are ignored by the overlay regardless, since no tool declares them).
 
 ## Debugging resolution
 
-Use `ryeos tool env-check <ref>` to see, per declared/auth secret, which source
-satisfied it (vault / host env / which `.env`) and what was skipped — without
-running the item. Values are never printed, only presence and source.
+Use `ryeos tool env-check <ref>` to see, per declared `required_secret`, which
+source would satisfy it (vault / host env / which `.env`) — without running the
+item. Values are never printed, only presence and source.
+
+v1 reports an item's declared `required_secrets`. A directive's provider
+`auth.env_var` is resolved separately at launch and is not yet enumerated by
+env-check; the response carries `provider_auth_checked: false` so this is
+explicit.
 
 ## Common mistakes
 

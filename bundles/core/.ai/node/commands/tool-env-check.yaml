@@ -10,9 +10,8 @@ forms:
   - field: item_ref
     matcher: canonical_ref
 project:
-  resolution: optional
+  resolution: required
   bind_parameter: project_path
-  no_project_flag: true
 dispatch:
   kind: execute_ref
   execute: service:tool/env-check
