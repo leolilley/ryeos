@@ -60,8 +60,10 @@ pub enum MaterializationError {
         fingerprint: Option<String>,
     },
     #[error(
-        "provider secret `{env_var}` (for provider `{provider_id}`) is not in vault — \
-             run: ryeos-core-tools vault put --name {env_var} --value-stdin"
+        "provider secret `{env_var}` (for provider `{provider_id}`) was not found in any \
+         source: sealed vault, daemon host environment, or `.env` overlay (operator config \
+         dir, then project root). Set it via `ryeos-core-tools vault put --name {env_var} \
+         --value-stdin`, a daemon/service env var, or a project/operator `.env`"
     )]
     ProviderSecretMissing {
         provider_id: String,

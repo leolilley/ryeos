@@ -49,7 +49,7 @@
 //!
 //! No silent dropping of bad entries: typed-fail-loud, end-to-end.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::VarError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -282,7 +282,19 @@ pub fn read_required_secrets(
     }
     let vault_map = vault.read_all(principal)?;
     let host_env_map = read_declared_host_env(required_secrets)?;
-    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+    // Only consult the `.env` overlay for secrets the higher-precedence sources
+    // (vault, daemon host env) did not already satisfy. This keeps vault > host
+    // > dotenv precedence at the I/O level: a poisoned or unreadable `.env`
+    // cannot fail a launch whose secrets are already fully resolved upstream,
+    // and the overlay only ever sees the declared keys it still needs.
+    let dotenv_wanted: HashSet<String> = required_secrets
+        .iter()
+        .filter(|k| {
+            !vault_map.contains_key(k.as_str()) && !host_env_map.contains_key(k.as_str())
+        })
+        .cloned()
+        .collect();
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs, &dotenv_wanted)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     let mut out = HashMap::with_capacity(required_secrets.len());
     let mut missing: Vec<&str> = Vec::new();
@@ -615,7 +627,10 @@ pub fn read_explicit_secret(
     if let Some(value) = host_env_map.get(name) {
         return Ok(Some(value.clone()));
     }
-    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+    // Vault and host env missed — consult `.env`, scoped to just this key so an
+    // unrelated blocked/malformed line in the file cannot fail the resolution.
+    let wanted: HashSet<String> = required.iter().cloned().collect();
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs, &wanted)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     Ok(dotenv_map.get(name).cloned())
 }
@@ -1032,25 +1047,61 @@ mod tests {
     }
 
     #[test]
-    fn dotenv_overlay_rejects_blocked_name() {
+    fn dotenv_overlay_ignores_unrelated_blocked_name() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(".env"), "PATH=/evil\n").unwrap();
+        // A project `.env` legitimately mixes a declared tool secret with
+        // unrelated control config. The blocked control key must be ignored,
+        // not fail the resolution of the secret the tool actually declared.
+        // (A blocked name can never itself be a declared secret — see
+        // `declared_secret_rejects_blocked_host_env_name`.)
+        std::fs::write(
+            tmp.path().join(".env"),
+            "PATH=/evil\nRYEOSD_URL=https://x\nMY_SECRET=ok\n",
+        )
+        .unwrap();
 
         let v = FixedVault(HashMap::new());
-        // Even with no required_secrets touching PATH, the parser
-        // bails because the file itself is poisoned. The dispatcher
-        // should not silently absorb a project's attempt to shadow
-        // PATH. (Empty required_secrets short-circuits before the
-        // .env read, so we declare a different secret to force the
-        // .env walk.)
-        let required = vec!["UNRELATED".to_string()];
+        let required = vec!["MY_SECRET".to_string()];
         let dirs = vec![tmp.path().to_path_buf()];
-        let err = read_required_secrets(&v, "op", &required, &dirs).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("PATH") && msg.contains("blocked"),
-            "expected blocked PATH error, got: {msg}"
-        );
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(bindings.get("MY_SECRET"), Some(&"ok".to_string()));
+        assert!(!bindings.contains_key("PATH"));
+        assert!(!bindings.contains_key("RYEOSD_URL"));
+    }
+
+    #[test]
+    fn dotenv_not_consulted_when_vault_satisfies_all() {
+        // vault provides every required secret, so a poisoned `.env` (here a
+        // malformed line that WOULD fail if parsed for a wanted key) is never
+        // read — vault > host > dotenv precedence holds at the I/O level.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "MALFORMED LINE NO EQUALS\n").unwrap();
+
+        let mut all = HashMap::new();
+        all.insert("FOO".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["FOO".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(bindings.get("FOO"), Some(&"from-vault".to_string()));
+    }
+
+    #[test]
+    fn read_explicit_secret_ignores_unrelated_blocked_dotenv_key() {
+        // Provider-key path: an unrelated blocked control key in `.env` must
+        // not fail resolution of the provider's auth secret.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".env"),
+            "RYEOSD_URL=https://x\nZEN_API_KEY=zk\n",
+        )
+        .unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("zk".to_string()));
     }
 
     #[test]
