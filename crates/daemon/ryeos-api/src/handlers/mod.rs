@@ -83,6 +83,7 @@ pub mod threads_children;
 pub mod threads_get;
 pub mod threads_input;
 pub mod threads_list;
+pub mod tool_env_check;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -172,5 +173,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     vault_set::DESCRIPTOR,
     vault_list::DESCRIPTOR,
     vault_delete::DESCRIPTOR,
+    tool_env_check::DESCRIPTOR,
     items_effective::DESCRIPTOR,
 ];
