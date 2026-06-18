@@ -218,11 +218,12 @@ impl ThreadLifecycleService {
     /// in their original (`chain_seq`) order, each to its OWN thread's lane —
     /// a continuation touches both the source (`thread_continued`) and
     /// successor (`thread_created`) threads, and the firehose lane must see
-    /// them in persisted order, so no per-thread regrouping. No-op when empty.
+    /// them in persisted order, so no per-thread regrouping. The whole slice
+    /// publishes under one hub-lock acquire so a concurrent same-thread append
+    /// cannot interleave a later `chain_seq` between two of these records.
+    /// No-op when empty.
     fn publish_records(&self, records: &[PersistedEventRecord]) {
-        for record in records {
-            self.event_hub.publish(&record.thread_id, record.clone());
-        }
+        self.event_hub.publish_ordered(records);
     }
 
     /// Wire the scheduler DB for thread completion tracking.

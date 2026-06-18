@@ -133,6 +133,38 @@ impl ThreadEventHub {
         }
     }
 
+    /// Publish a slice of persisted records to live subscribers in slice
+    /// order, holding the hub lock once for the whole slice. Each record goes
+    /// to its OWN thread's lane (records may span threads — a continuation
+    /// touches source and successor) plus the firehose. Holding the lock for
+    /// the whole slice means no concurrent publisher can interleave a
+    /// higher-`chain_seq` event between two records of this slice — which a
+    /// per-thread subscriber would otherwise drop as already-seen.
+    pub fn publish_ordered(&self, records: &[PersistedEventRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let mut guard = self.lock_inner();
+        for ev in records {
+            let sender = guard.entry(ev.thread_id.clone()).or_insert_with(|| {
+                let (tx, _rx) = broadcast::channel(self.capacity);
+                tx
+            });
+            let _ = self.all.send(ev.clone());
+            let _ = sender.send(ev.clone());
+        }
+        // Lazy cleanup: reclaim any lane we created (or already held) that has
+        // no live subscribers. Records can repeat a thread, so dedupe via the
+        // map state rather than the slice.
+        for ev in records {
+            if let Some(sender) = guard.get(&ev.thread_id) {
+                if sender.receiver_count() == 0 {
+                    guard.remove(&ev.thread_id);
+                }
+            }
+        }
+    }
+
     /// Reclaim a per-thread sender if no receivers remain. Called by
     /// the SSE endpoint when a subscriber disconnects so a long-lived
     /// daemon doesn't accumulate zombie channels for completed
@@ -310,6 +342,39 @@ mod tests {
             let got = rx.recv().await.expect("receive");
             assert_eq!(got.chain_seq, expected_seq);
         }
+    }
+
+    #[tokio::test]
+    async fn publish_ordered_delivers_each_record_to_its_own_thread_lane() {
+        // A continuation touches two threads; each subscriber sees only its
+        // own record, and the firehose sees both in slice order.
+        let hub = ThreadEventHub::new(8);
+        let mut rx_src = hub.subscribe("T-src");
+        let mut rx_succ = hub.subscribe("T-succ");
+        let mut rx_all = hub.subscribe_all();
+
+        let records = vec![
+            sample_event("T-src", 5, "thread_continued"),
+            sample_event("T-succ", 6, "thread_created"),
+        ];
+        hub.publish_ordered(&records);
+
+        assert_eq!(rx_src.recv().await.unwrap().event_type, "thread_continued");
+        assert_eq!(rx_succ.recv().await.unwrap().event_type, "thread_created");
+        // Firehose preserves slice order.
+        assert_eq!(rx_all.recv().await.unwrap().chain_seq, 5);
+        assert_eq!(rx_all.recv().await.unwrap().chain_seq, 6);
+    }
+
+    #[tokio::test]
+    async fn publish_ordered_reclaims_lanes_without_subscribers() {
+        let hub = ThreadEventHub::new(8);
+        // No subscribers on either thread: both lazily-created lanes reclaimed.
+        hub.publish_ordered(&[
+            sample_event("T-1", 1, "thread_created"),
+            sample_event("T-2", 2, "thread_created"),
+        ]);
+        assert_eq!(hub.inner.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]

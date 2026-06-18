@@ -425,12 +425,9 @@ async fn main() -> Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        let lifecycle = event.event_type == "thread_created"
-                            || event.event_type == "thread_started"
-                            || ryeos_api::routes::invokers::stream_helpers::is_terminal(
-                                &event.event_type,
-                            );
-                        if !lifecycle {
+                        if !ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
+                            &event.event_type,
+                        ) {
                             continue;
                         }
                         for session_id in ui.browser_sessions.session_ids() {

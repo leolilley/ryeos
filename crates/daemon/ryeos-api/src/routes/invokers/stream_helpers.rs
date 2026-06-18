@@ -23,6 +23,14 @@ pub fn is_terminal(event_type: &str) -> bool {
     TERMINAL_EVENT_TYPES.contains(&event_type)
 }
 
+/// Whether a thread event warrants a transient UI session hint ("look here"):
+/// the thread appeared, started running, or settled. The running transition is
+/// emitted as `thread_started` (see `StateStore::mark_thread_running`), so the
+/// filter must name that, not `thread_running`.
+pub fn is_lifecycle_hint(event_type: &str) -> bool {
+    event_type == "thread_created" || event_type == "thread_started" || is_terminal(event_type)
+}
+
 pub fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
@@ -115,5 +123,18 @@ mod tests {
         assert!(is_terminal_status("continued"));
         assert!(!is_terminal("continuation_requested"));
         assert!(!is_terminal_status("running"));
+    }
+
+    #[test]
+    fn lifecycle_hint_names_the_emitted_running_event() {
+        // The running transition is emitted as `thread_started`, not
+        // `thread_running` — guard against the firehose filter drifting back.
+        assert!(is_lifecycle_hint("thread_started"));
+        assert!(!is_lifecycle_hint("thread_running"));
+        assert!(is_lifecycle_hint("thread_created"));
+        assert!(is_lifecycle_hint("thread_completed"));
+        assert!(is_lifecycle_hint("thread_cancelled"));
+        // Non-lifecycle stream events do not warrant a hint.
+        assert!(!is_lifecycle_hint("cognition_out"));
     }
 }
