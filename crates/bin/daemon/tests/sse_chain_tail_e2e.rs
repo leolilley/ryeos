@@ -220,11 +220,8 @@ async fn boot_and_run_directive_with_extra_keys(
     let extra_key_bytes: Vec<[u8; 32]> = extra_keys.iter().map(|sk| sk.to_bytes()).collect();
 
     let plant =
-        move |state_path: &Path, user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user, &fixture.publisher)?;
-            plant_directive(user, "test/chain_tail_e2e", "Say hello.", &fixture.publisher)?;
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             for bytes in &extra_key_bytes {
                 let extra = SigningKey::from_bytes(bytes);
@@ -238,6 +235,8 @@ async fn boot_and_run_directive_with_extra_keys(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
+        // Provider/routing/directive are resolved from the project root.
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + route YAML");
@@ -245,7 +244,19 @@ async fn boot_and_run_directive_with_extra_keys(
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
+    // Dispatch resolves items from the project root (+ installed bundles), not
+    // from HOME — plant provider, routing, and the directive into the project
+    // that we pass as `project_path`.
     let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(
+        project.path(),
+        "test/chain_tail_e2e",
+        "Say hello.",
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let project_path = project.path().to_str().unwrap().to_string();
     let (status, body) = tokio::time::timeout(
         Duration::from_secs(30),
