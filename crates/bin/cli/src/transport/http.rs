@@ -89,6 +89,69 @@ pub async fn post_json(
     Ok(value)
 }
 
+/// Signed GET to the daemon, returning the response body as `Value`.
+pub async fn get_json(url: &str, headers: &SignHeaders) -> Result<Value, CliDispatchError> {
+    let uri: hyper::Uri = url.parse().map_err(|e| CliTransportError::Unreachable {
+        bind: url.to_string(),
+        detail: format!("invalid URL: {e}"),
+    })?;
+    let host = uri.host().unwrap_or("127.0.0.1");
+    let port = uri.port_u16().unwrap_or(80);
+    let bind = format!("{host}:{port}");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri.to_string())
+        .header("host", &bind)
+        .header("x-ryeos-key-id", &headers.key_id)
+        .header("x-ryeos-timestamp", &headers.timestamp)
+        .header("x-ryeos-nonce", &headers.nonce)
+        .header("x-ryeos-signature", &headers.signature)
+        .body(Full::new(Bytes::new()))
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: format!("failed to build request: {e}"),
+        })?;
+
+    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+        CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: e.to_string(),
+        }
+    })?;
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: format!("HTTP handshake: {e}"),
+        })?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::warn!("connection task error: {e}");
+        }
+    });
+
+    let resp = sender
+        .send_request(req)
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: format!("request send: {e}"),
+        })?;
+    let status = resp.status();
+    let body_bytes = collect_body(resp.into_body()).await?;
+    if !status.is_success() {
+        return Err(CliTransportError::HttpError {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body_bytes).into_owned(),
+        }
+        .into());
+    }
+    serde_json::from_slice(&body_bytes)
+        .map_err(|e| CliTransportError::BodyDecode { detail: format!("{e}") }.into())
+}
+
 /// One parsed Server-Sent Event.
 #[derive(Debug, Clone, Default)]
 pub struct SseEvent {
@@ -158,11 +221,29 @@ pub async fn post_json_streaming(
             detail: format!("request send: {e}"),
         })?;
     let status = resp.status();
+    let is_event_stream = resp
+        .headers()
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("text/event-stream"))
+        .unwrap_or(false);
     if !status.is_success() {
         let body_bytes = collect_body(resp.into_body()).await?;
         return Err(CliTransportError::HttpError {
             status: status.as_u16(),
             body: String::from_utf8_lossy(&body_bytes).into_owned(),
+        }
+        .into());
+    }
+    // A 2xx that is not an event stream (e.g. a JSON error body) would otherwise
+    // be consumed with zero frames and exit success — surface it instead.
+    if !is_event_stream {
+        let body_bytes = collect_body(resp.into_body()).await?;
+        return Err(CliTransportError::BodyDecode {
+            detail: format!(
+                "expected text/event-stream, got non-SSE 2xx response: {}",
+                String::from_utf8_lossy(&body_bytes)
+            ),
         }
         .into());
     }
@@ -177,15 +258,22 @@ pub async fn post_json_streaming(
             continue;
         };
         buf.extend_from_slice(data);
-        // Drain every complete event (terminated by a blank line) from the
-        // front of the buffer, leaving any partial tail for the next frame.
-        while let Some(pos) = find_subslice(&buf, b"\n\n") {
-            let block: Vec<u8> = buf.drain(..pos + 2).collect();
+        // Drain every complete event (terminated by a blank line, LF or CRLF)
+        // from the front of the buffer, leaving any partial tail for the next
+        // frame.
+        while let Some(end) = find_event_end(&buf) {
+            let block: Vec<u8> = buf.drain(..end).collect();
             if let Some(ev) = parse_sse_block(&block) {
                 if on_event(&ev) {
                     return Ok(());
                 }
             }
+        }
+    }
+    // Tolerate a final event not terminated by a blank line at EOF.
+    if !buf.is_empty() {
+        if let Some(ev) = parse_sse_block(&buf) {
+            on_event(&ev);
         }
     }
     Ok(())
@@ -195,6 +283,25 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// Index just past the first SSE event boundary (blank line), accepting both
+/// LF (`\n\n`) and CRLF (`\r\n\r\n`). Returns the earliest boundary by start.
+fn find_event_end(buf: &[u8]) -> Option<usize> {
+    let lf = find_subslice(buf, b"\n\n");
+    let crlf = find_subslice(buf, b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) => {
+            if a <= b {
+                Some(a + 2)
+            } else {
+                Some(b + 4)
+            }
+        }
+        (Some(a), None) => Some(a + 2),
+        (None, Some(b)) => Some(b + 4),
+        (None, None) => None,
+    }
 }
 
 fn parse_sse_block(block: &[u8]) -> Option<SseEvent> {
@@ -292,5 +399,17 @@ mod tests {
     fn find_subslice_locates_boundary() {
         assert_eq!(find_subslice(b"abc\n\ndef", b"\n\n"), Some(3));
         assert_eq!(find_subslice(b"abc", b"\n\n"), None);
+    }
+
+    #[test]
+    fn find_event_end_supports_lf_and_crlf() {
+        // LF: boundary ends just past "\n\n".
+        assert_eq!(find_event_end(b"event: x\ndata: y\n\nrest"), Some(18));
+        // CRLF: "\n\n" never appears; must detect "\r\n\r\n".
+        let crlf = b"event: x\r\ndata: y\r\n\r\nrest";
+        let end = find_event_end(crlf).expect("crlf boundary");
+        assert_eq!(&crlf[..end], b"event: x\r\ndata: y\r\n\r\n");
+        // No boundary yet.
+        assert_eq!(find_event_end(b"event: x\ndata: y\n"), None);
     }
 }

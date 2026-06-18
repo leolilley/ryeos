@@ -147,16 +147,20 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     if resolved.async_launch {
         body["launch_mode"] = Value::String("accepted".to_string());
     }
-    if let Some(project_path) = resolved.project_path {
+    if let Some(project_path) = &resolved.project_path {
         body["project_path"] = Value::String(project_path.to_string_lossy().into_owned());
     }
 
     // Stream a live execution log for `execute` runs on a terminal, unless the
     // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
     // the buffered JSON result (machine-friendly, unchanged behavior).
+    // `/execute/stream` requires a project_path (unlike `/execute`, which falls
+    // back to the app root), so fall back to the buffered path when none was
+    // resolved (`--no-project` / outside a project).
     let stream_live = resolved.direct_execute
         && !resolved.async_launch
         && !resolved.no_stream
+        && resolved.project_path.is_some()
         && std::io::IsTerminal::is_terminal(&std::io::stdout());
     if stream_live {
         return post_to_daemon_streaming(&app_root, &body).await;
@@ -611,9 +615,13 @@ async fn post_to_daemon(
     Ok(payload)
 }
 
-/// POST to the gateway `/execute/stream` and render the live execution log to
-/// stdout. Same signing/audience flow as [`post_to_daemon`].
+/// POST to the gateway `/execute/stream`, render the live execution log to
+/// stdout, then (on success) fetch and print the final thread result so the
+/// terminal path keeps parity with `/execute`. Same signing/audience flow as
+/// [`post_to_daemon`]. Returns a non-zero error on a failing/errored run.
 async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> Result<(), CliError> {
+    use crate::exec_stream::StreamOutcome;
+
     lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
@@ -624,10 +632,42 @@ async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> R
     let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
     let url = format!("{daemon_url}{route_path}");
 
+    let mut failure: Option<String> = None;
+    let mut thread_id: Option<String> = None;
     crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
-        crate::exec_stream::render_event(ev)
+        if ev.event == "stream_started" {
+            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
+                thread_id = v
+                    .get("thread_id")
+                    .and_then(|t| t.as_str())
+                    .map(String::from);
+            }
+        }
+        match crate::exec_stream::render_event(ev) {
+            StreamOutcome::Continue => false,
+            StreamOutcome::Done => true,
+            StreamOutcome::Failed(detail) => {
+                failure = Some(detail);
+                true
+            }
+        }
     })
     .await?;
+
+    if let Some(detail) = failure {
+        return Err(CliError::Local { detail });
+    }
+
+    // Parity with `/execute`: print the final result after a successful run.
+    if let Some(tid) = thread_id {
+        let result_path = format!("/threads/{tid}");
+        let headers = signer.sign("GET", &result_path, &[], &audience)?;
+        let url = format!("{daemon_url}{result_path}");
+        match crate::transport::http::get_json(&url, &headers).await {
+            Ok(payload) => print_result(payload),
+            Err(e) => tracing::warn!("could not fetch final result for {tid}: {e}"),
+        }
+    }
     Ok(())
 }
 
@@ -687,6 +727,34 @@ fn discover_app_root() -> PathBuf {
 mod tests {
     use super::*;
     use ryeos_runtime::CommandArgumentKind;
+
+    #[test]
+    fn strip_execute_control_flags_parses_stream_opt_outs() {
+        let mut tail = vec![
+            "item:x".to_string(),
+            "--async".to_string(),
+            "--no-stream".to_string(),
+            "--keep".to_string(),
+        ];
+        let flags = strip_execute_control_flags(&mut tail).unwrap();
+        assert!(flags.async_launch);
+        assert!(flags.no_stream);
+        // Non-control tokens survive untouched.
+        assert_eq!(tail, vec!["item:x".to_string(), "--keep".to_string()]);
+
+        let mut json_tail = vec!["--json".to_string()];
+        let flags = strip_execute_control_flags(&mut json_tail).unwrap();
+        assert!(flags.no_stream);
+        assert!(!flags.async_launch);
+        assert!(json_tail.is_empty());
+
+        // Default: nothing stripped, no flags set.
+        let mut plain = vec!["--other".to_string()];
+        let flags = strip_execute_control_flags(&mut plain).unwrap();
+        assert!(!flags.no_stream && !flags.async_launch);
+        assert_eq!(plain, vec!["--other".to_string()]);
+    }
+
     fn with_app_root<T>(f: impl FnOnce() -> T) -> T {
         let _g = crate::test_env::lock();
         let saved = std::env::var_os("RYEOS_APP_ROOT");

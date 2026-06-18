@@ -4,7 +4,7 @@ section: commands
 name: execute
 tokens:
 - execute
-description: Execute an item (tool, directive, service, graph)
+description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; pass --no-stream/--json for only the buffered JSON result (also the default when piped)."
 forms:
 - slots:
   - field: item_ref
