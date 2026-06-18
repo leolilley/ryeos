@@ -3,6 +3,7 @@ use clap::Parser;
 mod arg_bind;
 mod dispatcher;
 mod error;
+mod exec_stream;
 mod exit;
 mod help;
 mod lifecycle_commands;

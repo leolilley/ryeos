@@ -89,6 +89,139 @@ pub async fn post_json(
     Ok(value)
 }
 
+/// One parsed Server-Sent Event.
+#[derive(Debug, Clone, Default)]
+pub struct SseEvent {
+    pub event: String,
+    pub data: String,
+    pub id: Option<String>,
+}
+
+/// POST JSON to the daemon and stream the SSE response, invoking `on_event` for
+/// each complete event as it arrives. `on_event` returns `true` to stop reading
+/// (e.g. on a terminal event) — the terminal-event policy lives in the caller,
+/// not the transport. Returns when the caller stops or the stream closes.
+pub async fn post_json_streaming(
+    url: &str,
+    headers: &SignHeaders,
+    body: &[u8],
+    mut on_event: impl FnMut(&SseEvent) -> bool,
+) -> Result<(), CliDispatchError> {
+    let uri: hyper::Uri = url.parse().map_err(|e| CliTransportError::Unreachable {
+        bind: url.to_string(),
+        detail: format!("invalid URL: {e}"),
+    })?;
+    let host = uri.host().unwrap_or("127.0.0.1");
+    let port = uri.port_u16().unwrap_or(80);
+    let bind = format!("{host}:{port}");
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri.to_string())
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .header("host", &bind)
+        .header("x-ryeos-key-id", &headers.key_id)
+        .header("x-ryeos-timestamp", &headers.timestamp)
+        .header("x-ryeos-nonce", &headers.nonce)
+        .header("x-ryeos-signature", &headers.signature)
+        .body(Full::new(Bytes::from(body.to_vec())))
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: format!("failed to build request: {e}"),
+        })?;
+
+    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
+        CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: e.to_string(),
+        }
+    })?;
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: format!("HTTP handshake: {e}"),
+        })?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::warn!("connection task error: {e}");
+        }
+    });
+
+    let resp = sender
+        .send_request(req)
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: bind.clone(),
+            detail: format!("request send: {e}"),
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body_bytes = collect_body(resp.into_body()).await?;
+        return Err(CliTransportError::HttpError {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body_bytes).into_owned(),
+        }
+        .into());
+    }
+
+    let mut body = resp.into_body();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| CliTransportError::BodyDecode {
+            detail: format!("stream frame: {e}"),
+        })?;
+        let Some(data) = frame.data_ref() else {
+            continue;
+        };
+        buf.extend_from_slice(data);
+        // Drain every complete event (terminated by a blank line) from the
+        // front of the buffer, leaving any partial tail for the next frame.
+        while let Some(pos) = find_subslice(&buf, b"\n\n") {
+            let block: Vec<u8> = buf.drain(..pos + 2).collect();
+            if let Some(ev) = parse_sse_block(&block) {
+                if on_event(&ev) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn parse_sse_block(block: &[u8]) -> Option<SseEvent> {
+    let text = String::from_utf8_lossy(block);
+    let mut ev = SseEvent::default();
+    let mut data_lines: Vec<&str> = Vec::new();
+    let mut saw_field = false;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("event:") {
+            ev.event = rest.trim().to_string();
+            saw_field = true;
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+            saw_field = true;
+        } else if let Some(rest) = line.strip_prefix("id:") {
+            ev.id = Some(rest.trim().to_string());
+            saw_field = true;
+        }
+        // ignore comments (`:`) and unknown fields
+    }
+    if !saw_field {
+        return None;
+    }
+    ev.data = data_lines.join("\n");
+    Some(ev)
+}
+
 async fn collect_body(body: Incoming) -> Result<Vec<u8>, CliTransportError> {
     let mut bufs = Vec::new();
     let mut body = body;
@@ -129,4 +262,35 @@ pub async fn read_daemon_bind(app_root: &std::path::Path) -> Result<String, CliT
         .ok_or_else(|| CliTransportError::DaemonJsonMalformed {
             detail: "missing 'bind' field".into(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_sse_block_reads_event_data_id() {
+        let ev = parse_sse_block(b"event: thread_completed\ndata: {\"ok\":true}\nid: 7\n\n")
+            .expect("event");
+        assert_eq!(ev.event, "thread_completed");
+        assert_eq!(ev.data, "{\"ok\":true}");
+        assert_eq!(ev.id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn parse_sse_block_joins_multiline_data() {
+        let ev = parse_sse_block(b"event: x\ndata: a\ndata: b\n\n").expect("event");
+        assert_eq!(ev.data, "a\nb");
+    }
+
+    #[test]
+    fn parse_sse_block_ignores_comment_only() {
+        assert!(parse_sse_block(b": keep-alive\n\n").is_none());
+    }
+
+    #[test]
+    fn find_subslice_locates_boundary() {
+        assert_eq!(find_subslice(b"abc\n\ndef", b"\n\n"), Some(3));
+        assert_eq!(find_subslice(b"abc", b"\n\n"), None);
+    }
 }

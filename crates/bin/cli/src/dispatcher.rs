@@ -151,6 +151,17 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         body["project_path"] = Value::String(project_path.to_string_lossy().into_owned());
     }
 
+    // Stream a live execution log for `execute` runs on a terminal, unless the
+    // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
+    // the buffered JSON result (machine-friendly, unchanged behavior).
+    let stream_live = resolved.direct_execute
+        && !resolved.async_launch
+        && !resolved.no_stream
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if stream_live {
+        return post_to_daemon_streaming(&app_root, &body).await;
+    }
+
     let route_path = if resolved.async_launch {
         "/execute/launch"
     } else {
@@ -166,6 +177,18 @@ struct CliResolvedExecute {
     parameters: Value,
     project_path: Option<PathBuf>,
     async_launch: bool,
+    /// True when this is the `execute` command (`direct_execute_item_ref`) —
+    /// the only path that streams a live execution log.
+    direct_execute: bool,
+    /// True when the caller opted out of streaming (`--no-stream`/`--json`).
+    no_stream: bool,
+}
+
+/// Control flags stripped from an `execute` command tail before parameter bind.
+#[derive(Default)]
+struct ExecuteControlFlags {
+    async_launch: bool,
+    no_stream: bool,
 }
 
 fn resolve_command_for_daemon(
@@ -211,13 +234,14 @@ fn resolve_command_for_daemon_with_commands(
         detail: error.to_string(),
     })?;
     let mut tail = tokens[matched.consumed..].to_vec();
-    let async_launch = if matches!(
+    let direct_execute = matches!(
         matched.command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
-    ) {
+    );
+    let control = if direct_execute {
         strip_execute_control_flags(&mut tail)?
     } else {
-        false
+        ExecuteControlFlags::default()
     };
     let item_ref = match &matched.command.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
@@ -250,17 +274,19 @@ fn resolve_command_for_daemon_with_commands(
         item_ref,
         parameters,
         project_path,
-        async_launch,
+        async_launch: control.async_launch,
+        direct_execute,
+        no_stream: control.no_stream,
     })
 }
 
-fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<bool, CliError> {
-    let mut async_launch = false;
+fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<ExecuteControlFlags, CliError> {
+    let mut flags = ExecuteControlFlags::default();
     let mut out = Vec::with_capacity(tail.len());
     for token in tail.drain(..) {
         match token.as_str() {
             "--async" | "--async=true" => {
-                async_launch = true;
+                flags.async_launch = true;
             }
             "--async=false" => {}
             token if token.starts_with("--async=") => {
@@ -268,11 +294,15 @@ fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<bool, CliError>
                     detail: format!("invalid execute control flag value: {token}"),
                 });
             }
+            // Both opt out of the live stream and print the final JSON result.
+            "--no-stream" | "--json" => {
+                flags.no_stream = true;
+            }
             _ => out.push(token),
         }
     }
     *tail = out;
-    Ok(async_launch)
+    Ok(flags)
 }
 
 fn bind_command_parameters_for_daemon(
@@ -579,6 +609,26 @@ async fn post_to_daemon(
     let url = format!("{}{}", daemon_url, route_path);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
+}
+
+/// POST to the gateway `/execute/stream` and render the live execution log to
+/// stdout. Same signing/audience flow as [`post_to_daemon`].
+async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> Result<(), CliError> {
+    lifecycle_preflight(app_root).await?;
+    let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
+    let signer = crate::transport::signing::Signer::resolve(app_root)?;
+    let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
+
+    let route_path = "/execute/stream";
+    let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
+    let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
+    let url = format!("{daemon_url}{route_path}");
+
+    crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
+        crate::exec_stream::render_event(ev)
+    })
+    .await?;
+    Ok(())
 }
 
 async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError> {
