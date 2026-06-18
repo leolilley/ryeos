@@ -85,8 +85,17 @@ impl CompiledRouteInvocation for CompiledChainTailInvocation {
             ));
 
             let mut cursor: i64 = last_event_id.unwrap_or(0);
-            // The thread the live subscription currently follows.
-            let mut head_thread = chain_root_id.clone();
+            // The thread the live subscription currently follows. Start at the
+            // chain's current head so a resume whose `Last-Event-ID` is already
+            // past a head switch subscribes to the live thread immediately —
+            // otherwise the empty replay below would never discover the switch
+            // and we'd miss successor events until the next between-turns poll.
+            // A fresh full replay self-corrects this via the discovery below;
+            // an empty-events chain falls back to the root.
+            let mut head_thread = match events_svc.chain_head_thread(&chain_root_id) {
+                Ok(Some(head)) => head,
+                Ok(None) | Err(_) => chain_root_id.clone(),
+            };
             let mut sub = ryeos_app::event_stream::HubSubscription::new(hub, &head_thread);
 
             loop {
