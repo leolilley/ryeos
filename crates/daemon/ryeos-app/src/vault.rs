@@ -635,6 +635,84 @@ pub fn read_explicit_secret(
     Ok(dotenv_map.get(name).cloned())
 }
 
+/// Which source would satisfy a declared secret. Reported by `env-check`
+/// without ever exposing the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretSource {
+    /// Sealed operator vault.
+    Vault,
+    /// Daemon host environment.
+    HostEnv,
+    /// A `.env` overlay file in the given directory.
+    Dotenv(PathBuf),
+    /// Not found in any source.
+    Missing,
+}
+
+impl SecretSource {
+    /// Short stable label for wire/CLI output.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SecretSource::Vault => "vault",
+            SecretSource::HostEnv => "host_env",
+            SecretSource::Dotenv(_) => "dotenv",
+            SecretSource::Missing => "missing",
+        }
+    }
+}
+
+/// Report, per requested name, WHICH source would satisfy it — without
+/// returning any secret value. Mirrors the precedence of
+/// [`read_required_secrets`] exactly (vault > host env > `.env` overlay, with
+/// the overlay scoped to names unresolved by the higher sources), so a report
+/// reflects what a real launch would resolve. Results preserve `names` order.
+///
+/// This is the engine behind `ryeos tool env-check`: it never reads or returns
+/// the secret material, only presence and source.
+pub fn resolve_secret_sources(
+    vault: &dyn NodeVault,
+    principal: &str,
+    names: &[String],
+    dotenv_search_dirs: &[PathBuf],
+) -> Result<Vec<(String, SecretSource)>> {
+    let vault_map = vault.read_all(principal)?;
+    let host_env_map = read_declared_host_env(names)?;
+    // Only the names the higher-precedence sources did not satisfy reach the
+    // `.env` probe — and we probe each dir separately so we can attribute which
+    // file would supply the key (later dir wins, matching resolution order).
+    let unresolved: HashSet<String> = names
+        .iter()
+        .filter(|n| {
+            !vault_map.contains_key(n.as_str()) && !host_env_map.contains_key(n.as_str())
+        })
+        .cloned()
+        .collect();
+    let mut dotenv_dir_for: HashMap<String, PathBuf> = HashMap::new();
+    if !unresolved.is_empty() {
+        for dir in dotenv_search_dirs {
+            let map = ryeos_vault::dotenv::read_dotenv_overlay(std::slice::from_ref(dir), &unresolved)
+                .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+            for key in map.keys() {
+                dotenv_dir_for.insert(key.clone(), dir.clone());
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let source = if vault_map.contains_key(name.as_str()) {
+            SecretSource::Vault
+        } else if host_env_map.contains_key(name.as_str()) {
+            SecretSource::HostEnv
+        } else if let Some(dir) = dotenv_dir_for.get(name) {
+            SecretSource::Dotenv(dir.clone())
+        } else {
+            SecretSource::Missing
+        };
+        out.push((name.clone(), source));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,6 +1236,44 @@ mod tests {
         let dirs = vec![tmp.path().to_path_buf()];
         let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
         assert_eq!(got, Some("from-vault".to_string()));
+    }
+
+    #[test]
+    fn resolve_secret_sources_reports_per_secret_source() {
+        let _env = EnvVarGuard::set(&[("ENVCHECK_HOST", Some("h"))]);
+        let user = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        // project `.env` has a wanted key plus an unrelated blocked control key
+        // that must be ignored (not fail the report).
+        std::fs::write(
+            project.path().join(".env"),
+            "ENVCHECK_DOTENV=d\nRYEOSD_URL=x\n",
+        )
+        .unwrap();
+        let mut all = HashMap::new();
+        all.insert("ENVCHECK_VAULT".to_string(), "v".to_string());
+        let v = FixedVault(all);
+
+        let names = vec![
+            "ENVCHECK_VAULT".to_string(),
+            "ENVCHECK_HOST".to_string(),
+            "ENVCHECK_DOTENV".to_string(),
+            "ENVCHECK_MISSING".to_string(),
+        ];
+        let dirs = vec![user.path().to_path_buf(), project.path().to_path_buf()];
+        let report = resolve_secret_sources(&v, "op", &names, &dirs).unwrap();
+
+        // Order preserved.
+        let labels: Vec<&str> = report.iter().map(|(_, s)| s.label()).collect();
+        assert_eq!(labels, vec!["vault", "host_env", "dotenv", "missing"]);
+        assert_eq!(report[0].0, "ENVCHECK_VAULT");
+
+        // The dotenv hit is attributed to the project dir (later overrides user).
+        let dotenv = &report[2].1;
+        assert!(
+            matches!(dotenv, SecretSource::Dotenv(d) if d == project.path()),
+            "expected project dotenv dir, got: {dotenv:?}"
+        );
     }
 
     #[test]
