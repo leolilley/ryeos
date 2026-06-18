@@ -47,10 +47,10 @@ pub async fn run(
     // Degraded live timeline: tail the route's head thread over SSE.
     // The braid is the truth; this is it arriving now. Retargets abort
     // the old tail and open a new one.
-    let (tail_tx, mut tail_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (tail_tx, mut tail_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     let mut tail_thread: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
-    let mut tail_events_pending: bool = false;
 
     let start_effects = core.dispatch(StudioEvent::Start {
         session: session_for(project_path, read_only, &loaded_surface),
@@ -128,9 +128,21 @@ pub async fn run(
                     _ => {}
                 }
             }
-            Some(()) = tail_rx.recv() => {
-                // Braid events arrived; coalesce refreshes to tick rate.
-                tail_events_pending = true;
+            Some((event_type, data)) = tail_rx.recv() => {
+                // Transport only: forward the raw frame to the shared reducer,
+                // which accumulates cognition deltas or refetches the snapshot
+                // on a durable milestone. Same path the web client uses.
+                if let Some(thread_id) = tail_thread.clone() {
+                    let payload = serde_json::from_str::<serde_json::Value>(&data)
+                        .unwrap_or(serde_json::Value::Null);
+                    let effects = core.dispatch(StudioEvent::ThreadTail {
+                        thread_id,
+                        event_type,
+                        payload,
+                    });
+                    dispatch_effects(&mut core, &client, effects).await;
+                    dirty = true;
+                }
             }
             Some(kind) = hint_rx.recv() => {
                 let effects = core.effects_for_hint(&kind);
@@ -143,13 +155,6 @@ pub async fn run(
                 let effects = core.dispatch(StudioEvent::Tick { now_ms: now_ms() });
                 dispatch_effects(&mut core, &client, effects).await;
                 sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
-                if tail_events_pending {
-                    tail_events_pending = false;
-                    if tail_thread.is_some() {
-                        let effects = core.effects_for_hint("thread");
-                        dispatch_effects(&mut core, &client, effects).await;
-                    }
-                }
                 dirty = true;
             }
         }

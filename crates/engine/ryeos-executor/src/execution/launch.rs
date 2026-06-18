@@ -756,7 +756,7 @@ pub async fn build_and_launch(
                 })?;
         if let Some(exec) = launching_kind_schema.execution() {
             if !exec.launch_augmentations.is_empty() {
-                crate::augmentations::run_augmentations(
+                if let Err(e) = crate::augmentations::run_augmentations(
                     exec,
                     &mut resolution,
                     &thread.thread_id,
@@ -768,7 +768,32 @@ pub async fn build_and_launch(
                     state,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("launch augmentation failed: {e}"))?;
+                {
+                    // The thread was created (status `created`) above. An
+                    // augmentation failure (e.g. an unresolved context ref)
+                    // must finalize it `failed` rather than orphan it at
+                    // `created` with no `thread_failed` event — otherwise the
+                    // async launch path leaves the thread stuck and silent.
+                    // Mirrors the pre-runtime spawn-failure finalize below;
+                    // best-effort so a finalize error never masks the cause.
+                    let reason = format!("launch augmentation failed: {e}");
+                    // Put the reason in `error` (not `result`) + a stable
+                    // outcome_code so the `thread_failed` event payload carries
+                    // it (state_store surfaces error_json), and the timeline can
+                    // show *why* it failed, not just that it did.
+                    let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
+                        thread_id: thread_id.clone(),
+                        status: "failed".to_string(),
+                        outcome_code: Some("launch_augmentation_failed".to_string()),
+                        result: None,
+                        error: Some(json!({ "message": reason })),
+                        metadata: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        summary_json: None,
+                    });
+                    return Err(anyhow::anyhow!(reason).into());
+                }
             }
         }
     }

@@ -30,6 +30,11 @@ impl StudioCore {
             StudioEvent::Ui { event } => self.dispatch_ui(event),
             StudioEvent::EffectResult { result } => self.apply_effect_result(result),
             StudioEvent::DaemonEvent { payload: _ } => self.initial_effects(),
+            StudioEvent::ThreadTail {
+                thread_id,
+                event_type,
+                payload,
+            } => self.apply_thread_tail(&thread_id, &event_type, &payload),
             StudioEvent::Tick { now_ms } => {
                 self.runtime.now_ms = now_ms;
                 // The frame clock advances `generation` so generation-keyed
@@ -116,6 +121,7 @@ impl StudioCore {
                                 (atlas.file_space_root.clone(), atlas.file_space_path.clone())
                             };
                             vec![self.emit(StudioEffectKind::FetchFileSpace {
+                                tile_id: tile_id.clone(),
                                 root,
                                 path,
                                 max_depth: 8,
@@ -146,6 +152,7 @@ impl StudioCore {
                         (atlas.file_space_root.clone(), atlas.file_space_path.clone())
                     };
                     vec![self.emit(StudioEffectKind::FetchFileSpace {
+                        tile_id: tile_id.clone(),
                         root,
                         path,
                         max_depth: 8,
@@ -515,6 +522,29 @@ impl StudioCore {
                     vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
                 }
             }
+            StudioAction::SubmitThreadCommand { command } => {
+                if self.is_read_only() {
+                    self.notice("This session is read-only.", StudioTone::Warn);
+                    Vec::new()
+                } else if let Some(thread_id) = self.seat.fold().input_route().thread {
+                    // Steer the head thread through the shared control channel.
+                    // Authority == the CLI's `commands submit`; see
+                    // .tmp/thread-authorization-review.md for the authz model.
+                    vec![self.emit(StudioEffectKind::Invoke {
+                        target: super::effect::InvokeRef::Ref {
+                            item_ref: "service:commands/submit".to_string(),
+                        },
+                        params: serde_json::json!({
+                            "thread_id": thread_id,
+                            "command_type": command,
+                        }),
+                        route_seq: None,
+                    })]
+                } else {
+                    self.notice(format!("No active thread to {command}."), StudioTone::Warn);
+                    Vec::new()
+                }
+            }
         }
     }
 
@@ -792,6 +822,7 @@ impl StudioCore {
         self.active_workspace = index;
         self.data.tile_items.clear();
         self.data.tile_files.clear();
+        self.data.tile_file_space.clear();
         self.data.file_read = None;
         self.push_motion(StudioMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -1281,6 +1312,7 @@ impl StudioCore {
                 self.data.items = None;
                 self.data.file_space = None;
                 self.data.tile_items.clear();
+                self.data.tile_file_space.clear();
                 self.data.files = None;
                 self.data.tile_files.clear();
                 self.data.file_read = None;
@@ -1329,7 +1361,17 @@ impl StudioCore {
             StudioEffectResultKind::FileSpace => {
                 self.apply_parsed::<StudioFileSpaceDto>(data, "file_space", |core, file_space| {
                     if effect_matches_current_file_space(Some(&expected), core, &file_space) {
-                        core.data.file_space = Some(file_space);
+                        if let StudioEffectKind::FetchFileSpace {
+                            tile_id: Some(tile_id),
+                            ..
+                        } = &expected
+                        {
+                            core.data
+                                .tile_file_space
+                                .insert(tile_id.clone(), file_space);
+                        } else {
+                            core.data.file_space = Some(file_space);
+                        }
                     }
                 });
             }
@@ -1586,16 +1628,30 @@ fn effect_matches_current_items(expected: Option<&StudioEffectKind>, core: &Stud
     else {
         return true;
     };
-    if tile_id.is_none() {
+    let Some(tile_id) = tile_id.as_deref() else {
+        // The shared/ambient fetch is unscoped.
         return query.is_none() && kind.is_none();
-    }
-    let Some(tile_id) = tile_id.as_deref().and_then(parse_tile_id) else {
+    };
+    // A tile-scoped fetch is current iff that tile still binds an atlas view
+    // whose declared `body.scope` still matches this fetch's (query, kind) —
+    // content is the scope, so a re-bound or re-scoped tile drops the stale
+    // response instead of caching it.
+    let Some(tile_id) = parse_tile_id(tile_id) else {
         return false;
     };
-    // Tile-scoped item filters died with the legacy item tiles; only
-    // untargeted (atlas) fetches remain valid.
-    let _ = (core, tile_id);
-    query.is_none() && kind.is_none()
+    let Some(binding) = core
+        .workspace
+        .tiles
+        .get(&tile_id)
+        .and_then(|tile| core.views.get(&tile.view.view_ref))
+    else {
+        return false;
+    };
+    if binding.widget != "atlas" {
+        return false;
+    }
+    let (want_query, want_kind) = super::model::atlas_item_scope(binding);
+    &want_query == query && &want_kind == kind
 }
 
 fn effect_matches_current_files(
@@ -1624,14 +1680,24 @@ fn effect_matches_current_file_space(
     core: &StudioCore,
     file_space: &StudioFileSpaceDto,
 ) -> bool {
-    let Some(StudioEffectKind::FetchFileSpace { root, path, .. }) = expected else {
+    let Some(StudioEffectKind::FetchFileSpace {
+        tile_id, root, path, ..
+    }) = expected
+    else {
         return true;
     };
-    core.ui.atlas.active_projection.is_file_space()
-        && root == &core.ui.atlas.file_space_root
-        && path == &core.ui.atlas.file_space_path
-        && root == &file_space.root
-        && path == &file_space.path
+    let response_matches = root == &file_space.root && path == &file_space.path;
+    // Per-tile fetch: validate against THIS tile's file-space arrangement;
+    // the shared fetch validates against the ambient atlas state.
+    let atlas = match tile_id.as_deref().map(parse_tile_id) {
+        Some(Some(tile_id)) => core.tile_atlas_state(tile_id),
+        Some(None) => return false,
+        None => &core.ui.atlas,
+    };
+    atlas.active_projection.is_file_space()
+        && root == &atlas.file_space_root
+        && path == &atlas.file_space_path
+        && response_matches
 }
 
 fn effect_matches_current_file_read(
@@ -1952,7 +2018,7 @@ mod tests {
             },
         });
 
-        let scene = crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas);
+        let scene = crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas surface should build scene atlas");
         assert_eq!(atlas.root_label, ".ai");
         assert!(atlas
@@ -3511,5 +3577,88 @@ mod tests {
         assert!(core.data.dimension.is_none());
         assert!(core.data.items.is_none());
         assert_eq!(core.ui.notices.len(), 1);
+    }
+
+    #[test]
+    fn thread_tail_deltas_accumulate_then_clear_on_durable() {
+        let mut core = StudioCore::default();
+
+        // Streaming cognition deltas accumulate; no refetch while live.
+        let effects = core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "delta": "Hel" }),
+        });
+        assert!(effects.is_empty());
+        core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "delta": "lo" }),
+        });
+        assert_eq!(
+            core.data.live_delta.as_ref().map(|d| d.text.as_str()),
+            Some("Hello")
+        );
+
+        // The settled turn (content, no delta) supersedes the live buffer.
+        core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "content": "Hello", "turn": 1 }),
+        });
+        assert!(core.data.live_delta.is_none());
+    }
+
+    #[test]
+    fn thread_tail_ephemeral_nontext_is_noop() {
+        let mut core = StudioCore::default();
+        let effects = core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "stream_opened".to_string(),
+            payload: serde_json::json!({}),
+        });
+        assert!(effects.is_empty());
+        assert!(core.data.live_delta.is_none());
+    }
+
+    #[test]
+    fn submit_thread_command_targets_commands_submit_for_head_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-1" }),
+        );
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SubmitThreadCommand {
+                    command: "interrupt".to_string(),
+                },
+            },
+        });
+        assert_eq!(effects.len(), 1);
+        let StudioEffectKind::Invoke { target, params, .. } = &effects[0].kind else {
+            panic!("expected an Invoke effect");
+        };
+        assert!(matches!(
+            target,
+            crate::studio::effect::InvokeRef::Ref { item_ref }
+                if item_ref == "service:commands/submit"
+        ));
+        assert_eq!(params["thread_id"], "T-1");
+        assert_eq!(params["command_type"], "interrupt");
+    }
+
+    #[test]
+    fn submit_thread_command_without_head_thread_notices() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SubmitThreadCommand {
+                    command: "interrupt".to_string(),
+                },
+            },
+        });
+        assert!(effects.is_empty());
+        assert!(!core.ui.notices.is_empty());
     }
 }

@@ -45,6 +45,10 @@ Examples:
 EOF
 }
 
+# Default to the home surface. The directive-thread surface
+# (`surface:ryeos/studio/thread` — a single timeline tile that fills as you
+# submit) is staged but needs a full `populate-bundles --all` to be signed +
+# resolvable; once populated, pass it explicitly or flip this default to it.
 SURFACE="surface:ryeos/studio/base"
 PROFILE="debug"
 PROJECT="$PWD"

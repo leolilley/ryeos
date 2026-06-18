@@ -97,7 +97,7 @@ async fn effect_data(
         StudioEffectKind::AddProject { root } => client.signed_post("/ui/api/studio/projects/add", &serde_json::json!({ "root": root })).await,
         StudioEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/studio/projects/open", &serde_json::json!({ "local_id": local_id })).await,
         StudioEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/studio/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        StudioEffectKind::FetchFileSpace { root, path, max_depth, max_entries } => client.signed_post("/ui/api/studio/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
+        StudioEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/studio/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
         StudioEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/studio/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         StudioEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
         StudioEffectKind::CancelThread { thread_id } => client.signed_post("/ui/api/studio/thread/cancel", &serde_json::json!({ "thread_id": thread_id })).await,

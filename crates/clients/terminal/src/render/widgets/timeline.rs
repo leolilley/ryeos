@@ -8,7 +8,7 @@ use ryeos_client_base::studio::view_model::{StudioTimelineEntryVm, StudioTone};
 use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
-use super::super::theme::{style_fg, style_muted, tone_style};
+use super::super::theme::{style_fg, style_muted, tone_glyph, tone_style};
 
 pub fn draw_timeline(surface: &mut TextSurface, rect: Rect, entries: &[StudioTimelineEntryVm]) {
     let width = rect.w as usize;
@@ -53,7 +53,7 @@ fn push_timeline_lines(
                 tone,
             } => {
                 lines.push((
-                    join_with_right_meta("•", primary, meta.as_deref(), width),
+                    join_with_right_meta(tone_glyph(*tone), primary, meta.as_deref(), width),
                     tone_style(*tone),
                 ));
             }

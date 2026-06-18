@@ -85,7 +85,17 @@ use super::model::StudioCore;
 /// empty-center namespace_atlas, or a tile's per-tile state for an Atlas
 /// center tile. The underlying topology/item/file data is shared (global
 /// in `core.data`); `atlas` selects the projection, layers, and lens.
-pub fn build_scene_model(core: &StudioCore, atlas: &AtlasUiStateVm) -> StudioSceneModel {
+/// Build the scene for one atlas/graph instance. `items`/`file_space`
+/// override the shared `core.data.*` when this is a tile with its own
+/// scoped dataset (per-tile content); pass `None` for the ambient scene to
+/// read the shared global data. Topology stays shared (the node graph has
+/// no per-tile scope yet — see #23 follow-ups).
+pub fn build_scene_model(
+    core: &StudioCore,
+    atlas: &AtlasUiStateVm,
+    items: Option<&super::dto::StudioItemsDto>,
+    file_space: Option<&super::dto::StudioFileSpaceDto>,
+) -> StudioSceneModel {
     let mut scene = StudioSceneModel {
         generation: core.generation,
         ..StudioSceneModel::default()
@@ -292,7 +302,7 @@ pub fn build_scene_model(core: &StudioCore, atlas: &AtlasUiStateVm) -> StudioSce
         }
     }
 
-    if let Some(items) = &core.data.items {
+    if let Some(items) = items.or(core.data.items.as_ref()) {
         scene.objects.push(scene_object(
             "items:cluster",
             StudioSceneObjectKind::ItemCluster,
@@ -352,7 +362,7 @@ pub fn build_scene_model(core: &StudioCore, atlas: &AtlasUiStateVm) -> StudioSce
     }
 
     if atlas.active_projection == AtlasProjectionVm::FileSpace {
-        let file_space = core.data.file_space.as_ref();
+        let file_space = file_space.or(core.data.file_space.as_ref());
         let selected_ref = core
             .seat
             .fold()
@@ -693,7 +703,7 @@ mod tests {
             ..StudioItemsDto::default()
         });
 
-        let scene = build_scene_model(&core, &core.ui.atlas);
+        let scene = build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas");
         assert_eq!(atlas.generation, 42);
         let stack_node = atlas
@@ -702,6 +712,48 @@ mod tests {
             .find(|node| node.namespace_key == "rye/core/create_tool")
             .expect("projected stack");
         assert_eq!(stack_node.stack.len(), 2);
+    }
+
+    #[test]
+    fn per_tile_items_override_the_shared_dataset() {
+        let mut core = StudioCore::default();
+        core.generation = 7;
+        // Shared/global dataset: one namespace.
+        core.data.items = Some(StudioItemsDto {
+            items: vec![StudioItemDto {
+                canonical_ref: "directive:shared/global/x".to_string(),
+                item_kind: "directive".to_string(),
+                bare_id: "x".to_string(),
+                label: "x".to_string(),
+                namespace: Some("shared/global".to_string()),
+                space: "project".to_string(),
+                source_path: ".ai/directives/shared/global/x.md".to_string(),
+                executable: true,
+                trust: None,
+            }],
+            ..StudioItemsDto::default()
+        });
+        // This tile's own scoped items: a different namespace.
+        let tile_items = StudioItemsDto {
+            items: vec![StudioItemDto {
+                canonical_ref: "knowledge:tile/scoped/y".to_string(),
+                item_kind: "knowledge".to_string(),
+                bare_id: "y".to_string(),
+                label: "y".to_string(),
+                namespace: Some("tile/scoped".to_string()),
+                space: "project".to_string(),
+                source_path: ".ai/knowledge/tile/scoped/y.md".to_string(),
+                executable: false,
+                trust: None,
+            }],
+            ..StudioItemsDto::default()
+        };
+        let atlas = build_scene_model(&core, &core.ui.atlas, Some(&tile_items), None)
+            .atlas
+            .expect("atlas");
+        // The scene reflects the per-tile items, not the shared dataset.
+        assert!(atlas.nodes.iter().any(|n| n.namespace_key == "tile/scoped/y"));
+        assert!(!atlas.nodes.iter().any(|n| n.namespace_key == "shared/global/x"));
     }
 
     #[test]
@@ -727,7 +779,7 @@ mod tests {
             ..Default::default()
         });
 
-        let scene = build_scene_model(&core, &core.ui.atlas);
+        let scene = build_scene_model(&core, &core.ui.atlas, None, None);
         let node = scene
             .objects
             .iter()
@@ -779,7 +831,7 @@ mod tests {
             ..Default::default()
         });
 
-        let scene = build_scene_model(&core, &core.ui.atlas);
+        let scene = build_scene_model(&core, &core.ui.atlas, None, None);
         let edge = scene
             .objects
             .iter()
