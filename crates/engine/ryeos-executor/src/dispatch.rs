@@ -46,7 +46,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -57,7 +57,7 @@ use ryeos_engine::kind_registry::{
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
-use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
+use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
 use crate::execution::launch;
 use crate::executor::{
     self as service_executor, ExecutionContext, ExecutionMode, ServiceExecutionResult,
@@ -1080,29 +1080,32 @@ pub async fn dispatch_service(
                 item_ref,
                 Some("service"),
             )
-            .map_err(|e| match e.downcast_ref::<ryeos_engine::error::EngineError>() {
-                // The service item YAML is absent from every search
-                // space — the bundle shipping it is not installed.
-                // Surface the installed-bundle list instead of an
-                // opaque 500 so a remote operator can repair the
-                // deployment without source-level debugging.
-                Some(ryeos_engine::error::EngineError::ItemNotFound {
-                    searched_spaces, ..
-                }) => {
-                    let mut installed_bundles: Vec<String> = state
-                        .node_config
-                        .bundles
-                        .iter()
-                        .map(|b| b.name.clone())
-                        .collect();
-                    installed_bundles.sort();
-                    DispatchError::ServiceNotInstalled {
-                        service_ref: item_ref.to_string(),
-                        installed_bundles,
-                        searched_spaces: searched_spaces.clone(),
+            .map_err(|e| {
+                match e.downcast_ref::<ryeos_engine::error::EngineError>() {
+                    // The service item YAML is absent from every search
+                    // space — the bundle shipping it is not installed.
+                    // Surface the installed-bundle list instead of an
+                    // opaque 500 so a remote operator can repair the
+                    // deployment without source-level debugging.
+                    Some(ryeos_engine::error::EngineError::ItemNotFound {
+                        searched_spaces,
+                        ..
+                    }) => {
+                        let mut installed_bundles: Vec<String> = state
+                            .node_config
+                            .bundles
+                            .iter()
+                            .map(|b| b.name.clone())
+                            .collect();
+                        installed_bundles.sort();
+                        DispatchError::ServiceNotInstalled {
+                            service_ref: item_ref.to_string(),
+                            installed_bundles,
+                            searched_spaces: searched_spaces.clone(),
+                        }
                     }
+                    _ => DispatchError::Internal(e),
                 }
-                _ => DispatchError::Internal(e),
             })?;
             let params = service_params_with_project_path(
                 request.params.clone(),
@@ -1117,7 +1120,11 @@ pub async fn dispatch_service(
             if request.validate_only {
                 let description = verified.resolved.metadata.description.clone();
                 let input_schema = verified.resolved.metadata.extra.get("schema").cloned();
-                let endpoint = verified.resolved.metadata.extra.get("endpoint")
+                let endpoint = verified
+                    .resolved
+                    .metadata
+                    .extra
+                    .get("endpoint")
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let required_caps = ryeos_app::service_registry::extract_required_caps(
@@ -1136,17 +1143,16 @@ pub async fn dispatch_service(
                 }));
             }
 
-            let result: ServiceExecutionResult =
-                service_executor::execute_service_verified(
-                    verified,
-                    item_ref,
-                    params,
-                    ExecutionMode::Live,
-                    ctx,
-                    state,
-                    None,
-                )
-                .await?;
+            let result: ServiceExecutionResult = service_executor::execute_service_verified(
+                verified,
+                item_ref,
+                params,
+                ExecutionMode::Live,
+                ctx,
+                state,
+                None,
+            )
+            .await?;
             let envelope = serde_json::json!({
                 "thread": {
                     "thread_id": result.audit_thread_id,
@@ -1455,15 +1461,6 @@ async fn dispatch_managed_subprocess(
 
     let extra_effective_caps = derive_manifest_runtime_caps(&resolved, ctx)?;
 
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
-    let vault_bindings = ryeos_app::vault::read_required_secrets(
-        state.vault.as_ref(),
-        acting_principal,
-        &resolved.resolved_item.metadata.required_secrets,
-        &dotenv_dirs,
-    )
-    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
-
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         executor_ref: &executor_ref,
@@ -1472,26 +1469,25 @@ async fn dispatch_managed_subprocess(
         project_path,
         provenance: &request.provenance,
         parameters: &params,
-        vault_bindings: &vault_bindings,
+        metadata_required_secrets: &resolved.resolved_item.metadata.required_secrets,
+        required_envelope_fields: &verified_runtime.yaml.required_envelope_fields,
         extra_effective_caps: &extra_effective_caps,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
     })
     .await
     .map_err(|e| match &e {
-        launch::BuildAndLaunchError::Materialization(
-            launch::MaterializationError::ProviderSecretMissing {
-                provider_id,
-                env_var,
-                item_ref,
-            },
-        ) => DispatchError::RequiredSecretMissing {
-            item_ref: item_ref.clone(),
-            env_var: env_var.clone(),
-            source_kind: "provider".to_string(),
-            source_name: provider_id.clone(),
-            remediation: crate::dispatch_error::required_secret_remediation(env_var),
-        },
+        launch::BuildAndLaunchError::MissingSecrets { item_ref, secrets } => {
+            let first = secrets.first().expect("missing secret error has a secret");
+            let source = first.primary_source();
+            DispatchError::RequiredSecretMissing {
+                item_ref: item_ref.clone(),
+                env_var: first.name.clone(),
+                source_kind: source.kind_for_wire().to_string(),
+                source_name: source.name_for_wire(),
+                remediation: crate::dispatch_error::required_secret_remediation(&first.name),
+            }
+        }
         _ => {
             let msg = e.to_string();
             if msg.contains("manifest")
@@ -1762,7 +1758,24 @@ async fn dispatch_tool_subprocess(
         &resolved.resolved_item.metadata.required_secrets,
         &dotenv_dirs,
     )
-    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+    .map_err(|e| match e {
+        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+            let env_var = names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            DispatchError::RequiredSecretMissing {
+                item_ref: item_ref_for_error.clone(),
+                env_var: env_var.clone(),
+                source_kind: "declared".to_string(),
+                source_name: "item metadata".to_string(),
+                remediation: crate::dispatch_error::required_secret_remediation(&env_var),
+            }
+        }
+        ryeos_app::vault::VaultReadError::Internal(e) => {
+            DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))
+        }
+    })?;
 
     let params = crate::execution::runner::ExecutionParams {
         resolved,
@@ -2148,7 +2161,7 @@ mod tests {
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-    use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+    use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[71u8; 32])
@@ -2467,9 +2480,11 @@ runtime_vault:
         let bundle = tempdir().join("example-bundle");
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        assert!(
+            derive_manifest_runtime_caps(&resolved, &ctx)
+                .unwrap()
+                .is_empty()
+        );
 
         write_signed_manifest(
             &bundle.join(ryeos_engine::AI_DIR),
@@ -2482,9 +2497,11 @@ uses_kinds: []
 bundle_events: []
 "#,
         );
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        assert!(
+            derive_manifest_runtime_caps(&resolved, &ctx)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2585,9 +2602,11 @@ runtime_vault:
             )]),
         );
 
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        assert!(
+            derive_manifest_runtime_caps(&resolved, &ctx)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // P1.4: tests for `lookup_runtime_for_dispatch` were removed when

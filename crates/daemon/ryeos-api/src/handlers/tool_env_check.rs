@@ -9,9 +9,10 @@
 //! DaemonOnly: the authoritative host-env source is the daemon's process
 //! environment, so the report must come from the daemon, not an offline CLI.
 //!
-//! Scope (v1): item `required_secrets`. A directive's provider `auth.env_var`
-//! is resolved separately at launch (`preflight_inject_provider_secret`) and is
-//! not yet enumerated here — a follow-up will add it via the same resolver.
+//! Scope (v1): item `required_secrets`. Runtime-derived launch envelope
+//! requirements such as provider auth are resolved separately at launch and
+//! are not yet enumerated here — a follow-up will add them via the same
+//! resolver.
 
 use std::sync::Arc;
 
@@ -36,7 +37,11 @@ pub struct Request {
     pub project_path: Option<String>,
 }
 
-pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
+pub async fn handle(
+    req: Request,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> HandlerResult<Value> {
     ctx.require_verified()?;
 
     let project_path = req.project_path.ok_or_else(|| {
@@ -45,8 +50,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         )
     })?;
 
-    let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid item_ref `{}`: {e}", req.item_ref)))?;
+    let canonical =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {
+            HandlerError::BadRequest(format!("invalid item_ref `{}`: {e}", req.item_ref))
+        })?;
 
     // The report leaks secret presence/source, so the caller must hold the same
     // execute capability for the TARGET item that a real launch requires — being
@@ -58,7 +65,9 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     state
         .authorizer
         .authorize(&ctx.scopes, &policy)
-        .map_err(|_| HandlerError::Forbidden(format!("missing required capability: {required_cap}")))?;
+        .map_err(|_| {
+            HandlerError::Forbidden(format!("missing required capability: {required_cap}"))
+        })?;
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let plan_ctx = PlanContext {

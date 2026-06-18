@@ -54,7 +54,7 @@ use std::env::VarError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use ryeos_engine::roots;
 
@@ -64,7 +64,7 @@ use ryeos_engine::roots;
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
 pub use ryeos_vault::paths::default_sealed_store_path;
-pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
+pub use ryeos_vault::policy::{BLOCKED_NAMES, validate_decrypted_keys, validate_key_name};
 pub use ryeos_vault::sealed::write_sealed_secrets;
 
 pub const INTERNAL_RUNTIME_VAULT_PREFIX: &str = "INTERNAL_RUNTIME_VAULT_";
@@ -231,6 +231,25 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum VaultReadError {
+    #[error(
+        "missing declared secret(s) for principal `{principal}`: [{}]. \
+         The item declares these in `required_secrets` but none of the checked \
+         sources provides them: sealed vault, daemon host environment, or \
+         `.env` overlay. For hosted deployments, configure them as service \
+         variables. For local/dev, use `ryeos vault put` or a project/user \
+         `.env`, or remove the declaration.",
+        names.join(", ")
+    )]
+    MissingSecrets {
+        principal: String,
+        names: Vec<String>,
+    },
+    #[error("vault read error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Read only the secrets declared on the spawning item's
 /// `ItemMetadata.required_secrets`, refusing if any declared secret
 /// is missing.
@@ -271,7 +290,7 @@ pub fn read_required_secrets(
     principal: &str,
     required_secrets: &[String],
     dotenv_search_dirs: &[PathBuf],
-) -> Result<HashMap<String, String>> {
+) -> std::result::Result<HashMap<String, String>, VaultReadError> {
     if required_secrets.is_empty() {
         return Ok(HashMap::new());
     }
@@ -289,15 +308,13 @@ pub fn read_required_secrets(
     // and the overlay only ever sees the declared keys it still needs.
     let dotenv_wanted: HashSet<String> = required_secrets
         .iter()
-        .filter(|k| {
-            !vault_map.contains_key(k.as_str()) && !host_env_map.contains_key(k.as_str())
-        })
+        .filter(|k| !vault_map.contains_key(k.as_str()) && !host_env_map.contains_key(k.as_str()))
         .cloned()
         .collect();
     let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs, &dotenv_wanted)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     let mut out = HashMap::with_capacity(required_secrets.len());
-    let mut missing: Vec<&str> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     for key in required_secrets {
         // Vault wins on conflict; host env is the deployment fallback;
         // .env is the local/dev convenience fallback.
@@ -308,19 +325,14 @@ pub fn read_required_secrets(
         } else if let Some(v) = dotenv_map.get(key.as_str()) {
             out.insert(key.clone(), v.clone());
         } else {
-            missing.push(key.as_str());
+            missing.push(key.clone());
         }
     }
     if !missing.is_empty() {
-        bail!(
-            "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
-             The item declares these in `required_secrets` but none of the checked \
-             sources provides them: sealed vault, daemon host environment, or \
-             `.env` overlay. For hosted deployments, configure them as service \
-             variables. For local/dev, use `ryeos vault put` or a project/user \
-             `.env`, or remove the declaration.",
-            missing.join(", ")
-        );
+        return Err(VaultReadError::MissingSecrets {
+            principal: principal.to_string(),
+            names: missing,
+        });
     }
     Ok(out)
 }
@@ -694,16 +706,15 @@ pub fn resolve_secret_sources(
     // file would supply the key (later dir wins, matching resolution order).
     let unresolved: HashSet<String> = names
         .iter()
-        .filter(|n| {
-            !vault_map.contains_key(n.as_str()) && !host_env_map.contains_key(n.as_str())
-        })
+        .filter(|n| !vault_map.contains_key(n.as_str()) && !host_env_map.contains_key(n.as_str()))
         .cloned()
         .collect();
     let mut dotenv_dir_for: HashMap<String, PathBuf> = HashMap::new();
     if !unresolved.is_empty() {
         for dir in dotenv_search_dirs {
-            let map = ryeos_vault::dotenv::read_dotenv_overlay(std::slice::from_ref(dir), &unresolved)
-                .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+            let map =
+                ryeos_vault::dotenv::read_dotenv_overlay(std::slice::from_ref(dir), &unresolved)
+                    .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
             for key in map.keys() {
                 dotenv_dir_for.insert(key.clone(), dir.clone());
             }
