@@ -74,6 +74,9 @@ fn parse_dotenv_text(
         }
         // Defense in depth — unreachable, since wanted names are pre-validated
         // to be valid and non-blocked at the call sites.
+        if key.is_empty() {
+            bail!("vault dotenv: empty key at {}:{lineno}", path.display());
+        }
         if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
             bail!(
                 "vault dotenv: invalid key `{key}` at {}:{lineno} \

@@ -1602,7 +1602,7 @@ pub async fn run_existing_detached(
                             env_var,
                             "provider",
                             provider_id,
-                            format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
+                            crate::dispatch_error::required_secret_remediation(env_var),
                         );
                     guard.fail_thread_with_error("required_secret_missing", payload.to_value());
                     guard.cleanup();

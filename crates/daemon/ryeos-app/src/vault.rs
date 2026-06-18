@@ -1105,6 +1105,62 @@ mod tests {
     }
 
     #[test]
+    fn host_env_satisfied_skips_poisoned_dotenv() {
+        // Host env provides the only required secret; the `.env` (a bare wanted
+        // key that WOULD fail if parsed) is never read because dotenv_wanted is
+        // empty once vault + host satisfy everything.
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_POISON", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "SNAPTRACK_TEST_HOST_POISON\n").unwrap();
+        let v = FixedVault(HashMap::new());
+        let required = vec!["SNAPTRACK_TEST_HOST_POISON".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(
+            bindings.get("SNAPTRACK_TEST_HOST_POISON"),
+            Some(&"from-host".to_string())
+        );
+    }
+
+    #[test]
+    fn read_explicit_secret_vault_beats_host_and_dotenv() {
+        let _env = EnvVarGuard::set(&[("ZEN_API_KEY", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY=from-dotenv\n").unwrap();
+        let mut all = HashMap::new();
+        all.insert("ZEN_API_KEY".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("from-vault".to_string()));
+    }
+
+    #[test]
+    fn read_explicit_secret_host_beats_dotenv() {
+        let _env = EnvVarGuard::set(&[("ZEN_API_KEY", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY=from-dotenv\n").unwrap();
+        let v = FixedVault(HashMap::new());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("from-host".to_string()));
+    }
+
+    #[test]
+    fn read_explicit_secret_vault_skips_poisoned_dotenv() {
+        // vault satisfies the key, so the bare-wanted-key `.env` (which would
+        // fail if parsed) is never read.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY\n").unwrap();
+        let mut all = HashMap::new();
+        all.insert("ZEN_API_KEY".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("from-vault".to_string()));
+    }
+
+    #[test]
     fn dotenv_overlay_skipped_when_required_empty() {
         // `read_required_secrets` short-circuits on empty required;
         // no .env walk happens, so a poisoned .env doesn't trip the

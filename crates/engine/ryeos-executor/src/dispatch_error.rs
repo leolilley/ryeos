@@ -151,14 +151,14 @@ pub enum DispatchError {
         executor_ref: String,
         detail: String,
     },
-    /// A declared required secret was not in the operator vault.
+    /// A declared required secret was not found in any source.
     /// Generic at the dispatch layer; the `source_kind`/`source_name`
     /// fields attribute *which* subsystem demanded the secret (today
     /// only `"provider"` from LLM preflight; future kinds e.g. `"tool"`
-    /// or `"runtime"` slot in without changing the wire shape).
-    /// Operator-actionable: run
-    /// `ryeos-core-tools vault put --name <env_var> --value-stdin`.
-    #[error("required secret missing for '{item_ref}': set vault entry '{env_var}' (source: {source_kind}/{source_name})")]
+    /// or `"runtime"` slot in without changing the wire shape). The
+    /// secret resolves from sealed vault, daemon host env, or `.env`
+    /// overlay; `remediation` carries the actionable string.
+    #[error("required secret missing for '{item_ref}': `{env_var}` was not found in sealed vault, daemon host environment, or `.env` overlay (source: {source_kind}/{source_name})")]
     RequiredSecretMissing {
         item_ref: String,
         env_var: String,
@@ -274,6 +274,17 @@ pub enum DispatchError {
     Internal(#[from] anyhow::Error),
 }
 
+/// Operator-actionable remediation for a missing required secret. The secret
+/// resolves from any of the three sources (sealed vault, daemon host env,
+/// `.env` overlay), so the remediation names all three. Shared by the dispatch
+/// and resume paths so the wording cannot drift between them.
+pub fn required_secret_remediation(env_var: &str) -> String {
+    format!(
+        "Set `{env_var}` via `ryeos-core-tools vault put --name {env_var} --value-stdin`, \
+         a daemon/service environment variable, or a project/operator `.env`"
+    )
+}
+
 impl DispatchError {
     /// Map the typed variant to the HTTP status `/execute` returns.
     /// The execute response mode calls this once per error path; there is no
@@ -375,6 +386,27 @@ impl DispatchError {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+
+    #[test]
+    fn required_secret_missing_names_all_three_sources() {
+        let err = DispatchError::RequiredSecretMissing {
+            item_ref: "directive:test/x".to_string(),
+            env_var: "ZEN_API_KEY".to_string(),
+            source_kind: "provider".to_string(),
+            source_name: "zen".to_string(),
+            remediation: required_secret_remediation("ZEN_API_KEY"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("sealed vault"), "got: {msg}");
+        assert!(msg.contains("daemon host environment"), "got: {msg}");
+        assert!(msg.contains(".env"), "got: {msg}");
+        assert!(!msg.contains("set vault entry"), "stale wording leaked: {msg}");
+
+        let rem = required_secret_remediation("ZEN_API_KEY");
+        assert!(rem.contains("vault put"), "got: {rem}");
+        assert!(rem.contains("environment variable"), "got: {rem}");
+        assert!(rem.contains(".env"), "got: {rem}");
+    }
 
     fn sample_details() -> ContractViolationDetails {
         ContractViolationDetails {

@@ -458,8 +458,8 @@ fn build_verified_loader_for_thread(
 /// resume — keep the contract identical.
 ///
 /// Returns `Err(MaterializationError::ProviderSecretMissing)` if the
-/// resolved provider declares an `auth.env_var` and that env var is
-/// not present in the vault.
+/// resolved provider declares an `auth.env_var` and that env var is not
+/// found in any source (sealed vault, daemon host env, or `.env` overlay).
 pub(crate) fn preflight_inject_provider_secret(
     composed: &ryeos_engine::resolution::KindComposedView,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
@@ -489,7 +489,7 @@ pub(crate) fn preflight_inject_provider_secret(
             tracing::debug!(
                 provider_id = %resolved_target.provider_id,
                 env_var = %env_var,
-                "vault: provider secret already in bindings (likely from dotenv overlay)"
+                "vault: provider secret already in bindings (from required_secrets resolution: vault, host env, or .env)"
             );
         } else {
             match ryeos_app::vault::read_explicit_secret(

@@ -1490,7 +1490,7 @@ async fn dispatch_managed_subprocess(
             env_var: env_var.clone(),
             source_kind: "provider".to_string(),
             source_name: provider_id.clone(),
-            remediation: format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
+            remediation: crate::dispatch_error::required_secret_remediation(env_var),
         },
         _ => {
             let msg = e.to_string();
