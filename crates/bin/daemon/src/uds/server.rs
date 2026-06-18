@@ -274,19 +274,10 @@ fn handle_append_event_batch(
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
     let result = state.events.append_batch(&params)?;
-    // Group by thread_id and bulk-publish so each thread's
-    // subscribers receive its events in persisted order under a
-    // single hub lock acquisition per thread.
-    let mut by_thread: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
-    for ev in &result.persisted {
-        by_thread
-            .entry(ev.thread_id.clone())
-            .or_default()
-            .push(ev.clone());
-    }
-    for (thread_id, events) in &by_thread {
-        state.event_streams.publish_batch(thread_id, events);
-    }
+    // Publish the whole batch in persisted order under one hub-lock acquire:
+    // each thread's lane sees its events in order, and the firehose sees the
+    // batch contiguously without interleaving a concurrent publisher.
+    state.event_streams.publish_ordered(&result.persisted);
     serde_json::to_value(result).context("failed to encode events.append_batch result")
 }
 
