@@ -1,0 +1,18 @@
+category: commands
+section: commands
+name: tool-env-check
+tokens:
+- tool
+- env-check
+description: Report which source would satisfy each declared secret of an item, without running it
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+project:
+  resolution: optional
+  bind_parameter: project_path
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: service:tool/env-check

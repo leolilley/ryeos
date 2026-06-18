@@ -30,11 +30,20 @@ pub struct Request {
     /// The item whose declared secrets to check (e.g. `tool:foo/bar`).
     pub item_ref: String,
     /// Project root the item resolves against (also the `.env` overlay root).
-    pub project_path: String,
+    /// Bound by the CLI from the discovered project; absent when run outside
+    /// a project.
+    #[serde(default)]
+    pub project_path: Option<String>,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> HandlerResult<Value> {
     ctx.require_verified()?;
+
+    let project_path = req.project_path.ok_or_else(|| {
+        HandlerError::BadRequest(
+            "env-check requires a project: run inside a project directory".into(),
+        )
+    })?;
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let plan_ctx = PlanContext {
@@ -43,7 +52,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             scopes: ctx.scopes.clone(),
         }),
         project_context: ProjectContext::LocalPath {
-            path: std::path::PathBuf::from(&req.project_path),
+            path: std::path::PathBuf::from(&project_path),
         },
         current_site_id: state.threads.site_id().to_string(),
         origin_site_id: state.threads.site_id().to_string(),
@@ -59,7 +68,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let names = resolved.metadata.required_secrets.clone();
     let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(std::path::Path::new(&req.project_path)));
+        ryeos_app::vault::dotenv_search_dirs(Some(std::path::Path::new(&project_path)));
     let report = ryeos_app::vault::resolve_secret_sources(
         state.vault.as_ref(),
         &ctx.fingerprint,
