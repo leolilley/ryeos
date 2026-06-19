@@ -276,3 +276,96 @@ fn function_missing_execute_fails_loudly() {
         "error should mention the missing execute(): {detail}"
     );
 }
+
+#[test]
+fn function_stdout_noise_is_isolated_from_json_result() {
+    // A function tool (and its imports) may print to stdout — logging,
+    // banners, progress. None of it may corrupt the JSON result: the
+    // runtime redirects tool stdout to stderr and emits only the `execute`
+    // return value on the result channel.
+    let project_dir = unique_project_dir("noise");
+    write_python_tool(
+        &project_dir,
+        "probe/noise",
+        "function",
+        "import sys\n\
+         print(\"INFO: loading model\")\n\
+         sys.stdout.write(\"banner: ready\\n\")\n\
+         def execute(params, project_path):\n\
+         \x20   print(\"INFO: running\")\n\
+         \x20   return {\"answer\": 42, \"label\": \"ok\"}\n",
+    );
+
+    let completion = run_tool(&project_dir, "tool:probe/noise", Value::Null);
+    let _ = fs::remove_dir_all(&project_dir);
+
+    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    let result = completion.result.expect("captured stdout");
+    assert!(
+        result.is_object(),
+        "result must be structured JSON, not a noise-wrapped string: {result:?}"
+    );
+    assert_eq!(result["answer"], 42);
+    assert_eq!(result["label"], "ok");
+}
+
+#[test]
+fn function_dependency_stdout_write_does_not_corrupt_result() {
+    // Simulate a dependency that writes to stdout at import time. The
+    // structured result must still survive intact.
+    let project_dir = unique_project_dir("depnoise");
+    write_python_tool(
+        &project_dir,
+        "probe/depnoise",
+        "function",
+        "import sys\n\
+         sys.stdout.write(\"dep banner line 1\\n\")\n\
+         sys.stdout.flush()\n\
+         def execute(params, project_path):\n\
+         \x20   return {\"ok\": True, \"n\": params.get(\"n\")}\n",
+    );
+
+    let completion = run_tool(
+        &project_dir,
+        "tool:probe/depnoise",
+        serde_json::json!({"n": 7}),
+    );
+    let _ = fs::remove_dir_all(&project_dir);
+
+    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    let result = completion.result.expect("captured stdout");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["n"], 7);
+}
+
+#[test]
+fn function_noisy_tool_failure_surfaces_stderr() {
+    // A tool that prints noise to stdout and then raises: the result
+    // channel stays clean (stdout empty), the process exits non-zero, and
+    // the traceback reaches the failure envelope via stderr — which is what
+    // feeds the graph runtime's `describe_subprocess_failure`.
+    let project_dir = unique_project_dir("noisyfail");
+    write_python_tool(
+        &project_dir,
+        "probe/noisyfail",
+        "function",
+        "print(\"INFO: starting\")\n\
+         def execute(params, project_path):\n\
+         \x20   print(\"about to fail\")\n\
+         \x20   raise RuntimeError(\"boom-xyzzy\")\n",
+    );
+
+    let completion = run_tool(&project_dir, "tool:probe/noisyfail", Value::Null);
+    let _ = fs::remove_dir_all(&project_dir);
+
+    assert_ne!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "a raising tool must not be a clean completion: {completion:?}"
+    );
+    let detail = serde_json::to_string(&completion.error).unwrap_or_default();
+    assert!(
+        detail.contains("boom-xyzzy"),
+        "failure envelope must carry the tool's stderr traceback: {detail}"
+    );
+}

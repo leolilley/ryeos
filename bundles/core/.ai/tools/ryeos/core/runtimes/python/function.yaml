@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-08T03:48:05Z:1bd452cfd5d305be11e84967404348bb7e2761eb7c511fa36c42014709d882bd:adfxaACZVAGBXZP5/RPSeOB4zz/+rQfLzB5QUCcbPYaWV8xnAwFR0rAvFmbCP/5NeyZM9sGvmqcO4f/LgdH2Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-19T06:52:20Z:fed77e6eae30dc4de4c88b9f12005ab5cc4eaf98bf3ceac120626d0160b5d64e:VkAoI7fiZpGtLIfXcV2SbCUGh3/4gfg16BwZEFw5Cgc/OBm27RibT6Rs7lu3yN/+PNgDoJsYV9PFvU17Z8D6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -36,8 +36,12 @@ config:
     - "-u"
     - "-c"
     - |
-      import sys,json,importlib.util,inspect,asyncio
+      import os,sys,json,importlib.util,inspect,asyncio
       from pathlib import Path
+      _saved_stdout=os.dup(1)
+      os.set_inheritable(_saved_stdout,False)
+      os.dup2(2,1)
+      sys.stdout=sys.stderr
       def prepend(path):
           value=str(path)
           if value and value not in sys.path:sys.path.insert(0,value)
@@ -63,7 +67,9 @@ config:
       p=json.loads(sys.stdin.read())
       if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,project_path))
       else:r=fn(p,project_path)
-      print(json.dumps(r,default=str)if r is not None else json.dumps(dict()))
+      sys.stdout.flush()
+      _payload=(json.dumps(r,default=str)if r is not None else json.dumps(dict()))+"\n"
+      os.write(_saved_stdout,_payload.encode())
     - "{tool_path}"
     - "{runtime_dir}/lib"
     - "{project_path}"

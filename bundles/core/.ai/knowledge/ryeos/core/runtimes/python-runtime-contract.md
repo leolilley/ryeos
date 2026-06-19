@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-06-19T06:52:20Z:27891d30ad9602219cd47bd023f8b34315251678837dd89af3aaf2f88548275e:fzGxbwzZwSryLYVVjhskmwl8Z6x4d+MmO6J5FRRhaai3XVOws/1GHOkKpX1Y66zmqJ0gWm9+cUgDbDH2wPd2Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/runtimes
 tags: [runtime, python, contract, tools]
@@ -85,8 +86,27 @@ plus any vault/host bindings the dispatch layer attaches.
   JSON stdout is captured as structured data.
 - **function**: the runtime imports the tool module and calls
   `execute(params, project_path)` — synchronous or `async def` (it is
-  awaited). The return value is JSON-serialized as the tool result; a
+  awaited). The **return value** is JSON-serialized as the tool result; a
   missing `execute` is a hard error.
+
+## Result channel (function runtime)
+
+For the **function** runtime, the result is the `execute` return value —
+**not** whatever the process writes to stdout. To keep that channel clean,
+the runtime redirects the tool's stdout to **stderr** before importing the
+tool, then writes only the serialized return value to the real stdout. So:
+
+- anything your tool (or a dependency it imports) prints — logging banners,
+  `INFO:` lines, progress, `print()` debugging — goes to **stderr**, where it
+  is captured and surfaced if the tool fails. It can never corrupt the result.
+- you do **not** need to mute your dependencies' stdout (no `os.dup2(2, 1)`
+  workaround in your own tool).
+- `return` your result; do not `print` it. A value printed to stdout from
+  inside `execute` is treated as noise (redirected to stderr), not the result.
+
+This applies to the function runtime only. The **script** runtime owns its
+stdout (see above): there, stdout is your output channel and is captured
+as-is.
 
 ## What this contract pins
 
