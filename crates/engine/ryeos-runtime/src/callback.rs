@@ -35,6 +35,24 @@ pub struct DispatchActionRequest {
     pub action: ActionPayload,
 }
 
+/// Terminal completion a runtime sends when it self-finalizes a thread.
+///
+/// `cost` is carried as raw JSON so the runtime callback wire does not couple
+/// to a cross-crate cost type; the daemon maps it into its own cost record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalCompletion {
+    pub status: String,
+    #[serde(default)]
+    pub outcome_code: Option<String>,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub error: Option<Value>,
+    #[serde(default)]
+    pub cost: Option<Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
@@ -53,7 +71,11 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
     async fn mark_running(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
-    async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, CallbackError>;
+    async fn finalize_thread(
+        &self,
+        thread_id: &str,
+        completion: TerminalCompletion,
+    ) -> Result<Value, CallbackError>;
 
     async fn get_thread(&self, thread_id: &str) -> Result<Value, CallbackError>;
 

@@ -32,7 +32,7 @@ pub use authorizer::{
 };
 pub use callback::{
     client_from_env, ActionPayload, CallbackError, DispatchActionRequest, ReplayResponse,
-    ReplayedEventRecord, RuntimeCallbackAPI,
+    ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{

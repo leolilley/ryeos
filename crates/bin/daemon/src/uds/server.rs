@@ -18,8 +18,8 @@ use ryeos_app::runtime_vault_service::{
 };
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{
-    ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams,
-    ThreadFinalizeParams, ThreadGetParams, ThreadMarkRunningParams,
+    ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams, ThreadGetParams,
+    ThreadMarkRunningParams,
 };
 
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
@@ -215,11 +215,76 @@ fn handle_attach_process(
         .context("failed to encode threads.attach_process result")
 }
 
+/// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
+///
+/// `cost` is the runtime's own cost JSON (`{input_tokens, output_tokens,
+/// total_usd}`); it is mapped into a [`FinalCost`] before finalization.
+#[derive(serde::Deserialize)]
+struct RuntimeFinalizeParams {
+    thread_id: String,
+    status: String,
+    #[serde(default)]
+    outcome_code: Option<String>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+    #[serde(default)]
+    cost: Option<serde_json::Value>,
+}
+
+/// Map a runtime self-reported terminal status. Timeout is daemon-owned — the
+/// launch supervisor finalizes timed-out runs via the fallback path — so a
+/// runtime never self-reports `timed_out` here, and any unrecognized status is
+/// rejected rather than guessed.
+fn terminal_status_from_str(status: &str) -> Result<ryeos_engine::contracts::ThreadTerminalStatus> {
+    use ryeos_engine::contracts::ThreadTerminalStatus;
+    Ok(match status {
+        "completed" => ThreadTerminalStatus::Completed,
+        "failed" => ThreadTerminalStatus::Failed,
+        "cancelled" => ThreadTerminalStatus::Cancelled,
+        "continued" => ThreadTerminalStatus::Continued,
+        "killed" => ThreadTerminalStatus::Killed,
+        other => anyhow::bail!("invalid terminal status: {other}"),
+    })
+}
+
+fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contracts::FinalCost {
+    ryeos_engine::contracts::FinalCost {
+        turns: 0,
+        input_tokens: cost
+            .get("input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        output_tokens: cost
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        spend: cost.get("total_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        provider: None,
+        metadata: None,
+    }
+}
+
 fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: ThreadFinalizeParams =
-        serde_json::from_value(params.clone()).context("invalid threads.finalize params")?;
-    serde_json::to_value(state.threads.finalize_thread(&params)?)
-        .context("failed to encode threads.finalize result")
+    let params: RuntimeFinalizeParams =
+        serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
+    let completion = ryeos_engine::contracts::ExecutionCompletion {
+        status: terminal_status_from_str(&params.status)?,
+        outcome_code: params.outcome_code,
+        result: params.result,
+        error: params.error,
+        artifacts: Vec::new(),
+        final_cost: params.cost.as_ref().map(final_cost_from_runtime_json),
+        continuation_request: None,
+        metadata: None,
+    };
+    serde_json::to_value(
+        state
+            .threads
+            .finalize_from_completion(&params.thread_id, &completion)?,
+    )
+    .context("failed to encode runtime.finalize_thread result")
 }
 
 fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -519,7 +584,9 @@ mod tests {
     use ryeos_app::kind_profiles::KindProfileRegistry;
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::StateStore;
-    use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
+    use ryeos_app::thread_lifecycle::{
+        ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
+    };
     use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
     use std::time::Instant;
@@ -795,13 +862,25 @@ mod tests {
                     "callback_token": cbt.token,
                     "thread_id": "T-1",
                     "status": "completed",
-                    "outcome_code": "test",
+                    "outcome_code": "success",
+                    "result": "4",
+                    "cost": {"input_tokens": 10, "output_tokens": 2, "total_usd": 0.01},
                 }),
             ),
             &state,
         )
         .await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
+
+        // The completion's result and outcome_code must be persisted and
+        // readable, not only returned live.
+        let persisted = state
+            .threads
+            .get_thread_result("T-1")
+            .unwrap()
+            .expect("thread result row present after finalize");
+        assert_eq!(persisted.outcome_code.as_deref(), Some("success"));
+        assert_eq!(persisted.result, Some(json!("4")));
     }
 
     #[tokio::test]
@@ -821,7 +900,7 @@ mod tests {
                 thread_id: "T-pub".to_string(),
                 status: "completed".to_string(),
                 outcome_code: Some("success".to_string()),
-                result: None,
+                result: Some(json!("4")),
                 error: None,
                 metadata: None,
                 artifacts: Vec::new(),
@@ -836,6 +915,9 @@ mod tests {
             .expect("receiver did not lag/close");
         assert_eq!(event.event_type, "thread_completed");
         assert_eq!(event.thread_id, "T-pub");
+        // Live subscribers must see the terminal result in the payload.
+        assert_eq!(event.payload.get("result"), Some(&json!("4")));
+        assert_eq!(event.payload.get("outcome_code"), Some(&json!("success")));
     }
 
     #[tokio::test]

@@ -121,7 +121,27 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
             )
         });
 
-    if let Err(e) = client.finalize_thread("completed").await {
+    let completion = if result.success {
+        ryeos_runtime::TerminalCompletion {
+            status: "completed".to_string(),
+            outcome_code: Some("success".to_string()),
+            result: result.output.clone(),
+            error: None,
+            cost: None,
+        }
+    } else {
+        ryeos_runtime::TerminalCompletion {
+            status: "failed".to_string(),
+            outcome_code: Some("failed".to_string()),
+            result: None,
+            error: result
+                .error
+                .as_ref()
+                .and_then(|e| serde_json::to_value(e).ok()),
+            cost: None,
+        }
+    };
+    if let Err(e) = client.finalize_thread(completion).await {
         tracing::error!(error = %e, "finalize_thread failed");
     }
 

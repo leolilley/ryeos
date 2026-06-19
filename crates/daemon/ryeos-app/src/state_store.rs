@@ -209,6 +209,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         started_at: None,
         finished_at: None,
         result: None,
+        outcome_code: None,
         error: None,
         budget: None,
         artifacts: vec![],
@@ -512,6 +513,7 @@ impl StateStore {
             started_at: Some(now.clone()),
             finished_at: None,
             result: None,
+            outcome_code: None,
             error: None,
             budget: None,
             artifacts: vec![],
@@ -626,6 +628,7 @@ impl StateStore {
             started_at: thread_row.started_at.clone(),
             finished_at: Some(now.clone()),
             result: update.result_json.clone(),
+            outcome_code: update.outcome_code.clone(),
             error: update.error_json.clone(),
             budget: update.final_cost.as_ref().map(|cost| {
                 ThreadUsage {
@@ -674,6 +677,7 @@ impl StateStore {
 
         let mut terminal_payload = json!({
             "outcome_code": update.outcome_code,
+            "result": update.result_json,
             "has_error": update.error_json.is_some(),
             "artifact_count": update.artifacts.len(),
         });
@@ -755,6 +759,7 @@ impl StateStore {
             started_at: source_row.started_at.clone(),
             finished_at: Some(now),
             result: None,
+            outcome_code: Some("continued".to_string()),
             error: None,
             budget: None,
             artifacts: vec![],
@@ -883,9 +888,11 @@ impl StateStore {
                     None => None,
                 };
                 Some(ThreadResultRecord {
-                    outcome_code: None,
+                    outcome_code: row.outcome_code,
                     result: result_val,
-                    error: row.error.map(|e| json!(e)),
+                    error: row
+                        .error
+                        .map(|e| serde_json::from_str::<Value>(&e).unwrap_or(Value::String(e))),
                     metadata: None,
                 })
             }

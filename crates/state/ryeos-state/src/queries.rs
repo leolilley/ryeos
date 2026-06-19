@@ -90,6 +90,7 @@ pub struct ThreadResultRow {
     pub chain_root_id: String,
     pub status: String,
     pub result: Option<Vec<u8>>,
+    pub outcome_code: Option<String>,
     pub error: Option<String>,
     pub updated_at: String,
 }
@@ -101,6 +102,7 @@ impl ThreadResultRow {
             chain_root_id: row.get("chain_root_id")?,
             status: row.get("status")?,
             result: row.get("result")?,
+            outcome_code: row.get("outcome_code")?,
             error: row.get("error")?,
             updated_at: row.get("updated_at")?,
         })
@@ -422,7 +424,7 @@ pub fn get_thread_result(
     let mut stmt = db
         .connection()
         .prepare(
-            "SELECT thread_id, chain_root_id, status, result, error, updated_at \
+            "SELECT thread_id, chain_root_id, status, result, outcome_code, error, updated_at \
              FROM thread_results WHERE thread_id = ?",
         )
         .context("prepare get_thread_result")?;

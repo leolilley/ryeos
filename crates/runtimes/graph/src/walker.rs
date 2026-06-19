@@ -19,6 +19,7 @@ use crate::validation::analyze_graph;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
 use ryeos_runtime::events::RuntimeEventType;
+use ryeos_runtime::TerminalCompletion;
 
 // ── F3 advanced path: StepOutcome + commit_step ─────────────────
 //
@@ -297,7 +298,14 @@ impl Walker {
                 errors: None,
                 error: Some(validation.errors.join("; ")),
             };
-            let r = self.client.finalize_thread("failed").await;
+            let completion = TerminalCompletion {
+                status: "failed".to_string(),
+                outcome_code: Some("failed".to_string()),
+                result: None,
+                error: Some(json!(validation.errors.join("; "))),
+                cost: None,
+            };
+            let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
             guard.finalized = true;
             return result;
@@ -1432,8 +1440,14 @@ impl Walker {
         self.record_callback_warning("publish_artifact", r.map(|_| ()));
 
         // Finalize thread.
-        let thread_status = if success { "completed" } else { "failed" };
-        let r = self.client.finalize_thread(thread_status).await;
+        let completion = TerminalCompletion {
+            status: if success { "completed" } else { "failed" }.to_string(),
+            outcome_code: Some(if success { "success" } else { "failed" }.to_string()),
+            result: graph_result.result.clone(),
+            error: graph_result.error.as_ref().map(|e| json!(e)),
+            cost: None,
+        };
+        let r = self.client.finalize_thread(completion).await;
         self.record_callback_warning("finalize_thread", r.map(|_| ()));
         guard.finalized = true;
 
@@ -1488,7 +1502,14 @@ impl Walker {
                 .await;
             self.record_callback_warning("graph_completed", r);
 
-            let r = self.client.finalize_thread("failed").await;
+            let completion = TerminalCompletion {
+                status: "failed".to_string(),
+                outcome_code: Some("failed".to_string()),
+                result: None,
+                error: graph_result.error.as_ref().map(|e| json!(e)),
+                cost: None,
+            };
+            let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
             guard.finalized = true;
 
@@ -1766,7 +1787,11 @@ mod tests {
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: ryeos_runtime::TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
@@ -2930,12 +2955,12 @@ config:
         async fn finalize_thread(
             &self,
             thread_id: &str,
-            status: &str,
+            completion: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             self.finalizations
                 .lock()
                 .unwrap()
-                .push((thread_id.to_string(), status.to_string()));
+                .push((thread_id.to_string(), completion.status));
             Ok(json!({}))
         }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {

@@ -67,7 +67,11 @@ mod tests {
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: ryeos_runtime::TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
