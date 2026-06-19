@@ -227,7 +227,7 @@ mod tests {
         let input = json!({
             "route": {
                 "invoke": { "type": "service", "ref": "service:threads/input" },
-                "params": { "directive": "directive:rye/agent/core/base" }
+                "params": { "directive": "directive:ryeos/ops/base" }
             }
         });
         let route = InputRoute::from_surface_input(Some(&input)).expect("route parses");
@@ -239,7 +239,7 @@ mod tests {
         );
         assert_eq!(
             route.params.get("directive").and_then(Value::as_str),
-            Some("directive:rye/agent/core/base")
+            Some("directive:ryeos/ops/base")
         );
         assert!(route.thread.is_none());
     }
