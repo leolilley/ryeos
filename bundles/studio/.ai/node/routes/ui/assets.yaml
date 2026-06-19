@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:14280661fdf28230e02c7118b098a775066f308f7616cb15d9e3858b68a2e37c:86eg9Zfa49O6TlItUEkLVTpQ3DaZe9x3ewzPPrTWvu8USWU10ffuobBTlPrs2lJYtrSQ0ilReSdzwJSaXMt7Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:25f7d3b1efca027ca4f7dfbaff21b05319a0a4cd073514d919381ae0e3d7088e:HF6Q/MKP/edAl/BfZ60H7A1hSbniiuTzSWnIzbQ0UZwWLITCMP87c9aYvv6QOFKxro27uPoMXaKlgIoqswUQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/assets
 path: /ui/assets/{asset}
 methods:

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:900b89354ebbe5d2a0b0768fc581767453e71e73ecd58082b4303e6f984b02b3:2Zb3C3AQIqZMKuzXfXJyOvVBSu/u6vu4m5euL878qnvvlYZAlcULMQoM03Eoo9/ZiiQMjLgHfU8HBrMm+uDECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-status
+# ryeos:signed:2026-06-19T05:40:59Z:1186a79d3e5855420b385294ca1cb259fa40d330abed8275d1b4d60608dcc874:guQgIqnLsXcuS+hGHJO+vtch4k+VxmyGVBh08UljVG0R6A1bYeU4HVvgn2nXiSwBe9icgN+GmMY91qtfKq2VBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - status

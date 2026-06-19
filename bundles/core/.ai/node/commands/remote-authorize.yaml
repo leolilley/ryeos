@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:966ac7741619dc5894592fad09f5999d2c20fe3d1c0ebfd7aab5cc4e7e8b186d:ik8tVwOck4it+hicwp26pwY/DCggvMZfeo3mOEXpSVMFR24B5xUZ2rJr8VQec/d3DThtsPdFjWb8MrNEwgViBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-authorize
+# ryeos:signed:2026-06-19T05:40:59Z:0a90ff8d2e39b384e24221a15b942b5563bac0a0c80b02d81af7015cec2468dd:pB91jesQqMcfGA1VhCDNAdY71pmVEcbRBN7KsEoudjLEdseO+/WtP5wZ1bT5p9ccFeZDhg6m5shZfycp7EX+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - authorize

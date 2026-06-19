@@ -88,6 +88,11 @@ pub fn run_sign(
     project_path: Option<&Path>,
     source: SignSource,
 ) -> Result<BatchReport> {
+    let parsed_target = parse_sign_target(item_ref);
+    if parsed_target.is_err() && !looks_path_arg(item_ref) {
+        return parsed_target.map(|_| unreachable!());
+    }
+
     let bundle_roots = {
         let app_root = match std::env::var("RYEOS_APP_ROOT") {
             Ok(p) => PathBuf::from(p),
@@ -122,7 +127,7 @@ pub fn run_sign(
     // routinely pass the file path they just edited. A path under the project's
     // `.ai/` maps to exactly one canonical ref, so resolve it and sign that —
     // no reason to make the caller retype what we already resolved.
-    let target = match parse_sign_target(item_ref) {
+    let target = match parsed_target {
         Ok(t) => t,
         Err(e) => match resolve_path_to_ref(item_ref, source, project_path, &kinds) {
             Some(resolved) => {
@@ -232,6 +237,10 @@ pub fn run_sign(
     }
 
     Ok(report)
+}
+
+fn looks_path_arg(arg: &str) -> bool {
+    arg.contains('/') && (Path::new(arg).exists() || Path::new(arg).extension().is_some())
 }
 
 /// Sign a single resolved file: parse, validate, then sign in place.
@@ -413,9 +422,7 @@ fn resolve_path_to_ref(
     kinds: &KindRegistry,
 ) -> Option<String> {
     // Only attempt for path-shaped args (avoid hijacking refs/globs).
-    let looks_path =
-        arg.contains('/') && (Path::new(arg).exists() || Path::new(arg).extension().is_some());
-    if !looks_path {
+    if !looks_path_arg(arg) {
         return None;
     }
 

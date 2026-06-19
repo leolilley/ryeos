@@ -44,10 +44,7 @@ pricing:
     Ok(())
 }
 
-fn plant_model_routing(
-    project: &Path,
-    signer: &lillux::crypto::SigningKey,
-) -> anyhow::Result<()> {
+fn plant_model_routing(project: &Path, signer: &lillux::crypto::SigningKey) -> anyhow::Result<()> {
     let dir = project.join(".ai/config/ryeos-runtime");
     std::fs::create_dir_all(&dir)?;
     let body = r#"tiers:
@@ -61,10 +58,7 @@ fn plant_model_routing(
     Ok(())
 }
 
-fn plant_directive(
-    project: &Path,
-    signer: &lillux::crypto::SigningKey,
-) -> anyhow::Result<()> {
+fn plant_directive(project: &Path, signer: &lillux::crypto::SigningKey) -> anyhow::Result<()> {
     let path = project.join(".ai/directives/test/cli_stream.md");
     std::fs::create_dir_all(path.parent().unwrap())?;
     let body = r#"---
@@ -87,8 +81,7 @@ fn plant_execute_stream_route(
 ) -> anyhow::Result<()> {
     let dir = state_path.join(".ai/node/routes");
     std::fs::create_dir_all(&dir)?;
-    let body = r#"section: routes
-id: execute/stream
+    let body = r#"id: execute/stream
 path: /execute/stream
 methods:
   - POST
@@ -116,12 +109,13 @@ async fn boot(responses: Vec<MockResponse>) -> (DaemonHarness, String) {
     let mock = MockProvider::start(responses).await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_execute_stream_route(state_path, &fixture.publisher)?;
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_execute_stream_route(state_path, &fixture.publisher)?;
+            write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+            Ok(())
+        };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
@@ -164,7 +158,13 @@ async fn cli_execute_stream_success_exits_zero_and_prints_result() {
 
     let out = run_cli(
         &h,
-        &["-p", &project, "execute", "directive:test/cli_stream", "--stream"],
+        &[
+            "-p",
+            &project,
+            "execute",
+            "directive:test/cli_stream",
+            "--stream",
+        ],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -193,7 +193,13 @@ async fn cli_execute_stream_failure_exits_nonzero() {
 
     let out = run_cli(
         &h,
-        &["-p", &project, "execute", "directive:test/cli_stream", "--stream"],
+        &[
+            "-p",
+            &project,
+            "execute",
+            "directive:test/cli_stream",
+            "--stream",
+        ],
     );
     assert!(
         !out.status.success(),
@@ -213,7 +219,13 @@ async fn cli_execute_json_flag_prints_buffered_json() {
 
     let out = run_cli(
         &h,
-        &["-p", &project, "execute", "directive:test/cli_stream", "--json"],
+        &[
+            "-p",
+            &project,
+            "execute",
+            "directive:test/cli_stream",
+            "--json",
+        ],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:749362692e99889665338f2c488c6f241ac871570309c8eb16d93caaf717704e:V0epQkGqbEtCYSHpVhtWUeEv/0fcMbfS6P285B/5+of5D5XTFwKUKvqOFjYw1ghYTenCG/3/gymr2eD3E2JfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-push
+# ryeos:signed:2026-06-19T05:40:59Z:2928b81707f63c682d1ec13f7b461675b096f792cf1bd9b7062e83c107eb0d7e:VM56pAJD0vuIZ+mvXjqFo+9tZfYnCa6gqDeYvUgpPfoba3OEYGtWj5lH48SRHTlWFE60lsBvtI7+8lxaGVeTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - push

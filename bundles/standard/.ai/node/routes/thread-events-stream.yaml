@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:06Z:5f23f346c92cb28cb5376b1303380212c72b2c046aaf2c04104b502d30ab68f2:V45Zs7DGYmsyr/9neX72m16/GxHvIAyUfmY00/bcKfbdcfHB3gWyNk75BrqHWkr/C0klclHFcz0bDh/wY8nKBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "routes"
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:482db5f553dd80d830f73878575fecacf4c7d29dc52699cc1d8c3f5b33c5a6c5:Kff/JFbN5vcNuHoVJM3wcNGKkaoHtUR2YVGj049oVXHPQ9sbbrkBsekLyvBxH62as8OWMyr7iKiadYpKiP90CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: thread/events-stream
 path: /threads/{thread_id}/events/stream
 methods:

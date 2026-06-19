@@ -2033,7 +2033,10 @@ config:
 
         assert!(result.success, "bare domain data must not fail the graph");
         assert_eq!(result.status, "completed");
-        assert_eq!(result.state.get("outcome").and_then(|v| v.as_str()), Some("error"));
+        assert_eq!(
+            result.state.get("outcome").and_then(|v| v.as_str()),
+            Some("error")
+        );
     }
 
     #[tokio::test]
@@ -2112,7 +2115,10 @@ config:
             .await;
 
         assert!(result.success, "got: {:?}", result.error);
-        assert_eq!(result.result.and_then(|v| v.as_str().map(String::from)), Some("g-42".to_string()));
+        assert_eq!(
+            result.result.and_then(|v| v.as_str().map(String::from)),
+            Some("g-42".to_string())
+        );
     }
 
     #[tokio::test]
@@ -2205,7 +2211,11 @@ config:
         let result = w.execute(json!({}), None).await;
 
         assert!(result.success, "got: {:?}", result.error);
-        let collected = result.state.get("results").and_then(|v| v.as_array()).unwrap();
+        let collected = result
+            .state
+            .get("results")
+            .and_then(|v| v.as_array())
+            .unwrap();
         assert_eq!(collected.len(), 2);
     }
 
@@ -2412,12 +2422,19 @@ config:
                 .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
                 .await;
             assert!(result.success, "parallel={parallel}");
-            assert_eq!(result.status, "completed_with_errors", "parallel={parallel}");
+            assert_eq!(
+                result.status, "completed_with_errors",
+                "parallel={parallel}"
+            );
             assert_eq!(result.errors_suppressed, Some(1), "parallel={parallel}");
             let errors = result.errors.unwrap();
             assert!(errors[0].error.contains("boom"), "parallel={parallel}");
             // collect aligns: [a-result, null]
-            let collected = result.state.get("results").and_then(|v| v.as_array()).unwrap();
+            let collected = result
+                .state
+                .get("results")
+                .and_then(|v| v.as_array())
+                .unwrap();
             assert_eq!(collected.len(), 2, "parallel={parallel}");
             assert_eq!(collected[1], Value::Null, "parallel={parallel}");
             assert_no_raw_template(&result.state);
@@ -2538,8 +2555,11 @@ config:
             assert!(result.success, "{label}");
             assert_eq!(result.status, "completed_with_errors", "{label}");
             assert_eq!(result.errors_suppressed, Some(1), "{label}");
-            let collected =
-                result.state.get("results").and_then(|v| v.as_array()).unwrap();
+            let collected = result
+                .state
+                .get("results")
+                .and_then(|v| v.as_array())
+                .unwrap();
             assert_eq!(collected, &vec![Value::Null], "{label}: item must be Null");
         }
         // Both runners agree on collect and error count.
@@ -2608,7 +2628,9 @@ config:
         let graph = make_graph(yaml);
         let w = make_walker(
             graph,
-            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced failure"}})],
+            vec![
+                json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced failure"}}),
+            ],
         );
         let result = w.execute(json!({}), None).await;
         assert!(result.success);
@@ -3423,7 +3445,9 @@ config:
         let graph = make_graph(yaml);
         let (w, recorder) = make_recording_walker(
             graph,
-            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}})],
+            vec![
+                json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}}),
+            ],
             None,
         );
 
@@ -3532,7 +3556,9 @@ config:
         let tmp = tempfile::tempdir().unwrap();
         let (w, _recorder) = make_recording_walker(
             graph,
-            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}})],
+            vec![
+                json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}}),
+            ],
             Some(tmp.path()),
         );
 
@@ -3604,7 +3630,9 @@ config:
         let graph_err = make_graph(yaml_err);
         let (w_err, recorder_err) = make_recording_walker(
             graph_err,
-            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}})],
+            vec![
+                json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}}),
+            ],
             None,
         );
 

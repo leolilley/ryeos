@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:baa6f625d4b5eaf86b4f461a4620d59ee85613a0cf9ce1c8225c2b64aa49a5d6:c3sYs0NGG4hZcCK1SQ94vLLovLB+DLcYgoBNcMk4Cfr332mMclPtWP3dtnkdscpjQwKIob6Rp3nHEGqNaiaOBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: vault-list
+# ryeos:signed:2026-06-19T05:40:59Z:1bbcb6c73f14bd8626d8c0903ec92cf89fdbc0b074330d3907725bd69a914e4a:L3TSshJlGqO3IXk44yVzME6DCC5qWyRdv23CQpOt55rjHQ5xh5WOz6FNaftNniN3RvszDk+d52/VVUTdLlIoBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - vault
 - list

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:d99db61bd4951714f7c994375a46563c0046ddf21e70773916d2a49bc0d08416:wMHrWz/ZmiljD2TADjiWvUG9tiC/BLp8y6rb+c5TWWXr0rAW37rXBmxJmBu/6Sa6DlRneEoXXDUHSU0HwYgGAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-descriptor
+# ryeos:signed:2026-06-19T05:40:59Z:e2bf8284284f0a538b4c305777b7649bae72d9382570e610f77cc8553e6f8cf7:OAKBOhvOeYKwrPiAY9EQnowwV0C5BoWuBxHGEipuBFV21chJkAHLhCZJYzO8d+TtGQbX3m5LCPVZ25x4vmK6Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote-descriptor
 description: Export a remote descriptor trust pin for this node

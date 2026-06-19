@@ -209,9 +209,7 @@ impl HubSubscription {
     }
 
     /// Receive the next live event for the current head.
-    pub async fn recv(
-        &mut self,
-    ) -> Result<PersistedEventRecord, broadcast::error::RecvError> {
+    pub async fn recv(&mut self) -> Result<PersistedEventRecord, broadcast::error::RecvError> {
         self.rx
             .as_mut()
             .expect("receiver present until drop")
@@ -221,9 +219,7 @@ impl HubSubscription {
 
     /// Non-blocking receive for draining buffered events (e.g. after a launch
     /// task joins).
-    pub fn try_recv(
-        &mut self,
-    ) -> Result<PersistedEventRecord, broadcast::error::TryRecvError> {
+    pub fn try_recv(&mut self) -> Result<PersistedEventRecord, broadcast::error::TryRecvError> {
         self.rx
             .as_mut()
             .expect("receiver present until drop")

@@ -809,13 +809,13 @@ fn bound_view_vm_keyed(
                     core.data.tile_items.get(source_key),
                     core.data.tile_file_space.get(source_key),
                 ),
-            }
+            };
         }
         "graph" => {
             // Graph renders shared topology; no per-tile content scope yet.
             return StudioViewVm::Map {
                 scene: build_scene_model(core, atlas, None, None),
-            }
+            };
         }
         _ => {}
     }
@@ -884,8 +884,7 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let mut entries =
-                timeline_entries(super::content::project_records(binding, response));
+            let mut entries = timeline_entries(super::content::project_records(binding, response));
             append_live_delta(core, &mut entries);
             StudioViewVm::Timeline {
                 title,
@@ -1112,13 +1111,9 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
                 .get(tile_id)
                 .map(|tile| tile_title(core, &tile.view))
                 .unwrap_or_else(|| "Missing".to_string());
-            let input = core
-                .workspace
-                .tiles
-                .get(tile_id)
-                .and_then(|tile| {
-                    instance_input_vm(core, &tile_id.0.to_string(), &tile.view.view_ref)
-                });
+            let input = core.workspace.tiles.get(tile_id).and_then(|tile| {
+                instance_input_vm(core, &tile_id.0.to_string(), &tile.view.view_ref)
+            });
             StudioLayoutNodeVm::Tile {
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
@@ -1627,7 +1622,10 @@ mod tests {
         );
         let items = launcher_items(&core);
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
-        assert!(labels.contains(&"Atlas"), "named view uses its name: {labels:?}");
+        assert!(
+            labels.contains(&"Atlas"),
+            "named view uses its name: {labels:?}"
+        );
         assert!(
             labels.contains(&"ryeos/x/raw"),
             "unnamed view falls back to stripped ref: {labels:?}"
@@ -1828,8 +1826,10 @@ mod tests {
     #[test]
     fn append_live_delta_adds_trailing_cursor_block_for_head_thread() {
         let mut core = StudioCore::default();
-        core.seat
-            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            json!({ "thread": "T-1" }),
+        );
         core.data.live_delta = Some(crate::studio::model::StudioLiveDelta {
             thread: "T-1".to_string(),
             text: "Hel".to_string(),
@@ -1849,8 +1849,10 @@ mod tests {
     #[test]
     fn append_live_delta_ignores_buffer_for_non_head_thread() {
         let mut core = StudioCore::default();
-        core.seat
-            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            json!({ "thread": "T-1" }),
+        );
         // A buffer left over from a different head must not render.
         core.data.live_delta = Some(crate::studio::model::StudioLiveDelta {
             thread: "T-OTHER".to_string(),

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:9fc41593c3649b0926816ea54940d0bbd356f6167bf3fb23e2ca191a7fabde41:EAyCmzOZtDdWEFwZCSHY6erdnmPf4sovYMvYtFODRQA9rJ4lA7QCj+XCpqExwU9+UwfjtfC5OmalLSpySxLNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-vault-set
+# ryeos:signed:2026-06-19T05:40:59Z:98ac5713948c82bd18bd7fda90a6d46d930d609a36bc2f83aee815de03d8e053:1bVGPDl+hrpeFPXZXRjgO0Ua6PoqIW8OM2pDhoCtl2rVVyVf9baiwW8FpVNfQIabL5e6B8Wn1saW3qfpdnd3DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - vault-set

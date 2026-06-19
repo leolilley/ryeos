@@ -943,7 +943,12 @@ impl StudioCore {
 
     fn add_center_tile(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
         let tile_id = self.add_tile_motions(view);
-        let Some(view) = self.workspace.tiles.get(&tile_id).map(|tile| tile.view.clone()) else {
+        let Some(view) = self
+            .workspace
+            .tiles
+            .get(&tile_id)
+            .map(|tile| tile.view.clone())
+        else {
             return Vec::new();
         };
         self.effects_for_view(&view)
@@ -1082,7 +1087,10 @@ impl StudioCore {
         let view_ref = view.view_ref.clone();
         // Scene widgets pull engine data the generic source path doesn't
         // carry; everything else fetches its declared source.
-        let widget = self.views.get(&view_ref).map(|binding| binding.widget.clone());
+        let widget = self
+            .views
+            .get(&view_ref)
+            .map(|binding| binding.widget.clone());
         match widget.as_deref() {
             Some("atlas") => vec![
                 self.emit(StudioEffectKind::FetchDimension),
@@ -1432,7 +1440,6 @@ fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
     }
 }
 
-
 fn filtered_launcher_items(core: &StudioCore) -> Vec<super::view_model::StudioLauncherItemVm> {
     let query = core.ui.launcher.query.trim().to_lowercase();
     launcher_items_for(core)
@@ -1609,9 +1616,7 @@ fn file_root_requires_project(root: &str) -> bool {
 /// (`#view:…`), graph/atlas included. The engine names no specific view.
 fn view_from_route(route: &str) -> Option<ViewSpec> {
     let route = route.trim_start_matches('#');
-    route
-        .starts_with("view:")
-        .then(|| ViewSpec::bound(route))
+    route.starts_with("view:").then(|| ViewSpec::bound(route))
 }
 
 fn route_for_view(view: &ViewSpec) -> Option<String> {
@@ -1681,7 +1686,10 @@ fn effect_matches_current_file_space(
     file_space: &StudioFileSpaceDto,
 ) -> bool {
     let Some(StudioEffectKind::FetchFileSpace {
-        tile_id, root, path, ..
+        tile_id,
+        root,
+        path,
+        ..
     }) = expected
     else {
         return true;
@@ -2018,7 +2026,8 @@ mod tests {
             },
         });
 
-        let scene = crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
+        let scene =
+            crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas surface should build scene atlas");
         assert_eq!(atlas.root_label, ".ai");
         assert!(atlas

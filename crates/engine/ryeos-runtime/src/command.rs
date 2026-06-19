@@ -14,8 +14,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandDef {
-    pub category: String,
-    pub section: String,
+    #[serde(skip)]
     pub name: String,
     pub tokens: Vec<String>,
     pub description: String,
@@ -250,12 +249,6 @@ pub enum CommandAvailability {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandRegistryError {
-    #[error("command '{name}' has invalid category/section: expected commands/commands, got {category}/{section}")]
-    InvalidSection {
-        name: String,
-        category: String,
-        section: String,
-    },
     #[error("command '{name}' has empty tokens")]
     EmptyTokens { name: String },
     #[error("command '{name}' token '{token}' is invalid")]
@@ -369,13 +362,6 @@ fn validate_command(
     record: &CommandDef,
     policy: &CommandRegistrationPolicy,
 ) -> Result<(), CommandRegistryError> {
-    if record.category != "commands" || record.section != "commands" {
-        return Err(CommandRegistryError::InvalidSection {
-            name: record.name.clone(),
-            category: record.category.clone(),
-            section: record.section.clone(),
-        });
-    }
     validate_tokens(&record.name, &record.tokens)?;
     match &record.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => {
@@ -515,8 +501,6 @@ mod tests {
 
     fn command(name: &str, tokens: &[&str]) -> CommandDef {
         CommandDef {
-            category: "commands".into(),
-            section: "commands".into(),
             name: name.into(),
             tokens: tokens.iter().map(|token| token.to_string()).collect(),
             description: name.into(),

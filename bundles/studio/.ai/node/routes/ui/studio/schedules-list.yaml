@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:9d1408ba6e00d13babf326c4c0030ed6ff8b0253c4ade517ceed4bc6071eb6c4:8u0Hv58qsimSxJ7T6xZh5znnCeHEhrnWuv4hJ/g4EKrcoPklW7m7XDjxq7DoN2YfmPW3pUJxVLfDJoOEZ3EBAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/studio
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:9cb901d687f5ef9cc0c3103602ae2f0b1fca190364d8a2eb2708a401d2bfb70a:CYKeeFBFssruySbkFAeEJO/sCTtzQw+1oCuvwlEHXECbeyN52hs74Onr7GsFjeSWJjbOkbS1A3agn/shk3ulBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/studio/schedules/list
 path: /ui/api/studio/schedules/list
 methods:

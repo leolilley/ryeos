@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:06Z:85109ea1fa761db65143a18c664b85b376ba0ca967cd6e9eab526ae1649512f7:DxtUyPGDG3PfUA3096UsZXy+f6wVZsVhcxOmUlUhv0YC1Acrpfrl0ANjtoFpFXztpjUN7Hz8rWaniopGPXI6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "routes"
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:06ed5941a6c713c545e8794e784850c999a7787f662b08b2e36b8f9bba7ce689:pC1xiId0EIaVUGyilp5R82vPfpzITc90XUapedHK8Ho9r3F8Qr+Jz6E+BO3ugZK4gazbY6Fqrvlrh9UzoE+kDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: chain/events-stream
 path: /chains/{chain_root_id}/events/stream
 methods:

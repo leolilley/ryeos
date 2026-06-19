@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:7b9562cda0e592073f35da46a2225e86cf44d1a813fc50c1fc7cf95c46923011:3XEZrjzaODPsbuWPufg8fuSEyvcTz8CFKUSDbhzCRO1htAIEV08RtysF76Hq8RHjlfDlTzZ80ycyKX51CIigBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: snapshot-create
+# ryeos:signed:2026-06-19T05:40:59Z:f5cbc316e7552603966c97eb48a52042e0c95d705553c137e036ba866275267c:5WsPS/e2fpvWOnCAhsmj2YtTAH6y1gD/swIyuqaKfMg1lugAY6i4iE/osaVwt8qqCg/lBw4xOnbdHziknYs+BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - commit
 description: Create a local project snapshot

@@ -46,7 +46,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -57,7 +57,7 @@ use ryeos_engine::kind_registry::{
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
-use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
+use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
 use crate::execution::launch;
 use crate::executor::{
     self as service_executor, ExecutionContext, ExecutionMode, ServiceExecutionResult,
@@ -2161,7 +2161,7 @@ mod tests {
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-    use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
+    use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[71u8; 32])
@@ -2480,11 +2480,9 @@ runtime_vault:
         let bundle = tempdir().join("example-bundle");
         let ctx = test_execution_context(bundle.clone());
         let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
-        assert!(
-            derive_manifest_runtime_caps(&resolved, &ctx)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
+            .unwrap()
+            .is_empty());
 
         write_signed_manifest(
             &bundle.join(ryeos_engine::AI_DIR),
@@ -2497,11 +2495,9 @@ uses_kinds: []
 bundle_events: []
 "#,
         );
-        assert!(
-            derive_manifest_runtime_caps(&resolved, &ctx)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -2602,11 +2598,9 @@ runtime_vault:
             )]),
         );
 
-        assert!(
-            derive_manifest_runtime_caps(&resolved, &ctx)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
+            .unwrap()
+            .is_empty());
     }
 
     // P1.4: tests for `lookup_runtime_for_dispatch` were removed when

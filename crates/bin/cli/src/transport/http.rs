@@ -148,8 +148,12 @@ pub async fn get_json(url: &str, headers: &SignHeaders) -> Result<Value, CliDisp
         }
         .into());
     }
-    serde_json::from_slice(&body_bytes)
-        .map_err(|e| CliTransportError::BodyDecode { detail: format!("{e}") }.into())
+    serde_json::from_slice(&body_bytes).map_err(|e| {
+        CliTransportError::BodyDecode {
+            detail: format!("{e}"),
+        }
+        .into()
+    })
 }
 
 /// One parsed Server-Sent Event.
@@ -404,11 +408,11 @@ mod tests {
     #[test]
     fn find_event_end_supports_lf_crlf_and_mixed() {
         let cases: &[&[u8]] = &[
-            b"data: y\n\nrest",        // LF
-            b"data: y\r\n\r\nrest",    // CRLF
-            b"data: y\n\r\nrest",      // mixed LF then CRLF
-            b"data: y\r\n\nrest",      // mixed CRLF then LF
-            b"data: y\r\rrest",        // bare CR pair
+            b"data: y\n\nrest",     // LF
+            b"data: y\r\n\r\nrest", // CRLF
+            b"data: y\n\r\nrest",   // mixed LF then CRLF
+            b"data: y\r\n\nrest",   // mixed CRLF then LF
+            b"data: y\r\rrest",     // bare CR pair
         ];
         for raw in cases {
             let end = find_event_end(raw).unwrap_or_else(|| panic!("boundary in {raw:?}"));

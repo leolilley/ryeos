@@ -14,7 +14,7 @@ use ryeos_engine::error::EngineError;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::runtime_registry::{RuntimeRegistry, RuntimeYaml};
-use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
+use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
 
 // ── Test helpers ─────────────────────────────────────────────────────
 

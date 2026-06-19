@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:8fd8dd36f00f55521ffc4bf4395cf44a76ae35370a7a0f445a3a8203fd06a297:vwYVg6zpHmAk/zYkUnXEexpLHRNM2ruZ+bwUPH41dNWklnOa4M7PdtA4IHTvwUKW8LGreQuKy6W65q09bVPPDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: verify
+# ryeos:signed:2026-06-19T05:40:59Z:ce3559152ca2e5523560f0924c2f134ca8aa1048ece4b85b046dc34f983b623f:h61j7bzvVC4Pq6mk1Nhahsm9kIDMkw0UlYOIy3+3A+IwsZwb/wh3vL8jEu/0ejLqZL2Xn078bTXKa5y4LlDHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - verify
 description: Verify an item's signature chain

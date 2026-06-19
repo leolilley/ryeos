@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
+use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
 use crate::route_raw::RawRouteSpec;
 
 pub struct RouteSection;
@@ -11,16 +11,13 @@ impl NodeConfigSection for RouteSection {
         SectionSourcePolicy::EffectiveBundleRootsAndState
     }
 
-    fn parse(&self, _name: &str, body: &Value) -> Result<Box<dyn SectionRecord>> {
-        let mut record: RawRouteSpec = serde_json::from_value::<RawRouteSpec>(body.clone())
+    fn parse(&self, _ctx: &NodeItemContext, body: &Value) -> Result<Box<dyn SectionRecord>> {
+        let record: RawRouteSpec = serde_json::from_value::<RawRouteSpec>(body.clone())
             .context("failed to parse route record")?;
 
         if record.methods.is_empty() {
             anyhow::bail!("route '{}' has empty methods list", record.id);
         }
-
-        record.section = "routes".to_string();
-        record.source_file = std::path::PathBuf::new();
 
         Ok(Box::new(record))
     }
@@ -35,6 +32,18 @@ impl SectionRecord for RawRouteSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_config::NodeItemContext;
+
+    fn ctx(id: &str) -> NodeItemContext {
+        NodeItemContext {
+            section: "routes".into(),
+            id: id.into(),
+            stem: id.into(),
+            rel_path: format!("{id}.yaml").into(),
+            source_file: format!("/tmp/{id}.yaml").into(),
+            signer_fingerprint: "test".into(),
+        }
+    }
 
     fn valid_body() -> serde_json::Value {
         serde_json::json!({
@@ -54,7 +63,7 @@ mod tests {
     #[test]
     fn valid_route_parses() {
         let section = RouteSection;
-        let result = section.parse("r1", &valid_body());
+        let result = section.parse(&ctx("r1"), &valid_body());
         assert!(result.is_ok());
     }
 
@@ -63,7 +72,7 @@ mod tests {
         let section = RouteSection;
         let mut body = valid_body();
         body["unknown_field"] = serde_json::json!("oops");
-        let result = section.parse("r1", &body);
+        let result = section.parse(&ctx("r1"), &body);
         assert!(
             result.is_err(),
             "expected error for unknown top-level field"
@@ -82,7 +91,7 @@ mod tests {
             "concurrent_max": 10,
             "bogus_limit": 42
         });
-        let result = section.parse("r1", &body);
+        let result = section.parse(&ctx("r1"), &body);
         assert!(
             result.is_err(),
             "expected error for unknown field in limits"
@@ -96,7 +105,7 @@ mod tests {
         let section = RouteSection;
         let mut body = valid_body();
         body["response"]["bogus_response_field"] = serde_json::json!("nope");
-        let result = section.parse("r1", &body);
+        let result = section.parse(&ctx("r1"), &body);
         assert!(
             result.is_err(),
             "expected error for unknown field in response"

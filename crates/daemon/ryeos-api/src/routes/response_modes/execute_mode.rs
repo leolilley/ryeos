@@ -951,8 +951,6 @@ mod tests {
 
     fn make_raw(auth: &str, body: RawRequestBody) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "core/execute".into(),
             path: "/execute".into(),
             methods: ["POST".into()].into_iter().collect(),

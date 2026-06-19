@@ -289,7 +289,10 @@ impl StudioCore {
                 .or_else(|| payload.get("text"))
                 .and_then(|t| t.as_str()),
             // Ephemeral, non-text progress: nothing durable changed.
-            "cognition_reasoning" | "stream_snapshot" | "stream_opened" | "stream_closed"
+            "cognition_reasoning"
+            | "stream_snapshot"
+            | "stream_opened"
+            | "stream_closed"
             | "graph_foreach_iteration" => return Vec::new(),
             // Everything else is a durable milestone (handled below).
             _ => None,

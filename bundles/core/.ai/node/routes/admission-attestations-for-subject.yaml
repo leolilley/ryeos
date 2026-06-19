@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:dd373edf90572fa4ae4ae13a944b6a218f27c7838a6d1508c8dea8073d30e97c:/3CGZT0kzxwn6ikv7UUY0kWhGoZqNcX4+B9sfi8AQsKLrTFH1Cj62vCytdY2nrhQvPGyRPYz4Hy7KHjFfihTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:7e174880e6d61572116a319544f5e02bcc3875f396bf6419c429b1c437eda506:h/vxmrxua0M07y0+NStwk1NL1VNfRYY9EPiihRTGr4snRAv60G1xWoZc41ui2q6l659Q47SZZ+AbOxsPrKbnDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: admission/attestations-for-subject
 path: /admission/attestations-for-subject
 methods:

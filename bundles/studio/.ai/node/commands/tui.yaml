@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-13T00:29:10Z:5fbb05c9eb56dbed2ef4013a5fa9fd776c92c33e1e0c1f7d580d242af8de6b28:p7dxFiSsACv+9+9XhE1qc97cpL+/VIn+LBnopWCLQfxAF26a2wUCt7xOLP7ygZvLKTjQRORsYQeoMjHi16AIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: tui
+# ryeos:signed:2026-06-19T05:40:59Z:f37891981620fd98d89fe435115e3b0c31d586e0289aed3eeac920d8160fedea:wbPuhJIW83S8cAAjGgH/BrV/hAfvIJW6gcJ9Z7WCfINbFmz9PqNNrmmmCrREiqCq/XrBtxVl9LktWk4RijM4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - tui
 description: Open the terminal RyeOS Studio

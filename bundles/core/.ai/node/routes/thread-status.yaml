@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:30f3c32d5659d1f9bcc750762aa7a99d9371fcba43d23e673cfe7c043d7715b2:L+VfoAzWQUe124Y1N/LtnWWJgDGmKm6LWGJaGK7ldqBocR014X4YlJDRgpFtg2yrQ2rQi/p2uQrM3Nzmvf09AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:b585572abeb6cc2bf8b95224f259edb2a233e97075e792506529d012c1ad4f00:bYIMXs7PerfnjyMX2N/DtYLcFORr2SNqoCpTzeziYUUvg9rfgooHmhRZAGIVaDyqbtNwQvZf9+nLt9Yu9bebDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/thread-status
 path: /threads/{thread_id}
 methods:

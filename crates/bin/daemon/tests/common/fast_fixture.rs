@@ -267,7 +267,7 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
     })
 }
 
-/// Write a `kind: node, section: bundles` record registering the core
+/// Write a `kind: node` bundle record registering the core
 /// bundle that lives at `state_path` itself (the daemon harness copies
 /// `bundles/core` into the test tempdir and uses that as
 /// `app_root`). `bootstrap::verify_initialized` requires at
@@ -279,17 +279,14 @@ pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -
         .with_context(|| format!("canonicalize {}", state_path.display()))?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!(
-        "kind: node\nsection: bundles\nid: core\npath: {}\n",
-        abs.display()
-    );
+    let body = format!("kind: node\npath: {}\n", abs.display());
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("core.yaml"), signed)?;
     Ok(())
 }
 
-/// Write a `kind: node, section: bundles` record pointing at
+/// Write a `kind: node` bundle record pointing at
 /// `bundles/standard`, signed with the publisher key. Use this
 /// when a test needs the standard bundle's runtime/directive YAMLs in
 /// the daemon's effective bundle roots.
@@ -302,10 +299,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     let abs = standard.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!(
-        "kind: node\nsection: bundles\nid: standard\npath: {}\n",
-        abs.display()
-    );
+    let body = format!("kind: node\npath: {}\n", abs.display());
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
@@ -315,7 +309,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     Ok(())
 }
 
-/// Write a `kind: node, section: bundles` record pointing at
+/// Write a `kind: node` bundle record pointing at
 /// `bundles/studio`, signed with the publisher key. Use this when
 /// a test needs the Studio bundle's UI routes and services.
 pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
@@ -326,10 +320,7 @@ pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Resul
     let abs = studio.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!(
-        "kind: node\nsection: bundles\nid: studio\npath: {}\n",
-        abs.display()
-    );
+    let body = format!("kind: node\npath: {}\n", abs.display());
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("studio.yaml"), signed)?;

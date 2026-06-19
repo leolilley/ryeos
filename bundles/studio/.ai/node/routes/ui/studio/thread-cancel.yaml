@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:7667a6de69f0529a9a74319020bf9b53a91cbd5956a56a40501a9dd2ee3db769:q/5m/nfQJBjTdg3xxcZMKRxfxiZr/ur0zYURQyK7fQZHf4Q+HfDdsnYs5wl7QNMEHcn16ps33E5zMIeMGYDvBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/studio
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:eefe0e18f8ac37c393cab0f95ff0d5ce75a16b0ae76bef6f3bed0e4892d0b74c:IwNsJ5tGOjTQD3PcfFidoNlp31NA0OXmENiwCabDvmhxKNZj44wAXJwEa43YYZxaOX5nqVhYcnTXo9i8tnWpAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/studio/thread/cancel
 path: /ui/api/studio/thread/cancel
 methods:

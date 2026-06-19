@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:682c37ef01c72a3435384b70902404ca917a8061b80621641f93718787ff8532:SR250y0mUCf58vyOnizZA4f2A1AvzqLL+eZjTSoI20qgnZ+T+73rL51HHi7BASP5f9qkQAHaBXzHYsA6Eq3MDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: scheduler-show-fires
+# ryeos:signed:2026-06-19T05:40:59Z:c6446f2a073dc04378f8c55faea5397b6673dc4246763fd9dac51a7111d866ab:qOxva5u1XDhv8cq3ixJFuPpdjqq9Aoiaa/TjcJhKet6uQXCuKB5AKqyo3hxEwh+FcGcUn7CTiweijP/P0NbKAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - show

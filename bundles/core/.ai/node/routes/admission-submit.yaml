@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:2b21de524902798079c4b77de165770996844a095935763d7c2a9d10dfdb89aa:Aw04/nUuKlB06UqhMA9Ze6AOvGFuAIzHfClmbWOKaZNJ4QgifY0T8nCtZ6tvUEN9JvfzJXOIS5bMl84lB28GDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:ce45269336bbe63157a0c562f9a2b958d721a689aaa34e0bb5bc6f872e974c7d:at8VDvyh1YAwzkJ6MelKFnbNfYg9ySnmlNP9slY/rEJcg38cdI/AktPR4WiJcXJgqoerQyvx9a43p84b5E8+Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: admission/submit
 path: /admission/submit
 methods:

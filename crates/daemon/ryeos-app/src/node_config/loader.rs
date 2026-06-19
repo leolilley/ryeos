@@ -9,9 +9,9 @@
 //!   .ai/node/routes/ui/studio/items/list.yaml
 //!   .ai/node/commands/web.yaml
 //!
-//! The section invariant requires:
-//! - The file lives under `.ai/node/<section>/` (any depth)
-//! - The YAML body declares `section: <section>`
+//! The section invariant requires the file to live under
+//! `.ai/node/<section>/` (any depth). Section identity is derived from the
+//! path, not duplicated in the YAML body.
 //!
 //! Security: signed-required, trusted-signer-required, symlinks rejected,
 //! regular files only, deterministic traversal order.
@@ -31,7 +31,8 @@ use super::sections::command::CommandRecord;
 use super::sections::command_registration::CommandRegistrationPolicyRecord;
 use super::sections::hosted_node::HostedNodePolicyRecord;
 use super::{
-    BundleRecord, NodeConfigSection, NodeConfigSnapshot, SectionSourcePolicy, SectionTable,
+    BundleRecord, NodeConfigSection, NodeConfigSnapshot, NodeItemContext, SectionSourcePolicy,
+    SectionTable,
 };
 use crate::route_raw::RawRouteSpec;
 
@@ -47,7 +48,7 @@ pub struct BootstrapLoader<'a> {
 /// A verified and parsed node-config YAML file, ready for section-specific handling.
 struct VerifiedItem {
     path: PathBuf,
-    name: String,
+    ctx: NodeItemContext,
     signer_fingerprint: String,
     body: Value,
 }
@@ -114,7 +115,6 @@ fn scan_dir_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 /// The `section_root` is the `.ai/node/<section>/` directory (e.g. the
 /// `routes/` dir). The invariant checks that:
 /// 1. `file` lives under `section_root` (at any depth)
-/// 2. The YAML body declares `section: <expected_section>`
 fn verify_and_parse(
     file: &Path,
     section_root: &Path,
@@ -137,7 +137,7 @@ fn verify_and_parse(
         );
     }
 
-    let name = file.file_stem().and_then(|s| s.to_str()).context(format!(
+    let stem = file.file_stem().and_then(|s| s.to_str()).context(format!(
         "node config item at {} has no filename stem",
         file.display()
     ))?;
@@ -172,7 +172,8 @@ fn verify_and_parse(
     let body: Value = serde_yaml::from_str(&body_str)
         .with_context(|| format!("failed to parse YAML body of {}", file.display()))?;
 
-    // Check section invariant: file must live under section_root AND declare section
+    // Check section invariant: file must live under section_root. Section is
+    // selected by path, not duplicated in the body.
     if !file.starts_with(section_root) {
         bail!(
             "node config item at {} is not under expected section directory '{}' \
@@ -182,29 +183,57 @@ fn verify_and_parse(
         );
     }
 
-    let declared_section = body
-        .get("section")
-        .and_then(|v| v.as_str())
-        .with_context(|| {
-            format!(
-                "node config item at {} missing 'section' field",
-                file.display()
-            )
-        })?;
+    for forbidden in ["category", "section"] {
+        if body.get(forbidden).is_some() {
+            bail!(
+                "node config item at {} declares legacy structural field '{}' \
+                 (section/category are derived from path and must not be in node YAML)",
+                file.display(),
+                forbidden
+            );
+        }
+    }
 
-    if declared_section != expected_section {
-        bail!(
-            "node config item at {} declares section '{}' but was loaded under section '{}' \
-             (section = containment invariant violated)",
+    let rel_path = file.strip_prefix(section_root).with_context(|| {
+        format!(
+            "node config item at {} is not under expected section directory {}",
             file.display(),
-            declared_section,
-            expected_section
+            section_root.display()
+        )
+    })?;
+    let mut id_path = rel_path.to_path_buf();
+    id_path.set_extension("");
+    let id = id_path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(part) => part
+                .to_str()
+                .map(|s| s.to_string())
+                .context("node config path contains non-UTF-8 segment"),
+            _ => bail!("node config relative path contains non-normal segment"),
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("/");
+
+    if id.is_empty() {
+        bail!(
+            "node config item at {} has empty path-derived id",
+            file.display()
         );
     }
 
+    let ctx = NodeItemContext {
+        section: expected_section.to_string(),
+        id,
+        stem: stem.to_string(),
+        rel_path: rel_path.to_path_buf(),
+        source_file: file.to_path_buf(),
+        signer_fingerprint: signer_fingerprint.clone(),
+    };
+
     Ok(VerifiedItem {
         path: file.to_path_buf(),
-        name: name.to_string(),
+        ctx,
         signer_fingerprint,
         body,
     })
@@ -246,7 +275,7 @@ impl<'a> BootstrapLoader<'a> {
             };
 
             let record = section
-                .parse(&verified.name, &verified.body)
+                .parse(&verified.ctx, &verified.body)
                 .with_context(|| {
                     format!("failed to parse bundle record {}", verified.path.display())
                 })?;
@@ -385,7 +414,7 @@ impl<'a> BootstrapLoader<'a> {
                     if section_name == "bundles" {
                         let record =
                             section
-                                .parse(&verified.name, &verified.body)
+                                .parse(&verified.ctx, &verified.body)
                                 .with_context(|| {
                                     format!(
                                         "failed to parse bundle record {}",
@@ -418,7 +447,7 @@ impl<'a> BootstrapLoader<'a> {
                     } else if section_name == "routes" {
                         let record =
                             section
-                                .parse(&verified.name, &verified.body)
+                                .parse(&verified.ctx, &verified.body)
                                 .with_context(|| {
                                     format!(
                                         "failed to parse route record {}",
@@ -435,7 +464,7 @@ impl<'a> BootstrapLoader<'a> {
                     } else if section_name == "commands" {
                         let record =
                             section
-                                .parse(&verified.name, &verified.body)
+                                .parse(&verified.ctx, &verified.body)
                                 .with_context(|| {
                                     format!(
                                         "failed to parse command record {}",
@@ -453,7 +482,7 @@ impl<'a> BootstrapLoader<'a> {
                     } else if section_name == "hosted" {
                         let record =
                             section
-                                .parse(&verified.name, &verified.body)
+                                .parse(&verified.ctx, &verified.body)
                                 .with_context(|| {
                                     format!(
                                         "failed to parse hosted-node policy record {}",
@@ -537,7 +566,7 @@ impl<'a> BootstrapLoader<'a> {
                 );
             }
             let record = section
-                .parse(&verified.name, &verified.body)
+                .parse(&verified.ctx, &verified.body)
                 .with_context(|| {
                     format!(
                         "failed to parse command registration policy {}",
@@ -683,20 +712,17 @@ mod tests {
 
     #[test]
     fn strip_signature_removes_signed_line() {
-        let content =
-            "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\nsection: bundles\npath: /foo\n";
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc123:sig456:fp789\npath: /foo\n";
         let stripped = strip_signature(content);
-        assert!(stripped.starts_with("section: bundles"));
+        assert!(stripped.starts_with("path: /foo"));
         assert!(!stripped.contains("ryeos:signed:"));
     }
 
     #[test]
     fn strip_signature_preserves_body() {
-        let content =
-            "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\nsection: bundles\npath: /foo/bar\n";
+        let content = "# ryeos:signed:2026-01-01T00:00:00Z:abc:sig:fp\npath: /foo/bar\n";
         let stripped = strip_signature(content);
         let parsed: Value = serde_yaml::from_str(&stripped).unwrap();
-        assert_eq!(parsed["section"], "bundles");
         assert_eq!(parsed["path"], "/foo/bar");
     }
 
@@ -784,15 +810,19 @@ mod tests {
         fs::create_dir_all(&studio_dir).unwrap();
 
         // Flat file
-        fs::write(routes_dir.join("health.yaml"), "section: routes").unwrap();
+        fs::write(routes_dir.join("health.yaml"), "id: health").unwrap();
         // Nested one level
-        fs::write(ui_dir.join("index.yaml"), "section: routes").unwrap();
+        fs::write(ui_dir.join("index.yaml"), "id: ui.index").unwrap();
         // Nested two levels
-        fs::write(studio_dir.join("dimension-get.yaml"), "section: routes").unwrap();
+        fs::write(
+            studio_dir.join("dimension-get.yaml"),
+            "id: ui.studio.dimension-get",
+        )
+        .unwrap();
         // Non-yaml file (should be skipped)
         fs::write(routes_dir.join("README.md"), "not yaml").unwrap();
         // Hidden file (should be found — no hidden filtering)
-        fs::write(routes_dir.join(".hidden.yaml"), "section: routes").unwrap();
+        fs::write(routes_dir.join(".hidden.yaml"), "id: hidden").unwrap();
 
         let files = scan_yaml_files_recursive(&routes_dir).unwrap();
         let names: Vec<String> = files
@@ -852,7 +882,7 @@ mod tests {
 
         // Create a real target file
         let target = dir.path().join("target.yaml");
-        fs::write(&target, "section: routes").unwrap();
+        fs::write(&target, "id: target").unwrap();
 
         // Create a symlink to it inside routes dir
         let link = routes_dir.join("evil.yaml");
@@ -940,13 +970,16 @@ mod tests {
         fs::create_dir_all(&studio_dir).unwrap();
 
         let file = studio_dir.join("dimension-get.yaml");
-        fs::write(&file, "section: routes").unwrap();
+        fs::write(&file, "id: ui.studio.dimension-get").unwrap();
 
         let body: Value = serde_yaml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
 
-        // File is under routes/ and declares section: routes — should pass
+        // File is under routes/; section identity comes from containment.
         assert!(file.starts_with(&routes_dir));
-        assert_eq!(body.get("section").and_then(|v| v.as_str()), Some("routes"));
+        assert_eq!(
+            body.get("id").and_then(|v| v.as_str()),
+            Some("ui.studio.dimension-get")
+        );
     }
 
     #[test]
@@ -957,18 +990,14 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
 
         let file = nested.join("evil.yaml");
-        // Declares section: aliases but lives under routes/
+        // Legacy structural fields are no longer allowed in node YAML; section
+        // identity comes from the containing directory.
         fs::write(&file, "section: aliases").unwrap();
 
-        // Use a dummy trust store — we're testing the invariant logic,
-        // not the signature verification here. Instead, test directly.
         let body: Value = serde_yaml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
-        let declared_section = body.get("section").and_then(|v| v.as_str()).unwrap();
 
-        // File IS under routes_dir
         assert!(file.starts_with(&routes_dir));
-        // But declares wrong section
-        assert_ne!(declared_section, "routes");
+        assert!(body.get("section").is_some());
     }
 
     #[test]
@@ -1116,8 +1145,6 @@ mod tests {
     #[test]
     fn hosted_policy_uniqueness_rejects_multiple_policies() {
         let mk_record = |source_file: &str| HostedNodePolicyRecord {
-            category: "hosted".into(),
-            section: "hosted".into(),
             version: "0.1.0".into(),
             schema_version: "1.0.0".into(),
             description: "test".into(),

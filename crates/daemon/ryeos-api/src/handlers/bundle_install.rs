@@ -1,7 +1,7 @@
 //! `bundle.install` — install a downstream bundle via node-config writer.
 //!
 //! Copies source to `<app_root>/.ai/bundles/<name>/`, writes a signed
-//! `kind: node` `section: bundles` item at `<app_root>/.ai/node/bundles/<name>.yaml`.
+//! `kind: node` bundle registration item at `<app_root>/.ai/node/bundles/<name>.yaml`.
 //!
 //! Any bundle name is accepted — no special treatment for any name.
 //!

@@ -397,7 +397,10 @@ mod tests {
         assert!(msg.contains("sealed vault"), "got: {msg}");
         assert!(msg.contains("daemon host environment"), "got: {msg}");
         assert!(msg.contains(".env"), "got: {msg}");
-        assert!(!msg.contains("set vault entry"), "stale wording leaked: {msg}");
+        assert!(
+            !msg.contains("set vault entry"),
+            "stale wording leaked: {msg}"
+        );
 
         let rem = required_secret_remediation("ZEN_API_KEY");
         assert!(
@@ -406,7 +409,10 @@ mod tests {
         );
         assert!(rem.contains("environment variable"), "got: {rem}");
         assert!(rem.contains(".env"), "got: {rem}");
-        assert!(!rem.contains("vault put"), "stale vault command leaked: {rem}");
+        assert!(
+            !rem.contains("vault put"),
+            "stale vault command leaked: {rem}"
+        );
         assert!(
             !rem.contains("ryeos-core-tools"),
             "stale binary leaked: {rem}"

@@ -638,7 +638,10 @@ async fn post_to_daemon(
 /// stdout, then (on success) fetch and print the final thread result so the
 /// terminal path keeps parity with `/execute`. Same signing/audience flow as
 /// [`post_to_daemon`]. Returns a non-zero error on a failing/errored run.
-async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> Result<(), CliError> {
+async fn post_to_daemon_streaming(
+    app_root: &std::path::Path,
+    body: &Value,
+) -> Result<(), CliError> {
     use crate::exec_stream::StreamOutcome;
 
     lifecycle_preflight(app_root).await?;
@@ -699,7 +702,9 @@ async fn post_to_daemon_streaming(app_root: &std::path::Path, body: &Value) -> R
     let payload = crate::transport::http::get_json(&url, &headers)
         .await
         .map_err(|e| CliError::Local {
-            detail: format!("execute stream completed but final result fetch failed for {tid}: {e}"),
+            detail: format!(
+                "execute stream completed but final result fetch failed for {tid}: {e}"
+            ),
         })?;
     print_result(thread_get_payload_to_execute_result(payload));
     Ok(())
@@ -806,7 +811,9 @@ mod tests {
         // --stream forces on.
         let mut stream_tail = vec!["--stream".to_string()];
         assert_eq!(
-            strip_execute_control_flags(&mut stream_tail).unwrap().stream,
+            strip_execute_control_flags(&mut stream_tail)
+                .unwrap()
+                .stream,
             Some(true)
         );
 
@@ -838,7 +845,10 @@ mod tests {
         let normalized = thread_get_payload_to_execute_result(threads_get);
         let result = normalized.get("result").expect("result envelope");
         assert_eq!(result.get("outcome_code").unwrap(), "success");
-        assert_eq!(result.get("result").unwrap(), &serde_json::json!({"text": "hi"}));
+        assert_eq!(
+            result.get("result").unwrap(),
+            &serde_json::json!({"text": "hi"})
+        );
         // artifacts (a sibling in threads.get) are carried into the envelope.
         assert_eq!(
             result.get("artifacts").unwrap(),
@@ -872,8 +882,6 @@ mod tests {
         project_resolution: CommandProjectResolution,
     ) -> CommandDef {
         CommandDef {
-            category: "commands".into(),
-            section: "commands".into(),
             name: tokens.join("-"),
             tokens: s(tokens),
             description: String::new(),
@@ -954,7 +962,11 @@ mod tests {
     fn no_project_command_strips_trailing_dash_p() {
         // A forms-empty, no-project command (e.g. `scheduler list`) must accept
         // `-p <path>` after the verb and not forward it to the handler.
-        let cmd = command(&["scheduler", "list"], vec![], CommandProjectResolution::None);
+        let cmd = command(
+            &["scheduler", "list"],
+            vec![],
+            CommandProjectResolution::None,
+        );
         let rest = s(&["scheduler", "list", "-p", "/data/projects/snap-track"]);
         let out = canonicalize_tokens_with_commands(&rest, std::slice::from_ref(&cmd))
             .expect("dispatch should accept -p after the verb");
@@ -963,8 +975,6 @@ mod tests {
 
     fn direct_execute_command() -> CommandDef {
         CommandDef {
-            category: "commands".into(),
-            section: "commands".into(),
             name: "execute".into(),
             tokens: s(&["execute"]),
             description: "Execute an item".into(),

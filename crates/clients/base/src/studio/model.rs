@@ -533,7 +533,11 @@ impl StudioCore {
             // The scene widgets need engine data the generic source path
             // doesn't carry: graph wants topology, atlas wants topology plus
             // items or file space (per this tile's projection).
-            match self.views.get(&view_ref).map(|binding| binding.widget.as_str()) {
+            match self
+                .views
+                .get(&view_ref)
+                .map(|binding| binding.widget.as_str())
+            {
                 Some("atlas") => {
                     needs_topology = true;
                     match self.tile_atlas_state(tile_id).active_projection {
@@ -544,11 +548,7 @@ impl StudioCore {
                                 .map(atlas_item_scope)
                                 .unwrap_or_default();
                             if scope.0.is_some() || scope.1.is_some() {
-                                tile_item_fetches.push((
-                                    tile_id.0.to_string(),
-                                    scope.0,
-                                    scope.1,
-                                ));
+                                tile_item_fetches.push((tile_id.0.to_string(), scope.0, scope.1));
                             } else {
                                 needs_atlas_items = true;
                             }

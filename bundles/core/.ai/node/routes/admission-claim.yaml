@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:5845732724eed299ede3cbd6c991f100ba5630bd69de2e7d9d007beb67cf4338:rcZez3apfWSPkk9uXdaHYRS59mv4qQdrdZ1VhctvfV+8wb+NozhOTV+G7cNNdk9FuKARnx52tfrtniufj+byBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:90b38e366ea294ae652065d58c6bca2534f29016d746244efdd5454c28633dfb:wi45/tX6EC3678r0W9FzoUzmu4xvQTd/QMVO2Ba5bpUWCR61tra054LsBoFnk3bGYA1yywatbKkohNsOC5vMCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: admission/claim
 path: /admission/claim
 methods:

@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:5168335606e8864bc2c5bb6434d68528b66b94b685ee109595bac00953ce9e11:aAxjY3pN1THUNJDm7R2uFdvr8zZZtAzfuoS6QHdSfEEYNB1kM6xUDclApdlG3G9yJvmVHb3e/uI5t5iWnCZmAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/events
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:44b5ecf1ce9484b20ae52e700001785faf30f0e490980a4936618d6af3c7a955:lViJWK86IwAC9dHrZOW4QdfU79zQxGBNI3+LacBwIQ9EuEwRGIBSqNkefIh02glTpXpg3eYg6YppAEnOHIi6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/events/session
 path: /ui/events/session/{session_id}
 methods:

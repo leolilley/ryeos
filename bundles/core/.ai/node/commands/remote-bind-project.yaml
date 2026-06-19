@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:d03aca2ff9e67aa81944974c8b0759fe9bc1e785255d553d7d355eda0b465a7c:hMzScGqIt9mIjs1d5uAZ3KGn8UvXkTaoRZvqU/WOBE596HsN4uTBsZ4rbql0t//SLxo6qr9sp7pnVfecQpJnBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-bind-project
+# ryeos:signed:2026-06-19T05:40:59Z:60e9092768efc733fc0608f6f70956b6264c784228c25cb1c134c3008e934a30:bb/DV5jXAH199IWR4rMJLaIuiRnrgaC57wxnOhnhVlStJQxvBNT2ajzwIF/4FMRkPEKq6D9q/dTGGgGlxqbmCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - bind-project

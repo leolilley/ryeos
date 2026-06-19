@@ -216,13 +216,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     // bundle preflight compares it, so a divergence used to brick boot (the
     // mismatch is now a warning, not fatal — see ryeos-bundle preflight).
     let official_publisher_vk = decode_official_publisher_pubkey()?;
-    let pinned_fp = pin_key(
-        &official_publisher_vk,
-        "ryeos-official",
-        &trust_dir,
-        None,
-    )
-    .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
+    let pinned_fp = pin_key(&official_publisher_vk, "ryeos-official", &trust_dir, None)
+        .map_err(|e| anyhow!("pin official publisher trust doc: {e}"))?;
     if pinned_fp != OFFICIAL_PUBLISHER_FP {
         bail!(
             "official publisher fingerprint mismatch: hardcoded {} but \
@@ -418,9 +413,8 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     fs::create_dir_all(&sync_dir)
         .with_context(|| format!("create sync dir {}", sync_dir.display()))?;
     let policy_path = sync_dir.join("policy.yaml");
-    let policy_yaml = ryeos_state::project_sync::render_effective_sync_policy_yaml(
-        ".ai/node/ingest/ignore.yaml",
-    );
+    let policy_yaml =
+        ryeos_state::project_sync::render_effective_sync_policy_yaml(".ai/node/ingest/ignore.yaml");
     fs::write(&policy_path, policy_yaml)
         .with_context(|| format!("write sync policy {}", policy_path.display()))?;
 
@@ -660,36 +654,27 @@ fn validate_command_registration_seed_body(path: &Path, body: &str) -> Result<()
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct RawPolicy {
-        section: String,
-        #[serde(default)]
-        name: Option<String>,
         #[serde(default)]
         claim_rules: Vec<RawClaimRule>,
         #[serde(default)]
         system_source_caps: Vec<String>,
     }
 
+    let value: serde_yaml::Value = serde_yaml::from_str(body)
+        .with_context(|| format!("parse command registration policy seed {}", path.display()))?;
+    if let Some(mapping) = value.as_mapping() {
+        for forbidden in ["category", "section", "name"] {
+            if mapping.contains_key(serde_yaml::Value::String(forbidden.to_string())) {
+                bail!(
+                    "command registration policy seed {} declares legacy structural field '{}'",
+                    path.display(),
+                    forbidden
+                );
+            }
+        }
+    }
     let policy: RawPolicy = serde_yaml::from_str(body)
         .with_context(|| format!("parse command registration policy seed {}", path.display()))?;
-    if policy.section != "command_registration" {
-        bail!(
-            "command registration policy seed {} declares section '{}' instead of 'command_registration'",
-            path.display(),
-            policy.section
-        );
-    }
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .context("command registration policy seed has no filename stem")?;
-    if policy.name.as_deref().unwrap_or(stem) != stem {
-        bail!(
-            "command registration policy seed {} declares name '{}' but filename is '{}'",
-            path.display(),
-            policy.name.unwrap_or_default(),
-            stem
-        );
-    }
     if policy.claim_rules.is_empty() {
         bail!(
             "command registration policy seed {} must declare at least one claim rule",
@@ -1029,7 +1014,7 @@ fn install_bundle(
     Ok(canonical)
 }
 
-/// Write a signed `kind: node` `section: bundles` registration record.
+/// Write a signed `kind: node` bundle registration record.
 ///
 /// Mirrors what `bundle.install` does in the daemon, but uses the local
 /// node signing key rather than the daemon's identity (they're the same
@@ -1044,10 +1029,7 @@ fn write_node_bundle_registration(
     let bundles_dir = node_dir.join("bundles");
     fs::create_dir_all(&bundles_dir)
         .with_context(|| format!("create node bundles dir {}", bundles_dir.display()))?;
-    let mut body = format!(
-        "kind: node\nsection: bundles\nid: {name}\npath: {}\n",
-        path.display()
-    );
+    let mut body = format!("kind: node\npath: {}\n", path.display());
     if !command_registration_caps.is_empty() {
         body.push_str("command_registration_caps:\n");
         for cap in command_registration_caps {
@@ -1301,11 +1283,7 @@ mod tests {
         let _ = run_init(&opts).expect("init #1");
 
         let policy_dir = state.join(".ai/node/command_registration");
-        fs::write(
-            policy_dir.join("stale.yaml"),
-            "section: command_registration\n",
-        )
-        .expect("write stale policy");
+        fs::write(policy_dir.join("stale.yaml"), "claim_rules: []\n").expect("write stale policy");
 
         let report = run_init(&opts).expect("init #2");
         let mut policies = fs::read_dir(&policy_dir)

@@ -321,13 +321,11 @@ fn compile_chain_tail(raw: &RawRouteSpec) -> Result<EventStreamStrategy, RouteCo
             got: raw.auth.clone(),
         });
     }
-    let cfg: RawChainTailSourceConfig =
-        serde_json::from_value(raw.response.source_config.clone()).map_err(|e| {
-            RouteConfigError::InvalidSourceConfig {
-                id: raw.id.clone(),
-                src: "chain_tail".into(),
-                reason: format!("invalid source_config: {e}"),
-            }
+    let cfg: RawChainTailSourceConfig = serde_json::from_value(raw.response.source_config.clone())
+        .map_err(|e| RouteConfigError::InvalidSourceConfig {
+            id: raw.id.clone(),
+            src: "chain_tail".into(),
+            reason: format!("invalid source_config: {e}"),
         })?;
     let capture_name = validate_and_extract_path_capture(
         &cfg.chain_root_id,
@@ -609,8 +607,6 @@ mod tests {
 
     fn make_gateway_raw(id: &str, path: &str) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: id.into(),
             path: path.into(),
             methods: ["POST".into()].into_iter().collect(),
@@ -637,8 +633,6 @@ mod tests {
 
     fn make_subscription_raw(id: &str, path: &str) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: id.into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -983,8 +977,6 @@ mod tests {
 
     fn make_chain_tail_raw(id: &str, path: &str) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: id.into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),

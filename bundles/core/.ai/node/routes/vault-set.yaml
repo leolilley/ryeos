@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:e5fb2025cede68e0482f4e2384d31137424c9f1539df8b8ade7e59ac457b7b6d:NUTCunq6qA0CVDH+2Qzpo/uvjLLBX3S99t/0pCMTet71f5NJRSL1ZvpAUJYT1XM4aFOCbbAYG72ruiwkr3ZGBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:fca1d79d16b5e12641b19577503ca61661db060edeccf22176392142e3bf28b4:zpLFlsWm6NnRWGZh16/dQOFFnGjlF/L/jbs3NsGMR7mLkfa8LxMAXP66Zr1wAhTohc7CBz50iVWfdgSXaKl7CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/vault-set
 path: /vault/set
 methods:

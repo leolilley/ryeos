@@ -526,10 +526,7 @@ pub fn replay_events(
 /// live tail should currently follow. `chain_seq` is monotonic within a chain,
 /// so this is collision-free (unlike ordering threads by `created_at`).
 /// Returns `None` when the chain has no events yet.
-pub fn chain_head_thread(
-    db: &ProjectionDb,
-    chain_root_id: &str,
-) -> anyhow::Result<Option<String>> {
+pub fn chain_head_thread(db: &ProjectionDb, chain_root_id: &str) -> anyhow::Result<Option<String>> {
     db.connection()
         .query_row(
             "SELECT thread_id FROM events WHERE chain_root_id = ? \

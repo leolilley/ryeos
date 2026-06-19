@@ -154,7 +154,6 @@ pub async fn handle(
     };
     let mut body = serde_json::json!({
         "spec_version": 1,
-        "section": "schedules",
         "schedule_id": req.schedule_id,
         "item_ref": req.item_ref,
         "schedule_type": req.schedule_type,

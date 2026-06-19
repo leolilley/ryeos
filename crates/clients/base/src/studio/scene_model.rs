@@ -752,8 +752,14 @@ mod tests {
             .atlas
             .expect("atlas");
         // The scene reflects the per-tile items, not the shared dataset.
-        assert!(atlas.nodes.iter().any(|n| n.namespace_key == "tile/scoped/y"));
-        assert!(!atlas.nodes.iter().any(|n| n.namespace_key == "shared/global/x"));
+        assert!(atlas
+            .nodes
+            .iter()
+            .any(|n| n.namespace_key == "tile/scoped/y"));
+        assert!(!atlas
+            .nodes
+            .iter()
+            .any(|n| n.namespace_key == "shared/global/x"));
     }
 
     #[test]

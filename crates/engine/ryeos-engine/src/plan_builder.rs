@@ -1446,12 +1446,18 @@ config:
             }
         });
 
-        let from_string =
-            crate::runtime::config_schema::validate_caller_params(&tool, &json!({"count": "60"}), "tool:x")
-                .unwrap();
-        let from_typed =
-            crate::runtime::config_schema::validate_caller_params(&tool, &json!({"count": 60}), "tool:x")
-                .unwrap();
+        let from_string = crate::runtime::config_schema::validate_caller_params(
+            &tool,
+            &json!({"count": "60"}),
+            "tool:x",
+        )
+        .unwrap();
+        let from_typed = crate::runtime::config_schema::validate_caller_params(
+            &tool,
+            &json!({"count": 60}),
+            "tool:x",
+        )
+        .unwrap();
 
         // Coercion makes the string form typed...
         assert_eq!(from_string, json!({"count": 60}));

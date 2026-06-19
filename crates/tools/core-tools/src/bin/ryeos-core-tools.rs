@@ -526,7 +526,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 "--scopes required, comma-separated, in canonical form. \
                  Example: --scopes ryeos.execute.service.remote/admin,ryeos.execute.service.bundle/install"
             ))?;
-            run_authorize_client(app_root, public_key, scopes, label, merge_scopes, cli.stdin_json)
+            run_authorize_client(
+                app_root,
+                public_key,
+                scopes,
+                label,
+                merge_scopes,
+                cli.stdin_json,
+            )
         }
         Cmd::AdmissionToken {
             app_root,
@@ -1576,6 +1583,14 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+            let system_trust_dir = system
+                .join(ryeos_engine::AI_DIR)
+                .join("config")
+                .join("keys")
+                .join("trusted");
+            std::fs::create_dir_all(&system_trust_dir).unwrap();
+            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &system_trust_dir, None)
+                .unwrap();
             Self {
                 _tmp: tmp,
                 system,
@@ -1605,10 +1620,7 @@ mod tests {
                 .join(format!("{name}.yaml"));
             self.write_signed(
                 &registration,
-                &format!(
-                    "kind: node\nsection: bundles\nid: {name}\npath: {}\n",
-                    bundle.display()
-                ),
+                &format!("kind: node\npath: {}\n", bundle.display()),
             );
             bundle
         }

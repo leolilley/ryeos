@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:de23f8da0ef36cfdb0880103e2c70ac3e71a6bc46f63f0f327c90aded04d9e08:O1Gstw0SZ/RuIALKXDEZVsgTtoaNO+f9aImLWfK867r1A3xAayDRVW6eOGEpu0uBXo2nGjgDEMGqK/9xxIsqCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: fetch
+# ryeos:signed:2026-06-19T05:40:59Z:8346403b0da731f9b1f80f7aa19d9b673b08562511079298b47b195572563540:yW2Pa89yoWqO10SBkCZujYL71yB/u9JJ+EHXsm9y2x6e9qWE3DoBh9byj2jRJ8j2ibkJeUWeFt9EHiemoAoGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - f
 description: Fetch/resolve an item (read-only)

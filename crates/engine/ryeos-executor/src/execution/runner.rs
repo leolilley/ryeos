@@ -19,12 +19,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, PlanContext, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{EnvInjectionSource, produce_env_value};
+use ryeos_engine::protocol_vocabulary::{produce_env_value, EnvInjectionSource};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::compute_ttl;

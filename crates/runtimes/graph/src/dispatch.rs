@@ -197,7 +197,10 @@ fn describe_subprocess_failure(obj: &serde_json::Map<String, Value>) -> String {
 }
 
 fn describe_native_failure(obj: &serde_json::Map<String, Value>) -> String {
-    let status = obj.get("status").and_then(Value::as_str).unwrap_or("failed");
+    let status = obj
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
     let mut msg = format!("child runtime failed (status: {status})");
     if let Some(detail) = native_failure_detail(obj) {
         msg.push_str(&format!("; {}", excerpt(&detail, 800)));

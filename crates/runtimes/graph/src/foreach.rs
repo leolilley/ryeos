@@ -202,9 +202,7 @@ pub async fn run_foreach_parallel(
             Err(e) => {
                 drop(permit);
                 let diagnostic = format!("interpolation error in foreach action: {e:#}");
-                handles.push(tokio::spawn(
-                    async move { ParallelItem::Err(diagnostic) },
-                ));
+                handles.push(tokio::spawn(async move { ParallelItem::Err(diagnostic) }));
                 continue;
             }
         };

@@ -481,7 +481,10 @@ println!("{x}");</code></pre><p>Done</p><ul><li>Last</li></ul></body></html>"#,
         );
         assert_eq!(extract_charset("text/html").as_deref(), None);
         // 0xE9 is 'é' in latin1; UTF-8 lossy would mangle it.
-        assert_eq!(decode_body(&[b'c', b'a', b'f', 0xE9], Some("ISO-8859-1")), "café");
+        assert_eq!(
+            decode_body(&[b'c', b'a', b'f', 0xE9], Some("ISO-8859-1")),
+            "café"
+        );
         assert_eq!(decode_body("café".as_bytes(), None), "café");
     }
     #[test]

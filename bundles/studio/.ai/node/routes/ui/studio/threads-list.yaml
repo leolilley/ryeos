@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:9c76020e4a9d10647a369ee85387c4f7c51b149b5bfa940ef4680011c2ba5532:CZKSSOQb7v1Pt5oyGftyBXDcYhkCBfHevSOgFDqaCcSXim6AKAp5qxUDJJ6Y6949ZPboGbvBCTZKWIuUtlYoAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/studio
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:b561838d2cb2bf7518c967745120aeadebdefc2aef438e994b0bb1c0b5c2803f:HW2xKVx0m45xpVGVav8IvPIQECf4DIxqGuUcTgP7S9e4o5P6J9nK5Mcx3lIKV1x+clRGXJEQWkptKhrGaobxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/studio/threads/list
 path: /ui/api/studio/threads/list
 methods:

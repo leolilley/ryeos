@@ -169,8 +169,14 @@ mod tests {
 
     #[test]
     fn human_text_extracts_known_fields() {
-        assert_eq!(human_text(&serde_json::json!({"delta": "hi"})), Some("hi".into()));
-        assert_eq!(human_text(&serde_json::json!({"text": "yo"})), Some("yo".into()));
+        assert_eq!(
+            human_text(&serde_json::json!({"delta": "hi"})),
+            Some("hi".into())
+        );
+        assert_eq!(
+            human_text(&serde_json::json!({"text": "yo"})),
+            Some("yo".into())
+        );
         assert_eq!(human_text(&serde_json::json!({"delta": ""})), None);
         assert_eq!(human_text(&serde_json::json!({"other": 1})), None);
     }

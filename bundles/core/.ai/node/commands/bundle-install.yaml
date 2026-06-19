@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T23:56:18Z:20079e081b21e9314921f7133350a6e0e582a524b00148d778a5cd73ff87f1bb:8pHnqzPB/uXTLhLg/H+3LPHW9t9Ke5l6ItJV7RYNlPxqhFHgDKVEc1AYaqjJlb5vnq/LcT7yxv4eVHihWD+YAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: bundle-install
+# ryeos:signed:2026-06-19T05:40:59Z:c1500d75005e7a3beea643ffa602db64bc2d4ee52cb2024b5c76aaaafdc71d2a:vGpWppCYudmqSGxeBN7kRIMysanhKpJ82bsAljI39XDb3vCKlYq7IDoEdZAlj7Dq6zwwXIUo5AMjvU1Z2H00Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - install

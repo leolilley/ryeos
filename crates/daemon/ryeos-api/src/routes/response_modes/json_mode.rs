@@ -271,8 +271,6 @@ mod tests {
         source_config: serde_json::Value,
     ) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "test-route".into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -443,8 +441,6 @@ mod tests {
         use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
         let mode = api_mode();
         let raw = RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -484,8 +480,6 @@ mod tests {
         };
         let mode = api_mode();
         let raw = RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),

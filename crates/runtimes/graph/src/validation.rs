@@ -188,9 +188,13 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
     let mut referenced_inputs: HashSet<String> = HashSet::new();
 
     for node in cfg.nodes.values() {
-        for field in [node.assign.as_ref(), node.action.as_ref(), node.output.as_ref()]
-            .into_iter()
-            .flatten()
+        for field in [
+            node.assign.as_ref(),
+            node.action.as_ref(),
+            node.output.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             collect_refs(field, "state", &mut referenced_state);
             collect_refs(field, "inputs", &mut referenced_inputs);
@@ -534,7 +538,11 @@ config:
       node_type: return
 "#;
         let result = analyze_graph(&make_graph(yaml));
-        assert!(result.errors.is_empty(), "unexpected errors: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
         assert!(
             result
                 .warnings
@@ -566,7 +574,10 @@ config:
 "#;
         let result = analyze_graph(&make_graph(yaml));
         assert!(
-            !result.warnings.iter().any(|w| w.contains("no default branch")),
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("no default branch")),
             "default branch present — should not warn: {:?}",
             result.warnings
         );
@@ -594,12 +605,18 @@ config:
 "#;
         let result = analyze_graph(&make_graph(yaml));
         assert!(
-            result.warnings.iter().any(|w| w.contains("missing") && w.contains("config_schema")),
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("missing") && w.contains("config_schema")),
             "expected undeclared-input warning for 'missing', got: {:?}",
             result.warnings
         );
         assert!(
-            !result.warnings.iter().any(|w| w.contains("inputs.declared")),
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("inputs.declared")),
             "declared input must not warn: {:?}",
             result.warnings
         );
@@ -650,7 +667,10 @@ config:
 "#;
         let result = analyze_graph(&make_graph(yaml));
         assert!(
-            result.warnings.iter().any(|w| w.contains("unknown") && w.contains("config_schema")),
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("unknown") && w.contains("config_schema")),
             "expected output ${{inputs.unknown}} to warn, got: {:?}",
             result.warnings
         );

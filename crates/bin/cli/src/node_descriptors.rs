@@ -85,8 +85,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "bundle-sign".into(),
                 tokens: vec!["bundle".into(), "sign".into()],
                 description: "Sign bundle".into(),

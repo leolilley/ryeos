@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use rand::Rng;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use super::arch_check;
 use super::launch_envelope::{

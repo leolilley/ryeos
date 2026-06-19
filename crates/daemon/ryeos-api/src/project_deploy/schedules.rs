@@ -850,7 +850,6 @@ fn write_reconciled_schedule(
     let lateness_grace_secs = schedule.lateness_grace_secs.unwrap_or(60);
     let mut body = serde_json::json!({
         "spec_version": 1,
-        "section": "schedules",
         "schedule_id": schedule.schedule_id,
         "item_ref": schedule.item_ref,
         "schedule_type": schedule.schedule_type,
