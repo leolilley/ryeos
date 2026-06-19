@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::callback::{ReplayResponse, RuntimeCallbackAPI};
+use crate::callback::{ReplayResponse, RuntimeCallbackAPI, TerminalCompletion};
 use crate::envelope::EnvelopeCallback;
 use crate::events::{RuntimeEventType, StorageClass};
 
@@ -212,7 +212,7 @@ impl CallbackClient {
     }
 
     /// Resume-critical: must hard-fail on disconnect.
-    pub async fn finalize_thread(&self, status: &str) -> Result<()> {
+    pub async fn finalize_thread(&self, completion: TerminalCompletion) -> Result<()> {
         let client = self.inner.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "callback finalize_thread called without an inner UDS client \
@@ -220,7 +220,7 @@ impl CallbackClient {
             )
         })?;
         client
-            .finalize_thread(&self.thread_id, status)
+            .finalize_thread(&self.thread_id, completion)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(())
@@ -633,7 +633,7 @@ mod tests {
         async fn finalize_thread(
             &self,
             _thread_id: &str,
-            _status: &str,
+            _completion: TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
@@ -914,7 +914,16 @@ mod tests {
     #[tokio::test]
     async fn finalize_thread_errors_when_disconnected() {
         let client = make_client();
-        let err = client.finalize_thread("completed").await.unwrap_err();
+        let err = client
+            .finalize_thread(TerminalCompletion {
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: None,
+                error: None,
+                cost: None,
+            })
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("socket missing"), "got: {err}");
     }
 

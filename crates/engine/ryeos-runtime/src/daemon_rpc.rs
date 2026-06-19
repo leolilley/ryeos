@@ -228,15 +228,6 @@ impl ThreadLifecycleClient {
             .await
     }
 
-    pub async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "threads.finalize",
-                serde_json::json!({"thread_id": thread_id, "status": status}),
-            )
-            .await
-    }
-
     pub async fn get_thread(&self, thread_id: &str) -> Result<Value, RpcError> {
         self.rpc
             .request("threads.get", serde_json::json!({"thread_id": thread_id}))

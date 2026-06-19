@@ -497,8 +497,8 @@ fn read_pid_from_runtime_db(state_path: &Path, thread_id: &str) -> Option<i64> {
 }
 
 /// Read thread status + outcome_code from the projection DB.
-/// Returns `(status, outcome_code, error_detail)` where `outcome_code`
-/// is extracted from the error JSON and `error_detail` is the raw error.
+/// Returns `(status, outcome_code, error_detail)` read directly from the
+/// persisted `thread_results` columns.
 fn read_thread_outcome_full(
     state_path: &Path,
     thread_id: &str,
@@ -510,34 +510,23 @@ fn read_thread_outcome_full(
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
 
-    // Check thread_results for status + error.
     let mut stmt = conn
-        .prepare("SELECT status, error FROM thread_results WHERE thread_id = ?1")
+        .prepare("SELECT status, outcome_code, error FROM thread_results WHERE thread_id = ?1")
         .ok()?;
-    let result = stmt
+    let (status, outcome_code, error_json) = stmt
         .query_row(rusqlite::params![thread_id], |row| {
             let status: String = row.get(0)?;
-            let error: Option<String> = row.get(1)?;
-            Ok((status, error))
+            let outcome_code: Option<String> = row.get(1)?;
+            let error: Option<String> = row.get(2)?;
+            Ok((status, outcome_code, error))
         })
         .ok()?;
 
-    let (status, error_json) = result;
-    let outcome_code = error_json.as_ref().and_then(|e| {
-        serde_json::from_str::<serde_json::Value>(e)
-            .ok()
-            .and_then(|v| {
-                v.get("code")
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string())
-            })
-    });
     Some((status, outcome_code, error_json))
 }
 
 /// Read thread status + outcome_code from the projection DB.
-/// Returns `(status, outcome_code)` where `outcome_code` is extracted
-/// from the error JSON if present.
+/// Returns `(status, outcome_code)` read from the persisted columns.
 fn read_thread_outcome(state_path: &Path, thread_id: &str) -> Option<(String, Option<String>)> {
     read_thread_outcome_full(state_path, thread_id).map(|(s, oc, _)| (s, oc))
 }

@@ -194,6 +194,7 @@ mod tests {
     use async_trait::async_trait;
     use ryeos_runtime::callback::{
         CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI,
+        TerminalCompletion,
     };
     use ryeos_runtime::ReplayedEventRecord;
     use serde_json::json;
@@ -214,7 +215,11 @@ mod tests {
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {

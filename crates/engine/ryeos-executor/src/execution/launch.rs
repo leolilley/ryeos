@@ -1247,7 +1247,7 @@ pub async fn build_and_launch(
             thread_id: thread_id.clone(),
             status: terminal_status.to_string(),
             outcome_code: if terminal_status == "completed" {
-                None
+                Some("success".to_string())
             } else {
                 Some(terminal_status.to_string())
             },
