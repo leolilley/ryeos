@@ -45,15 +45,17 @@ pub fn referenced_input_keys(template: &str) -> std::collections::HashSet<String
         keys.insert(cap[1].to_string());
     }
     for cap in INTERP_RE.captures_iter(template) {
-        // The leading identifier of a `${...}` expression is the context key
-        // it reads (e.g. `${input}`, `${input || "x"}`, `${input.field}`).
-        let ident: String = cap[1]
-            .trim_start()
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !ident.is_empty() {
-            keys.insert(ident);
+        // Inputs referenced via expression are `${inputs.KEY ...}` — inputs
+        // live under the `inputs` context key; other paths (state, etc.) are
+        // not inputs and must not suppress the inputs dump.
+        if let Some(rest) = cap[1].trim_start().strip_prefix("inputs.") {
+            let key: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !key.is_empty() {
+                keys.insert(key);
+            }
         }
     }
     keys

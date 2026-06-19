@@ -213,18 +213,26 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         let user_prompt = bootstrap_output.config.user_prompt.clone();
         let inputs = envelope.request.inputs.clone();
 
-        // Apply template interpolation with envelope inputs as context.
-        let interpolated_prompt = if !inputs.is_null() {
-            ryeos_runtime::interpolate(&serde_json::json!(user_prompt), &inputs)
-                .map(|v| v.as_str().unwrap_or(&user_prompt).to_string())
-                .unwrap_or_else(|_| user_prompt.clone())
-        } else {
+        // Interpolation context: inputs are nested under `inputs` so the body's
+        // `{input:KEY}` and `${inputs.KEY}` references resolve — the same
+        // context shape graph actions use. Failures propagate: a body that
+        // references a missing input is an authoring error, not something to
+        // mask by silently shipping the raw template.
+        let interpolated_prompt = if inputs.is_null() {
             user_prompt.clone()
+        } else {
+            let context = serde_json::json!({ "inputs": inputs });
+            match ryeos_runtime::interpolate(&serde_json::json!(user_prompt), &context)? {
+                serde_json::Value::String(rendered) => rendered,
+                other => {
+                    anyhow::bail!("directive body interpolated to a non-string value: {other}")
+                }
+            }
         };
 
         // Surface only the inputs the template did NOT already place via a
-        // `{input:KEY}` / `${KEY}` placeholder. A directive that references its
-        // inputs (e.g. a conversational `{input:input}`) renders one clean
+        // `{input:KEY}` / `${inputs.KEY}` reference. A directive that references
+        // its inputs (e.g. a conversational `{input:input}`) renders one clean
         // message; one that declares inputs without referencing them still gets
         // them appended for the model.
         let prompt = match inputs.as_object() {
