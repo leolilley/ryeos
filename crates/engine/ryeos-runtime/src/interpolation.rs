@@ -33,6 +33,32 @@ pub fn interpolate(template: &Value, context: &Value) -> anyhow::Result<Value> {
     }
 }
 
+/// Input/context keys a template references via `{input:KEY}` or `${KEY...}`.
+///
+/// Callers that also surface raw inputs (e.g. the directive runtime appending
+/// an `Inputs:` block) use this to avoid re-rendering inputs the template
+/// already placed — a body of `{input:input}` consumes `input`, so it is not
+/// dumped a second time.
+pub fn referenced_input_keys(template: &str) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for cap in INPUT_RE.captures_iter(template) {
+        keys.insert(cap[1].to_string());
+    }
+    for cap in INTERP_RE.captures_iter(template) {
+        // The leading identifier of a `${...}` expression is the context key
+        // it reads (e.g. `${input}`, `${input || "x"}`, `${input.field}`).
+        let ident: String = cap[1]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !ident.is_empty() {
+            keys.insert(ident);
+        }
+    }
+    keys
+}
+
 fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> {
     tracing::trace!(template = %template, "interpolating template");
 

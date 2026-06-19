@@ -1,3 +1,4 @@
+# ryeos:signed:2026-06-19T02:44:51Z:4f0524609cd0488ad88eb799e94bb551e665f85990d14ba0ff85d7109e0a4623:xn8wqInYswZAZ4io9GLcUb2Ms5fTp43z0CEQoy+kWBwGRiufbiJLnmVLfKqegvz8B3RGvcbQ6K7uennQbpQsAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-thread
 version: "1.0.0"
 description: Directive thread — watch and drive a single execution stream
@@ -36,7 +37,7 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:rye/agent/core/base
+      directive: directive:ryeos/ops/base
 
 ambient:
   show_background: true

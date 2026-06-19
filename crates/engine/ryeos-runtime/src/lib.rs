@@ -52,7 +52,7 @@ pub use events::{RuntimeEventType, StorageClass};
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{merge_hooks, run_hooks, HookDispatcher};
 pub use hooks_loader::{HookDefinition, HooksLoader};
-pub use interpolation::{interpolate, interpolate_action};
+pub use interpolation::{interpolate, interpolate_action, referenced_input_keys};
 pub use lillux::crypto::SigningKey;
 pub use paths::{
     safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,

@@ -1,15 +1,16 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:25963c727541ca40c9e299601a66d291d9dc57d6235d139013bf42f4f720034f:VY0I9kTW8q/2wfiBq5QkZP/0WN/EDG0X7ENYsW/NNkV4mcryuMfjN6vPrTi8sHm1oky229qO6Z9q0YcqkAe8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-19T02:44:46Z:a54fc3b4fd16efba48daf51ba5f65226da3c4970432e6494d090b078b45ac8af:uHmpbBBPgAJgH+8Mhc7bSt0My/uivUINo1mZ8TDo8TpSZ3GNWSN4m9JjVnJQnLMb46DwdbQeD5enSWT0ZRRfAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Summarize a thread conversation for resume context. Returns a structured summary within a token budget."
 version: "1.0.0"
-model_tier: fast
+model:
+  tier: fast
 limits:
   turns: 3
   tokens: 8192
-  spend: 0.02
+  spend_usd: 0.02
 permissions:
   execute:
-    - tool:rye/agent/threads/internal/*
+    - ryeos.execute.tool.ryeos/threads/internal/*
 ---
 
 # Thread Summary
