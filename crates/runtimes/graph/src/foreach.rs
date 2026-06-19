@@ -1,11 +1,29 @@
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 
 use crate::context::ExecutionContext;
 use crate::model::{ErrorRecord, GraphNode, WalkContext};
 use ryeos_runtime::callback_client::CallbackClient;
+
+/// Outcome of running every iteration of a foreach node.
+///
+/// The runner does NOT mutate the graph's `suppressed_errors` or `state`
+/// directly. It returns per-item `errors` (so the caller can apply the
+/// node/graph `on_error` policy) and an accumulated `assign_delta` (so
+/// the caller can commit foreach `assign` mutations into real state —
+/// the runner only ever sees a clone).
+pub struct ForeachRun {
+    /// One entry per input item, index-aligned (`Null` placeholder for a
+    /// failed/skipped item).
+    pub results: Vec<Value>,
+    /// Per-item failures (interpolation, dispatch, leaf, assign).
+    pub errors: Vec<ErrorRecord>,
+    /// Accumulated `assign` mutations to merge into graph state, as a
+    /// single object. Empty object when the node has no `assign`.
+    pub assign_delta: Value,
+}
 
 pub struct ForeachContext<'a> {
     pub items: &'a [Value],
@@ -15,16 +33,15 @@ pub struct ForeachContext<'a> {
     pub project_path: &'a str,
     pub client: &'a CallbackClient,
     pub exec_ctx: Option<&'a ExecutionContext>,
-    pub suppressed_errors: &'a mut Vec<ErrorRecord>,
     pub step: u32,
     pub current_node: &'a str,
 }
 
 pub async fn run_foreach_sequential(
     ctx: ForeachContext<'_>,
-    state: &mut Value,
+    state: &Value,
     inputs: &Value,
-) -> Vec<Value> {
+) -> ForeachRun {
     let ForeachContext {
         items,
         var,
@@ -33,14 +50,22 @@ pub async fn run_foreach_sequential(
         project_path,
         client,
         exec_ctx,
-        suppressed_errors,
         step,
         current_node,
     } = ctx;
     let mut results = Vec::new();
+    let mut errors = Vec::new();
+    // Accumulated assign deltas. Each iteration sees base state + the
+    // deltas applied so far, so a later item can read an earlier item's
+    // assign — but the mutations land in real state only via the caller.
+    let mut delta: Map<String, Value> = Map::new();
+
     for item in items {
+        // Effective state = base state with accumulated deltas applied.
+        let mut effective_state = state.clone();
+        merge_into(&mut effective_state, &Value::Object(delta.clone()));
         let walk_ctx = WalkContext {
-            state: state.clone(),
+            state: effective_state,
             inputs: inputs.clone(),
             result: None,
         };
@@ -54,53 +79,80 @@ pub async fn run_foreach_sequential(
         let interpolated = match ryeos_runtime::interpolate_action(&action, &item_ctx_val) {
             Ok(v) => v,
             Err(e) => {
-                suppressed_errors.push(ErrorRecord {
+                // Never dispatch a raw `${...}` template — record the
+                // error and skip this item with an aligned placeholder.
+                errors.push(ErrorRecord {
                     step,
                     node: current_node.to_string(),
                     error: format!("interpolation error in foreach action: {e:#}"),
                 });
-                action.clone()
+                results.push(Value::Null);
+                continue;
             }
         };
         let stripped = strip_none_values(&interpolated);
 
-        if let Ok(val) =
-            crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx)
-                .await
+        match crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx)
+            .await
         {
-            // Typed contract: dispatch_action returns the leaf result
-            // directly; no `{status, data}` unwrap step.
-            results.push(val.clone());
-
-            if let Some(ref assign) = node.assign {
-                let mut assign_ctx_map = item_ctx_val.as_object().cloned().unwrap_or_default();
-                assign_ctx_map.insert("result".into(), val);
-                let assign_ctx = Value::Object(assign_ctx_map);
-                match ryeos_runtime::interpolate(assign, &assign_ctx) {
-                    Ok(interpolated) => merge_into(state, &interpolated),
-                    Err(e) => {
-                        suppressed_errors.push(ErrorRecord {
-                            step,
-                            node: current_node.to_string(),
-                            error: format!("interpolation error in foreach assign: {e:#}"),
-                        });
+            Ok(crate::dispatch::ActionOutcome::Success(val)) => {
+                // Interpolate assign BEFORE committing the result, so an
+                // assign failure makes this item a Null/error — matching
+                // the parallel path's per-item failure semantics.
+                if let Some(ref assign) = node.assign {
+                    let mut assign_ctx_map = item_ctx_val.as_object().cloned().unwrap_or_default();
+                    assign_ctx_map.insert("result".into(), val.clone());
+                    let assign_ctx = Value::Object(assign_ctx_map);
+                    match ryeos_runtime::interpolate(assign, &assign_ctx) {
+                        Ok(interpolated) => {
+                            merge_object_into(&mut delta, &interpolated);
+                            results.push(val);
+                        }
+                        Err(e) => {
+                            errors.push(ErrorRecord {
+                                step,
+                                node: current_node.to_string(),
+                                error: format!("interpolation error in foreach assign: {e:#}"),
+                            });
+                            results.push(Value::Null);
+                        }
                     }
+                } else {
+                    results.push(val);
                 }
             }
-        } else {
-            // Dispatch failed — record error and push null placeholder
-            // to keep result indices aligned with input items (matching
-            // parallel path semantics).
-            suppressed_errors.push(ErrorRecord {
-                step,
-                node: current_node.to_string(),
-                error: format!("foreach sequential iteration dispatch failed"),
-            });
-            results.push(Value::Null);
+            Ok(crate::dispatch::ActionOutcome::Failure(diagnostic)) => {
+                // Leaf ran but failed — record the diagnostic and push a
+                // null placeholder so result indices stay aligned with
+                // input items.
+                errors.push(ErrorRecord {
+                    step,
+                    node: current_node.to_string(),
+                    error: format!("foreach sequential iteration failed: {diagnostic}"),
+                });
+                results.push(Value::Null);
+            }
+            Err(e) => {
+                // Dispatch failed before the leaf returned anything.
+                errors.push(ErrorRecord {
+                    step,
+                    node: current_node.to_string(),
+                    error: format!("foreach sequential iteration dispatch failed: {e:#}"),
+                });
+                results.push(Value::Null);
+            }
         }
     }
-    results
+    ForeachRun {
+        results,
+        errors,
+        assign_delta: Value::Object(delta),
+    }
 }
+
+/// Per-item result of a parallel foreach task: the leaf result plus the
+/// (already interpolated) assign object for that item, or a diagnostic.
+type ParallelItem = Result<(Value, Option<Value>), String>;
 
 pub async fn run_foreach_parallel(
     ctx: ForeachContext<'_>,
@@ -108,7 +160,7 @@ pub async fn run_foreach_parallel(
     inputs: &Value,
     client: CallbackClient,
     exec_ctx: Arc<ExecutionContext>,
-) -> Vec<Value> {
+) -> ForeachRun {
     let ForeachContext {
         items,
         var,
@@ -117,7 +169,6 @@ pub async fn run_foreach_parallel(
         project_path,
         client: _client_ref,
         exec_ctx: _exec_ctx_ref,
-        suppressed_errors,
         step,
         current_node,
     } = ctx;
@@ -127,6 +178,8 @@ pub async fn run_foreach_parallel(
 
     for item in items {
         let permit = sem.clone().acquire_owned().await.unwrap();
+        // Parallel iterations are independent: each sees base state +
+        // inputs + its own item var. No cross-item delta visibility.
         let walk_ctx = WalkContext {
             state: state.clone(),
             inputs: inputs.clone(),
@@ -141,17 +194,18 @@ pub async fn run_foreach_parallel(
             }
         };
 
-        // Interpolate before spawning — errors go to suppressed_errors
-        // rather than being silently swallowed inside the spawned task.
+        // Interpolate before spawning. On failure, push an immediate-error
+        // task (NOT a raw-template dispatch) so handle ordering — and thus
+        // result index alignment — is preserved.
         let interpolated = match ryeos_runtime::interpolate_action(&action, &item_ctx_val) {
             Ok(v) => v,
             Err(e) => {
-                suppressed_errors.push(ErrorRecord {
-                    step,
-                    node: current_node.to_string(),
-                    error: format!("interpolation error in foreach action: {e:#}"),
-                });
-                action.clone()
+                drop(permit);
+                let diagnostic = format!("interpolation error in foreach action: {e:#}");
+                handles.push(tokio::spawn(
+                    async move { ParallelItem::Err(diagnostic) },
+                ));
+                continue;
             }
         };
 
@@ -160,15 +214,13 @@ pub async fn run_foreach_parallel(
         let project_path = project_path.to_string();
         let exec_ctx = exec_ctx.clone();
         let assign = node.assign.clone();
-        let item_owned = item.clone();
-        let step_owned = step;
-        let current_node_owned = current_node.to_string();
+        // Full item context (state + inputs + item var) so assign resolves
+        // the same way the sequential path does.
+        let assign_ctx_base = item_ctx_val.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = permit;
             let stripped = strip_none_values(&interpolated);
-            // Typed contract: dispatch_action already returns the leaf
-            // result directly; no `{status, data}` unwrap step.
             match crate::dispatch::dispatch_action(
                 &client,
                 &stripped,
@@ -178,48 +230,60 @@ pub async fn run_foreach_parallel(
             )
             .await
             {
-                Ok(val) => {
-                    // Perform node.assign (same as sequential path).
-                    if let Some(ref assign_expr) = assign {
+                Ok(crate::dispatch::ActionOutcome::Success(val)) => {
+                    let assign_val = if let Some(ref assign_expr) = assign {
                         let mut assign_ctx_map =
-                            item_owned.as_object().cloned().unwrap_or_default();
+                            assign_ctx_base.as_object().cloned().unwrap_or_default();
                         assign_ctx_map.insert("result".into(), val.clone());
                         let assign_ctx = Value::Object(assign_ctx_map);
-                        if let Err(e) = ryeos_runtime::interpolate(assign_expr, &assign_ctx) {
-                            tracing::warn!(
-                                step = step_owned,
-                                node = %current_node_owned,
-                                "foreach parallel iteration assign interpolation failed: {e:#}"
-                            );
+                        match ryeos_runtime::interpolate(assign_expr, &assign_ctx) {
+                            Ok(v) => Some(v),
+                            Err(e) => {
+                                return ParallelItem::Err(format!(
+                                    "interpolation error in foreach assign: {e:#}"
+                                ));
+                            }
                         }
-                    }
-                    Ok(val)
+                    } else {
+                        None
+                    };
+                    ParallelItem::Ok((val, assign_val))
                 }
-                Err(e) => Err(e),
+                Ok(crate::dispatch::ActionOutcome::Failure(diagnostic)) => {
+                    ParallelItem::Err(format!("foreach parallel iteration failed: {diagnostic}"))
+                }
+                Err(e) => {
+                    ParallelItem::Err(format!("foreach parallel iteration dispatch failed: {e:#}"))
+                }
             }
         });
         handles.push(handle);
     }
 
     let mut results = Vec::new();
+    let mut errors = Vec::new();
+    // Merge assign deltas in input order for determinism.
+    let mut delta: Map<String, Value> = Map::new();
     for handle in handles {
         match handle.await {
-            Ok(Ok(val)) => {
+            Ok(Ok((val, assign_val))) => {
                 results.push(val);
+                if let Some(obj) = assign_val {
+                    merge_object_into(&mut delta, &obj);
+                }
             }
-            Ok(Err(dispatch_err)) => {
-                // Dispatch failed — record in suppressed_errors (same
-                // semantics as sequential path) and push a null placeholder
-                // so result indices stay aligned with input items.
-                suppressed_errors.push(ErrorRecord {
+            Ok(Err(diagnostic)) => {
+                // Leaf, transport, or interpolation failure — record it and
+                // push a null placeholder so indices stay aligned.
+                errors.push(ErrorRecord {
                     step,
                     node: current_node.to_string(),
-                    error: format!("foreach parallel iteration dispatch failed: {dispatch_err:#}"),
+                    error: diagnostic,
                 });
                 results.push(Value::Null);
             }
             Err(join_err) => {
-                suppressed_errors.push(ErrorRecord {
+                errors.push(ErrorRecord {
                     step,
                     node: current_node.to_string(),
                     error: format!("foreach parallel iteration task panicked: {join_err}"),
@@ -228,13 +292,27 @@ pub async fn run_foreach_parallel(
             }
         }
     }
-    results
+    ForeachRun {
+        results,
+        errors,
+        assign_delta: Value::Object(delta),
+    }
 }
 
 fn merge_into(target: &mut Value, source: &Value) {
     if let (Value::Object(ref mut t_map), Value::Object(ref s_map)) = (target, source) {
         for (k, v) in s_map {
             t_map.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// Merge an interpolated `assign` value into the accumulating delta map.
+/// Non-object assign results are ignored (assign must yield an object).
+fn merge_object_into(delta: &mut Map<String, Value>, source: &Value) {
+    if let Value::Object(map) = source {
+        for (k, v) in map {
+            delta.insert(k.clone(), v.clone());
         }
     }
 }

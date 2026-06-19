@@ -4,6 +4,29 @@ use ryeos_runtime::callback_client::CallbackClient;
 
 use crate::context::ExecutionContext;
 
+/// Outcome of dispatching a single graph action leaf, classified from
+/// the daemon execute envelope BEFORE the bare result is unwrapped.
+///
+/// The daemon wraps tool output in an audit envelope — `{outcome_code,
+/// result, error, artifacts}` for subprocess leaves, `{success, status,
+/// result, outputs, warnings}` for native-runtime leaves. A *failed*
+/// leaf carries `result: null` with the diagnostic in `error`/`status`,
+/// so unconditionally peeling to the bare `result` would turn a failure
+/// into a silent `null` success that then poisons graph state via
+/// suppressed interpolation errors. Classification happens once, here,
+/// so a failing tool surfaces as a node error with an actionable
+/// diagnostic instead.
+#[derive(Debug)]
+pub enum ActionOutcome {
+    /// Leaf succeeded; carries the bare, envelope-unwrapped result for
+    /// `${result.*}` interpolation.
+    Success(Value),
+    /// Leaf ran but reported failure (non-zero exit, runtime
+    /// `success:false`, timeout). Carries a human-readable diagnostic
+    /// including exit/status and a stderr excerpt where available.
+    Failure(String),
+}
+
 #[tracing::instrument(
     name = "tool:execute",
     skip(client, action, exec_ctx),
@@ -18,7 +41,7 @@ pub async fn dispatch_action(
     thread_id: &str,
     project_path: &str,
     exec_ctx: Option<&ExecutionContext>,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<ActionOutcome> {
     let mut action = action.clone();
 
     if let Some(ctx) = exec_ctx {
@@ -59,52 +82,171 @@ pub async fn dispatch_action(
 
     // The typed callback contract puts the leaf-dispatcher value in
     // `response.result`; the wrapping `thread` snapshot is for audit
-    // only and never feeds into graph-walker control flow. Pass JUST
-    // the leaf value into continuation chasing — `continuation_id`
-    // (when present) lives at the leaf result's top level under the
-    // typed contract.
-    let leaf = unwrap_execute_envelope(response.result);
-    let followed = follow_continuation(client, &leaf, thread_id, project_path, 0).await?;
-    Ok(followed)
+    // only and never feeds into graph-walker control flow. Classify the
+    // envelope BEFORE unwrapping so a failed leaf becomes a structured
+    // failure rather than a silent `null`. Only success peels to the
+    // bare leaf value and chases continuations — `continuation_id`
+    // (when present) lives at the leaf result's top level.
+    match classify_envelope(response.result) {
+        ActionOutcome::Failure(diagnostic) => Ok(ActionOutcome::Failure(diagnostic)),
+        ActionOutcome::Success(leaf) => {
+            let followed = follow_continuation(client, &leaf, thread_id, project_path, 0).await?;
+            Ok(ActionOutcome::Success(followed))
+        }
+    }
 }
 
-/// Peel the daemon's audit envelope so graph `assign` templates see the
-/// bare tool output, not daemon plumbing.
+/// Classify a daemon execute envelope into success (bare unwrapped
+/// result) or failure (diagnostic), peeling the audit wrapper only on
+/// success.
 ///
 /// The subprocess terminator (`ryeosd::dispatch::dispatch_subprocess`)
 /// wraps tool stdout in `ExecuteResponseResult { outcome_code, result,
 /// error, artifacts }`. The native-runtime terminator wraps with
 /// `{ success, status, result, outputs, warnings }`. Both are daemon-
-/// internal accounting; the graph user wants `${result.msg}` to access
-/// the tool's actual JSON output, not `${result.result.msg}`.
+/// internal accounting; on success the graph user wants `${result.msg}`
+/// to access the tool's actual JSON output, not `${result.result.msg}`.
 ///
-/// Detection is structural: an Object containing `result` plus EITHER
-/// the subprocess audit fields (`outcome_code`/`error`/`artifacts`) OR
-/// the native-runtime envelope fields (`success`/`status`/`outputs`).
-/// A bare tool that happens to print `{"result": ...}` without those
-/// sibling fields is left alone — we don't unwrap on `result` alone.
+/// Detection of the subprocess envelope keys ONLY off `outcome_code`
+/// (always set by the terminator). `error`/`artifacts` are not used as
+/// discriminators — a bare tool returning `{"result": ..., "error":
+/// null}` must not be mistaken for an envelope. A bare tool that prints
+/// `{"result": ...}` with no envelope markers is left alone.
 ///
 /// `continuation_id` lives at the leaf's top level under the typed
-/// callback contract, so the unwrap MUST happen before continuation
+/// callback contract, so classification MUST happen before continuation
 /// chasing reads it.
-fn unwrap_execute_envelope(value: Value) -> Value {
+fn classify_envelope(value: Value) -> ActionOutcome {
     let Some(obj) = value.as_object() else {
-        return value;
+        return ActionOutcome::Success(value);
     };
-    let has_result = obj.contains_key("result");
-    if !has_result {
-        return value;
+    if !obj.contains_key("result") {
+        // No `result` key — not an envelope; bare leaf data.
+        return ActionOutcome::Success(value);
     }
-    let is_subprocess_envelope = obj.contains_key("outcome_code")
-        || obj.contains_key("error")
-        || obj.contains_key("artifacts");
-    let is_native_runtime_envelope = obj.contains_key("success")
+
+    // Native-runtime envelope: `{success, status, result, outputs|warnings}`.
+    let is_native = obj.contains_key("success")
         && obj.contains_key("status")
         && (obj.contains_key("outputs") || obj.contains_key("warnings"));
-    if is_subprocess_envelope || is_native_runtime_envelope {
-        return obj.get("result").cloned().unwrap_or(Value::Null);
+    if is_native {
+        let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
+        return if ok {
+            ActionOutcome::Success(inner_result(obj))
+        } else {
+            ActionOutcome::Failure(describe_native_failure(obj))
+        };
     }
-    value
+
+    // Subprocess envelope: discriminated by `outcome_code`.
+    if obj.contains_key("outcome_code") {
+        return if subprocess_succeeded(obj) {
+            ActionOutcome::Success(inner_result(obj))
+        } else {
+            ActionOutcome::Failure(describe_subprocess_failure(obj))
+        };
+    }
+
+    // Has `result` but no envelope markers — bare tool data.
+    ActionOutcome::Success(value)
+}
+
+fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {
+    obj.get("result").cloned().unwrap_or(Value::Null)
+}
+
+/// A subprocess leaf succeeded iff it carries no error payload and its
+/// `outcome_code` is exactly `"exit:0"`. The terminator sets
+/// `outcome_code` to `"exit:<n>"` (or `"timeout"`) and a non-null
+/// `error` object on failure; anything that is not a clean `"exit:0"`
+/// — non-zero exit, timeout, or a malformed/missing code — is a failure.
+fn subprocess_succeeded(obj: &serde_json::Map<String, Value>) -> bool {
+    let no_error = obj.get("error").map(Value::is_null).unwrap_or(true);
+    no_error && obj.get("outcome_code").and_then(Value::as_str) == Some("exit:0")
+}
+
+fn describe_subprocess_failure(obj: &serde_json::Map<String, Value>) -> String {
+    let code = obj
+        .get("outcome_code")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let err = obj.get("error");
+    let exit_code = err.and_then(|e| e.get("exit_code")).and_then(Value::as_i64);
+    let stderr = err
+        .and_then(|e| e.get("stderr"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let stdout = err
+        .and_then(|e| e.get("stdout"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let mut msg = format!("tool failed (outcome_code: {code}");
+    if let Some(ec) = exit_code {
+        msg.push_str(&format!(", exit_code: {ec}"));
+    }
+    msg.push(')');
+    if let Some(se) = stderr {
+        msg.push_str(&format!("; stderr: {}", excerpt(se, 800)));
+    } else if let Some(so) = stdout {
+        msg.push_str(&format!("; stdout: {}", excerpt(so, 800)));
+    }
+    msg
+}
+
+fn describe_native_failure(obj: &serde_json::Map<String, Value>) -> String {
+    let status = obj.get("status").and_then(Value::as_str).unwrap_or("failed");
+    let mut msg = format!("child runtime failed (status: {status})");
+    if let Some(detail) = native_failure_detail(obj) {
+        msg.push_str(&format!("; {}", excerpt(&detail, 800)));
+    }
+    msg
+}
+
+/// Extract the most actionable failure detail from a native-runtime
+/// envelope. Child graph/directive runtimes return a structured result
+/// (e.g. `GraphResult { error, ... }`) under `result`, so a bare
+/// `status` is rarely enough — prefer the inner `error`, then a string
+/// result, then a compact JSON excerpt of the structured result.
+fn native_failure_detail(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    let non_empty = |s: &str| -> Option<String> {
+        let t = s.trim();
+        (!t.is_empty()).then(|| t.to_string())
+    };
+
+    if let Some(s) = obj.get("error").and_then(Value::as_str).and_then(non_empty) {
+        return Some(s);
+    }
+    let result = obj.get("result")?;
+    if let Some(s) = result.as_str().and_then(non_empty) {
+        return Some(s);
+    }
+    if let Some(res_obj) = result.as_object() {
+        if let Some(s) = res_obj
+            .get("error")
+            .and_then(Value::as_str)
+            .and_then(non_empty)
+        {
+            return Some(s);
+        }
+        // Last resort: a compact JSON excerpt so the diagnostic is not
+        // reduced to just `status`.
+        return Some(result.to_string());
+    }
+    None
+}
+
+/// Truncate a diagnostic excerpt at a char boundary so it never splits a
+/// multi-byte UTF-8 sequence.
+fn excerpt(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}… [truncated]")
+    }
 }
 
 fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
@@ -143,9 +285,8 @@ fn follow_continuation<'a>(
             return Ok(result.clone());
         }
 
-        // Typed callback contract: continuation IDs live at the leaf
-        // result's top level. The removed `.data.continuation_id`
-        // sidechannel is gone — there is one source of truth here.
+        // Continuation IDs live at the leaf result's top level — one
+        // source of truth.
         let continuation_id = result.get("continuation_id").and_then(|v| v.as_str());
 
         let Some(cont_id) = continuation_id else {
@@ -164,12 +305,11 @@ fn follow_continuation<'a>(
             .unwrap_or("unknown");
 
         if thread_status == "continued" {
-            // No silent fallback to the removed `continuation.successor_thread_id`
-            // sidechannel: `runtime.get_thread` already returns a stable
-            // `{ thread, result, artifacts, facets }` shape and continued
-            // threads MUST advertise their successor under
-            // `thread.successor_thread_id`. A missing field is a daemon
-            // contract violation, not a soft case.
+            // `runtime.get_thread` returns a stable `{ thread, result,
+            // artifacts, facets }` shape; a continued thread MUST
+            // advertise its successor under `thread.successor_thread_id`.
+            // A missing field is a daemon contract violation, not a soft
+            // case.
             let successor_id = thread_result
                 .get("thread")
                 .and_then(|t| t.get("successor_thread_id"))
@@ -187,10 +327,9 @@ fn follow_continuation<'a>(
             return follow_continuation(client, &inner, thread_id, project_path, depth + 1).await;
         }
 
-        // Terminal: return the leaf value directly. No fallback to
-        // returning the whole `{thread, result, ...}` wrapper —
-        // `runtime.get_thread` always carries `result` for non-continued
-        // threads, and a missing field is a daemon contract violation.
+        // Terminal: return the leaf value directly. `runtime.get_thread`
+        // always carries `result` for non-continued threads; a missing
+        // field is a daemon contract violation.
         let terminal_result = thread_result.get("result").cloned().ok_or_else(|| {
             anyhow::anyhow!(
                 "thread {cont_id} status={thread_status:?} missing top-level \
@@ -338,9 +477,10 @@ mod tests {
         // chain runs to depth 20 and then returns the leaf as-is.
         let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
         let action = json!({"item_id": "tool:test/deep"});
-        let result = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
+        let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
             .await
             .unwrap();
+        let result = expect_success(outcome);
         assert!(
             result
                 .get("continuation_id")
@@ -350,28 +490,43 @@ mod tests {
         );
     }
 
-    // ── unwrap_execute_envelope ────────────────────────────────────────
+    // ── classify_envelope ──────────────────────────────────────────────
+
+    fn expect_success(outcome: ActionOutcome) -> Value {
+        match outcome {
+            ActionOutcome::Success(v) => v,
+            ActionOutcome::Failure(d) => panic!("expected Success, got Failure: {d}"),
+        }
+    }
+
+    fn classify_success(value: Value) -> Value {
+        expect_success(classify_envelope(value))
+    }
+
+    fn classify_failure(value: Value) -> String {
+        match classify_envelope(value) {
+            ActionOutcome::Failure(d) => d,
+            ActionOutcome::Success(v) => panic!("expected Failure, got Success: {v}"),
+        }
+    }
 
     #[test]
-    fn unwrap_subprocess_envelope_exposes_inner_result() {
-        // dispatch_subprocess returns ExecuteResponseResult-shaped value:
-        // `{outcome_code, result, error, artifacts}`. Graph templates
-        // expect `${result.msg}` to access the bare tool output.
+    fn classify_subprocess_success_exposes_inner_result() {
+        // A clean subprocess exit (`outcome_code: exit:0`) peels to the
+        // bare tool output so `${result.msg}` works.
         let envelope = json!({
-            "outcome_code": "completed",
+            "outcome_code": "exit:0",
             "result": {"msg": "hello"},
             "error": null,
             "artifacts": []
         });
-        let unwrapped = unwrap_execute_envelope(envelope);
-        assert_eq!(unwrapped, json!({"msg": "hello"}));
+        assert_eq!(classify_success(envelope), json!({"msg": "hello"}));
     }
 
     #[test]
-    fn unwrap_native_runtime_envelope_exposes_inner_result() {
-        // dispatch_managed_subprocess wraps RuntimeResult fields:
-        // `{success, status, result, outputs, warnings}`. Same unwrap
-        // applies for graph→graph or graph→directive dispatches.
+    fn classify_native_runtime_success_exposes_inner_result() {
+        // `{success, status, result, outputs, warnings}` — graph→graph or
+        // graph→directive dispatch. Success peels to the inner result.
         let envelope = json!({
             "success": true,
             "status": "completed",
@@ -379,52 +534,113 @@ mod tests {
             "outputs": null,
             "warnings": []
         });
-        let unwrapped = unwrap_execute_envelope(envelope);
-        assert_eq!(unwrapped, json!({"state": {"x": 1}}));
+        assert_eq!(classify_success(envelope), json!({"state": {"x": 1}}));
     }
 
     #[test]
-    fn unwrap_leaves_bare_tool_output_alone() {
-        // A tool that prints `{"msg": "hello"}` directly (no envelope)
-        // must NOT be unwrapped — there's no `result` key to peel.
-        let bare = json!({"msg": "hello"});
-        assert_eq!(unwrap_execute_envelope(bare.clone()), bare);
-    }
-
-    #[test]
-    fn unwrap_leaves_continuation_id_alone() {
-        // Leaf-shaped continuation values (from sub-thread dispatches)
-        // carry `continuation_id` at the top level. They have no audit
-        // fields, so no unwrap.
-        let cont = json!({"continuation_id": "cont-abc"});
-        assert_eq!(unwrap_execute_envelope(cont.clone()), cont);
-    }
-
-    #[test]
-    fn unwrap_leaves_innocent_result_key_alone() {
-        // A tool that legitimately prints `{"result": ...}` without any
-        // audit/envelope sibling fields must NOT be unwrapped.
-        let bare = json!({"result": "not an envelope"});
-        assert_eq!(unwrap_execute_envelope(bare.clone()), bare);
-    }
-
-    #[test]
-    fn unwrap_handles_non_object_values() {
-        assert_eq!(unwrap_execute_envelope(json!(null)), json!(null));
-        assert_eq!(unwrap_execute_envelope(json!("string")), json!("string"));
-        assert_eq!(unwrap_execute_envelope(json!([1, 2, 3])), json!([1, 2, 3]));
-    }
-
-    #[test]
-    fn unwrap_handles_subprocess_envelope_with_null_inner_result() {
-        // Tool dispatched but no stdout produced — `result` is Null
-        // inside the envelope. Unwrap returns Null, not the wrapper.
+    fn classify_subprocess_failure_surfaces_diagnostic_not_null() {
+        // P0 regression guard: a non-zero subprocess exit must NOT
+        // collapse to a `null` success — it must classify as a failure
+        // carrying the exit code and stderr excerpt.
         let envelope = json!({
-            "outcome_code": "completed",
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stdout": "", "stderr": "Traceback: boom"},
+            "artifacts": []
+        });
+        let diagnostic = classify_failure(envelope);
+        assert!(diagnostic.contains("exit:1"), "got: {diagnostic}");
+        assert!(diagnostic.contains("boom"), "got: {diagnostic}");
+    }
+
+    #[test]
+    fn classify_subprocess_failure_with_error_payload_and_zero_code() {
+        // A non-null `error` payload marks failure even if outcome_code
+        // looks benign.
+        let envelope = json!({
+            "outcome_code": "exit:0",
+            "result": null,
+            "error": {"exit_code": 0, "stderr": "late failure"},
+            "artifacts": []
+        });
+        assert!(classify_failure(envelope).contains("late failure"));
+    }
+
+    #[test]
+    fn classify_native_runtime_failure_surfaces_status() {
+        let envelope = json!({
+            "success": false,
+            "status": "failed",
+            "result": null,
+            "outputs": null,
+            "warnings": []
+        });
+        assert!(classify_failure(envelope).contains("failed"));
+    }
+
+    #[test]
+    fn classify_native_runtime_failure_surfaces_structured_child_error() {
+        // graph→graph: the child returns a structured GraphResult under
+        // `result`; the parent diagnostic must dig out `result.error`
+        // rather than collapsing to just the status.
+        let envelope = json!({
+            "success": false,
+            "status": "error",
+            "result": {"error": "child graph failed: boom", "status": "error"},
+            "outputs": null,
+            "warnings": []
+        });
+        assert!(classify_failure(envelope).contains("boom"));
+    }
+
+    #[test]
+    fn classify_leaves_bare_tool_output_alone() {
+        // A tool that prints `{"msg": "hello"}` directly (no envelope)
+        // is a success with no peeling — there's no `result` key.
+        let bare = json!({"msg": "hello"});
+        assert_eq!(classify_success(bare.clone()), bare);
+    }
+
+    #[test]
+    fn classify_leaves_continuation_id_alone() {
+        let cont = json!({"continuation_id": "cont-abc"});
+        assert_eq!(classify_success(cont.clone()), cont);
+    }
+
+    #[test]
+    fn classify_leaves_innocent_result_key_alone() {
+        // A tool that legitimately prints `{"result": ...}` without any
+        // envelope marker (no outcome_code, no success/status) is bare
+        // data — not unwrapped.
+        let bare = json!({"result": "not an envelope"});
+        assert_eq!(classify_success(bare.clone()), bare);
+    }
+
+    #[test]
+    fn classify_does_not_unwrap_on_error_key_alone() {
+        // `error` alone is NOT an envelope discriminator — a bare tool
+        // returning `{result, error: null}` must pass through untouched.
+        let bare = json!({"result": {"v": 1}, "error": null});
+        assert_eq!(classify_success(bare.clone()), bare);
+    }
+
+    #[test]
+    fn classify_handles_non_object_values() {
+        assert_eq!(classify_success(json!(null)), json!(null));
+        assert_eq!(classify_success(json!("string")), json!("string"));
+        assert_eq!(classify_success(json!([1, 2, 3])), json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn classify_subprocess_success_with_null_inner_result() {
+        // Clean exit, no stdout — success carrying a `null` result (the
+        // tool genuinely produced nothing), NOT a failure.
+        let envelope = json!({
+            "outcome_code": "exit:0",
             "result": null,
             "error": null,
             "artifacts": []
         });
-        assert_eq!(unwrap_execute_envelope(envelope), json!(null));
+        assert_eq!(classify_success(envelope), json!(null));
     }
 }

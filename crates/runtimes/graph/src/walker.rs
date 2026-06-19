@@ -35,6 +35,11 @@ enum StepOutcome {
     ActionOk {
         item_id: String,
         result: Value,
+        /// `assign` template already interpolated against the leaf
+        /// result in `run_action_body`. `commit_step` merges it into
+        /// state verbatim — interpolation does not run here, so a raw
+        /// `${...}` template can never reach state.
+        assign: Option<Value>,
         next: Option<String>,
         cache_hit: bool,
         elapsed_ms: u64,
@@ -61,6 +66,11 @@ enum StepOutcome {
         results: Vec<Value>,
         collect_key: Option<String>,
         var_name: String,
+        /// Accumulated foreach `assign` mutations to merge into state.
+        assign_delta: Value,
+        /// Per-item failures, surfaced as suppressed errors (only present
+        /// under the `continue` policy — fail/redirect never reach here).
+        errors: Vec<ErrorRecord>,
         next: Option<String>,
     },
     /// Terminal step — return node, max-steps exhausted, or fatal fail.
@@ -95,10 +105,10 @@ pub struct Walker {
     client: CallbackClient,
     checkpoint: Option<CheckpointWriter>,
     /// Accumulated non-fatal callback drift surfaced during a single
-    /// `execute` run. Replaces the V5.4-era `let _ =
-    /// self.client.append_event(...)` silent-drop pattern (V5.5 P0
-    /// remediation). Drained by `take_warnings()` after `execute`
-    /// returns so the daemon-side launcher can attach them to
+    /// `execute` run. Every failed callback (event-store rejection,
+    /// transient transport failure) is recorded here instead of being
+    /// dropped. Drained by `take_warnings()` after `execute` returns so
+    /// the daemon-side launcher can attach them to
     /// `RuntimeResult.warnings`.
     ///
     /// `Mutex` interior mutability lets the emitter (`record_callback_warning`)
@@ -157,6 +167,9 @@ struct CommitTerminalInput<'a> {
     pub guard: &'a mut RunGuard,
     pub hook_list: &'a [Value],
     pub current_node_id: &'a str,
+    /// Graph inputs, threaded so a return node's `output` template can
+    /// resolve `${inputs.*}` (not just `${state.*}`).
+    pub inputs: &'a Value,
 }
 
 impl Walker {
@@ -179,9 +192,7 @@ impl Walker {
 
     /// Drain the accumulated callback-drift warnings. Called by the
     /// graph-runtime binary's `main.rs` after `execute` returns so the
-    /// drift can be threaded into `RuntimeResult.warnings`. Replaces
-    /// the previous silent-drop semantics where event-store rejection
-    /// (or transport hiccups) were dropped on the floor with `let _ =`.
+    /// drift can be threaded into `RuntimeResult.warnings`.
     pub fn take_warnings(&self) -> Vec<String> {
         std::mem::take(&mut *self.warnings.lock().unwrap())
     }
@@ -312,7 +323,11 @@ impl Walker {
 
         let cfg = &self.graph.config;
         let inputs = params.get("inputs").cloned().unwrap_or(json!({}));
-        let mut state = json!({});
+
+        // Initial state precedence (lowest → highest): authored
+        // `config.state` defaults, then caller `inject_state`, then
+        // `resume_state` (handled below) for a resumed run.
+        let mut state = cfg.state.clone().unwrap_or_else(|| json!({}));
 
         if let Some(defaults) = params.get("inject_state") {
             merge_into(&mut state, defaults);
@@ -326,8 +341,8 @@ impl Walker {
 
         let hook_list: Vec<Value> = self.graph.config.hooks.clone().unwrap_or_default();
 
-        // Resume state injected by main.rs (from CheckpointWriter or replay fallback).
-        // No silent cold-start when RYEOS_RESUME=1 — main.rs handles that.
+        // Resume state injected by main.rs (from the checkpoint or event
+        // replay). main.rs owns the cold-start decision when RYEOS_RESUME=1.
         if let Some(resume_val) = params.get("resume_state") {
             if let Some(node) = resume_val.get("current_node").and_then(|v| v.as_str()) {
                 current = node.to_string();
@@ -504,12 +519,17 @@ impl Walker {
                 ) {
                     Ok(v) => v,
                     Err(e) => {
-                        suppressed_errors.push(ErrorRecord {
-                            step,
-                            node: current.to_string(),
-                            error: format!("interpolation error in `over`: {e:#}"),
-                        });
-                        Value::Array(vec![])
+                        // A foreach that can't resolve its iteration set
+                        // is a node error — route it through on_error
+                        // rather than silently iterating an empty list.
+                        return StepOutcome::DispatchHardError {
+                            item_id: None,
+                            error: format!(
+                                "interpolation error in `over` for node `{current}`: {e:#}"
+                            ),
+                            next_on_error: resolve_next_on_error(node, cfg),
+                            elapsed_ms: start.elapsed().as_millis() as u64,
+                        };
                     }
                 };
 
@@ -530,7 +550,7 @@ impl Walker {
                 let var = node.foreach_var().to_string();
                 let parallel = node.parallel;
 
-                let results = if parallel {
+                let foreach_run = if parallel {
                     foreach::run_foreach_parallel(
                         foreach::ForeachContext {
                             items: &items,
@@ -540,7 +560,6 @@ impl Walker {
                             project_path: &self.project_path,
                             client: &self.client,
                             exec_ctx: Some(exec_ctx),
-                            suppressed_errors: &mut *suppressed_errors,
                             step,
                             current_node: &current,
                         },
@@ -560,21 +579,46 @@ impl Walker {
                             project_path: &self.project_path,
                             client: &self.client,
                             exec_ctx: Some(exec_ctx),
-                            suppressed_errors: &mut *suppressed_errors,
                             step,
                             current_node: &current,
                         },
-                        &mut state.clone(),
+                        state,
                         inputs,
                     )
                     .await
                 };
+
+                let foreach::ForeachRun {
+                    results,
+                    errors,
+                    assign_delta,
+                } = foreach_run;
+
+                // Per-item failures obey the node/graph on_error policy,
+                // just like a single action node. Only `continue` keeps
+                // going (errors become suppressed); fail/redirect abandon
+                // the foreach with one combined diagnostic.
+                if !errors.is_empty() {
+                    match resolve_next_on_error(node, cfg) {
+                        NextOnError::PolicyContinue => {}
+                        policy => {
+                            return StepOutcome::DispatchHardError {
+                                item_id: None,
+                                error: foreach_failure_summary(&current, &errors),
+                                next_on_error: policy,
+                                elapsed_ms: start.elapsed().as_millis() as u64,
+                            };
+                        }
+                    }
+                }
 
                 let next = edges::evaluate_next(node, state, inputs);
                 StepOutcome::ForeachDone {
                     results,
                     collect_key: node.collect.clone(),
                     var_name: var,
+                    assign_delta,
+                    errors,
                     next,
                 }
             }
@@ -625,6 +669,7 @@ impl Walker {
                     Some(n) => StepOutcome::ActionOk {
                         item_id: String::new(),
                         result: json!({}),
+                        assign: None,
                         next: Some(n),
                         cache_hit: false,
                         elapsed_ms: start.elapsed().as_millis() as u64,
@@ -685,105 +730,103 @@ impl Walker {
             };
         }
 
-        // Dispatch
+        // Dispatch. `dispatch_action` classifies the daemon envelope:
+        //   Err            → transport/dispatch failure (hard error)
+        //   Ok(Failure(d)) → leaf ran but failed (non-zero exit, etc.)
+        //   Ok(Success(v)) → bare, envelope-unwrapped leaf result
         let mut cache_hit = false;
-        let mut dispatch_err: Option<String> = None;
-        let result = if node.is_cacheable() {
+        let outcome: Result<dispatch::ActionOutcome, String> = if node.is_cacheable() {
             let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
             if let Some(cached) = cache.lookup(&cache_key) {
                 cache_hit = true;
-                Some(cached)
+                Ok(dispatch::ActionOutcome::Success(cached))
             } else {
-                let res = dispatch::dispatch_action(
+                match dispatch::dispatch_action(
                     &self.client,
                     &stripped_action,
                     &self.thread_id,
                     &self.project_path,
                     Some(exec_ctx),
                 )
-                .await;
-                match &res {
-                    Ok(val) => {
-                        let is_error = val.get("status")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s == "error")
-                            .unwrap_or_else(|| {
-                                let raw = val.get("status");
-                                if raw.is_some() {
-                                    tracing::trace!(status_val = %raw.unwrap(), "dispatch result status is not a string");
-                                }
-                                false
-                            });
-                        if !is_error {
-                            cache.store(&cache_key, val);
-                        }
+                .await
+                {
+                    Ok(dispatch::ActionOutcome::Success(val)) => {
+                        // Only successful dispatches are cached — never a
+                        // failure, which would otherwise replay a stale
+                        // error (or `null`) on the next run.
+                        cache.store(&cache_key, &val);
+                        Ok(dispatch::ActionOutcome::Success(val))
                     }
-                    Err(e) => {
-                        dispatch_err = Some(format!("{e:#}"));
-                    }
+                    Ok(failure) => Ok(failure),
+                    Err(e) => Err(format!("{e:#}")),
                 }
-                res.ok()
             }
         } else {
-            let res = dispatch::dispatch_action(
+            match dispatch::dispatch_action(
                 &self.client,
                 &stripped_action,
                 &self.thread_id,
                 &self.project_path,
                 Some(exec_ctx),
             )
-            .await;
-            if let Err(e) = &res {
-                dispatch_err = Some(format!("{e:#}"));
+            .await
+            {
+                Ok(o) => Ok(o),
+                Err(e) => Err(format!("{e:#}")),
             }
-            res.ok()
         };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
-        match result {
-            None => {
-                let err_detail = dispatch_err.unwrap_or_else(|| "dispatch failed".to_string());
-                StepOutcome::DispatchHardError {
-                    item_id: Some(item_id),
-                    error: err_detail,
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: elapsed,
-                }
-            }
-            Some(val) => {
-                let is_error = val.get("status")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s == "error")
-                    .unwrap_or_else(|| {
-                        let raw = val.get("status");
-                        if raw.is_some() {
-                            tracing::trace!(status_val = %raw.unwrap(), "dispatch result status is not a string");
+        match outcome {
+            Err(err_detail) => StepOutcome::DispatchHardError {
+                item_id: Some(item_id),
+                error: err_detail,
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: elapsed,
+            },
+            Ok(dispatch::ActionOutcome::Failure(diagnostic)) => StepOutcome::LeafSoftError {
+                item_id,
+                error: diagnostic,
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: elapsed,
+            },
+            Ok(dispatch::ActionOutcome::Success(val)) => {
+                // Interpolate `assign` HERE (not in commit_step) so an
+                // interpolation failure becomes a node error that obeys
+                // on_error — never a suppressed error that merges the raw
+                // `${...}` template into graph state.
+                let assign = match &node.assign {
+                    Some(assign_tpl) => {
+                        let assign_ctx = WalkContext {
+                            state: state.clone(),
+                            inputs: inputs.clone(),
+                            result: Some(val.clone()),
+                        };
+                        match ryeos_runtime::interpolate(assign_tpl, &assign_ctx.as_context()) {
+                            Ok(interpolated) => Some(interpolated),
+                            Err(e) => {
+                                return StepOutcome::LeafSoftError {
+                                    item_id,
+                                    error: format!(
+                                        "interpolation error in `assign` for node `{current}`: {e:#}"
+                                    ),
+                                    next_on_error: resolve_next_on_error(node, cfg),
+                                    elapsed_ms: elapsed,
+                                };
+                            }
                         }
-                        false
-                    });
-
-                if is_error {
-                    let err_str = val
-                        .get("error")
-                        .and_then(|e| e.as_str())
-                        .unwrap_or("dispatch returned error status")
-                        .to_string();
-                    StepOutcome::LeafSoftError {
-                        item_id,
-                        error: err_str,
-                        next_on_error: resolve_next_on_error(node, cfg),
-                        elapsed_ms: elapsed,
                     }
-                } else {
-                    let next = edges::evaluate_next_with_result(node, state, inputs, &val);
-                    StepOutcome::ActionOk {
-                        item_id,
-                        result: val,
-                        next,
-                        cache_hit,
-                        elapsed_ms: elapsed,
-                    }
+                    None => None,
+                };
+                let next = edges::evaluate_next_with_result(node, state, inputs, &val);
+                StepOutcome::ActionOk {
+                    item_id,
+                    result: val,
+                    assign,
+                    next,
+                    cache_hit,
+                    elapsed_ms: elapsed,
                 }
             }
         }
@@ -822,6 +865,7 @@ impl Walker {
                     guard,
                     hook_list,
                     current_node_id: current,
+                    inputs,
                 })
                 .await
             }
@@ -859,6 +903,7 @@ impl Walker {
                             guard,
                             hook_list,
                             current_node_id: current,
+                            inputs,
                         })
                         .await
                     }
@@ -869,6 +914,8 @@ impl Walker {
                 ref results,
                 ref collect_key,
                 ref var_name,
+                ref assign_delta,
+                ref errors,
                 ref next,
             } => {
                 // Foreach lifecycle: graph_step_started → (per-iteration
@@ -905,9 +952,17 @@ impl Walker {
                         obj.insert(key.clone(), Value::Array(results.clone()));
                     }
                 }
+                // Commit accumulated foreach `assign` mutations.
+                merge_into(state, assign_delta);
                 // Remove the iteration variable from state.
                 if let Some(obj) = state.as_object_mut() {
                     obj.remove(var_name);
+                }
+
+                // Surface per-item failures (continue policy) as suppressed
+                // errors so the run terminates `completed_with_errors`.
+                for err in errors {
+                    suppressed_errors.push(err.clone());
                 }
 
                 self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
@@ -937,6 +992,7 @@ impl Walker {
                             guard,
                             hook_list,
                             current_node_id: current,
+                            inputs,
                         })
                         .await
                     }
@@ -946,6 +1002,7 @@ impl Walker {
             StepOutcome::ActionOk {
                 ref item_id,
                 ref result,
+                ref assign,
                 ref next,
                 cache_hit,
                 elapsed_ms,
@@ -960,28 +1017,12 @@ impl Walker {
                 self.emit_tool_call_result(graph_run_id, step, current, item_id, "ok")
                     .await;
 
-                // State mutation
-                if let Some(node) = self.graph.config.nodes.get(current) {
-                    if let Some(ref assign) = node.assign {
-                        let assign_ctx = WalkContext {
-                            state: state.clone(),
-                            inputs: inputs.clone(),
-                            result: Some(result.clone()),
-                        };
-                        let interpolated =
-                            match ryeos_runtime::interpolate(assign, &assign_ctx.as_context()) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    suppressed_errors.push(ErrorRecord {
-                                        step,
-                                        node: current.to_string(),
-                                        error: format!("interpolation error in `assign`: {e:#}"),
-                                    });
-                                    assign.clone()
-                                }
-                            };
-                        merge_into(state, &interpolated);
-                    }
+                // State mutation: `assign` was already interpolated in
+                // run_action_body (a failure there became a node error
+                // routed through on_error), so here we only merge the
+                // resolved value — no `${...}` template can reach state.
+                if let Some(assign_val) = assign {
+                    merge_into(state, assign_val);
                 }
 
                 // Receipt
@@ -1025,6 +1066,7 @@ impl Walker {
                             guard,
                             hook_list,
                             current_node_id: current,
+                            inputs,
                         })
                         .await
                     }
@@ -1111,6 +1153,7 @@ impl Walker {
                                     guard,
                                     hook_list,
                                     current_node_id: current,
+                                    inputs,
                                 })
                                 .await
                             }
@@ -1127,6 +1170,7 @@ impl Walker {
                             guard,
                             hook_list,
                             current_node_id: current,
+                            inputs,
                         })
                         .await
                     }
@@ -1223,6 +1267,7 @@ impl Walker {
                                     guard,
                                     hook_list,
                                     current_node_id: current,
+                                    inputs,
                                 })
                                 .await
                             }
@@ -1239,6 +1284,7 @@ impl Walker {
                             guard,
                             hook_list,
                             current_node_id: current,
+                            inputs,
                         })
                         .await
                     }
@@ -1261,6 +1307,7 @@ impl Walker {
             guard,
             hook_list: _hook_list,
             current_node_id,
+            inputs,
         } = input;
         let (success, status) = match base_status {
             "completed" => {
@@ -1277,13 +1324,12 @@ impl Walker {
 
         // Output: ONLY populated when a return node declares an explicit
         // `output:` template. Otherwise `result` stays `None` and
-        // consumers read from `state` — eliminates the historical
-        // "GraphResult.state == GraphResult.result" duplication that
-        // surfaced as `body.result.result.result == body.result.result.state`
-        // on the wire (smell flagged during phase 4c review).
+        // consumers read from `state` — so `result` never duplicates
+        // `state`.
         //
-        // G3: use the current cursor (deterministic) instead of
+        // Use the current cursor (deterministic) instead of
         // nodes.values().find() which iterates HashMap in random order.
+        let mut output_error: Option<String> = None;
         let output: Option<Value> = if success && base_status == "completed" {
             self.graph
                 .config
@@ -1291,31 +1337,37 @@ impl Walker {
                 .get(current_node_id)
                 .filter(|n| n.node_type == NodeType::Return)
                 .and_then(|n| n.output.as_ref())
-                .map(|tpl| {
+                .and_then(|tpl| {
                     let ctx = WalkContext {
                         state: state.clone(),
-                        inputs: Value::Object(Default::default()),
+                        inputs: inputs.clone(),
                         result: None,
                     };
-                    match ryeos_runtime::interpolate(&Value::String(tpl.clone()), &ctx.as_context())
-                    {
-                        Ok(v) => v,
+                    // `tpl` is a `Value` (scalar, map, or list);
+                    // `interpolate` recurses through all of them.
+                    match ryeos_runtime::interpolate(tpl, &ctx.as_context()) {
+                        Ok(v) => Some(v),
                         Err(e) => {
-                            // Return-node output interpolation error —
-                            // push to suppressed_errors (available in
-                            // the outer scope) so the graph result
-                            // carries the diagnostic.
-                            suppressed_errors.push(ErrorRecord {
-                                step: steps,
-                                node: current_node_id.to_string(),
-                                error: format!("interpolation error in `output`: {e:#}"),
-                            });
-                            Value::String(tpl.clone())
+                            // A return node that can't resolve its declared
+                            // `output` did NOT produce a valid result — fail
+                            // the run rather than emit a raw `${...}` template
+                            // as the graph's result.
+                            output_error = Some(format!(
+                                "interpolation error in `output` for node `{current_node_id}`: {e:#}"
+                            ));
+                            None
                         }
                     }
                 })
         } else {
             None
+        };
+
+        // A failed output interpolation overrides an otherwise-successful
+        // terminal into an error terminal carrying the diagnostic.
+        let (success, status, output, error_owned) = match output_error {
+            Some(oe) => (false, "error".to_string(), None, Some(oe)),
+            None => (success, status, output, error.map(String::from)),
         };
 
         let graph_result = GraphResult {
@@ -1338,7 +1390,7 @@ impl Walker {
             } else {
                 Some(std::mem::take(suppressed_errors))
             },
-            error: error.map(String::from),
+            error: error_owned,
         };
 
         // Emit GraphCompleted event.
@@ -1616,6 +1668,20 @@ fn resolve_next_on_error(node: &GraphNode, cfg: &GraphConfig) -> NextOnError {
     }
 }
 
+/// Build one combined diagnostic for a foreach node whose per-item
+/// failures trip a fail/redirect policy. Leads with the count and the
+/// first item's error (which carries the leaf stderr excerpt).
+fn foreach_failure_summary(node: &str, errors: &[ErrorRecord]) -> String {
+    let first = errors
+        .first()
+        .map(|e| e.error.as_str())
+        .unwrap_or("unknown error");
+    format!(
+        "foreach node `{node}` failed: {} of its iterations errored; first: {first}",
+        errors.len()
+    )
+}
+
 fn merge_into(target: &mut Value, source: &Value) {
     if let (Value::Object(ref mut t_map), Value::Object(ref s_map)) = (target, source) {
         for (k, v) in s_map {
@@ -1846,6 +1912,328 @@ config:
         assert_eq!(result.steps, 1);
     }
 
+    /// Helper: assert no graph-state value contains an unresolved
+    /// `${...}` template (the P0 state-corruption symptom).
+    fn assert_no_raw_template(state: &Value) {
+        let s = serde_json::to_string(state).unwrap();
+        assert!(
+            !s.contains("${"),
+            "graph state must not carry unresolved templates, got: {s}"
+        );
+    }
+
+    // ── Acceptance: a failing tool inside a graph produces ONE actionable
+    //    error (node + exit + stderr) and never poisons state. ──────────
+
+    #[tokio::test]
+    async fn failing_tool_on_error_fail_surfaces_diagnostic() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  on_error: fail
+  nodes:
+    step1:
+      action: {item_id: "tool:test/fail"}
+      assign: {captured: "${result.value}"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        // Failed subprocess envelope: result null, error carries stderr.
+        let w = make_walker(
+            graph,
+            vec![json!({
+                "outcome_code": "exit:1",
+                "result": null,
+                "error": {"exit_code": 1, "stderr": "Traceback: boom"}
+            })],
+        );
+        let result = w.execute(json!({}), None).await;
+
+        assert!(!result.success, "failed tool must fail the graph");
+        assert_eq!(result.status, "error");
+        let err = result.error.unwrap_or_default();
+        assert!(err.contains("step1"), "error should name the node: {err}");
+        assert!(err.contains("boom"), "error should carry stderr: {err}");
+        // The poisoned-state symptom must be absent: no `${result...}`.
+        assert_no_raw_template(&result.state);
+    }
+
+    #[tokio::test]
+    async fn failing_tool_on_error_continue_records_structured_error() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  on_error: continue
+  nodes:
+    step1:
+      action: {item_id: "tool:test/fail"}
+      assign: {captured: "${result.value}"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(
+            graph,
+            vec![json!({
+                "outcome_code": "exit:1",
+                "result": null,
+                "error": {"exit_code": 1, "stderr": "boom"}
+            })],
+        );
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success);
+        assert_eq!(result.status, "completed_with_errors");
+        assert_eq!(result.errors_suppressed, Some(1));
+        let errors = result.errors.unwrap();
+        assert_eq!(errors[0].node, "step1");
+        assert!(errors[0].error.contains("boom"), "got: {}", errors[0].error);
+        // Assignment never ran against a `null`, so no raw template leaked.
+        assert_no_raw_template(&result.state);
+    }
+
+    #[tokio::test]
+    async fn bare_user_status_error_is_not_a_graph_failure() {
+        // A tool that legitimately returns domain data shaped like
+        // `{status: "error", message: ...}` with a CLEAN process exit is
+        // NOT a graph failure — only the execution envelope decides.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  on_error: fail
+  nodes:
+    step1:
+      action: {item_id: "tool:test/lookup"}
+      assign: {outcome: "${result.status}"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(
+            graph,
+            vec![json!({"status": "error", "message": "not found"})],
+        );
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "bare domain data must not fail the graph");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.state.get("outcome").and_then(|v| v.as_str()), Some("error"));
+    }
+
+    #[tokio::test]
+    async fn assign_interpolation_failure_obeys_on_error() {
+        // Tool succeeds, but `assign` references a missing field — the
+        // interpolation failure is a node error (obeys on_error: fail),
+        // NOT a suppressed error that merges the raw `${...}` into state.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  on_error: fail
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo"}
+      assign: {captured: "${result.missing.deep}"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![json!({"present": 1})]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(!result.success);
+        assert_eq!(result.status, "error");
+        assert!(result.error.unwrap_or_default().contains("assign"));
+        assert_no_raw_template(&result.state);
+    }
+
+    #[tokio::test]
+    async fn return_output_interpolation_failure_fails_run() {
+        // A return node whose `output` template can't resolve must FAIL
+        // the run rather than emit a raw `${...}` template as the result.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output: "${state.never_set}"
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(!result.success);
+        assert_eq!(result.status, "error");
+        assert!(result.error.unwrap_or_default().contains("output"));
+        assert!(result.result.is_none(), "no raw template as result");
+    }
+
+    #[tokio::test]
+    async fn return_output_resolves_inputs() {
+        // `${inputs.*}` must resolve in a return node's output (inputs are
+        // threaded into the terminal interpolation context).
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output: "${inputs.game_id}"
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![]);
+        let result = w
+            .execute(json!({"inputs": {"game_id": "g-42"}}), None)
+            .await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(result.result.and_then(|v| v.as_str().map(String::from)), Some("g-42".to_string()));
+    }
+
+    #[tokio::test]
+    async fn return_output_accepts_map_template() {
+        // A map `output:` interpolates each leaf and yields a structured
+        // result (not just a string).
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output:
+        game_id: "${inputs.game_id}"
+        nested:
+          level: "${state.level}"
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![]);
+        let result = w
+            .execute(
+                json!({"inputs": {"game_id": "g-7"}, "inject_state": {"level": "hard"}}),
+                None,
+            )
+            .await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(
+            result.result,
+            Some(json!({"game_id": "g-7", "nested": {"level": "hard"}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn return_output_accepts_list_template() {
+        // A list `output:` interpolates each element.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      output:
+        - "${inputs.a}"
+        - "${state.b}"
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![]);
+        let result = w
+            .execute(
+                json!({"inputs": {"a": "first"}, "inject_state": {"b": "second"}}),
+                None,
+            )
+            .await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(result.result, Some(json!(["first", "second"])));
+    }
+
+    #[tokio::test]
+    async fn config_state_seeds_initial_state() {
+        // Authored `config.state` seeds graph state, so a foreach can run
+        // off it with no caller `inject_state`.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  state:
+    items: ["a", "b"]
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: "elem"
+      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      collect: "results"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![json!({"v": "a"}), json!({"v": "b"})]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        let collected = result.state.get("results").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(collected.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inject_state_overrides_config_state() {
+        // Caller `inject_state` takes precedence over authored defaults.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  state:
+    mode: "default"
+  nodes:
+    done:
+      node_type: return
+      output: "${state.mode}"
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![]);
+        let result = w
+            .execute(json!({"inject_state": {"mode": "override"}}), None)
+            .await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(result.result, Some(json!("override")));
+    }
+
     #[tokio::test]
     async fn gate_node_conditional_routing() {
         let yaml = r#"
@@ -1954,6 +2342,252 @@ config:
         assert_eq!(results.len(), 3);
     }
 
+    fn foreach_graph_yaml(parallel: bool, on_error: &str) -> String {
+        format!(
+            r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: {on_error}
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${{state.items}}"
+      as: "elem"
+      parallel: {parallel}
+      action: {{item_id: "tool:test/echo", params: {{value: "${{elem}}"}}}}
+      collect: "results"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#
+        )
+    }
+
+    #[tokio::test]
+    async fn foreach_item_failure_on_error_fail_fails_run() {
+        // A failed subprocess inside a foreach with on_error: fail must
+        // fail the whole run — not complete_with_errors.
+        for parallel in [false, true] {
+            let graph = make_graph(&foreach_graph_yaml(parallel, "fail"));
+            let w = make_walker(
+                graph,
+                vec![
+                    json!({"value": "a"}),
+                    json!({
+                        "outcome_code": "exit:1", "result": null,
+                        "error": {"exit_code": 1, "stderr": "boom"}
+                    }),
+                ],
+            );
+            let result = w
+                .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
+                .await;
+            assert!(!result.success, "parallel={parallel}: should fail");
+            assert_eq!(result.status, "error", "parallel={parallel}");
+            let err = result.error.unwrap_or_default();
+            assert!(err.contains("boom"), "parallel={parallel}: got {err}");
+            assert_no_raw_template(&result.state);
+        }
+    }
+
+    #[tokio::test]
+    async fn foreach_item_failure_on_error_continue_records_errors() {
+        for parallel in [false, true] {
+            let graph = make_graph(&foreach_graph_yaml(parallel, "continue"));
+            let w = make_walker(
+                graph,
+                vec![
+                    json!({"value": "a"}),
+                    json!({
+                        "outcome_code": "exit:1", "result": null,
+                        "error": {"exit_code": 1, "stderr": "boom"}
+                    }),
+                ],
+            );
+            let result = w
+                .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
+                .await;
+            assert!(result.success, "parallel={parallel}");
+            assert_eq!(result.status, "completed_with_errors", "parallel={parallel}");
+            assert_eq!(result.errors_suppressed, Some(1), "parallel={parallel}");
+            let errors = result.errors.unwrap();
+            assert!(errors[0].error.contains("boom"), "parallel={parallel}");
+            // collect aligns: [a-result, null]
+            let collected = result.state.get("results").and_then(|v| v.as_array()).unwrap();
+            assert_eq!(collected.len(), 2, "parallel={parallel}");
+            assert_eq!(collected[1], Value::Null, "parallel={parallel}");
+            assert_no_raw_template(&result.state);
+        }
+    }
+
+    #[tokio::test]
+    async fn foreach_parallel_interp_failure_not_dispatched() {
+        // Parallel foreach whose action template can't resolve must NOT
+        // dispatch a raw `${...}` — the item errors and yields a null.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: continue
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: "elem"
+      parallel: true
+      action: {item_id: "tool:test/echo", params: {value: "${elem.missing.deep}"}}
+      collect: "results"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        // No mock results queued: if a raw template were dispatched the
+        // mock would still answer, but the item must be a recorded error.
+        let w = make_walker(graph, vec![]);
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a"]}}), None)
+            .await;
+        assert!(result.success);
+        assert_eq!(result.errors_suppressed, Some(1));
+        assert!(result.errors.unwrap()[0].error.contains("interpolation"));
+        assert_no_raw_template(&result.state);
+    }
+
+    #[tokio::test]
+    async fn foreach_sequential_assign_persists_to_state() {
+        // Foreach `assign` must reach the committed final state.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: "elem"
+      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      assign: {last_value: "${result.value}"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![json!({"value": "a"}), json!({"value": "b"})]);
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
+            .await;
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(
+            result.state.get("last_value").and_then(|v| v.as_str()),
+            Some("b"),
+            "foreach assign must persist (last item wins)"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreach_assign_failure_is_consistent_seq_and_parallel() {
+        // Action succeeds but `assign` references a missing field. Under
+        // on_error: continue, sequential and parallel must behave
+        // identically: the item is Null in collect and one error recorded.
+        let yaml = |parallel: bool| {
+            format!(
+                r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: continue
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${{state.items}}"
+      as: "elem"
+      parallel: {parallel}
+      action: {{item_id: "tool:test/echo", params: {{value: "${{elem}}"}}}}
+      assign: {{captured: "${{result.missing.deep}}"}}
+      collect: "results"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#
+            )
+        };
+        let run = |parallel: bool| async move {
+            let graph = make_graph(&yaml(parallel));
+            let w = make_walker(graph, vec![json!({"value": "a"})]);
+            w.execute(json!({"inject_state": {"items": ["a"]}}), None)
+                .await
+        };
+        let seq = run(false).await;
+        let par = run(true).await;
+
+        for (label, result) in [("seq", &seq), ("par", &par)] {
+            assert!(result.success, "{label}");
+            assert_eq!(result.status, "completed_with_errors", "{label}");
+            assert_eq!(result.errors_suppressed, Some(1), "{label}");
+            let collected =
+                result.state.get("results").and_then(|v| v.as_array()).unwrap();
+            assert_eq!(collected, &vec![Value::Null], "{label}: item must be Null");
+        }
+        // Both runners agree on collect and error count.
+        assert_eq!(seq.state.get("results"), par.state.get("results"));
+        assert_eq!(seq.errors_suppressed, par.errors_suppressed);
+    }
+
+    #[tokio::test]
+    async fn foreach_item_failure_redirects_to_handler() {
+        // A node-level `on_error: <handler>` redirects the whole foreach
+        // to the handler node on item failure (no suppressed errors).
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: fail
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: "elem"
+      action: {item_id: "tool:test/echo", params: {value: "${elem}"}}
+      on_error: handler
+      next:
+        type: unconditional
+        to: done
+    handler:
+      node_type: return
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(
+            graph,
+            vec![json!({
+                "outcome_code": "exit:1", "result": null,
+                "error": {"exit_code": 1, "stderr": "boom"}
+            })],
+        );
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a"]}}), None)
+            .await;
+        assert!(result.success, "redirect handler should complete the run");
+        assert_eq!(result.status, "completed");
+        assert_eq!(result.errors_suppressed, None);
+    }
+
     #[tokio::test]
     async fn on_error_continue_mode() {
         let yaml = r#"
@@ -1974,7 +2608,7 @@ config:
         let graph = make_graph(yaml);
         let w = make_walker(
             graph,
-            vec![json!({"status": "error", "error": "forced failure"})],
+            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced failure"}})],
         );
         let result = w.execute(json!({}), None).await;
         assert!(result.success);
@@ -1999,14 +2633,14 @@ config:
         assert_eq!(cached, val);
     }
 
-    // ── V5.5 P0 #3: warning accumulator ─────────────────────────────
+    // ── warning accumulator ─────────────────────────────────────────
     //
     // `record_callback_warning` MUST push exactly one labelled string per
     // failed callback append, and `take_warnings()` MUST drain the
-    // buffer atomically. These two together replace the silent
-    // `let _ = ...` drops the V5.4 walker had at every event-emit
-    // site. The wire-level drift the daemon's `RuntimeResult.warnings`
-    // field surfaces is what these tests pin.
+    // buffer atomically. Together they ensure every callback failure at
+    // an event-emit site is surfaced (via the daemon's
+    // `RuntimeResult.warnings` field) rather than dropped. These tests
+    // pin that wire-level drift.
 
     #[test]
     fn record_callback_warning_pushes_when_result_is_err() {
@@ -2095,6 +2729,7 @@ config:
         let outcome = StepOutcome::ActionOk {
             item_id: "tool:test/echo".to_string(),
             result: json!({"msg": "hello"}),
+            assign: None,
             next: Some("done".to_string()),
             cache_hit: false,
             elapsed_ms: 42,
@@ -2177,6 +2812,8 @@ config:
             results: vec![json!(1), json!(2)],
             collect_key: Some("items".to_string()),
             var_name: "x".to_string(),
+            assign_delta: json!({}),
+            errors: Vec::new(),
             next: Some("done".to_string()),
         };
         match outcome {
@@ -2786,7 +3423,7 @@ config:
         let graph = make_graph(yaml);
         let (w, recorder) = make_recording_walker(
             graph,
-            vec![json!({"status": "error", "error": "forced"})],
+            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}})],
             None,
         );
 
@@ -2818,7 +3455,11 @@ config:
         );
         assert_eq!(receipt["graph_run_id"].as_str(), Some("gr-error-receipt"));
         assert_eq!(receipt["node_result_hash"], Value::Null);
-        assert_eq!(receipt["error"].as_str(), Some("forced"));
+        let receipt_error = receipt["error"].as_str().unwrap_or_default();
+        assert!(
+            receipt_error.contains("exit:1") && receipt_error.contains("forced"),
+            "receipt error should carry the failure diagnostic, got: {receipt_error}"
+        );
     }
 
     #[tokio::test]
@@ -2891,7 +3532,7 @@ config:
         let tmp = tempfile::tempdir().unwrap();
         let (w, _recorder) = make_recording_walker(
             graph,
-            vec![json!({"status": "error", "error": "forced"})],
+            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}})],
             Some(tmp.path()),
         );
 
@@ -2963,7 +3604,7 @@ config:
         let graph_err = make_graph(yaml_err);
         let (w_err, recorder_err) = make_recording_walker(
             graph_err,
-            vec![json!({"status": "error", "error": "forced"})],
+            vec![json!({"outcome_code": "exit:1", "result": null, "error": {"exit_code": 1, "stderr": "forced"}})],
             None,
         );
 

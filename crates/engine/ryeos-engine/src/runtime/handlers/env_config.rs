@@ -242,3 +242,75 @@ fn apply_env_paths(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod interpreter_resolution_tests {
+    //! Pins the Python (and any `local_binary`) interpreter resolution
+    //! order: env-var override → project-local search paths → PATH
+    //! candidate. This is the contract documented in
+    //! `knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
+    use super::*;
+    use std::fs;
+
+    /// Mirrors the Python runtime descriptors' interpreter block.
+    fn python_like(var: Option<&str>) -> InterpreterConfig {
+        InterpreterConfig::LocalBinary {
+            binary: "python".into(),
+            candidates: vec!["python3".into()],
+            search_paths: vec![".venv/bin".into(), ".venv/Scripts".into()],
+            var: var.map(String::from),
+            path_candidates: vec!["python3".into()],
+        }
+    }
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "").unwrap();
+    }
+
+    #[test]
+    fn resolves_project_venv_interpreter_over_path() {
+        let root = tempfile::tempdir().unwrap();
+        let py = root.path().join(".venv/bin/python3");
+        touch(&py);
+        let got = resolve_interpreter(&python_like(None), Some(root.path())).unwrap();
+        assert_eq!(got, py.to_string_lossy());
+    }
+
+    #[test]
+    fn prefers_venv_bin_over_scripts_and_binary_over_candidate() {
+        // `.venv/bin` is searched before `.venv/Scripts`, and the primary
+        // `binary` name before any `candidates`.
+        let root = tempfile::tempdir().unwrap();
+        touch(&root.path().join(".venv/Scripts/python3"));
+        touch(&root.path().join(".venv/bin/python"));
+        let got = resolve_interpreter(&python_like(None), Some(root.path())).unwrap();
+        assert_eq!(got, root.path().join(".venv/bin/python").to_string_lossy());
+    }
+
+    #[test]
+    fn falls_back_to_path_candidate_when_no_venv() {
+        let root = tempfile::tempdir().unwrap();
+        let got = resolve_interpreter(&python_like(None), Some(root.path())).unwrap();
+        assert_eq!(got, "python3");
+    }
+
+    #[test]
+    fn falls_back_to_path_candidate_when_no_project_root() {
+        let got = resolve_interpreter(&python_like(None), None).unwrap();
+        assert_eq!(got, "python3");
+    }
+
+    #[test]
+    fn env_var_override_wins_over_venv_and_path() {
+        // Uniquely-named var so the process-global env mutation can't
+        // collide with other (parallel) tests.
+        let var = "RYE_PYTHON_OVERRIDE_INTERP_TEST";
+        let root = tempfile::tempdir().unwrap();
+        touch(&root.path().join(".venv/bin/python3"));
+        std::env::set_var(var, "/custom/python");
+        let got = resolve_interpreter(&python_like(Some(var)), Some(root.path()));
+        std::env::remove_var(var);
+        assert_eq!(got.unwrap(), "/custom/python");
+    }
+}

@@ -65,8 +65,12 @@ pub struct GraphNode {
     pub parallel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
+    /// Return-node output template. A YAML scalar deserializes to a
+    /// `Value::String` and a YAML map/list to `Value::Object`/`Array`;
+    /// `interpolate` recurses through all of them, so both
+    /// `output: "${state.x}"` and `output: {id: "${state.id}"}` work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
+    pub output: Option<Value>,
     #[serde(default)]
     pub env_requires: Vec<String>,
 }
@@ -144,9 +148,9 @@ pub struct GraphDefinition {
     pub graph_id: String,
     /// Human/item reference for this authored execution definition.
     ///
-    /// `graph_id` is a legacy human/runtime identifier. This ref is
-    /// the stable conceptual bridge from a realized execution trace
-    /// back to the signed portable capability that was invoked.
+    /// `graph_id` is the human/runtime identifier. This ref is the
+    /// stable conceptual bridge from a realized execution trace back to
+    /// the signed portable capability that was invoked.
     pub definition_ref: String,
     /// Content identity of the signature-stripped authored definition body.
     ///

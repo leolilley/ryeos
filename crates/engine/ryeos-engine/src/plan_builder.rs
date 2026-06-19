@@ -359,11 +359,17 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         })?
         .to_owned();
 
-    crate::runtime::config_schema::validate_caller_params(
+    // Validate AND coerce caller params against the root config_schema.
+    // Coercion turns CLI string flags (`"60"`) into their declared scalar
+    // type before the cache key (Step 6) and chain compilation (Step 5)
+    // read `parameters`, so `60` and `"60"` share a plan cache entry and
+    // the runtime receives a typed value.
+    let coerced_parameters = crate::runtime::config_schema::validate_caller_params(
         &root_parsed,
         parameters,
         &canonical_ref,
     )?;
+    let parameters = &coerced_parameters;
 
     // Step 2: Follow the executor chain to a terminal
     let mut terminal = resolve_executor_chain(
@@ -538,13 +544,10 @@ fn compute_cache_key(
 /// Widen the contract-side 3-variant trust class into the resolution-side
 /// 4-variant tier, preserving the source-space distinction.
 ///
-/// Wave 5.5 oracle audit: previously this collapsed every `Trusted` item
-/// to `TrustedBundle` regardless of source space, so a project item
-/// whose signer happened to be in the trust store was passed downstream
-/// as if it were bundle-tier. The `binary_resolver` then computed
-/// `min(raw_binary_trust, root_trust_class)` against an over-strong
-/// `TrustedBundle` cap, defeating the cap on the runtime command
-/// resolution path.
+/// The source space MUST be carried through: a project item whose signer
+/// happens to be in the trust store is still project-tier, so the
+/// `binary_resolver`'s `min(raw_binary_trust, root_trust_class)` caps it
+/// below system tier on the runtime command resolution path.
 ///
 /// The mapping is:
 /// - `Trusted` from `System` → `TrustedBundle`
@@ -1427,6 +1430,51 @@ config:
             &ExecutionHints::default(),
         );
         assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn coerced_params_share_cache_key_with_typed_params() {
+        // `build_plan` runs `validate_caller_params` (which coerces) and
+        // feeds the coerced params into `compute_cache_key`. This pins the
+        // resulting property: a CLI string flag (`"60"`) and a typed JSON
+        // value (`60`) under the same `integer` schema produce identical
+        // coerced params — and therefore an identical plan cache key.
+        let tool = json!({
+            "config_schema": {
+                "type": "object",
+                "properties": { "count": { "type": "integer" } }
+            }
+        });
+
+        let from_string =
+            crate::runtime::config_schema::validate_caller_params(&tool, &json!({"count": "60"}), "tool:x")
+                .unwrap();
+        let from_typed =
+            crate::runtime::config_schema::validate_caller_params(&tool, &json!({"count": 60}), "tool:x")
+                .unwrap();
+
+        // Coercion makes the string form typed...
+        assert_eq!(from_string, json!({"count": 60}));
+        assert_eq!(from_string, from_typed);
+
+        // ...so the cache key (which hashes the coerced params) matches.
+        let key_string = compute_cache_key(
+            "tool:x",
+            "h",
+            &[],
+            "fp",
+            &from_string,
+            &ExecutionHints::default(),
+        );
+        let key_typed = compute_cache_key(
+            "tool:x",
+            "h",
+            &[],
+            "fp",
+            &from_typed,
+            &ExecutionHints::default(),
+        );
+        assert_eq!(key_string, key_typed);
     }
 
     // ── E2E: full 3-hop chain with interpreter resolution ───────────────

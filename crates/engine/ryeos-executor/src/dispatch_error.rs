@@ -1,11 +1,10 @@
 //! Typed dispatch errors with explicit HTTP status mapping.
 //!
-//! Replaces the V5.2/V5.3-pre substring HTTP mapping that used to live
-//! in the execute handler (`msg.contains("insufficient capabilities")`,
-//! `msg.contains("push first")`, `msg.contains("is not root-executable")`).
 //! Each enumerated variant carries the structured fields callers need
 //! to reason about the failure, plus a `http_status()` method that
-//! the execute response mode consults exactly once per request.
+//! the execute response mode consults exactly once per request. Status
+//! mapping is by variant, never by matching substrings of an error
+//! message.
 //!
 //! The variant names — and the `http_status()` arms — are the source
 //! of truth for `/execute` non-200 surfaces. The pin tests in
@@ -13,11 +12,10 @@
 //! JSON shapes; if a future variant changes the status mapping, the
 //! pin test catches it before the HTTP contract drifts.
 //!
-//! **V5.4 P1.2**: operator-fixable failures are now distinct variants
-//! instead of collapsing into `Internal(#[from] anyhow::Error) → 500`.
-//! The HTTP contract is honest: cap denial → 403, manifest miss → 502,
-//! push-first → 409, unknown service handler → 502, materialization
-//! error → 502. Only truly unexpected internal errors remain 500.
+//! Operator-fixable failures are distinct variants with honest status
+//! codes: cap denial → 403, manifest miss → 502, push-first → 409,
+//! unknown service handler → 502, materialization error → 502. Only
+//! truly unexpected internal errors are 500.
 
 use axum::http::StatusCode;
 
@@ -79,15 +77,14 @@ pub enum DispatchError {
     SchemaMisconfigured { kind: String, detail: String },
     /// `Display` is the bare reason — pin tests assert byte-equality
     /// of the wording (`"detached mode not yet supported for native runtimes"`,
-    /// etc.). The variant name carries the diagnostic context; the
-    /// surface string preserves the V5.2 contract.
+    /// etc.). The variant name carries the diagnostic context.
     #[error("{reason}")]
     CapabilityRejected { reason: String },
-    #[error("streaming dispatch outcome is not implemented in V5.3")]
+    #[error("streaming dispatch outcome is not implemented")]
     StreamingNotImplemented,
     #[error("project source error: {0}")]
     ProjectSource(String),
-    // ── P1.2: operator-fixable failures, no longer 500 ────────────
+    // ── operator-fixable failures (not 500) ───────────────────────
     /// Service handler not found in the in-process handler registry.
     /// The kind schema declared `InProcessHandler { Services }` but
     /// no handler matched the item's service name.
@@ -169,9 +166,9 @@ pub enum DispatchError {
     /// Project source push-first — the project has not been pushed to
     /// the daemon's CAS before execution was requested. The Display
     /// is the bare wording (e.g. `"no pushed HEAD for project '<path>' \
-    /// — push first"`) so the V5.2 pin in `dispatch_pin.rs::\
-    /// pin_native_runtime_with_pushed_head` continues to hold byte-\
-    /// identically. The HTTP layer maps this variant to 409.
+    /// — push first"`) so the pin in `dispatch_pin.rs::\
+    /// pin_native_runtime_with_pushed_head` holds byte-identically. The
+    /// HTTP layer maps this variant to 409.
     #[error("{0}")]
     ProjectSourcePushFirst(String),
     /// Project source checkout failed — the pushed HEAD snapshot
@@ -280,15 +277,15 @@ pub enum DispatchError {
 /// and resume paths so the wording cannot drift between them.
 pub fn required_secret_remediation(env_var: &str) -> String {
     format!(
-        "Set `{env_var}` via `ryeos-core-tools vault put --name {env_var} --value-stdin`, \
+        "Set `{env_var}` via `ryeos vault set --name {env_var} --value <value>`, \
          a daemon/service environment variable, or a project/operator `.env`"
     )
 }
 
 impl DispatchError {
     /// Map the typed variant to the HTTP status `/execute` returns.
-    /// The execute response mode calls this once per error path; there is no
-    /// substring fallback anywhere else.
+    /// The execute response mode calls this once per error path; status
+    /// is determined by variant, never by matching the message string.
     pub fn http_status(&self) -> StatusCode {
         match self {
             Self::InvalidRef(..)
@@ -403,9 +400,17 @@ mod tests {
         assert!(!msg.contains("set vault entry"), "stale wording leaked: {msg}");
 
         let rem = required_secret_remediation("ZEN_API_KEY");
-        assert!(rem.contains("vault put"), "got: {rem}");
+        assert!(
+            rem.contains("ryeos vault set --name ZEN_API_KEY --value <value>"),
+            "got: {rem}"
+        );
         assert!(rem.contains("environment variable"), "got: {rem}");
         assert!(rem.contains(".env"), "got: {rem}");
+        assert!(!rem.contains("vault put"), "stale vault command leaked: {rem}");
+        assert!(
+            !rem.contains("ryeos-core-tools"),
+            "stale binary leaked: {rem}"
+        );
     }
 
     fn sample_details() -> ContractViolationDetails {

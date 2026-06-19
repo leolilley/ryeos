@@ -161,7 +161,7 @@ async fn missing_selected_secret_fails_before_provider_request() {
     //
     // The body carries the structured RequiredSecretMissing surface:
     //   - "ZEN_API_KEY"
-    //   - "ryeos-core-tools vault put --name ZEN_API_KEY --value-stdin"
+    //   - "ryeos vault set --name ZEN_API_KEY --value <value>"
 
     // Start mock but expect it to receive ZERO requests.
     let mock = MockProvider::start(vec![MockResponse::Text("should not be called".into())]).await;
@@ -243,8 +243,8 @@ async fn missing_selected_secret_fails_before_provider_request() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY --value-stdin"),
-        "remediation must include the vault put command; got: {remediation}"
+        remediation.contains("ryeos vault set --name ZEN_API_KEY --value <value>"),
+        "remediation must include the vault set command; got: {remediation}"
     );
 
     // The mock provider MUST NOT have received any requests — the
@@ -347,8 +347,8 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY"),
-        "remediation must contain the vault put command; got: {remediation}"
+        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+        "remediation must contain the vault set command; got: {remediation}"
     );
 
     // Mock provider must receive zero requests — preflight blocked.
@@ -758,9 +758,12 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
 
 // ── Test 5: SSE stream emits structured required_secret_missing ──
 //
-// F3: proves the `/execute/stream` endpoint emits a `stream_error`
-// SSE event with the structured fields (env_var, source_kind,
-// source_name, remediation) when the preflight catches a missing provider secret.
+// F3: proves the `/execute/stream` endpoint surfaces a missing provider secret
+// as a `thread_failed` terminal whose payload carries the structured error
+// fields (env_var, source_kind, source_name, remediation). The secret preflight
+// runs inside the spawned launch (after the thread is created), so the failure
+// is a persisted thread lifecycle terminal — not a pre-spawn `stream_error`,
+// which is reserved for synchronous gateway rejections before any thread exists.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_stream_emits_structured_required_secret_missing_event() {
@@ -861,9 +864,11 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
         .expect("SSE response timed out")
         .expect("SSE response read failed");
 
-    // Parse SSE lines looking for:
-    //   event: stream_error
-    //   data: {"code":"required_secret_missing",...}
+    // Parse SSE lines looking for the `thread_failed` terminal whose payload
+    // carries a structured `required_secret_missing` error:
+    //   event: thread_failed
+    //   data: {"payload":{"outcome_code":"required_secret_missing",
+    //          "error":{"code":"required_secret_missing","env_var":...}},...}
     let mut found_error = false;
     let mut current_event_type = String::new();
     for line in text.lines() {
@@ -871,62 +876,67 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
             current_event_type = ev.trim().to_string();
         }
         if let Some(data) = line.strip_prefix("data: ") {
-            if current_event_type == "stream_error" {
+            if current_event_type == "thread_failed" {
                 let parsed: serde_json::Value =
                     serde_json::from_str(data.trim()).unwrap_or(serde_json::json!({}));
 
-                let code = parsed
-                    .get("code")
+                let outcome_code = parsed
+                    .pointer("/payload/outcome_code")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                if code == "required_secret_missing" {
+                let error = parsed
+                    .pointer("/payload/error")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let code = error.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+                if outcome_code == "required_secret_missing" && code == "required_secret_missing" {
                     found_error = true;
 
                     // Assert structured fields.
-                    let env_var = parsed
+                    let env_var = error
                         .get("env_var")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert_eq!(
                         env_var, "ZEN_API_KEY",
-                        "SSE stream_error must have env_var=ZEN_API_KEY; got: {env_var}"
+                        "thread_failed error must have env_var=ZEN_API_KEY; got: {env_var}"
                     );
 
-                    let source_kind = parsed
+                    let source_kind = error
                         .get("source_kind")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert_eq!(
                         source_kind, "provider",
-                        "SSE stream_error must have source_kind=provider; got: {source_kind}"
+                        "thread_failed error must have source_kind=provider; got: {source_kind}"
                     );
 
-                    let source_name = parsed
+                    let source_name = error
                         .get("source_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert_eq!(
                         source_name, "zen",
-                        "SSE stream_error must have source_name=zen; got: {source_name}"
+                        "thread_failed error must have source_name=zen; got: {source_name}"
                     );
 
-                    let remediation = parsed
+                    let remediation = error
                         .get("remediation")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert!(
-                        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY"),
-                        "remediation must contain vault put command; got: {remediation}"
+                        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+                        "remediation must contain vault set command; got: {remediation}"
                     );
 
                     // The error message must be a non-empty string.
-                    let error_msg = parsed
+                    let error_msg = error
                         .get("error")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert!(
                         !error_msg.is_empty(),
-                        "SSE stream_error must have non-empty error message"
+                        "thread_failed error must have non-empty error message"
                     );
                     break;
                 }
@@ -936,8 +946,8 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
 
     assert!(
         found_error,
-        "SSE stream must contain a stream_error event with code=required_secret_missing; \
-         raw SSE output:\n{text}"
+        "SSE stream must contain a thread_failed terminal whose payload carries a \
+         structured required_secret_missing error; raw SSE output:\n{text}"
     );
 
     // Mock provider must receive zero requests — preflight blocked.

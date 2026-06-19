@@ -1,0 +1,25 @@
+category: commands
+section: commands
+name: graph-validate
+tokens:
+- graph
+- validate
+description: "Statically validate a graph (structure, edges, references, ${inputs.*} declarations) without executing it. Returns {valid, errors, warnings}."
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+defaults:
+  validate: true
+dispatch:
+  kind: direct_execute_item_ref
+  item_ref_arg: item_ref
+  availability: both
+project:
+  resolution: optional
+  default: discover_upward_ai
+  no_project_flag: true
+  request_project_path: true
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore
