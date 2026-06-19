@@ -44,13 +44,6 @@ struct Cli {
     /// source of truth per C1).
     #[arg(long)]
     project_path: Option<String>,
-
-    /// Validate-only mode: parse and statically analyze the graph at
-    /// `--graph-path`, print a JSON report `{valid, errors, warnings, …}`,
-    /// then exit WITHOUT executing. No launch envelope, callback, or
-    /// daemon required. Drives the `graph validate` command.
-    #[arg(long)]
-    validate: bool,
 }
 
 /// Normalized launch data from the envelope.
@@ -71,8 +64,9 @@ struct ResolvedLaunch {
 }
 
 /// Static validation report for a graph: `{valid, errors, warnings, …}`.
-/// Shared by the offline `--validate` flag and the in-run `validate`
-/// input path.
+/// Reached only via the daemon-spawned `validate` execution input — the
+/// daemon trust-gates the graph (resolve → verify) before the runtime
+/// ever runs, so the runtime never analyzes untrusted content.
 fn validate_report(graph: &model::GraphDefinition) -> Value {
     let report = validation::analyze_graph(graph);
     json!({
@@ -85,28 +79,10 @@ fn validate_report(graph: &model::GraphDefinition) -> Value {
     })
 }
 
-/// Offline `--validate`: parse + analyze the graph at `--graph-path` and
-/// print the report. No execution, no envelope, no callback.
-fn run_validate(cli: &Cli) -> anyhow::Result<()> {
-    let path = cli
-        .graph_path
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("--validate requires --graph-path"))?;
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read graph file '{path}': {e}"))?;
-    let graph = model::GraphDefinition::from_yaml(&raw, Some(path))?;
-    println!("{}", serde_json::to_string(&validate_report(&graph))?);
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_graph_runtime());
 
     let cli = Cli::parse();
-
-    if cli.validate {
-        return run_validate(&cli);
-    }
 
     let mut stdin_data = Vec::new();
     std::io::stdin().read_to_end(&mut stdin_data)?;
