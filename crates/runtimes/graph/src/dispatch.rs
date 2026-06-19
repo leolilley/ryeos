@@ -155,14 +155,14 @@ fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {
     obj.get("result").cloned().unwrap_or(Value::Null)
 }
 
-/// A subprocess leaf succeeded iff it carries no error payload and its
-/// `outcome_code` is exactly `"exit:0"`. The terminator sets
-/// `outcome_code` to `"exit:<n>"` (or `"timeout"`) and a non-null
-/// `error` object on failure; anything that is not a clean `"exit:0"`
-/// — non-zero exit, timeout, or a malformed/missing code — is a failure.
+/// A subprocess leaf failed iff the envelope carries a non-null `error`
+/// payload — the terminator populates it (with exit_code/stderr/stdout,
+/// or a timeout message) for any non-zero exit, timeout, or dispatch
+/// failure. A clean completion leaves `error` null AND nulls
+/// `outcome_code` (the daemon nulls `outcome_code` for a completed
+/// thread), so `error` — not `outcome_code` — is the success signal.
 fn subprocess_succeeded(obj: &serde_json::Map<String, Value>) -> bool {
-    let no_error = obj.get("error").map(Value::is_null).unwrap_or(true);
-    no_error && obj.get("outcome_code").and_then(Value::as_str) == Some("exit:0")
+    obj.get("error").map(Value::is_null).unwrap_or(true)
 }
 
 fn describe_subprocess_failure(obj: &serde_json::Map<String, Value>) -> String {
@@ -642,5 +642,21 @@ mod tests {
             "artifacts": []
         });
         assert_eq!(classify_success(envelope), json!(null));
+    }
+
+    #[test]
+    fn classify_completed_thread_envelope_is_success() {
+        // The real graph→tool callback success shape: a completed thread
+        // nulls `outcome_code` (only failures carry exit:<n>/timeout), and
+        // `error` is null. This MUST classify as success — `error` is the
+        // discriminator, not `outcome_code`. (Regression: requiring
+        // `outcome_code == "exit:0"` here broke every graph→tool dispatch.)
+        let envelope = json!({
+            "outcome_code": null,
+            "result": {"ok": true, "n": 7},
+            "error": null,
+            "artifacts": []
+        });
+        assert_eq!(classify_success(envelope), json!({"ok": true, "n": 7}));
     }
 }
