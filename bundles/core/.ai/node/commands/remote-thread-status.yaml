@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:939d374b85bf7acf812a9d34f62150aa54f3dba3dde63f1b2fb8646dad482163:zvIh5oX83kzhuJvcv26luVo7NuQuQP8EgobuDWOivVuRQsZOS7pvZE/qfJbOFQFPWacl5pTlE5hrbAwW5xH/Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-thread-status
+# ryeos:signed:2026-06-19T05:40:59Z:b48a0acddde23b2798a9a9fbe7f07cfd5b64abf84f5bc6c93e9a07337e1efa3e:TrMzuNcIhu2SXY+wGDDs+J+CsVONC3uYWUffF+ywA/KUEKw/ESKSHqSovuZBmvdjo6CmU8XoQE0PAZWWo/juBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - thread-status

@@ -117,7 +117,10 @@ pub async fn handle(
         "identity_filtered": true,
         "your_fingerprint": filter_requester,
     });
-    if response["schedules"].as_array().is_some_and(|a| a.is_empty()) {
+    if response["schedules"]
+        .as_array()
+        .is_some_and(|a| a.is_empty())
+    {
         response["note"] = serde_json::Value::String(format!(
             "no schedules owned by your fingerprint ({filter_requester}); results are \
              scoped to the calling principal. An empty list does NOT mean nothing is \

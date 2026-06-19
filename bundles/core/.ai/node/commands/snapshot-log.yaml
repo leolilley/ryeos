@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:12ee4ab092a3ac0da7b4090fca0383a6863e825fec95f57fa303ef2b5d85e421:vNGrQRRlKtPdoFeppklaZnANOO3eJwPIrh2lTbS9Lik/VgLc2I9DdF0oWafZrJeAY436KHptwMau5PKHU5ZvDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: snapshot-log
+# ryeos:signed:2026-06-19T05:40:59Z:0e2f909ca89077f1e5fa8ea5a133caa15273746f1294b210538fcde20940e708:fNS2pUyEJJ9DfrtUOcKKG6Pqu0aa6hxPkpsO2GBPvHp7EDCj2knVMqiy80eByOYBpGc5/zfHdL1mG5GouoEqBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - log
 description: Show recent local project snapshots

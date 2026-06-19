@@ -584,8 +584,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "remote-doctor".into(),
                 tokens: vec!["remote".into(), "doctor".into()],
                 description: "Diagnose remote setup".into(),
@@ -644,8 +642,6 @@ mod tests {
     fn installed_direct_execute_help_usage_includes_async_control_flag() {
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "execute".into(),
                 tokens: vec!["execute".into()],
                 description: "Execute an item".into(),
@@ -687,8 +683,6 @@ mod tests {
         );
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "web".into(),
                 tokens: vec!["web".into()],
                 description: "Open Studio".into(),

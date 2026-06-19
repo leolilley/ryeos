@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-10T11:46:34Z:940c17beb1e7d294e91de0d89cd20aa23b53b6e2ce67421dd20f1b8be7d7a3a4:vJcAxLkxLSDowNtO8KfkOwnnjU6cQCW8fUnDL/0ips2dRt/LTLPVdDZJM12tb+0Vjuf1D4pBJvj370nQRcqZAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: maintenance-gc
+# ryeos:signed:2026-06-19T05:40:59Z:22b846cbe469d17b6a53b1d4829dd27926582ad47d8439383991a3192afa734f:ivsaFnKHUowZHTH5Iq29NdliZ3IHoxiJZoyAIKJy4izoMyxmDn2j67MqrO6r1+6pygeFHEuEjxWC2FArX84PDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - maintenance
 - gc

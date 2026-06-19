@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:b8663e0654f45a79394e1d3aa617c6f2e3e16bc2d60f0ecdd49ad20184e73ecc:MgXmcu1Qa0nVsdK1jQR4YqBfKHZTB97cLVjf5/W94+XfnTyKJszOTlWVrcF9TI71DV/fMG+MX0zw0ukbfqUsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-vault-delete
+# ryeos:signed:2026-06-19T05:40:59Z:f815a41c95bbdf7a120b472112d88fc932093563b61582b1a6e1dd83f2f3bc89:4pjQhNCVJhHcy6/Yb/O9fK/kJDYykRxXd7AsXB1sQJ+Ztxo3tBIAY7GaigsWVph/I7pFbDhqO6ogw40Pd6q7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - vault-delete

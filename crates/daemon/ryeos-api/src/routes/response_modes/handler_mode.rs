@@ -786,8 +786,6 @@ mod tests {
 
     fn raw_handler_route(source_config: Value) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "ryeos-email.track_click".into(),
             path: "/track/click".into(),
             methods: ["GET".to_string()].into_iter().collect(),

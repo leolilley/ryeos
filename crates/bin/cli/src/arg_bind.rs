@@ -247,7 +247,10 @@ mod tests {
 
     #[test]
     fn parse_input_arg_accepts_inline_json() {
-        let tail = vec!["--input".into(), r#"{"game_id":"g","max_actions":60}"#.into()];
+        let tail = vec![
+            "--input".into(),
+            r#"{"game_id":"g","max_actions":60}"#.into(),
+        ];
         let value = parse_input_arg(&tail).unwrap().unwrap();
         assert_eq!(value["game_id"], "g");
         assert_eq!(value["max_actions"], 60);
@@ -380,9 +383,8 @@ mod tests {
 
         let scalar_path = dir.path().join("scalar.json");
         std::fs::write(&scalar_path, r#""just a string""#).unwrap();
-        let err =
-            parse_input_arg(&["--input".into(), scalar_path.to_string_lossy().into_owned()])
-                .unwrap_err();
+        let err = parse_input_arg(&["--input".into(), scalar_path.to_string_lossy().into_owned()])
+            .unwrap_err();
         assert!(format!("{err:?}").contains("object or array"));
     }
 

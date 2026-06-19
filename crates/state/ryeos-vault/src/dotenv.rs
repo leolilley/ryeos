@@ -133,7 +133,8 @@ mod tests {
         .unwrap();
         // Only MY_SECRET is wanted; every unrelated line (blocked, invalid,
         // malformed) is ignored rather than failing the resolution.
-        let map = read_dotenv_overlay(&[tmp.path().to_path_buf()], &wanted(&["MY_SECRET"])).unwrap();
+        let map =
+            read_dotenv_overlay(&[tmp.path().to_path_buf()], &wanted(&["MY_SECRET"])).unwrap();
         assert_eq!(map.get("MY_SECRET").map(String::as_str), Some("ok"));
         assert!(!map.contains_key("RYEOSD_URL"));
         assert!(!map.contains_key("PATH"));
@@ -156,7 +157,10 @@ mod tests {
         let err =
             read_dotenv_overlay(&[tmp.path().to_path_buf()], &wanted(&["MY_SECRET"])).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("MY_SECRET") && msg.contains("malformed"), "got: {msg}");
+        assert!(
+            msg.contains("MY_SECRET") && msg.contains("malformed"),
+            "got: {msg}"
+        );
     }
 
     #[test]

@@ -6,14 +6,13 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
+use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
 
 /// A parsed schedule spec loaded from `.ai/node/schedules/<name>.yaml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScheduleRecord {
     pub spec_version: u32,
-    pub section: String,
     pub schedule_id: String,
     pub item_ref: String,
     pub schedule_type: String,
@@ -91,22 +90,15 @@ impl NodeConfigSection for ScheduleSection {
         SectionSourcePolicy::SystemAndState
     }
 
-    fn parse(&self, name: &str, body: &Value) -> Result<Box<dyn SectionRecord>> {
+    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> Result<Box<dyn SectionRecord>> {
         let record: ScheduleRecord = serde_json::from_value(body.clone())
             .context("failed to parse schedule record")?;
 
-        if record.schedule_id != name {
+        if record.schedule_id != ctx.id {
             bail!(
                 "schedule record declares schedule_id '{}' but filename is '{}'",
                 record.schedule_id,
-                name
-            );
-        }
-
-        if record.section != "schedules" {
-            bail!(
-                "schedule record declares section '{}' but must be 'schedules'",
-                record.section
+                ctx.id
             );
         }
 
@@ -185,12 +177,22 @@ impl SectionRecord for ScheduleRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node_config::{NodeConfigSection, SectionSourcePolicy};
+    use crate::node_config::{NodeConfigSection, NodeItemContext, SectionSourcePolicy};
+
+    fn ctx(id: &str) -> NodeItemContext {
+        NodeItemContext {
+            section: "schedules".into(),
+            id: id.into(),
+            stem: id.into(),
+            rel_path: format!("{id}.yaml").into(),
+            source_file: format!("/tmp/{id}.yaml").into(),
+            signer_fingerprint: "test".into(),
+        }
+    }
 
     fn valid_body() -> serde_json::Value {
         serde_json::json!({
             "spec_version": 1,
-            "section": "schedules",
             "schedule_id": "my-schedule",
             "item_ref": "directive:test/hello",
             "schedule_type": "interval",
@@ -209,7 +211,7 @@ mod tests {
     #[test]
     fn parse_valid_minimal() {
         let section = ScheduleSection;
-        let result = section.parse("my-schedule", &valid_body());
+        let result = section.parse(&ctx("my-schedule"), &valid_body());
         assert!(result.is_ok(), "expected ok, got {:?}", result.err());
         let boxed = result.unwrap();
         let record = boxed.as_any().downcast_ref::<ScheduleRecord>().unwrap();
@@ -229,7 +231,7 @@ mod tests {
         body["overlap_policy"] = serde_json::json!("cancel_previous");
         body["lateness_grace_secs"] = serde_json::json!(30);
 
-        let result = section.parse("my-schedule", &body).unwrap();
+        let result = section.parse(&ctx("my-schedule"), &body).unwrap();
         let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
         assert_eq!(record.misfire_policy.as_deref(), Some("fire_once_now"));
         assert_eq!(record.overlap_policy.as_deref(), Some("cancel_previous"));
@@ -243,7 +245,7 @@ mod tests {
         body["schedule_type"] = serde_json::json!("cron");
         body["expression"] = serde_json::json!("0 * * * * *");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_ok());
     }
 
@@ -254,14 +256,14 @@ mod tests {
         body["schedule_type"] = serde_json::json!("at");
         body["expression"] = serde_json::json!("2028-01-01T00:00:00Z");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_ok());
     }
 
     #[test]
     fn parse_rejects_wrong_schedule_id() {
         let section = ScheduleSection;
-        let result = section.parse("different-name", &valid_body());
+        let result = section.parse(&ctx("different-name"), &valid_body());
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
         assert!(msg.contains("declares schedule_id"));
@@ -273,7 +275,7 @@ mod tests {
         let mut body = valid_body();
         body["section"] = serde_json::json!("routes");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -283,7 +285,7 @@ mod tests {
         let mut body = valid_body();
         body["spec_version"] = serde_json::json!(2);
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -293,7 +295,7 @@ mod tests {
         let mut body = valid_body();
         body["item_ref"] = serde_json::json!("not a valid ref!!!");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -303,7 +305,7 @@ mod tests {
         let mut body = valid_body();
         body["expression"] = serde_json::json!("not-a-cron");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -313,7 +315,7 @@ mod tests {
         let mut body = valid_body();
         body["timezone"] = serde_json::json!("Invalid/Zone");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -323,7 +325,7 @@ mod tests {
         let mut body = valid_body();
         body["overlap_policy"] = serde_json::json!("invalid");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -333,7 +335,7 @@ mod tests {
         let mut body = valid_body();
         body["misfire_policy"] = serde_json::json!("invalid");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -343,7 +345,7 @@ mod tests {
         let mut body = valid_body();
         body["lateness_grace_secs"] = serde_json::json!(0);
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_err());
     }
 
@@ -353,7 +355,7 @@ mod tests {
         let mut body = valid_body();
         body["misfire_policy"] = serde_json::json!("catch_up_bounded:5");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_ok());
     }
 
@@ -363,7 +365,7 @@ mod tests {
         let mut body = valid_body();
         body["misfire_policy"] = serde_json::json!("catch_up_within_secs:300");
 
-        let result = section.parse("my-schedule", &body);
+        let result = section.parse(&ctx("my-schedule"), &body);
         assert!(result.is_ok());
     }
 
@@ -373,7 +375,7 @@ mod tests {
         let mut body = valid_body();
         body["project_root"] = serde_json::json!("/tmp/my-project");
 
-        let result = section.parse("my-schedule", &body).unwrap();
+        let result = section.parse(&ctx("my-schedule"), &body).unwrap();
         let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
         assert_eq!(record.project_root.as_deref(), Some("/tmp/my-project"));
     }
@@ -384,7 +386,7 @@ mod tests {
         let mut body = valid_body();
         body["params"] = serde_json::json!({"key": "value", "num": 42});
 
-        let result = section.parse("my-schedule", &body).unwrap();
+        let result = section.parse(&ctx("my-schedule"), &body).unwrap();
         let record = result.as_any().downcast_ref::<ScheduleRecord>().unwrap();
         assert_eq!(record.params["key"], "value");
         assert_eq!(record.params["num"], 42);

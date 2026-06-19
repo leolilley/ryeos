@@ -94,8 +94,6 @@ pub fn build_test_state_with_hosted_policy(token_ttl_secs: u64) -> (tempfile::Te
         commands: vec![],
         hosted_node_policies: vec![
             ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord {
-                category: "hosted".into(),
-                section: "hosted".into(),
                 version: "0.1.0".into(),
                 schema_version: "1.0.0".into(),
                 description: "test hosted policy".into(),

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:163334c96f268acf14da3b1cdc6e717d122af18215894b53feb546f70b2313d1:z1hLV9Dena/bmbPr90tZZbOd8xGI7Yk7Fqy+nQea/YuKAImxpnJEmjgUdE2Q1uqdL6maYqu5KFqnJgo/LJHTCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: compose
+# ryeos:signed:2026-06-19T05:40:59Z:d54c758ab4d94b301d6a6cb47bde40aa6eed1464c01699a2ea043f5d9fff8135:WdQN3AiuOEyEbCQKWJu/jfvxXzYkTRNkv9qk4vwZvRawmMH94IDvohyemD+4RokSaLkpjJ5UxH4SLRiaYNI1CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - compose
 description: Compose a knowledge graph context block within a token budget

@@ -480,12 +480,7 @@ fn gate_13_bundle_yaml_files_parse() {
 #[test]
 fn gate_14_unsigned_node_file_rejected() {
     let unsigned_content = r#"kind: node
-section: system
-name: test-node
-version: "1.0.0"
-
-config:
-  key: value
+path: /tmp/test-bundle
 "#;
 
     let envelope = ryeos_engine::contracts::SignatureEnvelope {
@@ -498,45 +493,6 @@ config:
     assert!(
         result.is_none(),
         "unsigned YAML should yield no signature header"
-    );
-}
-
-// ── Gate 15: Path = section invariant ────────────────────────────────
-// TODO: requires daemon-spawn for full coverage. The full path=section
-// enforcement happens in the binary-only node_config resolver. This test
-// verifies the structural invariant that a "route" section in a "bundles/"
-// directory is detectable as a mismatch.
-
-#[test]
-fn gate_15_path_section_invariant() {
-    // Simulate the path=section check: a file under bundles/ should not
-    // declare section "route".  The real enforcement is in node_config
-    // which is binary-only; this tests the detectability of the mismatch.
-    let section_from_content = "route";
-    let dir_segment = "bundles";
-
-    let section_dirs = [
-        "system",
-        "config",
-        "identity",
-        "services",
-        "bundles",
-        "tools",
-        "directives",
-        "parsers",
-        "composers",
-    ];
-
-    if section_from_content == dir_segment {
-        // route != bundles so this won't fire, but if it matched
-        // that would be the correct section.
-        panic!("invariant satisfied");
-    }
-
-    // Verify that "route" is NOT in the list of valid bundle sections
-    assert!(
-        !section_dirs.contains(&section_from_content),
-        "section `{section_from_content}` is not a valid top-level section for `{dir_segment}/`"
     );
 }
 

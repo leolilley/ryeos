@@ -55,14 +55,13 @@ pub fn load_hosted_policy(app_root: &Path) -> Result<Option<HostedNodePolicyReco
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     const POLICY: &str = r#"
-category: "hosted"
-section: "hosted"
 version: "0.1.0"
 schema_version: "1.0.0"
 description: "Default hosted-node operator policy for decentralized remote admission."
@@ -111,9 +110,11 @@ operations:
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
             std::env::set_var("RYEOS_APP_ROOT", &user);
+            let system = tmp.path().join("system");
+            write_node_bootstrap(&system, &key);
 
             Self {
-                system: tmp.path().join("system"),
+                system,
                 _tmp: tmp,
                 _env_guard: env_guard,
                 key,
@@ -140,6 +141,36 @@ operations:
         .unwrap();
     }
 
+    fn write_node_bootstrap(app_root: &Path, key: &lillux::crypto::SigningKey) {
+        let trust_dir = app_root.join(".ai/config/keys/trusted");
+        std::fs::create_dir_all(&trust_dir).unwrap();
+        ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
+
+        let identity_dir = app_root.join(".ai/node/identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        std::fs::write(
+            identity_dir.join("private_key.pem"),
+            key.to_pkcs8_pem(Default::default()).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let policy_dir = app_root.join(".ai/node/command_registration");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let policy = r#"claim_rules:
+  - claim:
+      kind: command.root
+      value: execute
+    required_caps: []
+system_source_caps:
+  - ryeos.register.command.root.execute
+"#;
+        std::fs::write(
+            policy_dir.join("default.yaml"),
+            lillux::signature::sign_content(policy, key, "#", None),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn load_hosted_policy_reads_installed_bundle_policy() {
         let fixture = Fixture::new();
@@ -159,7 +190,7 @@ operations:
     }
 
     #[test]
-    fn load_hosted_policy_rejects_multiple_policies() {
+    fn load_hosted_policy_rejects_nested_policy_id() {
         let fixture = Fixture::new();
         fixture.write_policy(&fixture.system.join(".ai/node/hosted/policy.yaml"));
         fixture.write_policy(&fixture.system.join(".ai/node/hosted/extra/policy.yaml"));
@@ -168,7 +199,7 @@ operations:
         let rendered = format!("{err:#}");
 
         assert!(
-            rendered.contains("multiple hosted-node policies"),
+            rendered.contains("hosted-node policy filename must be 'policy'"),
             "got: {rendered}"
         );
     }

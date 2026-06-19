@@ -1,8 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
+use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
 
 #[derive(Debug, Clone)]
 pub struct CommandRegistrationPolicyRecord {
@@ -24,10 +24,6 @@ impl Default for CommandRegistrationPolicyRecord {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCommandRegistrationPolicyRecord {
-    #[allow(dead_code)]
-    section: String,
-    #[serde(default)]
-    name: Option<String>,
     #[serde(default)]
     claim_rules: Vec<ryeos_runtime::CommandRegistrationRule>,
     #[serde(default)]
@@ -41,20 +37,12 @@ impl NodeConfigSection for CommandRegistrationSection {
         SectionSourcePolicy::SystemAndState
     }
 
-    fn parse(&self, name: &str, body: &Value) -> Result<Box<dyn SectionRecord>> {
+    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> Result<Box<dyn SectionRecord>> {
         let raw: RawCommandRegistrationPolicyRecord = serde_json::from_value(body.clone())
             .context("failed to parse command registration policy record")?;
-        let declared_name = raw.name.unwrap_or_else(|| name.to_string());
-        if declared_name != name {
-            bail!(
-                "command registration policy declares name '{}' but filename is '{}'",
-                declared_name,
-                name
-            );
-        }
 
         Ok(Box::new(CommandRegistrationPolicyRecord {
-            name: declared_name,
+            name: ctx.id.clone(),
             policy: ryeos_runtime::CommandRegistrationPolicy {
                 claim_rules: raw.claim_rules,
                 system_source_caps: raw.system_source_caps,

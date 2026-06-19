@@ -272,7 +272,8 @@ mod tests {
     fn does_not_coerce_already_typed_values() {
         let tool = coerce_schema();
         let coerced =
-            validate_caller_params(&tool, &json!({"count": 60, "flag": false}), "tool:foo").unwrap();
+            validate_caller_params(&tool, &json!({"count": 60, "flag": false}), "tool:foo")
+                .unwrap();
         assert_eq!(coerced["count"], json!(60));
         assert_eq!(coerced["flag"], json!(false));
     }
@@ -282,8 +283,7 @@ mod tests {
         // "nope" can't become an integer → stays a string → validation
         // fails with the real type-mismatch message.
         let tool = coerce_schema();
-        let err =
-            validate_caller_params(&tool, &json!({"count": "nope"}), "tool:foo").unwrap_err();
+        let err = validate_caller_params(&tool, &json!({"count": "nope"}), "tool:foo").unwrap_err();
         assert!(matches!(err, EngineError::ParameterValidationFailed { .. }));
     }
 
@@ -292,8 +292,7 @@ mod tests {
         // "60.5" is not a valid i64 and the field is integer-only, so it
         // is left as a string and rejected — floats don't sneak in.
         let tool = coerce_schema();
-        let err =
-            validate_caller_params(&tool, &json!({"count": "60.5"}), "tool:foo").unwrap_err();
+        let err = validate_caller_params(&tool, &json!({"count": "60.5"}), "tool:foo").unwrap_err();
         assert!(matches!(err, EngineError::ParameterValidationFailed { .. }));
     }
 

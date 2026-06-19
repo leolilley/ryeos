@@ -40,14 +40,14 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
-use serde_json::{Value, json};
-use tokio::sync::{Mutex, oneshot};
+use axum::Router;
+use serde_json::{json, Value};
+use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
 /// One canned LLM response. The mock pops these FIFO.

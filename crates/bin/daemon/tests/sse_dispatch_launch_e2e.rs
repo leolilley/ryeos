@@ -119,8 +119,7 @@ model:
 fn plant_execute_stream_route(state_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = state_path.join(".ai/node/routes");
     std::fs::create_dir_all(&dir)?;
-    let body = r#"section: routes
-id: execute/stream
+    let body = r#"id: execute/stream
 path: /execute/stream
 methods:
   - POST

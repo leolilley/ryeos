@@ -83,7 +83,10 @@ fn unique_project_dir(tag: &str) -> PathBuf {
 /// the project root. `rel` is the path under `.ai/tools` (e.g.
 /// `probe/probe`), `runtime` is the script/function runtime ref tail.
 fn write_python_tool(project_dir: &Path, rel: &str, runtime: &str, body: &str) {
-    let tool_path = project_dir.join(".ai").join("tools").join(format!("{rel}.py"));
+    let tool_path = project_dir
+        .join(".ai")
+        .join("tools")
+        .join(format!("{rel}.py"));
     fs::create_dir_all(tool_path.parent().unwrap()).unwrap();
     let header = format!(
         "#!/usr/bin/env python3\n\
@@ -161,7 +164,11 @@ fn cwd_is_project_root() {
     let expected = fs::canonicalize(&project_dir).unwrap();
     let _ = fs::remove_dir_all(&project_dir);
 
-    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "{completion:?}"
+    );
     let result = completion.result.expect("captured stdout");
     let cwd = result["cwd"].as_str().expect("cwd string");
     assert_eq!(
@@ -188,7 +195,11 @@ fn function_receives_project_path_as_arg_and_in_params() {
     );
 
     let completion = run_tool(&project_dir, "tool:probe/pp", serde_json::json!({}));
-    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "{completion:?}"
+    );
     let result = completion.result.expect("captured stdout");
     // Canonicalize while the project dir still exists, then clean up.
     let expected = fs::canonicalize(&project_dir).unwrap();
@@ -219,7 +230,11 @@ fn async_execute_is_supported() {
     let completion = run_tool(&project_dir, "tool:probe/aio", Value::Null);
     let _ = fs::remove_dir_all(&project_dir);
 
-    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "{completion:?}"
+    );
     let result = completion.result.expect("captured stdout");
     assert_eq!(result["async_ran"], true);
 }
@@ -244,7 +259,11 @@ fn stdin_json_params_delivered_to_function() {
     );
     let _ = fs::remove_dir_all(&project_dir);
 
-    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "{completion:?}"
+    );
     let result = completion.result.expect("captured stdout");
     assert_eq!(result["echoed"], "ping");
 }

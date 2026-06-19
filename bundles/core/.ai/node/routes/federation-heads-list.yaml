@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:6a43b14ff5f06c2e8a3c370473be8e01a8182840c6632b55cdc697974a5cf1ed:aBJidyIVrOpf3WtHPTkbMZlEfCtZysBGOkSmnRbv5M9bjn90JpG+VexAfYQkpunCkyVAy08ECVl4LxJ1DvXGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:d43dd7ed40b7a1f744cdde9f8ffb8681dfcada1411a3cfcd9ae3fd3560909f0c:8AxoMokF/Xvu0Lbfe+Zd5RqoJmZGFMwY7YyyypThpQQjlPG2l0ZrpZDsPUTo/+rl6xDiU/LJbuWZfU+PxKxcCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: federation/heads/list
 path: /federation/heads/list
 methods:

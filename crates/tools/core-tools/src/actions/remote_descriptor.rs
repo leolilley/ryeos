@@ -304,6 +304,7 @@ fn fingerprint_for_ed25519_key(key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
     use std::sync::{Mutex, MutexGuard};
 
@@ -328,6 +329,7 @@ mod tests {
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
             std::env::set_var("RYEOS_APP_ROOT", &user);
+            write_node_bootstrap(root, &trust_dir, &key);
             Self {
                 _env_guard: env_guard,
                 _user: user,
@@ -346,8 +348,6 @@ mod tests {
         let path = app_root.join(".ai/node/hosted/policy.yaml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body = r#"
-category: "hosted"
-section: "hosted"
 version: "0.1.0"
 schema_version: "1.0.0"
 description: "test hosted policy"
@@ -375,6 +375,54 @@ operations:
   shared_daemon_multitenancy_enabled: false
 "#;
         std::fs::write(path, lillux::signature::sign_content(body, key, "#", None)).unwrap();
+    }
+
+    fn write_node_bootstrap(
+        app_root: &std::path::Path,
+        trust_dir: &std::path::Path,
+        fallback_key: &lillux::crypto::SigningKey,
+    ) {
+        let app_trust_dir = app_root.join(".ai/config/keys/trusted");
+        std::fs::create_dir_all(&app_trust_dir).unwrap();
+        ryeos_engine::trust::pin_key(&fallback_key.verifying_key(), "test", &app_trust_dir, None)
+            .unwrap();
+
+        let identity_dir = app_root.join(".ai/node/identity");
+        std::fs::create_dir_all(&identity_dir).unwrap();
+        let identity_path = identity_dir.join("private_key.pem");
+        let node_identity = if identity_path.exists() {
+            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+        } else {
+            std::fs::write(
+                &identity_path,
+                fallback_key
+                    .to_pkcs8_pem(Default::default())
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+            ryeos_app::identity::NodeIdentity::load(&identity_path).unwrap()
+        };
+        ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", trust_dir, None)
+            .unwrap();
+        ryeos_engine::trust::pin_key(node_identity.verifying_key(), "node", &app_trust_dir, None)
+            .unwrap();
+
+        let policy_dir = app_root.join(".ai/node/command_registration");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let policy = r#"claim_rules:
+  - claim:
+      kind: command.root
+      value: execute
+    required_caps: []
+system_source_caps:
+  - ryeos.register.command.root.execute
+"#;
+        std::fs::write(
+            policy_dir.join("default.yaml"),
+            lillux::signature::sign_content(policy, node_identity.signing_key(), "#", None),
+        )
+        .unwrap();
     }
 
     #[test]

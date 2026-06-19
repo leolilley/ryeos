@@ -54,7 +54,7 @@ use std::env::VarError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 
 use ryeos_engine::roots;
 
@@ -64,7 +64,7 @@ use ryeos_engine::roots;
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
 pub use ryeos_vault::paths::default_sealed_store_path;
-pub use ryeos_vault::policy::{BLOCKED_NAMES, validate_decrypted_keys, validate_key_name};
+pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
 pub use ryeos_vault::sealed::write_sealed_secrets;
 
 pub const INTERNAL_RUNTIME_VAULT_PREFIX: &str = "INTERNAL_RUNTIME_VAULT_";

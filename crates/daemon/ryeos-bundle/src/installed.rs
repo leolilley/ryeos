@@ -2,7 +2,7 @@
 //!
 //! This mirrors the daemon bootstrap semantics for `.ai/node/bundles/*.yaml`
 //! without depending on `ryeos-app`: registrations must be signed, trusted,
-//! structured YAML records in the `bundles` section; paths are canonicalized;
+//! structured YAML records under `.ai/node/bundles`; paths are canonicalized;
 //! symlinks and collisions fail closed.
 
 use std::collections::HashMap;
@@ -41,9 +41,6 @@ impl InstalledBundleRecord {
 struct BundleRegistrationBody {
     #[serde(default)]
     kind: Option<String>,
-    section: String,
-    #[serde(default)]
-    id: Option<String>,
     path: PathBuf,
     #[allow(dead_code)]
     #[serde(default)]
@@ -113,21 +110,6 @@ pub fn load_installed_bundle_records_with_trust(
                 "node bundle registration {} declares kind {:?}, expected 'node'",
                 path.display(),
                 body.kind
-            );
-        }
-        if body.section != "bundles" {
-            bail!(
-                "node bundle registration {} declares section '{}', expected 'bundles'",
-                path.display(),
-                body.section
-            );
-        }
-        if body.id.as_deref().is_some_and(|id| id != name) {
-            bail!(
-                "node bundle registration {} declares id {:?}, expected filename id '{}'",
-                path.display(),
-                body.id,
-                name
             );
         }
         if !body.path.is_absolute() {
@@ -334,10 +316,7 @@ mod tests {
         fn write_registration(&self, name: &str, bundle: &Path) -> PathBuf {
             let dir = self.system.join(".ai/node/bundles");
             fs::create_dir_all(&dir).unwrap();
-            let body = format!(
-                "kind: node\nsection: bundles\nid: {name}\npath: {}\n",
-                bundle.display()
-            );
+            let body = format!("kind: node\npath: {}\n", bundle.display());
             let signed = lillux::signature::sign_content(&body, &self.key, "#", None);
             let path = dir.join(format!("{name}.yaml"));
             fs::write(&path, signed).unwrap();
@@ -369,10 +348,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("core.yaml"),
-            format!(
-                "kind: node\nsection: bundles\nid: core\npath: {}\n",
-                bundle.display()
-            ),
+            format!("kind: node\npath: {}\n", bundle.display()),
         )
         .unwrap();
 
@@ -383,21 +359,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_id_filename_mismatch() {
+    fn rejects_legacy_registration_id_field() {
         let layout = Layout::new();
         let bundle = layout.write_bundle("core");
         let dir = layout.system.join(".ai/node/bundles");
         fs::create_dir_all(&dir).unwrap();
-        let body = format!(
-            "kind: node\nsection: bundles\nid: wrong\npath: {}\n",
-            bundle.display()
-        );
+        let body = format!("kind: node\nid: wrong\npath: {}\n", bundle.display());
         let signed = lillux::signature::sign_content(&body, &layout.key, "#", None);
         fs::write(dir.join("core.yaml"), signed).unwrap();
 
         let err = load_installed_bundle_records_with_trust(&layout.system, &layout.trust_store())
             .unwrap_err();
-        assert!(err.to_string().contains("expected filename id"));
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("unknown field `id`"),
+            "expected id rejection: {msg}"
+        );
     }
 
     #[cfg(unix)]

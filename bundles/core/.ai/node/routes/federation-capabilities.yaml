@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:2058aa8d8d11f161c54957566eb6c761df15b7bd6f4ea5edb363ee8faa816830:zojeHaJZ9upNPwS4DqpQMjt6pTK9YBCMhYIBZzCV53mGLEwJskqj8zNWvOuxYFcGhAktKR9iH7VkhRL0z+r0AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:70b77aaf0af90d10a4dda54119e4dc9bcfddb7268970d0c055cf47cabb7dfec2:FfoaewKbC2fOuNJbVSYMUofh0Jb4sTc3/gd1Z9JCyfrNrwzS7a9JL0jKwwloZQhmhupoDlDwyZc2GuK2Y+HrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: federation/capabilities
 path: /federation/capabilities
 methods:

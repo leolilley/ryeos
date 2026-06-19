@@ -221,8 +221,13 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let project = tempfile::tempdir().expect("project tempdir");
     plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
-    plant_directive(project.path(), "test/sse_e2e", "Say hello.", &fixture.publisher)
-        .expect("plant directive");
+    plant_directive(
+        project.path(),
+        "test/sse_e2e",
+        "Say hello.",
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let (status, body) = match tokio::time::timeout(
         Duration::from_secs(30),
         h.post_execute(
@@ -388,8 +393,13 @@ async fn boot_and_run_directive_with_extra_keys(
     let project = tempfile::tempdir().expect("project tempdir");
     plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
-    plant_directive(project.path(), "test/sse_e2e", "Say hello.", &fixture.publisher)
-        .expect("plant directive");
+    plant_directive(
+        project.path(),
+        "test/sse_e2e",
+        "Say hello.",
+        &fixture.publisher,
+    )
+    .expect("plant directive");
     let project_path = project.path().to_str().unwrap().to_string();
     let (status, body) = tokio::time::timeout(
         Duration::from_secs(30),

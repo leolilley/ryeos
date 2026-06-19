@@ -15,10 +15,10 @@ mod common;
 
 use std::path::Path;
 
+use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
 use lillux::crypto::SigningKey;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 /// Plant ZEN_API_KEY in the sealed vault for any directive work the graph may
 /// trigger. Graph launch itself does not require provider auth.

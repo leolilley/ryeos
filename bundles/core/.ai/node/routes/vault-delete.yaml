@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:dc344b64f9332e1dbc5f7eadd72ac7835f3c722b6629f3eac3f50fca704d3f9e:w49klO6NoLact2OUaqy2Pm8TrID38L+t2rCe7zYQnw0nOghaVM0tQ4p7hkrZ9eBN6WOod9WGiBb+SM4gyH4HAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:fe635fd4900338d660db364c935efef6e98cf4f05b4e54de3dd8d27af64b091e:E71kMydDwPCLzDGli3hu17nL65wG/DspK90n+vFsodcvHtWYuqm2r4FXVU30SaUAbMUz2UchJtkSGyuTrds6DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/vault-delete
 path: /vault/delete
 methods:

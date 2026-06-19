@@ -47,8 +47,7 @@ pub async fn run(
     // Degraded live timeline: tail the route's head thread over SSE.
     // The braid is the truth; this is it arriving now. Retargets abort
     // the old tail and open a new one.
-    let (tail_tx, mut tail_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let (tail_tx, mut tail_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     let mut tail_thread: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
 

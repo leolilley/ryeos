@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T00:42:18Z:fe821bd5ffc335359565e6dca1f39c07ea666d8a6dbae91d644fb4880624eebb:W5HgkR0oH1T4PDPl5lQZykirhm2Xf8VX69t2zNaKgUR1tKp9EhhGMFD2Ldf6dIVZwNW+J0Et76Hq0b5jqWeYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-19T05:40:59Z:76aad50488ccfd28739e55a79063b27127c965dab588257c0796a4c906a9ffda:kJL9Z3uG33wY7uiYay89Ls1Z+dqD2P4kbucDnTLAzZT7p9ok82AXEubNdmiyHJBKt1YfiMW2KcjF3J3dpVM2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:31e05eb8a0b55e27535e2b575aa77476d56a869b845c84099f2a0860240b9706:VmlT8saN+g88+R/8uZ6XmTZQfy4wIMYDxc/dCyKaUq33gXWAflwolNeYdd2wzlDcjnKjpKROvkDE7gQEeglwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 category: ryeos/core
@@ -99,7 +99,7 @@ Created by `ryeos init`. Lives in the system space
     │   │   ├── private_key.pem          # X25519 vault encryption key
     │   │   └── public_key.pem
     │   ├── bundles/                     # installed bundle registrations
-    │   │   └── <name>.yaml             # section: bundles, path: <abs-path>
+    │   │   └── <name>.yaml             # path: <abs-path>
     │   ├── verbs/                       # merged from installed bundles
     │   ├── aliases/                     # merged from installed bundles
     │   └── routes/                      # merged from installed bundles
@@ -174,5 +174,6 @@ bootstrap loader:
 | `auth/`          | Bootstrap-managed           | Authorized keys              |
 | `vault/`         | Bootstrap-managed           | Encryption keys              |
 
-A YAML at `.ai/node/commands/sign.yaml` must declare `section: commands`.
-The loader enforces this path invariant strictly.
+A YAML at `.ai/node/commands/sign.yaml` is a command because of its path.
+The loader enforces section containment strictly and rejects duplicated
+structural fields such as `section` or `category` in node-config YAML.

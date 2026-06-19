@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:da7ba99cc63f864388035e5b9b92617438d13b768664d9b3badbe24b1d2a88a5:2zDwXRZcdVOcZHm+HouQGVF3lngAAvlQLuDGHMNU6i/U9eso4+KpmwpGzShspStHMo2ttum8fYvyPcubj10dBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: bundle-list
+# ryeos:signed:2026-06-19T05:40:59Z:962d942fd83a62877992eeb8059fe90906f4902e471a873efcfa265ad220d721:I7aXkGz0u4ofPxZwgEN2E2c/SSIHb5yXZmBFFf9km/aT5/ZLo61UdszHviJHFqtCUiYkzoxRifAjmp4R4t+1AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - list

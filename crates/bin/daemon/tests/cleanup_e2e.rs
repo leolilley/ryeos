@@ -558,25 +558,39 @@ async fn daemon_startup_proves_bundle_yamls_parse() {
     );
 }
 
-// ── Test 13: Path=section invariant enforced by daemon (Gate 15 daemon-spawn) ──
-//   A node config YAML whose `section` field doesn't match its parent
-//   directory must cause daemon startup to fail. We plant a valid
-//   signed route YAML (section: routes) into the bundles directory
-//   to trigger the mismatch. This closes the TODO at
-//   cleanup_invariants.rs:521.
+// ── Test 13: legacy structural fields rejected by daemon startup ──
+//   Node config identity is derived from the path. A node YAML body that still
+//   declares `section` must fail during startup rather than being tolerated as
+//   a legacy ref shape.
 
 #[tokio::test(flavor = "multi_thread")]
-async fn path_section_mismatch_rejected_at_startup() {
-    let workspace = common::workspace_root();
-    let route_yaml = workspace.join("bundles/core/.ai/node/routes/execute-stream.yaml");
-    assert!(route_yaml.is_file(), "route fixture must exist");
-
-    let result = DaemonHarness::start_with_pre_init(
-        move |state_path, _user_space| {
-            let bundles_dir = state_path.join(".ai").join("node").join("bundles");
-            std::fs::create_dir_all(&bundles_dir)?;
-            let dest = bundles_dir.join("execute-stream.yaml");
-            std::fs::copy(&route_yaml, &dest)?;
+async fn legacy_section_field_rejected_at_startup() {
+    let result = DaemonHarness::start_fast_with(
+        |state_path, _user_space, fixture| {
+            let routes_dir = state_path.join(".ai").join("node").join("routes");
+            std::fs::create_dir_all(&routes_dir)?;
+            let body = r#"section: routes
+id: legacy/section
+path: /legacy/section
+methods:
+  - GET
+auth: none
+limits:
+  body_bytes_max: 1024
+  timeout_ms: 1000
+  concurrent_max: 1
+response:
+  mode: json
+  body_b64: e30=
+"#;
+            let signed = lillux::signature::sign_content_at(
+                body,
+                &fixture.publisher,
+                "#",
+                None,
+                common::fast_fixture::FAST_FIXTURE_TIME,
+            );
+            std::fs::write(routes_dir.join("legacy-section.yaml"), signed)?;
             Ok(())
         },
         |_cmd| {},
@@ -584,13 +598,12 @@ async fn path_section_mismatch_rejected_at_startup() {
     .await;
 
     match result {
-        Ok(_) => panic!("daemon should reject node config item with section != parent directory"),
+        Ok(_) => panic!("daemon should reject node config item declaring legacy section field"),
         Err(e) => {
             let err_msg = format!("{:#}", e);
             assert!(
-                err_msg.contains("path = section invariant")
-                    || err_msg.contains("declares section"),
-                "error should mention path=section invariant violation, got: {err_msg}"
+                err_msg.contains("legacy structural field 'section'"),
+                "error should mention legacy section rejection, got: {err_msg}"
             );
         }
     }

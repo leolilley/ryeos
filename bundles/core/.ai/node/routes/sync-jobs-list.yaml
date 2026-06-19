@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:00bad4e27c9b8949c2d9f44d3e03386a38d392bba9b4741706148afeadf935aa:Ic62nXoBbf2fwg/DPjevlzXL5UrbJFIN89xUxUegcOHSBdxMgvPRN/NCGTxULSEeJ3l6MtR9XaxZCJAl+k/QBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:9e7fd67892b60b1906d203a28c09122dd15b10125f61aa26d8d8c730fc6a7153:2+uSlxJKS486jx5WzveR6PlYO30O8fvLJZcoag7LRMVKBD9loV4SM0f8gvQ3/hIJTGhq4K46dIDJc2Ux9SUAAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: sync/jobs/list
 path: /sync/jobs/list
 methods:

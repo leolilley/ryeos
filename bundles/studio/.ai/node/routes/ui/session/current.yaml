@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:c9be978af4ed07d46e39eaadca07e4fc1449d12e64caf4cb4bcf6c16b428c9d7:9MNjL8PEfQIlqnwLrF2fLip2D9mOrPrA4zHzMOmwKBzVqn5Uuv93Lh/0jMcbzZHin2ZLXGTiph6mqxXi5hY5AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/session
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:83fd0fcb00a1900cde81dcbc96f6c48751f1f6fb3ff8840c5b1dfd6bfdb1dfca:T8JkNoEmTvM6KFnan/7gnUT98JBqyz7ixEg84wgFZcztM3eh7Gb2PuAmEk9TGDgrSMzlnlXaPbpaoGN3V2nHBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/session/current
 path: /ui/api/session/current
 methods:

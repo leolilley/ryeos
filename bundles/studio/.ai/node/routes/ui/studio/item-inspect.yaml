@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:6e758c2f0982facd4071da5f6012300b4bc9a61cd19273e66feb942224652d05:GTe2MoKdYcz03BRpkWcS/B78c1QhSJfFgHRKAhs7E24wMHB/tgxQl0CuZu63JyG7ZNxp1ccGFjB3JkXFn9+6AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/studio
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:fa982bca9e9cab2bdf5311c9f6a04af60c8421a0488aa3c2c0717dcc31ae7552:GJCuFljvh+r7TxKxG/8VDh45I8AfSmlBJdNU9ilNFNqg0leLuw6qOEnfv1ONlJvZpPYRWEG0JBJitKnByG5wDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/studio/item/inspect
 path: /ui/api/studio/item/inspect
 methods:

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:7158346c1118f4b8a054ef07263563227a6bf47eab2541d7c47fdba97af8bf00:kl0aCdWpGtb5ZTQBuC/Gd0kf4VYVCyht+hDPZOtfYyrTjr55tw5W9mdC9zZ+hAHcmFVlWHMw57KM7uaUK3Y5Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: status
+# ryeos:signed:2026-06-19T05:40:59Z:1b099064fa651438df79974b1d6f3ca6fd84c2c425784fe95590f418e61ec9ba:cUCjERDjiZltqDVPk/r1WItP10StcIg/naOtJ+Qcc2Owu/VRuffof1eSTommEh03EtfhesAOAJyLXwha1J+bBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - daemon
 - status

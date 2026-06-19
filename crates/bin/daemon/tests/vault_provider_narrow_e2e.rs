@@ -28,9 +28,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use common::DaemonHarness;
-use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::fast_fixture::{register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
+use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
 // ── Helpers (mirror directive_provider_secret_injection_e2e.rs) ──
@@ -877,7 +877,10 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
                     .pointer("/payload/error")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                let code = error.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+                let code = error
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 if outcome_code == "required_secret_missing" && code == "required_secret_missing" {
                     found_error = true;
 

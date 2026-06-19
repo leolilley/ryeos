@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:06Z:5675c0924e28fb34a62f5ded824181036067c7021c355524aface1a1f61f11b2:I3si9Y/iLPUhgcGiw+E2d0ZzR6IHy4EiLgp7GkWjKNUT4utKPrY1hcdZwcVmNvt1zYFYKUCmS9D3lCYMS/OkDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:31cbcee73ec88a9ddd5ec471b4026c06d6b6498a4b3dbe380d7602ecf50f7eee:XVracXahLixRXAw6oAGEi5eI+vZSOUjSGC2vVTd8YimBH0xT1ka4F+ZbxvM5wCd32x9Xc87Vj2hajdkcTvokBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: threads/cancel
 path: /threads/{thread_id}/cancel
 methods:

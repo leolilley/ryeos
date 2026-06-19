@@ -745,8 +745,6 @@ mod tests {
         forms: Vec<crate::CommandArgumentForm>,
     ) -> crate::CommandDef {
         crate::CommandDef {
-            category: "commands".into(),
-            section: "commands".into(),
             name: tokens.join("-"),
             tokens,
             description: String::new(),

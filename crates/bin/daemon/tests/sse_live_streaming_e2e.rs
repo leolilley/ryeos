@@ -118,8 +118,7 @@ model:
 fn plant_execute_stream_route(state_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let dir = state_path.join(".ai/node/routes");
     std::fs::create_dir_all(&dir)?;
-    let body = r#"section: routes
-id: execute/stream
+    let body = r#"id: execute/stream
 path: /execute/stream
 methods:
   - POST
@@ -285,12 +284,13 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, S
     .await;
     let mock_url = mock.base_url.clone();
 
-    let plant = move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)?;
-        plant_execute_stream_route(state_path, &fixture.publisher)?;
-        write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
-        Ok(())
-    };
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            plant_execute_stream_route(state_path, &fixture.publisher)?;
+            write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
+            Ok(())
+        };
 
     let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
@@ -358,15 +358,18 @@ async fn open_gateway_stream(
             Ok(Ok(Some(chunk))) => {
                 buf.extend_from_slice(&chunk);
                 let events = parse_complete_events(&buf, Instant::now());
-                let thread_id = events.iter().find(|e| e.event == "stream_started").map(|ev| {
-                    let payload: serde_json::Value =
-                        serde_json::from_str(&ev.data).expect("stream_started data is JSON");
-                    payload
-                        .get("thread_id")
-                        .and_then(|v| v.as_str())
-                        .expect("stream_started carries thread_id")
-                        .to_string()
-                });
+                let thread_id = events
+                    .iter()
+                    .find(|e| e.event == "stream_started")
+                    .map(|ev| {
+                        let payload: serde_json::Value =
+                            serde_json::from_str(&ev.data).expect("stream_started data is JSON");
+                        payload
+                            .get("thread_id")
+                            .and_then(|v| v.as_str())
+                            .expect("stream_started carries thread_id")
+                            .to_string()
+                    });
                 let created = events.iter().any(|e| e.event == "thread_created");
                 if let (Some(thread_id), true) = (thread_id, created) {
                     return (resp, thread_id);
@@ -425,7 +428,10 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
     }
 
     let first = events.first().expect("at least one event");
-    assert_eq!(first.event, "stream_started", "first event is stream_started");
+    assert_eq!(
+        first.event, "stream_started",
+        "first event is stream_started"
+    );
 
     let terminal = events
         .iter()
@@ -485,7 +491,10 @@ async fn chain_tail_attached_before_terminal_receives_terminal_live() {
 
     // The tail's opening event arrives promptly on connect.
     let first = events.first().expect("at least one event");
-    assert_eq!(first.event, "stream_started", "tail opens with stream_started");
+    assert_eq!(
+        first.event, "stream_started",
+        "tail opens with stream_started"
+    );
     assert!(
         first.at.duration_since(opened_at) < PROVIDER_DELAY,
         "opening event must arrive promptly, not bundled with the terminal"

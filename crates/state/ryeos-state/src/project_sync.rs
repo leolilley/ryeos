@@ -157,7 +157,9 @@ pub fn render_effective_sync_policy_yaml(ignore_source: &str) -> String {
     let mut out = String::new();
     out.push_str("# GENERATED — read-only view of this node's effective sync policy.\n");
     out.push_str("# Editing this file does NOTHING. To change what is ignored, edit the file\n");
-    out.push_str(&format!("# named in `ignore_source` below ({ignore_source}).\n"));
+    out.push_str(&format!(
+        "# named in `ignore_source` below ({ignore_source}).\n"
+    ));
     out.push_str("# Secrets, node-owned state, and deployable surfaces are enforced in code\n");
     out.push_str("# (protocol v1) and cannot be loosened here.\n");
     out.push_str("version: 1\n");
@@ -536,8 +538,12 @@ mod tests {
     #[test]
     fn rejects_unsafe_paths_for_all_scopes() {
         for path in ["../escape", "/absolute/path", "./dot", "a/../b", "a\\b"] {
-            validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::FullProject, None)
-                .expect_err("unsafe full-project path must be rejected");
+            validate_project_manifest_paths(
+                &manifest(&[path]),
+                ProjectSyncScope::FullProject,
+                None,
+            )
+            .expect_err("unsafe full-project path must be rejected");
             validate_project_manifest_paths(&manifest(&[path]), ProjectSyncScope::AiOnly, None)
                 .expect_err("unsafe ai-only path must be rejected");
         }
@@ -553,9 +559,13 @@ mod tests {
     #[test]
     fn rendered_policy_is_valid_yaml_with_all_buckets() {
         let yaml = render_effective_sync_policy_yaml(".ai/node/ingest/ignore.yaml");
-        let v: serde_yaml::Value = serde_yaml::from_str(&yaml).expect("generated policy is valid YAML");
+        let v: serde_yaml::Value =
+            serde_yaml::from_str(&yaml).expect("generated policy is valid YAML");
         assert_eq!(v["version"].as_u64(), Some(1));
-        assert_eq!(v["ignore_source"].as_str(), Some(".ai/node/ingest/ignore.yaml"));
+        assert_eq!(
+            v["ignore_source"].as_str(),
+            Some(".ai/node/ingest/ignore.yaml")
+        );
         let secrets = v["never_deploy_secrets"].as_sequence().unwrap();
         assert!(secrets
             .iter()
