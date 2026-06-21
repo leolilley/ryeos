@@ -402,6 +402,55 @@ async fn graph_action_completes_with_permitted_cap() {
 
     let graph_thread_id = graph_thread_id(&body, "permitted graph").to_string();
     let receipts = graph_node_receipts(&h, &graph_thread_id, &body).await;
+
+    // `service:threads/receipts` returns the same node receipts server-side,
+    // sorted by step, without the caller sifting through every artifact.
+    let (receipts_status, receipts_body) = h
+        .post_execute(
+            "service:threads/receipts",
+            ".",
+            json!({ "thread_id": graph_thread_id }),
+        )
+        .await
+        .expect("post service:threads/receipts");
+    assert!(
+        receipts_status.is_success(),
+        "threads.receipts failed: status={receipts_status}; body={receipts_body:#}"
+    );
+    // `post_execute` wraps the handler result under `result`.
+    let receipts_result = receipts_body
+        .get("result")
+        .and_then(|v| v.as_object())
+        .unwrap_or_else(|| panic!("threads.receipts missing result; body={receipts_body:#}"));
+    let svc_receipts = receipts_result
+        .get("receipts")
+        .and_then(|v| v.as_array())
+        .expect("threads.receipts returns a receipts array");
+    assert_eq!(
+        receipts_result.get("count").and_then(|v| v.as_u64()),
+        Some(svc_receipts.len() as u64),
+        "threads.receipts count must match; body={receipts_body:#}"
+    );
+    assert_eq!(
+        svc_receipts.len(),
+        receipts.len(),
+        "threads.receipts must return every graph_node_receipt; body={receipts_body:#}"
+    );
+    let steps: Vec<u64> = svc_receipts
+        .iter()
+        .map(|r| r.get("step").and_then(|v| v.as_u64()).unwrap_or(u64::MAX))
+        .collect();
+    assert!(
+        steps.windows(2).all(|w| w[0] <= w[1]),
+        "threads.receipts must be sorted by step; steps={steps:?}"
+    );
+    assert!(
+        svc_receipts
+            .iter()
+            .any(|r| r.get("node").and_then(|v| v.as_str()) == Some("greet")),
+        "threads.receipts must include the greet node; body={receipts_body:#}"
+    );
+
     let receipt_metadata = receipt_metadata_for_node(&receipts, "greet", &body);
     assert_eq!(
         receipt_metadata

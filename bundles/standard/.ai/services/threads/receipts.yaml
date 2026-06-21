@@ -1,0 +1,9 @@
+# ryeos:signed:2026-06-21T03:54:09Z:f788ee90410b7cd5420e67a72df9edfd5bb39f646b83a8543a788579e2c20862:lBW9rMbnfq+DJisqVACs3mAPMKbXBwkdJaWBgPHPjCUKBzAJV+r7S6Vdy7glqmYomYmT7lYxJV9XI0tHIJywDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "receipts"
+kind: service
+endpoint: threads.receipts
+required_caps: []
+schema:
+  thread_id: string
+description: "Per-node graph receipts (node, step, error, cache_hit, elapsed_ms) sorted by step"
