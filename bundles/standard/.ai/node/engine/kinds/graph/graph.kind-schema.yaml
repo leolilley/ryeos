@@ -44,6 +44,12 @@ composed_value_contract:
     permissions:
       type: single
       prim: sequence
+    # Structured runtime capability requirements. The daemon mints the
+    # requested manifest-backed subset into the callback token at launch —
+    # this is NOT self-grantable authority like `permissions:`.
+    requires:
+      type: single
+      prim: mapping
 metadata:
   rules:
     name:

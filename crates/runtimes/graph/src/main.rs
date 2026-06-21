@@ -132,6 +132,7 @@ fn main() -> anyhow::Result<()> {
         bundle_roots = ?resolved.bundle_roots,
         graph_id = %graph.graph_id,
         declared_permissions = ?graph.declared_permissions,
+        runtime_capability_requirements = ?graph.runtime_capability_requirements,
         "launch resolved"
     );
 

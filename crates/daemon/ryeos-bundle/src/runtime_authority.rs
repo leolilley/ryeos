@@ -18,7 +18,11 @@
 //! Keeping minting, service authorization, and rejection on one definition is
 //! the point: they cannot drift.
 
+use std::collections::BTreeSet;
+
 use ryeos_runtime::authorizer::{canonical_cap, validate_scope_pattern};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::manifest::{
     BundleEventDecl, BundleEventOperation, RuntimeVaultDecl, RuntimeVaultOperation,
@@ -106,6 +110,166 @@ impl RuntimeVaultDecl {
     }
 }
 
+// ── Item-level runtime capability requirements ───────────────────────
+//
+// A signed manifest declares the bundle's *upper bound* runtime authority
+// (see `BundleManifest::bundle_events` / `runtime_vault`). An individual item
+// declares the exact subset it needs under:
+//
+//     requires:
+//       capabilities:
+//         callbacks:
+//           bundle_events:
+//             - event_kind: arc_pattern_event
+//               operations: [append]
+//           runtime_vault:
+//             - namespace: oauth
+//               operations: [get]
+//
+// This is a *requirement contract*, not a grant: the daemon mints into the
+// callback token only the requested caps that the signed manifest actually
+// backs. Absent requirements mint nothing — runtime authority is never granted
+// merely because the manifest declares it.
+
+/// The `requires:` block of an item, as authored. Only the
+/// `capabilities` sub-tree is modelled; unknown keys are rejected so a typo
+/// (`capabilites:`) fails loudly rather than silently minting nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeRequires {
+    #[serde(default)]
+    pub capabilities: RuntimeCapabilityRequirements,
+}
+
+/// The `requires.capabilities` sub-tree. Today only `callbacks` exists;
+/// future surfaces (`actions`, `network`, …) are added here, keeping the
+/// callback-token authority distinct from other requirement classes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCapabilityRequirements {
+    #[serde(default)]
+    pub callbacks: CallbackCapabilityRequirements,
+}
+
+/// Runtime callback-token authority an item requires: bundle-event and
+/// runtime-vault operations the daemon must mint into the callback token.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallbackCapabilityRequirements {
+    #[serde(default)]
+    pub bundle_events: Vec<BundleEventRequirement>,
+    #[serde(default)]
+    pub runtime_vault: Vec<RuntimeVaultRequirement>,
+}
+
+/// One bundle-event requirement: an event kind plus the operations the item
+/// needs on it. Operation names reuse [`BundleEventOperation`] so requirement
+/// and manifest declarations cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleEventRequirement {
+    pub event_kind: String,
+    pub operations: Vec<BundleEventOperation>,
+}
+
+/// One runtime-vault requirement: a namespace plus the operations the item
+/// needs on it. Operation names reuse [`RuntimeVaultOperation`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeVaultRequirement {
+    pub namespace: String,
+    pub operations: Vec<RuntimeVaultOperation>,
+}
+
+impl BundleEventRequirement {
+    /// The exact caps this requirement requests for `bundle_id`.
+    pub fn requested_caps<'a>(
+        &'a self,
+        bundle_id: &'a str,
+    ) -> impl Iterator<Item = String> + 'a {
+        self.operations
+            .iter()
+            .map(move |op| bundle_event_cap(op, bundle_id, &self.event_kind))
+    }
+}
+
+impl RuntimeVaultRequirement {
+    /// The exact caps this requirement requests for `bundle_id`.
+    pub fn requested_caps<'a>(
+        &'a self,
+        bundle_id: &'a str,
+    ) -> impl Iterator<Item = String> + 'a {
+        self.operations
+            .iter()
+            .map(move |op| runtime_vault_cap(op, bundle_id, &self.namespace))
+    }
+}
+
+/// The exact set of callback caps `reqs` requests for `bundle_id`.
+pub fn requested_runtime_caps(
+    reqs: &RuntimeCapabilityRequirements,
+    bundle_id: &str,
+) -> BTreeSet<String> {
+    let mut caps = BTreeSet::new();
+    for req in &reqs.callbacks.bundle_events {
+        caps.extend(req.requested_caps(bundle_id));
+    }
+    for req in &reqs.callbacks.runtime_vault {
+        caps.extend(req.requested_caps(bundle_id));
+    }
+    caps
+}
+
+/// Static, manifest-independent validation of an item's `requires:` block.
+///
+/// Parses the authored value into the typed shape (rejecting unknown keys,
+/// unknown operations, and raw `ryeos.*` strings via serde) and then enforces
+/// the structural rules a type alone cannot:
+///
+/// - non-empty `event_kind` / `namespace`,
+/// - non-empty `operations` arrays.
+///
+/// Deeper, trust-store-dependent checks (manifest subset, bundle-id segment
+/// grammar) belong to the launch path, not here.
+pub fn parse_runtime_requires(value: &Value) -> Result<RuntimeCapabilityRequirements, String> {
+    let requires: RuntimeRequires = serde_json::from_value(value.clone())
+        .map_err(|e| format!("malformed `requires` block: {e}"))?;
+    validate_runtime_capability_requirements(&requires.capabilities)?;
+    Ok(requires.capabilities)
+}
+
+/// Enforce the structural rules a type alone cannot: non-empty event
+/// kinds/namespaces and non-empty operation arrays. Shared by the launch
+/// parser and the graph/directive runtime parsers so both reject the same
+/// malformed requirements.
+pub fn validate_runtime_capability_requirements(
+    caps: &RuntimeCapabilityRequirements,
+) -> Result<(), String> {
+    for req in &caps.callbacks.bundle_events {
+        if req.event_kind.trim().is_empty() {
+            return Err("bundle_events entry has an empty `event_kind`".to_string());
+        }
+        if req.operations.is_empty() {
+            return Err(format!(
+                "bundle_events entry for '{}' must list at least one operation",
+                req.event_kind
+            ));
+        }
+    }
+    for req in &caps.callbacks.runtime_vault {
+        if req.namespace.trim().is_empty() {
+            return Err("runtime_vault entry has an empty `namespace`".to_string());
+        }
+        if req.operations.is_empty() {
+            return Err(format!(
+                "runtime_vault entry for '{}' must list at least one operation",
+                req.namespace
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// True when a user-composed grant could satisfy *any* capability the manifest
 /// runtime-authority minter can produce — i.e. it overlaps a `(verb, kind)`
 /// surface in [`AUTHORITY_SURFACES`], including wildcard forms (`*`, `ryeos.*`,
@@ -164,8 +328,9 @@ impl std::fmt::Display for ComposedGrantError {
             ComposedGrantError::Reserved { grant } => write!(
                 f,
                 "composed permission '{grant}' is reserved: bundle-event and runtime-vault \
-                 capabilities are runtime authority, minted only by a signed bundle manifest's \
-                 declaration — they cannot be granted via a `permissions:` block"
+                 capabilities are manifest-backed runtime requirements. Declare them under \
+                 `requires.capabilities.callbacks`, not `permissions:` — the signed manifest is \
+                 the authority upper bound and the item selects the subset it needs"
             ),
         }
     }
@@ -310,5 +475,103 @@ mod tests {
                 "expected reserved for {grant}, got {err:?}"
             );
         }
+    }
+
+    // ── requirement model ────────────────────────────────────────────
+
+    use serde_json::json;
+
+    #[test]
+    fn requirement_caps_match_canonical_wire_form() {
+        let reqs = parse_runtime_requires(&json!({
+            "capabilities": {
+                "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "arc_pattern_event", "operations": ["append", "scan"] }
+                    ],
+                    "runtime_vault": [
+                        { "namespace": "oauth", "operations": ["get"] }
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let caps = requested_runtime_caps(&reqs, "arc");
+        assert_eq!(
+            caps.into_iter().collect::<Vec<_>>(),
+            vec![
+                "ryeos.append.bundle-events.arc/arc_pattern_event".to_string(),
+                "ryeos.get.vault.arc/oauth".to_string(),
+                "ryeos.scan.bundle-events.arc/arc_pattern_event".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn absent_capabilities_request_nothing() {
+        // `requires:` with no capabilities sub-tree is valid and mints nothing.
+        let reqs = parse_runtime_requires(&json!({})).unwrap();
+        assert!(requested_runtime_caps(&reqs, "arc").is_empty());
+    }
+
+    #[test]
+    fn unknown_keys_fail_static_validation() {
+        for value in [
+            json!({ "capabilites": {} }),                       // top-level typo
+            json!({ "capabilities": { "callback": {} } }),      // callbacks typo
+            json!({ "capabilities": { "callbacks": {
+                "bundle_events": [ { "event_kind": "e", "operations": ["append"], "extra": 1 } ]
+            } } }),                                              // unknown entry field
+        ] {
+            assert!(
+                parse_runtime_requires(&value).is_err(),
+                "expected error for {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_operation_fails_static_validation() {
+        let value = json!({ "capabilities": { "callbacks": {
+            "bundle_events": [ { "event_kind": "e", "operations": ["frobnicate"] } ]
+        } } });
+        assert!(parse_runtime_requires(&value).is_err());
+    }
+
+    #[test]
+    fn empty_operations_fail_static_validation() {
+        let value = json!({ "capabilities": { "callbacks": {
+            "bundle_events": [ { "event_kind": "e", "operations": [] } ]
+        } } });
+        let err = parse_runtime_requires(&value).unwrap_err();
+        assert!(err.contains("at least one operation"), "got: {err}");
+
+        let value = json!({ "capabilities": { "callbacks": {
+            "runtime_vault": [ { "namespace": "oauth", "operations": [] } ]
+        } } });
+        let err = parse_runtime_requires(&value).unwrap_err();
+        assert!(err.contains("at least one operation"), "got: {err}");
+    }
+
+    #[test]
+    fn raw_cap_strings_fail_static_validation() {
+        // Authors must not paste `ryeos.*` strings under requires.
+        let value = json!({ "capabilities": { "callbacks": {
+            "bundle_events": ["ryeos.append.bundle-events.arc/arc_pattern_event"]
+        } } });
+        assert!(parse_runtime_requires(&value).is_err());
+    }
+
+    #[test]
+    fn empty_event_kind_or_namespace_fails() {
+        let value = json!({ "capabilities": { "callbacks": {
+            "bundle_events": [ { "event_kind": "", "operations": ["append"] } ]
+        } } });
+        assert!(parse_runtime_requires(&value).is_err());
+
+        let value = json!({ "capabilities": { "callbacks": {
+            "runtime_vault": [ { "namespace": "  ", "operations": ["get"] } ]
+        } } });
+        assert!(parse_runtime_requires(&value).is_err());
     }
 }
