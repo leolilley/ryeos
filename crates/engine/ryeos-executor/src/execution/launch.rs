@@ -223,6 +223,10 @@ pub enum BuildAndLaunchError {
         item_ref: String,
         secrets: Vec<MissingSecret>,
     },
+    /// A composed permission tried to self-grant manifest runtime authority
+    /// (bundle events / vault). Mapped to `DispatchError::CapabilityRejected`.
+    #[error("{reason}")]
+    CapabilityRejected { reason: String },
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -906,7 +910,19 @@ pub async fn build_and_launch(
     // without a permission model surface no `effective_caps` fact →
     // empty caps (deny-all). Runtimes consume `resolution.composed`
     // directly and never re-derive.
-    let effective_caps: Vec<String> = derive_effective_caps(&resolution.composed)
+    // Composed permissions are caller-declared input; `extra_effective_caps`
+    // are daemon-minted from the signed manifest. A composed grant must not
+    // overlap the manifest runtime-authority namespace (bundle events / vault):
+    // that authority is minted only from a signed manifest, never self-granted
+    // via `permissions:`. Reject while the two sources are still distinguishable,
+    // before they are unioned.
+    let composed_effective_caps = derive_effective_caps(&resolution.composed);
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
+        .map_err(|err| BuildAndLaunchError::CapabilityRejected {
+            reason: err.to_string(),
+        })?;
+
+    let effective_caps: Vec<String> = composed_effective_caps
         .into_iter()
         .chain(extra_effective_caps.iter().cloned())
         .collect::<BTreeSet<_>>()

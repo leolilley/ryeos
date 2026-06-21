@@ -78,13 +78,16 @@ impl Capability {
     }
 }
 
-/// Derive a canonical capability string from an executable ref.
+/// Build a canonical capability string `ryeos.<verb>.<kind>.<subject>`.
 ///
-/// `canonical_cap("service", "bundle/install", "execute")` →
-/// `"ryeos.execute.service.bundle/install"`
+/// The generic wire builder for every capability family — item-execution caps
+/// (`canonical_cap("service", "bundle/install", "execute")` →
+/// `"ryeos.execute.service.bundle/install"`) and daemon-minted runtime
+/// authority alike (callers in `ryeos_bundle::runtime_authority` build
+/// bundle-event / vault caps through this).
 ///
-/// Subject is the canonical bare item id verbatim, preserving `/`
-/// separators. `*` wildcards in grants match `/`.
+/// Subject is passed verbatim, preserving `/` separators. `*` wildcards in
+/// grants match `/`.
 pub fn canonical_cap(kind: &str, ref_path: &str, verb: &str) -> String {
     format!("ryeos.{}.{}.{}", verb, kind, ref_path)
 }

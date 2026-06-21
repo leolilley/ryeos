@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use ryeos_bundle::manifest::BundleEventOperation;
+use ryeos_bundle::runtime_authority::bundle_event_cap;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use ryeos_state::{BundleEventAppendRequest, BundleEventAppendResult, BundleEventRecord};
 use serde::{Deserialize, Serialize};
@@ -74,7 +76,7 @@ impl BundleEventService {
         authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
-            "append",
+            &BundleEventOperation::Append,
             &effective_bundle_id,
             &params.event_kind,
         )?;
@@ -106,7 +108,7 @@ impl BundleEventService {
         authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
-            "scan",
+            &BundleEventOperation::Scan,
             &effective_bundle_id,
             &params.event_kind,
         )?;
@@ -130,7 +132,7 @@ impl BundleEventService {
         authorize_bundle_event(
             authorizer,
             &cap.effective_caps,
-            "scan",
+            &BundleEventOperation::Scan,
             &effective_bundle_id,
             &params.event_kind,
         )?;
@@ -170,14 +172,21 @@ fn validate_bundle_identifiers(bundle_id: &str, event_kind: &str) -> anyhow::Res
 fn authorize_bundle_event(
     authorizer: &Authorizer,
     effective_caps: &[String],
-    verb: &str,
+    op: &BundleEventOperation,
     bundle_id: &str,
     event_kind: &str,
 ) -> anyhow::Result<()> {
-    let required = format!("ryeos.{verb}.bundle-events.{bundle_id}/{event_kind}");
+    let required = bundle_event_cap(op, bundle_id, event_kind);
     authorizer
         .authorize(effective_caps, &AuthorizationPolicy::require(&required))
-        .with_context(|| format!("missing required capability: {required}"))
+        .with_context(|| {
+            format!(
+                "missing required capability: {required} — bundle-event access is runtime \
+                 authority: declare `bundle_events:` for event kind '{event_kind}' in this \
+                 bundle's `.ai/manifest.source.yaml` and sign it (`ryeos bundle publish`). It \
+                 cannot be granted through a graph/directive `permissions:` block."
+            )
+        })
 }
 
 fn attribution_for_callback(cap: &CallbackCapability) -> ryeos_state::BundleEventAttribution {
@@ -229,7 +238,7 @@ mod tests {
         authorize_bundle_event(
             &authorizer,
             &cap.effective_caps,
-            "append",
+            &BundleEventOperation::Append,
             "example-bundle",
             "example_event",
         )

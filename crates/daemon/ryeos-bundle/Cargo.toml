@@ -7,6 +7,7 @@ edition = "2021"
 anyhow = { workspace = true }
 lillux = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

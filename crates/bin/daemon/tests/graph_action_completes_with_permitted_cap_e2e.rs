@@ -130,6 +130,26 @@ config:
     Ok(())
 }
 
+/// Plant a graph that tries to self-grant bundle-event runtime authority via
+/// `permissions:`. The daemon must reject this at launch, before the graph runs.
+fn plant_runtime_authority_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+permissions:
+  - ryeos.append.bundle-events.echo/some_event
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("reserved.yaml"), signed)?;
+    Ok(())
+}
+
 fn graph_thread_id<'a>(body: &'a Value, ctx: &str) -> &'a str {
     body.get("thread")
         .and_then(|thread| thread.get("thread_id"))
@@ -428,6 +448,66 @@ async fn graph_action_completes_with_permitted_cap() {
         "graph:flow",
         "greet",
         Some("ok"),
+    );
+}
+
+/// A graph whose `permissions:` names a manifest runtime-authority capability
+/// (bundle events / vault) must be refused at the cap-assembly boundary — that
+/// authority is minted only from a signed manifest, never self-granted. The
+/// daemon returns a typed `capability_rejected` (HTTP 400) at launch, before the
+/// graph runs at all (distinct from the in-run callback denial above).
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_with_runtime_authority_permission_rejected_at_launch() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_runtime_authority_graph(project.path(), &fixture.publisher)
+        .expect("plant runtime-authority graph");
+
+    let post_fut = h.post_execute(
+        "graph:reserved",
+        project.path().to_str().unwrap(),
+        serde_json::json!({}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("POST /execute timed out after 30s.\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+
+    // Typed rejection at launch → HTTP 400 `capability_rejected`, not a
+    // 200-with-error-envelope and not a 500.
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "self-granted runtime authority must be rejected at launch with 400; got {status}\nbody={body:#}"
+    );
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
+    assert!(
+        body_str.contains("capability_rejected") || body_str.contains("reserved"),
+        "expected capability_rejected/reserved in error body; got body={body:#}"
+    );
+    assert!(
+        body_str.contains("bundle-events.echo/some_event"),
+        "error must name the offending grant; got body={body:#}"
     );
 }
 
