@@ -142,6 +142,12 @@ struct GraphFile {
     config: GraphConfig,
     #[serde(default)]
     permissions: Vec<String>,
+    /// Structured runtime capability requirements (`requires.capabilities`).
+    /// Kept separate from `permissions`: these are manifest-backed runtime
+    /// callback requirements the daemon mints into the callback token, not
+    /// self-grantable action authority.
+    #[serde(default)]
+    requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +174,12 @@ pub struct GraphDefinition {
     /// runtime side keeps them visible for traceability + parity
     /// checks (see `main.rs` launch log).
     pub declared_permissions: Vec<String>,
+    /// Structured runtime capability requirements declared by the graph
+    /// (`requires.capabilities`). The daemon is the authority: it mints the
+    /// requested manifest-backed subset into the callback token at launch.
+    /// Retained here for traceability and static validation parity.
+    pub runtime_capability_requirements:
+        Option<ryeos_bundle::runtime_authority::RuntimeCapabilityRequirements>,
 }
 
 impl GraphDefinition {
@@ -175,6 +187,15 @@ impl GraphDefinition {
         let cleaned = lillux::signature::strip_signature_lines(raw);
         let definition_hash = lillux::cas::sha256_hex(cleaned.as_bytes());
         let file: GraphFile = serde_yaml::from_str(&cleaned)?;
+        let runtime_capability_requirements = match file.requires {
+            Some(requires) => {
+                let caps = requires.capabilities;
+                ryeos_bundle::runtime_authority::validate_runtime_capability_requirements(&caps)
+                    .map_err(|e| anyhow::anyhow!("invalid `requires.capabilities`: {e}"))?;
+                Some(caps)
+            }
+            None => None,
+        };
         let graph_id = if let Some(fp) = file_path {
             let stem = std::path::Path::new(fp)
                 .file_stem()
@@ -203,6 +224,7 @@ impl GraphDefinition {
             file_path: file_path.map(String::from),
             config: file.config,
             declared_permissions: file.permissions,
+            runtime_capability_requirements,
         })
     }
 }
@@ -415,6 +437,89 @@ config:
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert!(def.declared_permissions.is_empty());
+    }
+
+    /// `requires.capabilities.callbacks` parses into the structured
+    /// requirement field, kept separate from `declared_permissions`.
+    #[test]
+    fn requires_capabilities_parse_into_definition() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+requires:
+  capabilities:
+    callbacks:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: [append]
+      runtime_vault:
+        - namespace: oauth
+          operations: [get]
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        assert!(def.declared_permissions.is_empty());
+        let reqs = def.runtime_capability_requirements.expect("requirements parsed");
+        let caps = ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, "arc");
+        assert_eq!(
+            caps.into_iter().collect::<Vec<_>>(),
+            vec![
+                "ryeos.append.bundle-events.arc/arc_pattern_event".to_string(),
+                "ryeos.get.vault.arc/oauth".to_string(),
+            ]
+        );
+    }
+
+    /// A graph without `requires:` yields `None`, not an empty requirement.
+    #[test]
+    fn missing_requires_yields_none() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        assert!(def.runtime_capability_requirements.is_none());
+    }
+
+    /// Static validation runs at parse time: empty operation lists are
+    /// rejected by the runtime before the daemon ever sees the graph.
+    #[test]
+    fn requires_with_empty_operations_rejected() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+requires:
+  capabilities:
+    callbacks:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: []
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
+    }
+
+    /// Unknown keys under `requires` fail the strict typed parse.
+    #[test]
+    fn requires_with_unknown_key_rejected() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+requires:
+  capabilities:
+    callbacks:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: [append]
+          extra: nope
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 
     #[test]

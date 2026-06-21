@@ -62,6 +62,7 @@ fn extract_rule_value(
         ExtractionRule::PathStringSeq { key } => {
             RuleResult::StringSeq(extract_string_seq_from_value(parsed, key))
         }
+        ExtractionRule::PathValue { key } => RuleResult::Value(parsed.get(key).cloned()),
         ExtractionRule::RelativeDir => {
             // Derive from file's parent dir relative to the kind directory.
             // kind_directory is the kind's `directory` field (e.g. "knowledge").
@@ -100,6 +101,10 @@ fn extract_rule_value(
 enum RuleResult {
     String(Option<String>),
     StringSeq(Vec<String>),
+    /// A raw JSON value extracted verbatim from the parsed document — used for
+    /// structured metadata (e.g. a nested `requires:` mapping) that the
+    /// scalar/string-seq extractors cannot represent. Always routed to `extra`.
+    Value(Option<Value>),
 }
 
 /// Route an extracted value into the typed `ItemMetadata` slot named
@@ -133,7 +138,12 @@ fn assign_extracted_field(metadata: &mut ItemMetadata, field: &str, result: Rule
                 Value::Array(seq.into_iter().map(Value::String).collect()),
             );
         }
-        (_, RuleResult::String(None)) => {}
+        // Structured values always land in `extra` — no typed slot consumes a
+        // raw `Value` today. Absent values are dropped like the scalar case.
+        (other, RuleResult::Value(Some(v))) => {
+            metadata.extra.insert(other.to_string(), v);
+        }
+        (_, RuleResult::String(None)) | (_, RuleResult::Value(None)) => {}
     }
 }
 
@@ -193,6 +203,12 @@ pub enum ExtractionRule {
     Path { key: String },
     /// Extract a `Vec<String>` from a key path in the parsed document.
     PathStringSeq { key: String },
+    /// Extract a raw JSON value verbatim from a key path in the parsed
+    /// document. Unlike `Path`/`PathStringSeq`, the value keeps its full
+    /// structure (mappings, nested sequences) and is routed into
+    /// `metadata.extra`. Used for structured item metadata such as the
+    /// `requires:` runtime-capability requirements block.
+    PathValue { key: String },
     /// Derive the value from the file's parent directory path relative
     /// to the kind directory. For a file at
     /// `.ai/knowledge/ryeos/standard/scheduler/scheduler.md` with
@@ -335,6 +351,7 @@ pub fn validate_metadata_anchoring(
             let present = match &result {
                 RuleResult::String(s) => s.is_some(),
                 RuleResult::StringSeq(seq) => !seq.is_empty(),
+                RuleResult::Value(v) => v.is_some(),
             };
             if !present {
                 return Err(MetadataAnchoringError::MissingRequired {
@@ -360,6 +377,10 @@ pub fn validate_metadata_anchoring(
                 }
                 RuleResult::StringSeq(_) => {
                     // Schema parser rejects seq+match — defensive skip.
+                    continue;
+                }
+                RuleResult::Value(_) => {
+                    // Schema parser rejects value+match — defensive skip.
                     continue;
                 }
             };
@@ -1585,6 +1606,23 @@ fn parse_extraction_rules(
                     })?;
                 ExtractionRule::PathStringSeq { key }
             }
+            "path_value" => {
+                let key = rule_map
+                    .iter()
+                    .find_map(|(rk, rv)| {
+                        if rk.as_str() == Some("key") {
+                            rv.as_str().map(|s| s.to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} from=path_value requires `key`"
+                        ),
+                    })?;
+                ExtractionRule::PathValue { key }
+            }
             "relative_dir" => {
                 // Incompatible with `key:` and `match:`.
                 if rule_map.iter().any(|(rk, _)| rk.as_str() == Some("key")) {
@@ -1657,6 +1695,15 @@ fn parse_extraction_rules(
                         reason: format!(
                             "{display}: metadata.rules.{field} cannot declare \
                              `match` on a `path_string_seq` extractor — anchors \
+                             require a scalar value"
+                        ),
+                    });
+                }
+                if matches!(extractor, ExtractionRule::PathValue { .. }) {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} cannot declare \
+                             `match` on a `path_value` extractor — anchors \
                              require a scalar value"
                         ),
                     });
@@ -3372,6 +3419,90 @@ metadata:
         assert!(
             matches!(err, EngineError::SchemaLoaderError { ref reason }
                 if reason.contains("path_string_seq") && reason.contains("scalar")),
+            "expected scalar-anchor error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn path_value_extracts_structured_mapping_into_extra() {
+        // A nested mapping (e.g. a `requires:` block) is carried verbatim into
+        // `metadata.extra`, unlike the scalar/string-seq extractors.
+        let parsed = serde_json::json!({
+            "requires": {
+                "capabilities": {
+                    "callbacks": {
+                        "bundle_events": [
+                            { "event_kind": "arc_pattern_event", "operations": ["append"] }
+                        ]
+                    }
+                }
+            }
+        });
+        let mut rules = HashMap::new();
+        rules.insert(
+            "requires".to_string(),
+            anchor_rule(
+                ExtractionRule::PathValue {
+                    key: "requires".into(),
+                },
+                false,
+                None,
+            ),
+        );
+        let metadata =
+            apply_extraction_rules(&parsed, &rules, Path::new("/proj/.ai/graphs/g.yaml"), "graphs");
+        assert_eq!(
+            metadata.extra.get("requires"),
+            Some(&parsed["requires"]),
+            "structured value must be carried verbatim into extra"
+        );
+    }
+
+    #[test]
+    fn path_value_absent_key_inserts_nothing() {
+        let parsed = serde_json::json!({ "other": 1 });
+        let mut rules = HashMap::new();
+        rules.insert(
+            "requires".to_string(),
+            anchor_rule(
+                ExtractionRule::PathValue {
+                    key: "requires".into(),
+                },
+                false,
+                None,
+            ),
+        );
+        let metadata =
+            apply_extraction_rules(&parsed, &rules, Path::new("/proj/.ai/graphs/g.yaml"), "graphs");
+        assert!(!metadata.extra.contains_key("requires"));
+    }
+
+    #[test]
+    fn schema_rejects_match_on_path_value() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let yaml = "\
+location:
+  directory: tools
+formats:
+  - extensions: [\".py\"]
+    parser: parser:ryeos/core/python/tool-header
+    signature:
+      prefix: \"#\"
+metadata:
+  rules:
+    requires:
+      from: path_value
+      key: requires
+      match: path
+";
+        sign_and_write_schema(&tmp, "tool", yaml, &sk);
+
+        let err = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            matches!(err, EngineError::SchemaLoaderError { ref reason }
+                if reason.contains("path_value") && reason.contains("scalar")),
             "expected scalar-anchor error, got: {err:?}"
         );
     }

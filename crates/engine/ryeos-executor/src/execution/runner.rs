@@ -28,7 +28,7 @@ use ryeos_engine::protocol_vocabulary::{produce_env_value, EnvInjectionSource};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::compute_ttl;
-use ryeos_app::callback_token::effective_bundle_id_from_item_ref;
+use ryeos_app::callback_token::effective_bundle_id_for_request;
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::state::AppState;
@@ -585,6 +585,11 @@ fn mint_callback_env(
     caller_scopes: Vec<String>,
     provenance: ExecutionProvenance,
     item_ref: &str,
+    // Bundle identity for the token, derived once from the resolved canonical
+    // ref by the caller via `effective_bundle_id_for_request` so it matches the
+    // identity the runtime-cap minter used. `item_ref` stays the requested ref
+    // for provenance/display.
+    effective_bundle_id: Option<String>,
 ) -> Result<(HashMap<String, String>, String, String)> {
     let ttl = compute_ttl(duration_seconds);
     let cap = state.callback_tokens.generate_with_context(
@@ -593,7 +598,7 @@ fn mint_callback_env(
         ttl,
         effective_caps,
         provenance,
-        effective_bundle_id_from_item_ref(item_ref),
+        effective_bundle_id,
         Some(item_ref.to_string()),
     );
 
@@ -738,6 +743,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        effective_bundle_id_for_request(&params.resolved),
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -971,6 +977,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        effective_bundle_id_for_request(&params.resolved),
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -1650,6 +1657,7 @@ pub async fn run_existing_detached(
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        effective_bundle_id_for_request(&params.resolved),
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);

@@ -15,7 +15,7 @@ use super::limits::{
     load_limits_config,
 };
 use super::thread_meta::ThreadMeta;
-use ryeos_app::callback_token::{compute_ttl, effective_bundle_id_from_item_ref};
+use ryeos_app::callback_token::{compute_ttl, effective_bundle_id_for_request};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
@@ -675,7 +675,6 @@ pub struct BuildAndLaunchParams<'a> {
     pub parameters: &'a Value,
     pub metadata_required_secrets: &'a [String],
     pub required_envelope_fields: &'a [String],
-    pub extra_effective_caps: &'a [String],
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
@@ -694,7 +693,6 @@ pub async fn build_and_launch(
         parameters,
         metadata_required_secrets,
         required_envelope_fields,
-        extra_effective_caps,
         pre_minted_thread_id,
         previous_thread_id,
     } = params;
@@ -910,21 +908,33 @@ pub async fn build_and_launch(
     // without a permission model surface no `effective_caps` fact →
     // empty caps (deny-all). Runtimes consume `resolution.composed`
     // directly and never re-derive.
-    // Composed permissions are caller-declared input; `extra_effective_caps`
-    // are daemon-minted from the signed manifest. A composed grant must not
-    // overlap the manifest runtime-authority namespace (bundle events / vault):
-    // that authority is minted only from a signed manifest, never self-granted
-    // via `permissions:`. Reject while the two sources are still distinguishable,
-    // before they are unioned.
+    // Composed permissions are caller-declared input; the runtime callback caps
+    // minted below are daemon-derived from the signed manifest. A composed grant
+    // must not overlap the manifest runtime-authority namespace (bundle events /
+    // vault): that authority is minted only from a signed manifest, never
+    // self-granted via `permissions:`. Reject while the two sources are still
+    // distinguishable, before they are unioned.
     let composed_effective_caps = derive_effective_caps(&resolution.composed);
     ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
         .map_err(|err| BuildAndLaunchError::CapabilityRejected {
             reason: err.to_string(),
         })?;
 
+    // Manifest-backed runtime callback caps (bundle-events / runtime-vault) are
+    // minted from the *composed* `requires` block: for directives the
+    // extends-chain composer has already narrowed a child against its parent, so
+    // a child can never request more than the parent template. The signed
+    // bundle manifest remains the final upper bound (checked inside the minter).
+    let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
+        resolution.composed.composed.get("requires"),
+        resolved,
+        &engine.trust_store,
+    )
+    .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
+
     let effective_caps: Vec<String> = composed_effective_caps
         .into_iter()
-        .chain(extra_effective_caps.iter().cloned())
+        .chain(runtime_capability_caps)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -993,7 +1003,9 @@ pub async fn build_and_launch(
         ttl,
         effective_caps.clone(),
         child_provenance,
-        effective_bundle_id_from_item_ref(&resolved.item_ref),
+        // Same bundle identity the runtime-cap minter used (resolved canonical
+        // ref), so token-claimed caps and minted caps cannot diverge.
+        effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
     );
 

@@ -1633,8 +1633,10 @@ async fn dispatch_managed_subprocess(
         plan_context: ctx.plan_ctx.clone(),
     };
 
-    let extra_effective_caps = derive_manifest_runtime_caps(&resolved, ctx)?;
-
+    // Runtime callback caps (bundle-events / runtime-vault) are minted inside
+    // `build_and_launch` from the *composed* `requires` block — after the
+    // extends-chain composer has narrowed a child directive against its parent.
+    // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         executor_ref: &executor_ref,
@@ -1645,7 +1647,6 @@ async fn dispatch_managed_subprocess(
         parameters: &params,
         metadata_required_secrets: &resolved.resolved_item.metadata.required_secrets,
         required_envelope_fields: &verified_runtime.yaml.required_envelope_fields,
-        extra_effective_caps: &extra_effective_caps,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
     })
@@ -1995,81 +1996,123 @@ async fn dispatch_tool_subprocess(
     }
 }
 
+/// Mint the bundle-event / runtime-vault callback caps an item is entitled to.
+///
+/// Launch-time satisfaction of the item's runtime capability *requirement
+/// contract* (`requires.capabilities.callbacks`). `requires_value` is the raw
+/// `requires:` mapping from whichever source the caller trusts:
+///
+/// - **graph/directive (managed path):** the *composed* view, after the
+///   extends-chain composer has narrowed a child against its parent — so a
+///   child can never exceed the parent template.
+/// - **tool path:** the resolved item's extracted metadata (tools use the
+///   identity composer and never extend, so the leaf declaration is effective).
+///
+/// Semantics, regardless of source:
+///
+/// 1. Absent `requires:` → no caps. The signed manifest is an authority *upper
+///    bound*, never an automatic grant.
+/// 2. The requested subset must be backed by the signed generated manifest;
+///    requesting a cap the manifest does not declare fails launch.
+/// 3. Exactly the requested (manifest-backed) subset is minted.
+pub(crate) fn mint_runtime_capability_caps(
+    requires_value: Option<&Value>,
+    resolved: &ResolvedExecutionRequest,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<Vec<String>, String> {
+    // (1) Requirement contract. No `requires:` → no runtime callback authority.
+    let Some(requires_value) = requires_value else {
+        return Ok(Vec::new());
+    };
+    let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
+        .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
+    if reqs.callbacks.bundle_events.is_empty() && reqs.callbacks.runtime_vault.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Single source of truth for the bundle identity: the resolved canonical
+    // ref. The callback token's `effective_bundle_id` is stamped from this same
+    // value (see `effective_bundle_id_for_request`), so the caps minted here and
+    // the token that carries them can never claim different bundles.
+    let effective_bundle_id = ryeos_app::callback_token::effective_bundle_id_for_request(resolved)
+        .ok_or_else(|| {
+            "runtime capability requirements need a bundle-qualified item ref".to_string()
+        })?;
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
+        .map_err(|err| err.to_string())?;
+
+    // Deep, segment-grammar validation of each requested resource. The static
+    // shape (known keys, valid ops, non-empty arrays) was already enforced by
+    // `parse_runtime_requires`; this checks the bundle-id segment grammar that
+    // the cap-string scheme depends on.
+    for req in &reqs.callbacks.bundle_events {
+        ryeos_state::objects::validate_bundle_identifier("event_kind", &req.event_kind)
+            .map_err(|err| err.to_string())?;
+    }
+    for req in &reqs.callbacks.runtime_vault {
+        ryeos_app::vault::validate_runtime_vault_segment("namespace", &req.namespace)
+            .map_err(|err| err.to_string())?;
+    }
+
+    // (2) Authority upper bound = signed generated manifest. Requirements
+    // declared with no manifest backing them are a launch failure, not a
+    // silent mint-nothing.
+    let ai_dir = resolved_item_ai_dir(&resolved.resolved_item).ok_or_else(|| {
+        "runtime capability requirements declared but item has no containing `.ai` directory"
+            .to_string()
+    })?;
+    let manifest = ryeos_bundle::manifest::load_verified_manifest_yaml(&ai_dir, None, trust_store)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| {
+            "runtime capability requirements declared but no signed bundle manifest backs them"
+                .to_string()
+        })?;
+    if manifest.name != effective_bundle_id {
+        return Err(format!(
+            "runtime-cap manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
+            manifest.name, effective_bundle_id
+        ));
+    }
+
+    // Manifest-declared caps form the upper bound. Cap strings come from the
+    // manifest declarations' own constructors (`runtime_authority`), so the
+    // minter and the daemon callback services share one definition.
+    let mut manifest_caps = BTreeSet::new();
+    for decl in &manifest.bundle_events {
+        manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
+    }
+    for decl in &manifest.runtime_vault {
+        manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
+    }
+
+    // (3) Subset check + mint exactly the requested subset.
+    let requested =
+        ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, &effective_bundle_id);
+    let missing: Vec<String> = requested.difference(&manifest_caps).cloned().collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "requested runtime capabilities are not declared in the signed manifest \
+             (authority upper bound): {}",
+            missing.join(", ")
+        ));
+    }
+
+    Ok(requested.into_iter().collect())
+}
+
+/// Tool-path entry point: source the `requires` block from the resolved item's
+/// extracted metadata. Graph/directive mint from the composed/narrowed view at
+/// launch instead (see `build_and_launch`).
 fn derive_manifest_runtime_caps(
     resolved: &ResolvedExecutionRequest,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
-    let item_ref = resolved.resolved_item.canonical_ref.to_string();
-    let effective_bundle_id = ryeos_app::callback_token::effective_bundle_id_from_item_ref(
-        &item_ref,
+    mint_runtime_capability_caps(
+        resolved.resolved_item.metadata.extra.get("requires"),
+        resolved,
+        &ctx.engine.trust_store,
     )
-    .ok_or_else(|| {
-        DispatchError::InvalidRef(
-            item_ref.clone(),
-            "manifest runtime authority requires a bundle-qualified item ref".into(),
-        )
-    })?;
-    ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
-        .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
-
-    let Some(ai_dir) = resolved_item_ai_dir(&resolved.resolved_item) else {
-        return Ok(Vec::new());
-    };
-    let manifest =
-        ryeos_bundle::manifest::load_verified_manifest_yaml(&ai_dir, None, &ctx.engine.trust_store)
-            .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
-    let Some(manifest) = manifest else {
-        return Ok(Vec::new());
-    };
-    if manifest.bundle_events.is_empty() && manifest.runtime_vault.is_empty() {
-        return Ok(Vec::new());
-    }
-    if manifest.name != effective_bundle_id {
-        return Err(DispatchError::InvalidRef(
-            item_ref,
-            format!(
-                "runtime-cap manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
-                manifest.name, effective_bundle_id
-            ),
-        ));
-    }
-
-    // The cap strings come from the manifest declarations themselves
-    // (`runtime_authority` module), so the minter and the daemon callback
-    // services that *require* these caps share one constructor. The validation
-    // below stays here — it is a trust-boundary check on the signed manifest.
-    let mut caps = BTreeSet::new();
-    for decl in &manifest.bundle_events {
-        ryeos_state::objects::validate_bundle_identifier("event_kind", &decl.event_kind)
-            .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
-        if decl.operations.is_empty() {
-            return Err(DispatchError::InvalidRef(
-                resolved.item_ref.clone(),
-                format!(
-                    "bundle_events declaration for '{}' must list at least one operation",
-                    decl.event_kind
-                ),
-            ));
-        }
-        caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
-    }
-
-    for decl in &manifest.runtime_vault {
-        ryeos_app::vault::validate_runtime_vault_segment("namespace", &decl.namespace)
-            .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
-        if decl.operations.is_empty() {
-            return Err(DispatchError::InvalidRef(
-                resolved.item_ref.clone(),
-                format!(
-                    "runtime_vault declaration for '{}' must list at least one operation",
-                    decl.namespace
-                ),
-            ));
-        }
-        caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
-    }
-
-    Ok(caps.into_iter().collect())
+    .map_err(|reason| DispatchError::InvalidRef(resolved.item_ref.clone(), reason))
 }
 
 fn resolved_item_ai_dir(item: &ResolvedItem) -> Option<std::path::PathBuf> {
@@ -2599,13 +2642,15 @@ metadata:
         resolved
     }
 
-    #[test]
-    fn manifest_runtime_caps_derive_exact_self_bundle_caps() {
-        let bundle = tempdir().join("example-bundle");
-        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
+    /// Build a `metadata.extra` map carrying a `requires:` block (the value is
+    /// the content of `requires:`, i.e. `{capabilities: {callbacks: …}}`).
+    fn requires_extra(
+        requires: serde_json::Value,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        std::collections::HashMap::from([("requires".to_string(), requires)])
+    }
+
+    const SELF_BUNDLE_MANIFEST: &str = r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
@@ -2617,34 +2662,57 @@ bundle_events:
 runtime_vault:
   - namespace: oauth
     operations: [put, get, delete, list]
-"#,
-        );
+"#;
+
+    #[test]
+    fn requirement_mints_exact_requested_subset() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
+        // Manifest is the upper bound ([append, scan] + full vault); the item
+        // selects only `append` and vault `get`.
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ],
+                    "runtime_vault": [
+                        { "namespace": "oauth", "operations": ["get"] }
+                    ]
+                } }
+            })),
+        );
 
         let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
         assert_eq!(
             caps,
             vec![
                 "ryeos.append.bundle-events.example-bundle/example_event".to_string(),
-                "ryeos.delete.vault.example-bundle/oauth".to_string(),
                 "ryeos.get.vault.example-bundle/oauth".to_string(),
-                "ryeos.list.vault.example-bundle/oauth".to_string(),
-                "ryeos.put.vault.example-bundle/oauth".to_string(),
-                "ryeos.scan.bundle-events.example-bundle/example_event".to_string(),
-            ]
+            ],
+            "only the requested subset is minted, not the full manifest authority"
         );
     }
 
     #[test]
-    fn manifest_runtime_caps_empty_without_signed_declarations() {
+    fn no_requirement_mints_nothing_even_with_manifest_authority() {
         let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
         let ctx = test_execution_context(bundle.clone());
+        // No `requires:` → manifest authority is an upper bound, never an
+        // automatic grant.
         let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
         assert!(derive_manifest_runtime_caps(&resolved, &ctx)
             .unwrap()
             .is_empty());
+    }
 
+    #[test]
+    fn requirement_not_backed_by_manifest_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
         write_signed_manifest(
             &bundle.join(ryeos_engine::AI_DIR),
             r#"name: example-bundle
@@ -2653,20 +2721,84 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events: []
+bundle_events:
+  - event_kind: example_event
+    operations: [append]
 "#,
         );
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        let ctx = test_execution_context(bundle.clone());
+        // Manifest grants only `append`; the item requests `scan`.
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["scan"] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("not declared in the signed manifest"),
+            "got: {err}"
+        );
     }
 
     #[test]
-    fn manifest_runtime_caps_reject_manifest_namespace_mismatch_when_declared() {
+    fn requirement_runtime_vault_subset_semantics() {
         let bundle = tempdir().join("example-bundle");
-        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "runtime_vault": [
+                        { "namespace": "oauth", "operations": ["get", "put"] }
+                    ]
+                } }
+            })),
+        );
+        let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
+        assert_eq!(
+            caps,
+            vec![
+                "ryeos.get.vault.example-bundle/oauth".to_string(),
+                "ryeos.put.vault.example-bundle/oauth".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn requirement_without_signed_manifest_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("no signed bundle manifest"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn requirement_manifest_namespace_mismatch_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
         write_signed_manifest(
-            &ai_dir,
+            &bundle.join(ryeos_engine::AI_DIR),
             r#"name: other-bundle
 version: "0.1.0"
 description: test
@@ -2679,65 +2811,51 @@ bundle_events:
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ]
+                } }
+            })),
+        );
         let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("namespace mismatch"), "got: {err}");
     }
 
     #[test]
-    fn manifest_runtime_caps_reject_invalid_manifest_declarations() {
+    fn requirement_rejects_unsafe_requested_segments() {
         let bundle = tempdir().join("example-bundle");
-        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
 
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
-version: "0.1.0"
-description: test
-provides_kinds: []
-requires_kinds: []
-uses_kinds: []
-bundle_events:
-  - event_kind: ../bad
-    operations: [append]
-"#,
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "../bad", "operations": ["append"] }
+                    ]
+                } }
+            })),
         );
         let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
 
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
-version: "0.1.0"
-description: test
-provides_kinds: []
-requires_kinds: []
-uses_kinds: []
-bundle_events:
-  - event_kind: example_event
-    operations: []
-"#,
-        );
-        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
-        assert!(
-            err.to_string().contains("must list at least one operation"),
-            "got: {err}"
-        );
-
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
-version: "0.1.0"
-description: test
-provides_kinds: []
-requires_kinds: []
-uses_kinds: []
-runtime_vault:
-  - namespace: ../bad
-    operations: [get]
-"#,
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "runtime_vault": [
+                        { "namespace": "../bad", "operations": ["get"] }
+                    ]
+                } }
+            })),
         );
         let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(
@@ -2747,9 +2865,247 @@ runtime_vault:
     }
 
     #[test]
+    fn requirement_with_empty_operations_fails_static_validation() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": [] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one operation"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn bundle_identity_uses_resolved_canonical_ref_not_item_ref() {
+        // Regression guard for the cap/token identity split: the requested
+        // `item_ref` is deliberately diverged from the resolved canonical ref.
+        // Both the minted caps AND the callback token's effective_bundle_id must
+        // follow the *resolved canonical ref*, never the requested alias —
+        // otherwise caps would be minted under one bundle while the token claims
+        // another.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let mut resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "callbacks": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ]
+                } }
+            })),
+        );
+        // resolved_item.canonical_ref stays `example-bundle`; only the requested
+        // ref points at a different bundle.
+        resolved.item_ref = "tool:other-alias/send".to_string();
+
+        // Single source of truth: derived from the resolved canonical ref.
+        assert_eq!(
+            ryeos_app::callback_token::effective_bundle_id_for_request(&resolved).as_deref(),
+            Some("example-bundle"),
+            "token bundle identity must follow the resolved canonical ref, not item_ref"
+        );
+        // Caps are minted under that same identity.
+        let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()]
+        );
+    }
+
+    // Minimal kind schema exercising the metadata rail (the tool path): a
+    // `requires` rule using the `path_value` extractor under the identity
+    // composer. Tools never extend, so the leaf declaration is effective and
+    // metadata extraction is the carrier (graph/directive use the composed view).
+    const METADATA_RAIL_KIND_SCHEMA_BODY: &str = r##"category: "engine/kinds/tool"
+version: "1.0.0"
+location:
+  directory: tools
+resolution: []
+effective_trust:
+  include_references: false
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/runtime_v1
+  thread_profile:
+    name: tool_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    requires:
+      type: single
+      prim: mapping
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+    requires:
+      from: path_value
+      key: requires
+"##;
+
+    #[test]
+    fn requires_metadata_rail_extraction_to_caps_pipeline() {
+        use ryeos_engine::kind_registry::KindRegistry;
+
+        // 1. Load the kind schema through the REAL loader so `from: path_value`
+        //    is parsed into the extractor (not a hand-built rule).
+        let kinds_dir = tempdir();
+        let tool_dir = kinds_dir.join("tool");
+        fs::create_dir_all(&tool_dir).unwrap();
+        let signed = lillux::signature::sign_content(
+            METADATA_RAIL_KIND_SCHEMA_BODY,
+            &signing_key(),
+            "#",
+            None,
+        );
+        fs::write(tool_dir.join("tool.kind-schema.yaml"), signed).unwrap();
+        let ts = trust_store();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).expect("load kind schema");
+        let schema = kinds.get("tool").expect("tool kind registered");
+
+        // 2. A real item document carrying a `requires.capabilities.callbacks`
+        //    block (as a parser would produce it).
+        let item_yaml = r#"
+version: "1.0.0"
+category: example-bundle
+requires:
+  capabilities:
+    callbacks:
+      bundle_events:
+        - event_kind: example_event
+          operations: [append]
+"#;
+        let parsed: serde_json::Value = serde_yaml::from_str(item_yaml).unwrap();
+
+        // 3. REAL metadata extraction: the path_value rule carries the nested
+        //    `requires` mapping verbatim into metadata.extra.
+        let metadata = ryeos_engine::kind_registry::apply_extraction_rules(
+            &parsed,
+            &schema.extraction_rules,
+            std::path::Path::new("/proj/.ai/tools/example-bundle/play.yaml"),
+            schema.directory.as_str(),
+        );
+        assert!(
+            metadata.extra.contains_key("requires"),
+            "path_value rule must surface `requires` into metadata.extra"
+        );
+
+        // 4. Feed the *extracted* metadata into the minter together with a
+        //    signed manifest. No manual metadata.extra injection.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let mut resolved = resolved_tool(&bundle, "tool:example-bundle/play");
+        resolved.resolved_item.metadata = metadata;
+
+        // 5. Exact manifest-backed subset is derived end-to-end.
+        let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
+            "schema → extraction → manifest upper-bound → caps must yield the requested subset"
+        );
+    }
+
+    #[test]
+    fn edited_kind_schemas_carry_requires_on_the_right_rail() {
+        // Validates the ACTUAL repo schema edits. Only `tool` uses the metadata
+        // rail (`path_value`); graph + directive carry `requires` through the
+        // composed view, so they must NOT declare a `requires` metadata rule.
+        // Re-signs the live bodies with the test key so the stale on-disk
+        // signature (awaiting the final populate pass) does not block loading.
+        use ryeos_engine::kind_registry::{ExtractionRule, KindRegistry};
+
+        fn workspace_root() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|p| p.join("bundles").is_dir())
+                .expect("workspace root with bundles/ directory")
+                .to_path_buf()
+        }
+
+        let schemas = [
+            (
+                "graph",
+                "bundles/standard/.ai/node/engine/kinds/graph/graph.kind-schema.yaml",
+            ),
+            (
+                "tool",
+                "bundles/core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml",
+            ),
+            (
+                "directive",
+                "bundles/standard/.ai/node/engine/kinds/directive/directive.kind-schema.yaml",
+            ),
+        ];
+        let root = workspace_root();
+        let kinds_dir = tempdir();
+        for (kind, rel) in schemas {
+            let raw =
+                fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let body = lillux::signature::strip_signature_lines(&raw);
+            let signed = lillux::signature::sign_content(&body, &signing_key(), "#", None);
+            let dir = kinds_dir.join(kind);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("{kind}.kind-schema.yaml")), signed).unwrap();
+        }
+        let ts = trust_store();
+        let kinds =
+            KindRegistry::load_base(&[kinds_dir], &ts).expect("edited kind schemas load cleanly");
+
+        // Tool: metadata rail → `requires` extracted via path_value.
+        let tool = kinds.get("tool").expect("tool kind registered");
+        assert_eq!(
+            tool.extraction_rules.get("requires").map(|r| &r.extractor),
+            Some(&ExtractionRule::PathValue {
+                key: "requires".into()
+            }),
+            "tool must extract `requires` via path_value"
+        );
+
+        // Graph + directive: composed-view rail → NO `requires` metadata rule.
+        for kind in ["graph", "directive"] {
+            let schema = kinds.get(kind).unwrap_or_else(|| panic!("{kind} kind registered"));
+            assert!(
+                !schema.extraction_rules.contains_key("requires"),
+                "{kind} must NOT carry `requires` on the metadata rail (it uses the composed view)"
+            );
+        }
+    }
+
+    #[test]
     fn direct_tool_required_caps_do_not_become_callback_caps() {
         let bundle = tempdir().join("example-bundle");
         let ctx = test_execution_context(bundle.clone());
+        // `required_caps` is caller-side invoke authorization, not a runtime
+        // requirement — it must never mint callback caps.
         let resolved = resolved_tool_with_extra(
             &bundle,
             "tool:example-bundle/send",

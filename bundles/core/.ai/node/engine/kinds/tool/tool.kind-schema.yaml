@@ -44,6 +44,13 @@ composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
+  optional:
+    # Structured runtime capability requirements. The daemon mints the
+    # requested manifest-backed subset into the callback token at launch —
+    # this is NOT self-grantable authority like `required_caps`.
+    requires:
+      type: single
+      prim: mapping
 runtime:
   handlers:
     - type: config
@@ -70,6 +77,11 @@ runtime:
     # Ignored here (runtime block parser) so tool YAMLs may declare
     # it without triggering UnknownRuntimeBlock.
     - required_caps
+    # `requires` is the structured runtime-capability requirement block,
+    # extracted into metadata and consumed by the launch path to mint
+    # callback caps. Ignored here (runtime block parser) so tool YAMLs may
+    # declare it without triggering UnknownRuntimeBlock.
+    - requires
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare
@@ -112,3 +124,8 @@ metadata:
     required_caps:
       from: path_string_seq
       key: required_caps
+    # Carry the structured `requires:` block verbatim into metadata.extra so
+    # the launch path can mint the requested manifest-backed callback caps.
+    requires:
+      from: path_value
+      key: requires

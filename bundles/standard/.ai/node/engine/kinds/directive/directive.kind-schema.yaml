@@ -56,6 +56,13 @@ composer_config:
     - name: permissions
       strategy: narrow_against_parent_effective
       expect_value_type: mapping
+    # Structured runtime capability requirements. Narrowed against the parent
+    # exactly like `permissions`: a child directive can never request more
+    # callback authority than its parent template. The signed bundle manifest
+    # is still the final upper bound at launch.
+    - name: requires
+      strategy: narrow_runtime_requires_against_parent
+      expect_value_type: mapping
     - name: context
       strategy: dict_merge_string_seq_root_last
       expect_value_type: mapping
@@ -100,6 +107,14 @@ composed_value_contract:
     inputs:
       type: single
       prim: sequence
+    # Structured runtime capability requirements. Narrowed against the parent
+    # through `extends` (see composer_config) and bounded by the signed bundle
+    # manifest (the authority upper bound); the daemon mints the satisfied
+    # subset into the callback token at launch. Distinct from `permissions:`,
+    # which is tool-execution authority.
+    requires:
+      type: single
+      prim: mapping
 metadata:
   rules:
     name:

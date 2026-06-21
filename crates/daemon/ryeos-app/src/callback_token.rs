@@ -189,6 +189,20 @@ pub fn effective_bundle_id_from_item_ref(item_ref: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Single source of truth for an execution request's effective bundle id.
+///
+/// Derived from the **resolved** canonical ref (the post-resolution identity of
+/// the item that will actually run), not the requested `item_ref` which may be
+/// an alias or non-canonical form. The runtime-cap minter, the manifest
+/// namespace check, and the callback token's `effective_bundle_id` MUST all use
+/// this one value so the minted caps and the token that carries them claim the
+/// same bundle identity.
+pub fn effective_bundle_id_for_request(
+    resolved: &crate::thread_lifecycle::ResolvedExecutionRequest,
+) -> Option<String> {
+    effective_bundle_id_from_item_ref(&resolved.resolved_item.canonical_ref.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadAuthState {
     pub token: String,
