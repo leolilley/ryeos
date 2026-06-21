@@ -150,3 +150,67 @@ fn knowledge_to_batch_error(err: KnowledgeError) -> BatchOpError {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(op: &str, payload: serde_json::Value) -> BatchOpEnvelope {
+        BatchOpEnvelope {
+            schema_version: 1,
+            kind: "knowledge".into(),
+            op: op.into(),
+            thread_id: "T-test".into(),
+            callback: ryeos_runtime::envelope::EnvelopeCallback {
+                socket_path: std::path::PathBuf::from("/tmp/cb.sock"),
+                token: "tat-test".into(),
+            },
+            project_root: std::path::PathBuf::from("/tmp/proj"),
+            payload,
+        }
+    }
+
+    #[test]
+    fn error_mapping_preserves_taxonomy() {
+        assert!(matches!(
+            knowledge_to_batch_error(KnowledgeError::NotImplemented { op: "snapshot".into(), phase: 5 }),
+            BatchOpError::NotImplemented { phase: 5, .. }
+        ));
+        assert!(matches!(
+            knowledge_to_batch_error(KnowledgeError::InvalidInput { op: "query".into(), reason: "x".into() }),
+            BatchOpError::InvalidInput { field: None, .. }
+        ));
+        // Variants without a dedicated wire mapping collapse to OpFailed.
+        assert!(matches!(
+            knowledge_to_batch_error(KnowledgeError::Internal("boom".into())),
+            BatchOpError::OpFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn dispatch_op_maps_op_error_to_failure_result() {
+        // A reserved op surfaces as a structured failure result, not a panic
+        // or a success — exercises BatchOpEnvelope -> BatchOpResult.
+        let result = dispatch_op(&envelope("snapshot", serde_json::json!({})));
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(BatchOpError::NotImplemented { phase: 5, .. })
+        ));
+
+        // Unknown op → InvalidInput failure.
+        let result = dispatch_op(&envelope("bogus", serde_json::json!({})));
+        assert!(!result.success);
+        assert!(matches!(result.error, Some(BatchOpError::InvalidInput { .. })));
+    }
+
+    #[test]
+    fn dispatch_op_success_result() {
+        let result = dispatch_op(&envelope(
+            "graph",
+            serde_json::json!({"items_by_ref": {}, "edges": [], "inputs": {}}),
+        ));
+        assert!(result.success, "error: {:?}", result.error);
+        assert!(result.output.is_some());
+    }
+}
