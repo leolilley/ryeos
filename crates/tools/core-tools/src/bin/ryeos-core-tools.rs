@@ -67,9 +67,40 @@ enum Cmd {
         #[arg(long)]
         owner: Option<String>,
 
+        /// Effective bundle id the generated manifest must carry — the first
+        /// bare-id segment of the bundle's item refs. Defaults to the source
+        /// directory's basename. Runtime authority requires this to equal the
+        /// bundle id used in item refs.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Report and skip items that fail to sign instead of aborting the
+        /// publish. The manifest is still generated; the result is a PARTIAL
+        /// publish (`partial: true`, `skipped_unsignable: [...]`) and the trust
+        /// doc is suppressed. Default: fail fast on the first unsignable item.
+        #[arg(long)]
+        skip_unsignable: bool,
+
         /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
         #[arg(long)]
         no_trust_doc: bool,
+    },
+
+    /// Generate + sign `.ai/manifest.yaml` from `.ai/manifest.source.yaml`
+    /// without running the full publish pipeline.
+    ///
+    /// Touches only the manifest — no CAS clean, no item signing, no trust
+    /// doc. The signing key is auto-resolved from the user root. Use when
+    /// iterating on manifest declarations (`bundle_events:`, `runtime_vault:`).
+    ManifestSign {
+        /// Bundle source root (directory containing `.ai/`).
+        bundle_source: Option<PathBuf>,
+
+        /// Effective bundle id the manifest must carry — the first bare-id
+        /// segment of the bundle's item refs. Defaults to the source
+        /// directory's basename.
+        #[arg(long)]
+        name: Option<String>,
     },
 
     /// Verify a bundle source tree without rewriting files.
@@ -429,14 +460,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             bundle_source,
             registry_roots,
             owner,
+            name,
+            skip_unsignable,
             no_trust_doc,
         } => run_build(
             bundle_source,
             registry_roots,
             owner,
+            name,
+            skip_unsignable,
             no_trust_doc,
             cli.stdin_json,
         ),
+        Cmd::ManifestSign { bundle_source, name } => {
+            run_manifest_sign(bundle_source, name, cli.stdin_json)
+        }
         Cmd::BundleVerify {
             source,
             registry_roots,
@@ -648,13 +686,15 @@ fn run_build(
     bundle_source: Option<PathBuf>,
     registry_roots: Vec<PathBuf>,
     owner: Option<String>,
+    name: Option<String>,
+    skip_unsignable: bool,
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let (bundle_source, registry_roots, owner, no_trust_doc) = if stdin_json {
+    let (bundle_source, registry_roots, owner, name, skip_unsignable, no_trust_doc) = if stdin_json {
         if bundle_source.is_some() {
             anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
         }
@@ -664,12 +704,21 @@ fn run_build(
             params.source,
             registry_roots,
             params.owner,
+            params.name,
+            params.skip_unsignable,
             params.no_trust_doc,
         )
     } else {
         let source = bundle_source
             .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
-        (source, registry_roots, owner, no_trust_doc)
+        (
+            source,
+            registry_roots,
+            owner,
+            name,
+            skip_unsignable,
+            no_trust_doc,
+        )
     };
 
     let key_path = roots::runtime_root()
@@ -706,11 +755,62 @@ fn run_build(
         signing_key,
         base_trust_store: Some(base_trust_store),
         owner,
+        name,
+        skip_unsignable,
         emit_trust_doc: !no_trust_doc,
     })?;
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn run_manifest_sign(
+    bundle_source: Option<PathBuf>,
+    name: Option<String>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    use ryeos_engine::roots;
+
+    let (bundle_source, name) = if stdin_json {
+        if bundle_source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
+        }
+        let params: BundleManifestSignParams = serde_json::from_value(read_stdin_json()?)?;
+        (params.source, params.name)
+    } else {
+        let source = bundle_source
+            .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
+        (source, name)
+    };
+
+    let key_path = roots::runtime_root()
+        .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
+        .operator_signing_key_path();
+    if !key_path.exists() {
+        anyhow::bail!(
+            "operator signing key not found at {} — run `ryeos init` first",
+            key_path.display()
+        );
+    }
+    let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+        .with_context(|| format!("load signing key from {}", key_path.display()))?;
+
+    let source_path = canonical_bundle_source(&bundle_source)?;
+    let report = ryeos_tools::actions::manifest_sign::manifest_sign(
+        &source_path,
+        name.as_deref(),
+        &signing_key,
+    )?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct BundleManifestSignParams {
+    source: PathBuf,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 fn resolve_publish_owner(
@@ -736,6 +836,10 @@ struct BundlePublishParams {
     registry_roots: Vec<PathBuf>,
     #[serde(default)]
     owner: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    skip_unsignable: bool,
     #[serde(default)]
     no_trust_doc: bool,
 }
