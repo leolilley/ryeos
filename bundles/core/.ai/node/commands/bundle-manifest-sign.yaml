@@ -1,0 +1,12 @@
+# ryeos:signed:2026-06-21T03:25:57Z:2c2665c64e6a3291d07364b77c584b2117c0083e507c65ce224ef8d00e2a8d87:ErUxIlAFeA+nhOkiZu4Oc8Y5VBxFgnkjO71nagIkuFtSHWdIkK3Lur2XlzqqT2qRVWoUp9PNTpKmamhebDx/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- bundle
+- manifest-sign
+description: Generate and sign a bundle manifest without a full publish
+forms:
+- slots:
+  - field: source
+    matcher: path
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/manifest-sign

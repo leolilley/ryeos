@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T23:56:20Z:e38c15a9081402d85f393186b3ecc39052a55f4561658eee2c336c3ca0d58939:sAG2TwkxLLWI0RgmiVq6AC20SmFNzvPIhbtR29AyS1rgrzJzx702N8SnqjGZ+5+KKt72sZd6EP6m/jm1nGxvDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-21T03:25:57Z:4b8181f324e6137899905ac6f8ed39e19240785df47fd881c0f2c887e7a8a0d2:w6864v9iLlbFTzYSX8pG24BEzBmtONS3IoqbU0VRROmxV2dUghXHN8CfI+8sfpkw0jxmwxqlczT7qyD0kEKtCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.publish
 availability: offline
@@ -9,5 +9,7 @@ schema:
   registry_root: string?
   registry_roots: array?
   owner: string?
+  name: string?
+  skip_unsignable: boolean?
   no_trust_doc: boolean?
 description: "Full bundle release pipeline: bootstrap-sign, rebuild CAS, sign items, generate manifest, emit trust doc. When no registry root is supplied, installed bundle roots are used as dependencies."
