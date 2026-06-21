@@ -1254,6 +1254,36 @@ mod tests {
         assert!(cfg.validate("").is_ok());
     }
 
+    #[test]
+    fn local_openai_provider_config_parses_with_empty_auth() {
+        // Loads the actual shipped `local-openai.yaml` (signature stripped)
+        // and asserts the offline contract: no auth env var required, the
+        // OpenAI-compatible family, a localhost base_url, and a valid
+        // config. This is the "model resolution accepts a provider with
+        // empty auth and does not require an env var" guarantee.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/local-openai.yaml",
+        );
+        let raw = std::fs::read_to_string(&path).expect("read local-openai.yaml");
+        let body = lillux::signature::strip_signature_lines(&raw);
+        let cfg: ProviderConfig =
+            serde_yaml::from_str(&body).expect("parse local-openai provider config");
+
+        assert!(
+            cfg.auth.env_var.is_none(),
+            "local provider must not require an API key env var"
+        );
+        assert!(cfg.auth.header_name.is_none());
+        assert!(matches!(cfg.family, ProtocolFamily::ChatCompletions));
+        assert!(cfg.base_url.starts_with("http://127.0.0.1"));
+        assert!(cfg.validate("local-openai").is_ok());
+
+        // No profiles → resolving any model yields the base config, still
+        // with empty auth.
+        let resolved = cfg.resolve_for_model("Qwen/Qwen2.5-7B-Instruct");
+        assert!(resolved.auth.env_var.is_none());
+    }
+
     /// Sign a YAML body with a throwaway test key and write the matching
     /// trusted-key TOML into the root's `.ai/config/keys/trusted` dir.
     /// Pass the operator app root (or the project root) — bundle roots
@@ -1278,6 +1308,46 @@ mod tests {
         std::fs::write(trust_dir.join("test.toml"), toml).expect("write trust");
 
         signed
+    }
+
+    #[test]
+    fn local_openai_config_loads_under_strict_verified_loader() {
+        // Exercise the REAL strict load path: the shipped `local-openai.yaml`
+        // body, signed + trust-pinned, must verify and parse as a
+        // ProviderConfig via `VerifiedLoader::load_config_strict_signed`
+        // (the security-critical path used in production), not just a raw
+        // serde_yaml::from_str. Uses a test signer because the path under
+        // test is the loader's verify+parse, not dev-key trust discovery.
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../bundles/standard/.ai/config/ryeos-runtime/model-providers/local-openai.yaml",
+        );
+        let raw = std::fs::read_to_string(&real).expect("read shipped local-openai.yaml");
+        let body = lillux::signature::strip_signature_lines(&raw);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = tmp.path().join("project");
+        let system = tmp.path().join("system");
+        let operator_root = tmp.path().join("app-root");
+        let cfg_subpath = ".ai/config/ryeos-runtime/model-providers/local-openai.yaml";
+        std::fs::create_dir_all(system.join(cfg_subpath).parent().unwrap()).expect("mkdir");
+        std::fs::create_dir_all(&project).expect("mkdir project");
+
+        let signed = sign_yaml_and_pin_trust(&body, &operator_root);
+        std::fs::write(system.join(cfg_subpath), signed).expect("write config");
+
+        let loader = VerifiedLoader::new(
+            project,
+            vec![system],
+            &operator_root.join(".ai/config/keys/trusted"),
+        );
+        let cfg: ProviderConfig = loader
+            .load_config_strict_signed("ryeos-runtime/model-providers/local-openai")
+            .expect("strict load must succeed for a trusted signer")
+            .expect("config file is present");
+
+        assert!(cfg.auth.env_var.is_none(), "offline provider requires no env var");
+        assert!(matches!(cfg.family, ProtocolFamily::ChatCompletions));
+        assert!(cfg.validate("local-openai").is_ok());
     }
 
     /// Regression for the v0.5.11 trust split-brain: provider preflight

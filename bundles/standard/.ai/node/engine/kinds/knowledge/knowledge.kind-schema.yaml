@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:05e70e58f40cba1ca85c944b6bcd08c20917e4dd9d8b6b72b2f8ac87a245925b:p32j8n6Y4iEbtZ3u1seE2Mh3/fgiGrEWKkZy03APvqP9HGXQ3dSShKHdLyw9Y3jrSPo6TXjNFKSXsNkzeiP3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-21T04:29:31Z:23e78f162cf8e3ad0cb571266cd1e94848deac5db53b948341645f04aea3a900:XefAxx1/CcgqN6UZqYmkvPI9ZiYA7telc/Rwi02VPULjJeSYkgPg7Oh4XnAEkGgUPOATeVZ9sSxZD5zA1r3TCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -41,6 +41,54 @@ execution:
           type: integer
           required: false
           default: 2000
+    # Read side. These ops do not mutate state (side_effects: none); the
+    # daemon builds the verified corpus (items_by_ref/edges) and the
+    # runtime computes over it.
+    - name: query
+      side_effects: none
+      dispatch: { via: runtime_registry }
+      scope: corpus
+      inputs:
+        query:
+          type: string
+          required: true
+        limit:
+          type: integer
+          required: false
+          default: 10
+        include_content:
+          type: boolean
+          required: false
+          default: false
+        filters:
+          type: object
+          required: false
+    - name: graph
+      side_effects: none
+      dispatch: { via: runtime_registry }
+      scope: corpus
+      inputs:
+        roots:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
+        depth:
+          type: integer
+          required: false
+          default: 3
+    - name: validate
+      side_effects: none
+      dispatch: { via: runtime_registry }
+      scope: corpus
+      inputs:
+        roots:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
   default_operation: compose
   thread_profile:
     name: knowledge_run

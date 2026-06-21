@@ -559,6 +559,22 @@ impl PartialEq for InputType {
 }
 impl Eq for InputType {}
 
+/// What item set an op operates over. The daemon uses this to decide
+/// whether to project a single resolved item (extends chain + references)
+/// or the whole verified corpus of the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpScope {
+    /// Operate on the single resolved item (the requested ref's extends
+    /// chain + references). The default — every existing op is single-root.
+    #[default]
+    SingleRoot,
+    /// Operate over every verified item of the kind across resolution
+    /// roots (e.g. knowledge `query`/`graph`/`validate`). The requested
+    /// ref authorizes/routes the call but does not bound the corpus.
+    Corpus,
+}
+
 /// A single operation declared on a kind's execution schema.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -566,6 +582,8 @@ pub struct OperationDecl {
     pub name: String,
     pub side_effects: SideEffectClass,
     pub dispatch: OperationDispatch,
+    #[serde(default)]
+    pub scope: OpScope,
     #[serde(default)]
     pub inputs: BTreeMap<String, InputDecl>,
 }
@@ -3723,5 +3741,48 @@ metadata:
         // Each kind retains its own directory
         assert_eq!(surf.directory, "surfaces");
         assert_eq!(cli.directory, "clients");
+    }
+
+    #[test]
+    fn shipped_knowledge_schema_declares_read_ops() {
+        // The shipped standard knowledge kind schema must parse and declare
+        // the read-side operations (query/graph/validate) alongside the
+        // compose ops, so the daemon can dispatch them.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../bundles/standard/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
+        );
+        let content = std::fs::read_to_string(&path).expect("read knowledge kind schema");
+        let schema = parse_kind_schema_content("knowledge.kind-schema.yaml", &content)
+            .expect("knowledge kind schema must parse");
+
+        let ops: Vec<&str> = schema
+            .execution()
+            .expect("knowledge has an execution block")
+            .operations
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect();
+        for expected in ["compose", "compose_positions", "query", "graph", "validate"] {
+            assert!(ops.contains(&expected), "missing op `{expected}` in {ops:?}");
+        }
+
+        // Read ops are non-mutating and corpus-scoped; compose is single-root.
+        let op = |name: &str| -> OperationDecl {
+            schema
+                .execution()
+                .unwrap()
+                .operations
+                .iter()
+                .find(|o| o.name == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("op {name} missing"))
+        };
+        let query_op = op("query");
+        assert_eq!(query_op.side_effects, SideEffectClass::None);
+        assert!(query_op.inputs.contains_key("query"));
+        for name in ["query", "graph", "validate"] {
+            assert_eq!(op(name).scope, OpScope::Corpus, "{name} must be corpus-scoped");
+        }
+        assert_eq!(op("compose").scope, OpScope::SingleRoot);
     }
 }

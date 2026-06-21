@@ -6,6 +6,22 @@ use tokio::sync::Semaphore;
 use crate::context::ExecutionContext;
 use crate::model::{ErrorRecord, GraphNode, WalkContext};
 use ryeos_runtime::callback_client::CallbackClient;
+use ryeos_runtime::envelope::RuntimeCost;
+
+/// Fold one iteration's reported cost into the foreach node's running
+/// aggregate. The first cost-bearing iteration seeds the total so a
+/// foreach over pure tools stays `None`.
+fn add_cost(acc: &mut Option<RuntimeCost>, cost: Option<RuntimeCost>) {
+    let Some(c) = cost else { return };
+    let total = acc.get_or_insert(RuntimeCost {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_usd: 0.0,
+    });
+    total.input_tokens += c.input_tokens;
+    total.output_tokens += c.output_tokens;
+    total.total_usd += c.total_usd;
+}
 
 /// Outcome of running every iteration of a foreach node.
 ///
@@ -23,6 +39,8 @@ pub struct ForeachRun {
     /// Accumulated `assign` mutations to merge into graph state, as a
     /// single object. Empty object when the node has no `assign`.
     pub assign_delta: Value,
+    /// Aggregate cost across every iteration's native child, if any.
+    pub cost: Option<RuntimeCost>,
 }
 
 pub struct ForeachContext<'a> {
@@ -55,6 +73,7 @@ pub async fn run_foreach_sequential(
     } = ctx;
     let mut results = Vec::new();
     let mut errors = Vec::new();
+    let mut total_cost: Option<RuntimeCost> = None;
     // Accumulated assign deltas. Each iteration sees base state + the
     // deltas applied so far, so a later item can read an earlier item's
     // assign — but the mutations land in real state only via the caller.
@@ -95,7 +114,9 @@ pub async fn run_foreach_sequential(
         match crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx)
             .await
         {
-            Ok(crate::dispatch::ActionOutcome::Success(val)) => {
+            Ok(crate::dispatch::ActionOutcome::Success(success)) => {
+                let crate::dispatch::ActionSuccess { result: val, cost } = success;
+                add_cost(&mut total_cost, cost);
                 // Interpolate assign BEFORE committing the result, so an
                 // assign failure makes this item a Null/error — matching
                 // the parallel path's per-item failure semantics.
@@ -121,14 +142,15 @@ pub async fn run_foreach_sequential(
                     results.push(val);
                 }
             }
-            Ok(crate::dispatch::ActionOutcome::Failure(diagnostic)) => {
-                // Leaf ran but failed — record the diagnostic and push a
-                // null placeholder so result indices stay aligned with
-                // input items.
+            Ok(crate::dispatch::ActionOutcome::Failure(failure)) => {
+                // Leaf ran but failed — a failed native child may still have
+                // spent tokens, so fold its cost in before recording the
+                // diagnostic and a null placeholder (indices stay aligned).
+                add_cost(&mut total_cost, failure.cost);
                 errors.push(ErrorRecord {
                     step,
                     node: current_node.to_string(),
-                    error: format!("foreach sequential iteration failed: {diagnostic}"),
+                    error: format!("foreach sequential iteration failed: {}", failure.diagnostic),
                 });
                 results.push(Value::Null);
             }
@@ -147,12 +169,14 @@ pub async fn run_foreach_sequential(
         results,
         errors,
         assign_delta: Value::Object(delta),
+        cost: total_cost,
     }
 }
 
-/// Per-item result of a parallel foreach task: the leaf result plus the
-/// (already interpolated) assign object for that item, or a diagnostic.
-type ParallelItem = Result<(Value, Option<Value>), String>;
+/// Per-item result of a parallel foreach task: the leaf result, the
+/// (already interpolated) assign object for that item, and the iteration's
+/// reported cost — or a diagnostic.
+type ParallelItem = Result<(Value, Option<Value>, Option<RuntimeCost>), (String, Option<RuntimeCost>)>;
 
 pub async fn run_foreach_parallel(
     ctx: ForeachContext<'_>,
@@ -202,7 +226,8 @@ pub async fn run_foreach_parallel(
             Err(e) => {
                 drop(permit);
                 let diagnostic = format!("interpolation error in foreach action: {e:#}");
-                handles.push(tokio::spawn(async move { ParallelItem::Err(diagnostic) }));
+                // Interpolation failed before dispatch — no cost.
+                handles.push(tokio::spawn(async move { ParallelItem::Err((diagnostic, None)) }));
                 continue;
             }
         };
@@ -228,7 +253,8 @@ pub async fn run_foreach_parallel(
             )
             .await
             {
-                Ok(crate::dispatch::ActionOutcome::Success(val)) => {
+                Ok(crate::dispatch::ActionOutcome::Success(success)) => {
+                    let crate::dispatch::ActionSuccess { result: val, cost } = success;
                     let assign_val = if let Some(ref assign_expr) = assign {
                         let mut assign_ctx_map =
                             assign_ctx_base.as_object().cloned().unwrap_or_default();
@@ -237,22 +263,27 @@ pub async fn run_foreach_parallel(
                         match ryeos_runtime::interpolate(assign_expr, &assign_ctx) {
                             Ok(v) => Some(v),
                             Err(e) => {
-                                return ParallelItem::Err(format!(
-                                    "interpolation error in foreach assign: {e:#}"
+                                // Child succeeded (with cost); only assign
+                                // failed — carry the cost through.
+                                return ParallelItem::Err((
+                                    format!("interpolation error in foreach assign: {e:#}"),
+                                    cost,
                                 ));
                             }
                         }
                     } else {
                         None
                     };
-                    ParallelItem::Ok((val, assign_val))
+                    ParallelItem::Ok((val, assign_val, cost))
                 }
-                Ok(crate::dispatch::ActionOutcome::Failure(diagnostic)) => {
-                    ParallelItem::Err(format!("foreach parallel iteration failed: {diagnostic}"))
-                }
-                Err(e) => {
-                    ParallelItem::Err(format!("foreach parallel iteration dispatch failed: {e:#}"))
-                }
+                Ok(crate::dispatch::ActionOutcome::Failure(failure)) => ParallelItem::Err((
+                    format!("foreach parallel iteration failed: {}", failure.diagnostic),
+                    failure.cost,
+                )),
+                Err(e) => ParallelItem::Err((
+                    format!("foreach parallel iteration dispatch failed: {e:#}"),
+                    None,
+                )),
             }
         });
         handles.push(handle);
@@ -260,19 +291,23 @@ pub async fn run_foreach_parallel(
 
     let mut results = Vec::new();
     let mut errors = Vec::new();
+    let mut total_cost: Option<RuntimeCost> = None;
     // Merge assign deltas in input order for determinism.
     let mut delta: Map<String, Value> = Map::new();
     for handle in handles {
         match handle.await {
-            Ok(Ok((val, assign_val))) => {
+            Ok(Ok((val, assign_val, cost))) => {
+                add_cost(&mut total_cost, cost);
                 results.push(val);
                 if let Some(obj) = assign_val {
                     merge_object_into(&mut delta, &obj);
                 }
             }
-            Ok(Err(diagnostic)) => {
-                // Leaf, transport, or interpolation failure — record it and
-                // push a null placeholder so indices stay aligned.
+            Ok(Err((diagnostic, cost))) => {
+                // Leaf, transport, or interpolation failure — fold any cost
+                // the child spent before failing, then record the diagnostic
+                // and a null placeholder so indices stay aligned.
+                add_cost(&mut total_cost, cost);
                 errors.push(ErrorRecord {
                     step,
                     node: current_node.to_string(),
@@ -294,6 +329,7 @@ pub async fn run_foreach_parallel(
         results,
         errors,
         assign_delta: Value::Object(delta),
+        cost: total_cost,
     }
 }
 

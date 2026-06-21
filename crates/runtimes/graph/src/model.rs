@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ryeos_runtime::envelope::RuntimeCost;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {
@@ -224,6 +226,14 @@ pub struct GraphResult {
     pub errors: Option<Vec<ErrorRecord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Aggregate token/spend cost across every cost-bearing node in the
+    /// run. `None` when no node reported cost (e.g. a pure-tool graph).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
+    /// Per-node cost breakdown, one record per cost-bearing node. Empty
+    /// when no node reported cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_costs: Vec<NodeCostRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +242,18 @@ pub struct ErrorRecord {
     pub step: u32,
     pub node: String,
     pub error: String,
+}
+
+/// Cost attributed to a single node's action (a directive or sub-graph
+/// child that reported usage). Foreach nodes aggregate all iteration
+/// costs into one record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCostRecord {
+    pub node: String,
+    pub step: u32,
+    pub item_id: String,
+    pub cost: RuntimeCost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +269,9 @@ pub struct NodeReceipt {
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Cost reported by this node's native child, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
 }
 
 pub struct WalkContext {

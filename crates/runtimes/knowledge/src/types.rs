@@ -12,9 +12,9 @@ use thiserror::Error;
 pub enum KnowledgeRequest {
     Compose(ComposePayload),
     ComposePositions(ComposeContextPayload),
-    Query(serde_json::Value),
-    Graph(serde_json::Value),
-    Validate(serde_json::Value),
+    Query(QueryPayload),
+    Graph(GraphPayload),
+    Validate(ValidatePayload),
     Snapshot(serde_json::Value),
     Index(serde_json::Value),
 }
@@ -94,6 +94,131 @@ pub struct ComposeEdge {
 pub enum ComposeEdgeKind {
     Extends,
     References,
+}
+
+// -------- Query (BM25 lexical retrieval) --------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryPayload {
+    pub items_by_ref: BTreeMap<String, VerifiedItem>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdge>,
+    pub inputs: QueryInputs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryInputs {
+    pub query: String,
+    #[serde(default = "default_query_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub include_content: bool,
+    #[serde(default)]
+    pub filters: QueryFilters,
+}
+
+fn default_query_limit() -> usize {
+    10
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueryFilters {
+    #[serde(default)]
+    pub ref_prefixes: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryOutput {
+    pub query: String,
+    pub matches: Vec<QueryMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryMatch {
+    pub item_ref: String,
+    pub score: f64,
+    pub title: Option<String>,
+    pub excerpt: String,
+    pub metadata: serde_json::Value,
+    pub raw_content_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+// -------- Graph (adjacency / reachable subgraph) --------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphPayload {
+    pub items_by_ref: BTreeMap<String, VerifiedItem>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdge>,
+    pub inputs: GraphInputs,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphInputs {
+    /// Roots to traverse from. Empty means "every item is a root" — the
+    /// whole provided corpus is returned.
+    #[serde(default)]
+    pub roots: Vec<String>,
+    #[serde(default = "default_graph_depth")]
+    pub depth: usize,
+}
+
+fn default_graph_depth() -> usize {
+    3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphOutput {
+    /// Refs reachable from `roots` within `depth`, sorted.
+    pub nodes: Vec<String>,
+    /// Edges whose endpoints are both within the reachable set.
+    pub edges: Vec<GraphEdgeOut>,
+    pub roots: Vec<String>,
+    /// Edge endpoints that are not present in `items_by_ref`.
+    pub missing_refs: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdgeOut {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+}
+
+// -------- Validate (corpus + reference integrity) --------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatePayload {
+    pub items_by_ref: BTreeMap<String, VerifiedItem>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdge>,
+    // Op inputs are nested under `inputs` by the executor (it merges
+    // schema-validated op args under `payload.inputs`), so `roots` must
+    // live here — NOT at the top level, where it would be silently dropped.
+    #[serde(default)]
+    pub inputs: ValidateInputs,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ValidateInputs {
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateOutput {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub item_count: usize,
+    pub edge_count: usize,
 }
 
 // -------- ComposePositions (multi-root) --------
