@@ -1,0 +1,49 @@
+# ryeos:signed:2026-06-21T03:33:05Z:7f14fb7d24ee556f8095957e9a2ec998e93459b6318453802f0ce3321a00e94c:r6WGwteGe1G4QDY1Ck9aVtJIo5wrSCWRL+mgVUZqr2svhskPf749A8JR4g4533eWwvyN9afGrTZnbmGcUgz3Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos-runtime/model-providers"
+family: chat_completions
+# Offline/eval target: a local OpenAI-compatible server (vLLM, llama.cpp,
+# etc.). `auth: {}` means no credential header is sent, so this provider
+# works with internet disabled and no API key set.
+base_url: "http://127.0.0.1:8000/v1"
+auth: {}
+headers:
+  Content-Type: application/json
+schemas:
+  messages:
+    role_map: {user: user, assistant: assistant, system: system, tool: tool}
+    content_key: content
+    system_message: {mode: message_role}
+    tool_result:
+      role: tool
+      wrap_mode: direct
+      block_template:
+        tool_call_id: "{tool_call_id}"
+        content: "{content}"
+    tool_call_block_template:
+      id: "{id}"
+      type: function
+      function:
+        name: "{name}"
+        arguments: "{input_json}"
+  tools:
+    template:
+      type: function
+      function:
+        name: "{name}"
+        description: "{description}"
+        parameters: "{schema}"
+  streaming: {mode: delta_merge}
+body_template:
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
+  stream_options:
+    include_usage: true
+# Local open-weights models are free to run; report zero spend so cost
+# accounting still records token counts without inventing a dollar figure.
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+extra:
+  stream_url: "/chat/completions"

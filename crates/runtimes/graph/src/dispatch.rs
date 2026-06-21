@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use ryeos_runtime::callback_client::CallbackClient;
+use ryeos_runtime::envelope::RuntimeCost;
 
 use crate::context::ExecutionContext;
 
@@ -18,13 +19,58 @@ use crate::context::ExecutionContext;
 /// diagnostic instead.
 #[derive(Debug)]
 pub enum ActionOutcome {
-    /// Leaf succeeded; carries the bare, envelope-unwrapped result for
-    /// `${result.*}` interpolation.
-    Success(Value),
+    /// Leaf succeeded; carries the unwrapped result plus optional
+    /// accounting metadata parsed from the envelope.
+    Success(ActionSuccess),
     /// Leaf ran but reported failure (non-zero exit, runtime
-    /// `success:false`, timeout). Carries a human-readable diagnostic
-    /// including exit/status and a stderr excerpt where available.
-    Failure(String),
+    /// `success:false`, timeout). Carries a human-readable diagnostic and
+    /// any cost the child reported before failing.
+    Failure(ActionFailure),
+}
+
+/// A failed leaf dispatch: the diagnostic plus any cost the child spent
+/// before failing. A failed LLM directive can burn tokens and still
+/// return `success:false` with a non-null `cost`, so accounting must not
+/// drop it.
+#[derive(Debug)]
+pub struct ActionFailure {
+    /// Human-readable diagnostic including exit/status and a stderr
+    /// excerpt where available.
+    pub diagnostic: String,
+    /// Cost reported by a native child before it failed. `None` for
+    /// subprocess failures and transport failures (no child cost exists).
+    pub cost: Option<RuntimeCost>,
+}
+
+/// A successful leaf dispatch: the graph-visible result plus optional
+/// cost reported by a native child runtime.
+#[derive(Debug)]
+pub struct ActionSuccess {
+    /// Bare, envelope-unwrapped result for `${result.*}` interpolation.
+    ///
+    /// For a native directive return carrying declared `outputs`, this is
+    /// `{result: <inner>, outputs: <outputs>}` so a graph can reach the
+    /// directive's structured outputs as `${result.outputs.X}`. The inner
+    /// `result` of a directive return is the synthetic sentinel
+    /// `"directive_return"` — not meaningful graph data — so the outputs
+    /// are the payload. For every other leaf (subprocess, bare value,
+    /// native return with no outputs) this is the bare inner result and
+    /// the shape is unchanged.
+    pub result: Value,
+    /// Token/spend cost reported by a native child runtime (directive or
+    /// sub-graph) in the envelope's `cost` field. `None` for subprocess
+    /// leaves, cache hits, and bare values — cost is never invented.
+    pub cost: Option<RuntimeCost>,
+}
+
+impl ActionSuccess {
+    /// A success with no accounting metadata — subprocess leaves, bare
+    /// tool output, and cache hits. A cache hit replays a stored result
+    /// and must NOT re-bill cost, so the walker rebuilds the outcome with
+    /// this constructor.
+    pub fn bare(result: Value) -> Self {
+        Self { result, cost: None }
+    }
 }
 
 #[tracing::instrument(
@@ -88,10 +134,25 @@ pub async fn dispatch_action(
     // bare leaf value and chases continuations — `continuation_id`
     // (when present) lives at the leaf result's top level.
     match classify_envelope(response.result) {
-        ActionOutcome::Failure(diagnostic) => Ok(ActionOutcome::Failure(diagnostic)),
-        ActionOutcome::Success(leaf) => {
-            let followed = follow_continuation(client, &leaf, thread_id, project_path, 0).await?;
-            Ok(ActionOutcome::Success(followed))
+        ActionOutcome::Failure(failure) => Ok(ActionOutcome::Failure(failure)),
+        ActionOutcome::Success(mut success) => {
+            // Continuation chasing operates on the leaf result only;
+            // cost parsed from the immediate envelope rides along
+            // unchanged. (Per the cost-accounting contract, continuation/
+            // async child cost is not chased — only the immediate native
+            // child envelope's cost is trusted.)
+            //
+            // CONTRACT: a native return carrying meaningful `outputs` is
+            // wrapped to `{result, outputs}`, which would hide a top-level
+            // `continuation_id` from `follow_continuation`. This is safe
+            // only because a directive return with declared outputs is
+            // terminal (it never also requests continuation). Subprocess
+            // and bare leaves are not wrapped, so their `continuation_id`
+            // stays visible.
+            let followed =
+                follow_continuation(client, &success.result, thread_id, project_path, 0).await?;
+            success.result = followed;
+            Ok(ActionOutcome::Success(success))
         }
     }
 }
@@ -118,11 +179,11 @@ pub async fn dispatch_action(
 /// chasing reads it.
 fn classify_envelope(value: Value) -> ActionOutcome {
     let Some(obj) = value.as_object() else {
-        return ActionOutcome::Success(value);
+        return ActionOutcome::Success(ActionSuccess::bare(value));
     };
     if !obj.contains_key("result") {
         // No `result` key — not an envelope; bare leaf data.
-        return ActionOutcome::Success(value);
+        return ActionOutcome::Success(ActionSuccess::bare(value));
     }
 
     // Native-runtime envelope: `{success, status, result, outputs|warnings}`.
@@ -132,27 +193,89 @@ fn classify_envelope(value: Value) -> ActionOutcome {
     if is_native {
         let ok = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
         return if ok {
-            ActionOutcome::Success(inner_result(obj))
+            ActionOutcome::Success(ActionSuccess {
+                result: native_success_value(obj),
+                cost: parse_native_cost(obj),
+            })
         } else {
-            ActionOutcome::Failure(describe_native_failure(obj))
+            // A failed native child (e.g. a directive that burned tokens
+            // then errored) still reports `cost` — preserve it.
+            ActionOutcome::Failure(ActionFailure {
+                diagnostic: describe_native_failure(obj),
+                cost: parse_native_cost(obj),
+            })
         };
     }
 
     // Subprocess envelope: discriminated by `outcome_code`.
     if obj.contains_key("outcome_code") {
         return if subprocess_succeeded(obj) {
-            ActionOutcome::Success(inner_result(obj))
+            ActionOutcome::Success(ActionSuccess::bare(inner_result(obj)))
         } else {
-            ActionOutcome::Failure(describe_subprocess_failure(obj))
+            // Subprocess leaves carry no stable cost field.
+            ActionOutcome::Failure(ActionFailure {
+                diagnostic: describe_subprocess_failure(obj),
+                cost: None,
+            })
         };
     }
 
     // Has `result` but no envelope markers — bare tool data.
-    ActionOutcome::Success(value)
+    ActionOutcome::Success(ActionSuccess::bare(value))
 }
 
 fn inner_result(obj: &serde_json::Map<String, Value>) -> Value {
     obj.get("result").cloned().unwrap_or(Value::Null)
+}
+
+/// Graph-visible success value for a native-runtime envelope.
+///
+/// When the child declared structured `outputs` (a directive return), wrap
+/// as `{result: <inner>, outputs: <outputs>}` so the graph can read
+/// `${result.outputs.X}`. When there are no meaningful outputs (a native
+/// return, a sub-graph result, or a directive with no declared outputs —
+/// which emits `outputs: {}`), return the bare inner result so existing
+/// `${result.state}` / `${result.foo}` call sites keep working unchanged.
+fn native_success_value(obj: &serde_json::Map<String, Value>) -> Value {
+    let inner = inner_result(obj);
+    match obj.get("outputs").filter(|v| has_meaningful_outputs(v)) {
+        Some(outputs) => json!({ "result": inner, "outputs": outputs.clone() }),
+        None => inner,
+    }
+}
+
+/// Whether a native envelope's `outputs` carries declared data. A
+/// directive with no declared outputs emits `outputs: {}`; treating that
+/// (and `null`) as absent keeps the bare-result shape for the common case
+/// so `${result.foo}` does not silently become `${result.result.foo}`.
+fn has_meaningful_outputs(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Object(map) => !map.is_empty(),
+        _ => true,
+    }
+}
+
+/// Parse the optional `cost` field of a native envelope into a typed
+/// `RuntimeCost`. A missing or null `cost` yields `None` — cost is never
+/// invented for a child that did not report it. A present-but-malformed
+/// `cost` (contract drift between the child runtime and the cost schema)
+/// is logged loudly rather than silently dropped, so under-accounting is
+/// visible to operators.
+fn parse_native_cost(obj: &serde_json::Map<String, Value>) -> Option<RuntimeCost> {
+    let raw = obj.get("cost").filter(|v| !v.is_null())?;
+    match serde_json::from_value(raw.clone()) {
+        Ok(cost) => Some(cost),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                cost = %raw,
+                "native child reported a malformed `cost`; dropping it from graph \
+                 accounting (cost-schema contract drift)"
+            );
+            None
+        }
+    }
 }
 
 /// A subprocess leaf failed iff the envelope carries a non-null `error`
@@ -500,9 +623,20 @@ mod tests {
     // ── classify_envelope ──────────────────────────────────────────────
 
     fn expect_success(outcome: ActionOutcome) -> Value {
+        expect_action_success(outcome).result
+    }
+
+    fn expect_action_success(outcome: ActionOutcome) -> ActionSuccess {
         match outcome {
-            ActionOutcome::Success(v) => v,
-            ActionOutcome::Failure(d) => panic!("expected Success, got Failure: {d}"),
+            ActionOutcome::Success(s) => s,
+            ActionOutcome::Failure(f) => panic!("expected Success, got Failure: {}", f.diagnostic),
+        }
+    }
+
+    fn expect_action_failure(outcome: ActionOutcome) -> ActionFailure {
+        match outcome {
+            ActionOutcome::Failure(f) => f,
+            ActionOutcome::Success(s) => panic!("expected Failure, got Success: {:?}", s.result),
         }
     }
 
@@ -511,10 +645,7 @@ mod tests {
     }
 
     fn classify_failure(value: Value) -> String {
-        match classify_envelope(value) {
-            ActionOutcome::Failure(d) => d,
-            ActionOutcome::Success(v) => panic!("expected Failure, got Success: {v}"),
-        }
+        expect_action_failure(classify_envelope(value)).diagnostic
     }
 
     #[test]
@@ -542,6 +673,116 @@ mod tests {
             "warnings": []
         });
         assert_eq!(classify_success(envelope), json!({"state": {"x": 1}}));
+    }
+
+    #[test]
+    fn classify_native_runtime_success_with_outputs_exposes_outputs() {
+        // A directive return: inner `result` is the synthetic sentinel and
+        // the payload is in `outputs`. The graph-visible value must wrap
+        // both so `${result.outputs.recommendations}` resolves to an array.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": "directive_return",
+            "outputs": {"recommendations": ["a", "b"], "abstractions": {"k": 1}},
+            "warnings": []
+        });
+        assert_eq!(
+            classify_success(envelope),
+            json!({
+                "result": "directive_return",
+                "outputs": {"recommendations": ["a", "b"], "abstractions": {"k": 1}}
+            })
+        );
+    }
+
+    #[test]
+    fn classify_native_runtime_success_without_outputs_preserves_inner_result() {
+        // No `outputs` (null) → bare inner result, unchanged shape, so
+        // existing `${result.state}` graph→graph call sites keep working.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": {"state": {"x": 1}},
+            "outputs": null,
+            "warnings": []
+        });
+        assert_eq!(classify_success(envelope), json!({"state": {"x": 1}}));
+    }
+
+    #[test]
+    fn classify_native_runtime_parses_cost() {
+        // A native child reporting `cost` exposes it as typed RuntimeCost
+        // for graph accounting; the result is still the bare inner value.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": "directive_return",
+            "outputs": {"x": 1},
+            "cost": {"input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012},
+            "warnings": []
+        });
+        let success = expect_action_success(classify_envelope(envelope));
+        let cost = success.cost.expect("cost should be parsed");
+        assert_eq!(cost.input_tokens, 120);
+        assert_eq!(cost.output_tokens, 45);
+        assert!((cost.total_usd - 0.0012).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn classify_native_runtime_success_without_cost_is_none() {
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": {"state": {"x": 1}},
+            "outputs": null,
+            "warnings": []
+        });
+        assert!(expect_action_success(classify_envelope(envelope)).cost.is_none());
+    }
+
+    #[test]
+    fn classify_native_runtime_success_with_empty_outputs_preserves_inner_result() {
+        // A directive with NO declared outputs emits `outputs: {}`. That
+        // must NOT wrap the result — `${result.foo}` has to keep working,
+        // not silently become `${result.result.foo}`.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": {"foo": 1},
+            "outputs": {},
+            "warnings": []
+        });
+        assert_eq!(classify_success(envelope), json!({"foo": 1}));
+    }
+
+    #[test]
+    fn classify_native_runtime_failure_preserves_cost() {
+        // A failed LLM directive can burn tokens and still return
+        // `success:false` with non-null `cost` — accounting must keep it.
+        let envelope = json!({
+            "success": false,
+            "status": "error",
+            "result": {"error": "model refused"},
+            "outputs": null,
+            "cost": {"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008},
+            "warnings": []
+        });
+        let failure = expect_action_failure(classify_envelope(envelope));
+        assert!(failure.diagnostic.contains("error"));
+        let cost = failure.cost.expect("failed child cost should be preserved");
+        assert_eq!(cost.input_tokens, 80);
+    }
+
+    #[test]
+    fn classify_subprocess_failure_has_no_cost() {
+        let envelope = json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "boom"},
+            "artifacts": []
+        });
+        assert!(expect_action_failure(classify_envelope(envelope)).cost.is_none());
     }
 
     #[test]

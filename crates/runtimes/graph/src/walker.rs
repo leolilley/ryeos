@@ -18,8 +18,46 @@ use crate::persistence;
 use crate::validation::analyze_graph;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
+use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
+
+/// Running cost accumulator for a single graph execution. Owned by the
+/// walker behind a `Mutex` (like `warnings`) so cost can be recorded with
+/// `&self` from `commit_step` — the single state-mutation point.
+///
+/// SEMANTICS: the aggregate is a **rollup** — a node that dispatches a
+/// cost-bearing directive/sub-graph child includes that child's cost here,
+/// and the child thread is ALSO finalized with its own cost. Downstream
+/// billing/reporting must therefore NOT sum `final_cost` across a thread
+/// tree, or nested executions are double-counted. Parent graph cost is a
+/// rollup/display figure.
+#[derive(Default)]
+struct GraphAccounting {
+    /// Aggregate across every cost-bearing node. `None` until the first
+    /// node reports cost, so a pure-tool graph finalizes `cost: None`
+    /// rather than a misleading all-zeros record.
+    total: Option<RuntimeCost>,
+    /// One record per cost-bearing node, in execution order.
+    nodes: Vec<NodeCostRecord>,
+}
+
+impl GraphAccounting {
+    fn record(&mut self, node: &str, step: u32, item_id: &str, cost: RuntimeCost) {
+        let total = self
+            .total
+            .get_or_insert(RuntimeCost { input_tokens: 0, output_tokens: 0, total_usd: 0.0 });
+        total.input_tokens += cost.input_tokens;
+        total.output_tokens += cost.output_tokens;
+        total.total_usd += cost.total_usd;
+        self.nodes.push(NodeCostRecord {
+            node: node.to_string(),
+            step,
+            item_id: item_id.to_string(),
+            cost,
+        });
+    }
+}
 
 // ── F3 advanced path: StepOutcome + commit_step ─────────────────
 //
@@ -44,21 +82,31 @@ enum StepOutcome {
         next: Option<String>,
         cache_hit: bool,
         elapsed_ms: u64,
+        /// Cost reported by the leaf's native child (directive/sub-graph),
+        /// if any. `None` for subprocess leaves and cache hits.
+        cost: Option<RuntimeCost>,
     },
-    /// Action node ran but the leaf reported `status == "error"`.
+    /// Action node ran but the leaf reported `status == "error"`, OR the
+    /// leaf succeeded (possibly with cost) and graph post-processing
+    /// (`assign` interpolation) then failed. Carries any cost the child
+    /// spent before the error so accounting is not lost.
     LeafSoftError {
         item_id: String,
         error: String,
         next_on_error: NextOnError,
         elapsed_ms: u64,
+        cost: Option<RuntimeCost>,
     },
     /// Dispatch failed before the leaf returned anything (transport,
-    /// permission, env preflight).
+    /// permission, env preflight) — so normally no cost. The foreach
+    /// fail/redirect path reuses this variant and DOES carry the aggregate
+    /// cost already spent across completed iterations.
     DispatchHardError {
         item_id: Option<String>,
         error: String,
         next_on_error: NextOnError,
         elapsed_ms: u64,
+        cost: Option<RuntimeCost>,
     },
     /// Gate node: condition evaluation picked `target`.
     GateTaken { target: Option<String> },
@@ -73,6 +121,11 @@ enum StepOutcome {
         /// under the `continue` policy — fail/redirect never reach here).
         errors: Vec<ErrorRecord>,
         next: Option<String>,
+        /// `item_id` of the foreach node's action, for the aggregated
+        /// cost record.
+        item_id: String,
+        /// Aggregate cost across all iterations' native children, if any.
+        cost: Option<RuntimeCost>,
     },
     /// Terminal step — return node, max-steps exhausted, or fatal fail.
     Terminal {
@@ -118,6 +171,12 @@ pub struct Walker {
     /// taken at the top of the run loop. The lock is held for a
     /// single push and never across an `await`.
     warnings: Mutex<Vec<String>>,
+    /// Per-run token/spend accounting, accumulated as cost-bearing nodes
+    /// commit. Interior-mutable for the same reason as `warnings`: it is
+    /// updated with `&self` from `commit_step` and read once at terminal
+    /// finalization. The lock is held for a single record/read, never
+    /// across an `await`.
+    accounting: Mutex<GraphAccounting>,
 }
 
 struct RunGuard {
@@ -188,6 +247,7 @@ impl Walker {
             client,
             checkpoint,
             warnings: Mutex::new(Vec::new()),
+            accounting: Mutex::new(GraphAccounting::default()),
         }
     }
 
@@ -246,6 +306,8 @@ impl Walker {
             errors_suppressed: None,
             errors: None,
             error: None,
+            cost: None,
+            node_costs: Vec::new(),
         }
     }
 
@@ -264,6 +326,12 @@ impl Walker {
             file_path = ?self.graph.file_path,
             "graph loaded"
         );
+
+        // Reset per-run accounting so a Walker reused across multiple
+        // `execute` calls does not carry stale cost from a prior run.
+        // (NOTE: resume does not yet restore pre-resume cost — a resumed
+        // run reports only post-resume cost. See `write_checkpoint`.)
+        *self.accounting.lock().unwrap() = GraphAccounting::default();
 
         let mut guard = RunGuard { finalized: false };
 
@@ -297,6 +365,8 @@ impl Walker {
                 errors_suppressed: None,
                 errors: None,
                 error: Some(validation.errors.join("; ")),
+                cost: None,
+                node_costs: Vec::new(),
             };
             let completion = TerminalCompletion {
                 status: "failed".to_string(),
@@ -537,6 +607,8 @@ impl Walker {
                             ),
                             next_on_error: resolve_next_on_error(node, cfg),
                             elapsed_ms: start.elapsed().as_millis() as u64,
+                            // `over` failed before any iteration ran — no cost.
+                            cost: None,
                         };
                     }
                 };
@@ -600,7 +672,15 @@ impl Walker {
                     results,
                     errors,
                     assign_delta,
+                    cost,
                 } = foreach_run;
+                let foreach_item_id = node
+                    .action
+                    .as_ref()
+                    .and_then(|a| a.get("item_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 // Per-item failures obey the node/graph on_error policy,
                 // just like a single action node. Only `continue` keeps
@@ -610,11 +690,15 @@ impl Walker {
                     match resolve_next_on_error(node, cfg) {
                         NextOnError::PolicyContinue => {}
                         policy => {
+                            // Abandoning the foreach under fail/redirect must
+                            // still report cost already spent on completed
+                            // iterations before the failure.
                             return StepOutcome::DispatchHardError {
-                                item_id: None,
+                                item_id: Some(foreach_item_id),
                                 error: foreach_failure_summary(&current, &errors),
                                 next_on_error: policy,
                                 elapsed_ms: start.elapsed().as_millis() as u64,
+                                cost: cost.clone(),
                             };
                         }
                     }
@@ -628,6 +712,8 @@ impl Walker {
                     assign_delta,
                     errors,
                     next,
+                    item_id: foreach_item_id,
+                    cost,
                 }
             }
 
@@ -681,6 +767,7 @@ impl Walker {
                         next: Some(n),
                         cache_hit: false,
                         elapsed_ms: start.elapsed().as_millis() as u64,
+                        cost: None,
                     },
                     None => StepOutcome::Terminal {
                         status: "completed",
@@ -712,6 +799,9 @@ impl Walker {
             match ryeos_runtime::interpolate_action(&action, &ctx.as_context()) {
                 Ok(value) => value,
                 Err(err) => {
+                    // Interpolation failed before any dispatch — no cost, and
+                    // the interpolated item_id is unavailable, so report the
+                    // raw template item_id.
                     return StepOutcome::DispatchHardError {
                         item_id: Some(item_id),
                         error: format!(
@@ -719,11 +809,20 @@ impl Walker {
                         ),
                         next_on_error: resolve_next_on_error(node, cfg),
                         elapsed_ms: elapsed,
+                        cost: None,
                     };
                 }
             };
 
         let stripped_action = strip_none_values(&interpolated_action);
+        // The dispatched item_id is the interpolated one (item_id may itself
+        // contain `${...}`). Cost records and receipts for everything past
+        // this point use it, not the raw template id.
+        let dispatched_item_id = stripped_action
+            .get("item_id")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| item_id.clone());
 
         // Env preflight
         if let Err(env_err) =
@@ -731,10 +830,11 @@ impl Walker {
         {
             let err_msg = format!("env preflight failed: {env_err}");
             return StepOutcome::DispatchHardError {
-                item_id: Some(item_id),
+                item_id: Some(dispatched_item_id),
                 error: err_msg,
                 next_on_error: resolve_next_on_error(node, cfg),
                 elapsed_ms: elapsed,
+                cost: None,
             };
         }
 
@@ -747,7 +847,11 @@ impl Walker {
             let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
             if let Some(cached) = cache.lookup(&cache_key) {
                 cache_hit = true;
-                Ok(dispatch::ActionOutcome::Success(cached))
+                // A cache hit replays the stored result and must NOT
+                // re-bill cost — `bare` carries no cost.
+                Ok(dispatch::ActionOutcome::Success(
+                    dispatch::ActionSuccess::bare(cached),
+                ))
             } else {
                 match dispatch::dispatch_action(
                     &self.client,
@@ -758,12 +862,13 @@ impl Walker {
                 )
                 .await
                 {
-                    Ok(dispatch::ActionOutcome::Success(val)) => {
+                    Ok(dispatch::ActionOutcome::Success(success)) => {
                         // Only successful dispatches are cached — never a
                         // failure, which would otherwise replay a stale
-                        // error (or `null`) on the next run.
-                        cache.store(&cache_key, &val);
-                        Ok(dispatch::ActionOutcome::Success(val))
+                        // error (or `null`) on the next run. The cache
+                        // stores only the result value; cost is per-run.
+                        cache.store(&cache_key, &success.result);
+                        Ok(dispatch::ActionOutcome::Success(success))
                     }
                     Ok(failure) => Ok(failure),
                     Err(e) => Err(format!("{e:#}")),
@@ -788,18 +893,23 @@ impl Walker {
 
         match outcome {
             Err(err_detail) => StepOutcome::DispatchHardError {
-                item_id: Some(item_id),
+                item_id: Some(dispatched_item_id),
                 error: err_detail,
                 next_on_error: resolve_next_on_error(node, cfg),
                 elapsed_ms: elapsed,
+                // Transport/dispatch failed before the child returned — no cost.
+                cost: None,
             },
-            Ok(dispatch::ActionOutcome::Failure(diagnostic)) => StepOutcome::LeafSoftError {
-                item_id,
-                error: diagnostic,
+            Ok(dispatch::ActionOutcome::Failure(failure)) => StepOutcome::LeafSoftError {
+                item_id: dispatched_item_id,
+                error: failure.diagnostic,
                 next_on_error: resolve_next_on_error(node, cfg),
                 elapsed_ms: elapsed,
+                // A failed native child may have spent tokens — preserve it.
+                cost: failure.cost,
             },
-            Ok(dispatch::ActionOutcome::Success(val)) => {
+            Ok(dispatch::ActionOutcome::Success(success)) => {
+                let dispatch::ActionSuccess { result: val, cost } = success;
                 // Interpolate `assign` HERE (not in commit_step) so an
                 // interpolation failure becomes a node error that obeys
                 // on_error — never a suppressed error that merges the raw
@@ -814,13 +924,17 @@ impl Walker {
                         match ryeos_runtime::interpolate(assign_tpl, &assign_ctx.as_context()) {
                             Ok(interpolated) => Some(interpolated),
                             Err(e) => {
+                                // The child SUCCEEDED (and may have spent
+                                // tokens); only graph post-processing failed.
+                                // Carry the cost so it is still accounted.
                                 return StepOutcome::LeafSoftError {
-                                    item_id,
+                                    item_id: dispatched_item_id,
                                     error: format!(
                                         "interpolation error in `assign` for node `{current}`: {e:#}"
                                     ),
                                     next_on_error: resolve_next_on_error(node, cfg),
                                     elapsed_ms: elapsed,
+                                    cost,
                                 };
                             }
                         }
@@ -829,12 +943,13 @@ impl Walker {
                 };
                 let next = edges::evaluate_next_with_result(node, state, inputs, &val);
                 StepOutcome::ActionOk {
-                    item_id,
+                    item_id: dispatched_item_id,
                     result: val,
                     assign,
                     next,
                     cache_hit,
                     elapsed_ms: elapsed,
+                    cost,
                 }
             }
         }
@@ -925,12 +1040,24 @@ impl Walker {
                 ref assign_delta,
                 ref errors,
                 ref next,
+                ref item_id,
+                ref cost,
             } => {
                 // Foreach lifecycle: graph_step_started → (per-iteration
                 // graph_foreach_iteration events) → graph_step_completed →
                 // checkpoint
                 self.emit_graph_step_started(graph_run_id, step, current)
                     .await;
+
+                // Foreach aggregates all iteration child costs into one
+                // record for the node (per-iteration accounting can be
+                // added later if needed).
+                if let Some(c) = cost {
+                    self.accounting
+                        .lock()
+                        .unwrap()
+                        .record(current, step, item_id, c.clone());
+                }
 
                 // Emit per-iteration events from the aggregated results.
                 // Each result corresponds to one item that was iterated over.
@@ -1014,6 +1141,7 @@ impl Walker {
                 ref next,
                 cache_hit,
                 elapsed_ms,
+                ref cost,
             } => {
                 // R3 fence order:
                 // graph_step_started → tool_call_start → (dispatch in run_node_body) →
@@ -1033,6 +1161,16 @@ impl Walker {
                     merge_into(state, assign_val);
                 }
 
+                // Record node cost into the run accumulator before the
+                // receipt so the receipt carries it too. A cache hit or a
+                // subprocess leaf has no cost and contributes nothing.
+                if let Some(c) = cost {
+                    self.accounting
+                        .lock()
+                        .unwrap()
+                        .record(current, step, item_id, c.clone());
+                }
+
                 // Receipt
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
@@ -1043,6 +1181,7 @@ impl Walker {
                     cache_hit,
                     elapsed_ms,
                     error: None,
+                    cost: cost.clone(),
                 });
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
                     .await;
@@ -1086,8 +1225,10 @@ impl Walker {
                 ref error,
                 ref next_on_error,
                 elapsed_ms,
+                ref cost,
             } => {
-                // Soft error: dispatch succeeded but leaf returned error.
+                // Soft error: dispatch succeeded but leaf returned error, OR
+                // the child succeeded (with cost) and `assign` then failed.
                 // graph_step_started → tool_call_start → tool_call_result(error) → graph_step_completed(error) → [redirect/continue/fail]
                 self.emit_graph_step_started(graph_run_id, step, current)
                     .await;
@@ -1095,6 +1236,15 @@ impl Walker {
                     .await;
                 self.emit_tool_call_result(graph_run_id, step, current, item_id, "error")
                     .await;
+
+                // A cost-bearing child that then errored (or whose assign
+                // failed) still spent tokens — account for it.
+                if let Some(c) = cost {
+                    self.accounting
+                        .lock()
+                        .unwrap()
+                        .record(current, step, item_id, c.clone());
+                }
 
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
@@ -1105,6 +1255,7 @@ impl Walker {
                     cache_hit: false,
                     elapsed_ms,
                     error: Some(error.clone()),
+                    cost: cost.clone(),
                 });
 
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
@@ -1190,9 +1341,11 @@ impl Walker {
                 ref error,
                 ref next_on_error,
                 elapsed_ms,
+                ref cost,
             } => {
-                // Hard error: dispatch failed before leaf returned.
-                // graph_step_started → tool_call_start → tool_call_result(dispatch_failed) → graph_step_completed(error)
+                // Hard error: dispatch failed before leaf returned (no cost),
+                // OR a foreach abandoned under fail/redirect after spending
+                // cost on completed iterations (cost present).
                 let item_str = item_id.as_deref().unwrap_or("");
                 self.emit_graph_step_started(graph_run_id, step, current)
                     .await;
@@ -1211,6 +1364,13 @@ impl Walker {
                     .await;
                 }
 
+                if let Some(c) = cost {
+                    self.accounting
+                        .lock()
+                        .unwrap()
+                        .record(current, step, item_str, c.clone());
+                }
+
                 receipts.push(NodeReceipt {
                     node: current.to_string(),
                     step,
@@ -1220,6 +1380,7 @@ impl Walker {
                     cache_hit: false,
                     elapsed_ms,
                     error: Some(error.clone()),
+                    cost: cost.clone(),
                 });
 
                 self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
@@ -1378,6 +1539,14 @@ impl Walker {
             None => (success, status, output, error.map(String::from)),
         };
 
+        // Snapshot accounting accumulated across the run. Even a failed
+        // graph reports the cost spent before it failed — the accumulator
+        // holds every cost-bearing node that committed prior to terminal.
+        let (agg_cost, node_costs) = {
+            let acc = self.accounting.lock().unwrap();
+            (acc.total.clone(), acc.nodes.clone())
+        };
+
         let graph_result = GraphResult {
             success,
             graph_id: self.graph.graph_id.clone(),
@@ -1399,6 +1568,8 @@ impl Walker {
                 Some(std::mem::take(suppressed_errors))
             },
             error: error_owned,
+            cost: agg_cost,
+            node_costs,
         };
 
         // Emit GraphCompleted event.
@@ -1439,13 +1610,17 @@ impl Walker {
             .await;
         self.record_callback_warning("publish_artifact", r.map(|_| ()));
 
-        // Finalize thread.
+        // Finalize thread. `TerminalCompletion.cost` is raw JSON on the
+        // callback wire — serialize the typed aggregate.
         let completion = TerminalCompletion {
             status: if success { "completed" } else { "failed" }.to_string(),
             outcome_code: Some(if success { "success" } else { "failed" }.to_string()),
             result: graph_result.result.clone(),
             error: graph_result.error.as_ref().map(|e| json!(e)),
-            cost: None,
+            cost: graph_result
+                .cost
+                .as_ref()
+                .and_then(|c| serde_json::to_value(c).ok()),
         };
         let r = self.client.finalize_thread(completion).await;
         self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -1470,7 +1645,12 @@ impl Walker {
             .await
         {
             // Checkpoint failure is a hard error — resume correctness
-            // is contractual (R4).
+            // is contractual (R4). Still report cost spent before the
+            // failure so a partial run is accounted for.
+            let (agg_cost, node_costs) = {
+                let acc = self.accounting.lock().unwrap();
+                (acc.total.clone(), acc.nodes.clone())
+            };
             let graph_result = GraphResult {
                 success: false,
                 graph_id: self.graph.graph_id.clone(),
@@ -1484,6 +1664,8 @@ impl Walker {
                 errors_suppressed: None,
                 errors: None,
                 error: Some(format!("checkpoint write failed: {e}")),
+                cost: agg_cost,
+                node_costs,
             };
 
             let r = self
@@ -1507,7 +1689,10 @@ impl Walker {
                 outcome_code: Some("failed".to_string()),
                 result: None,
                 error: graph_result.error.as_ref().map(|e| json!(e)),
-                cost: None,
+                cost: graph_result
+                    .cost
+                    .as_ref()
+                    .and_then(|c| serde_json::to_value(c).ok()),
             };
             let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -1655,6 +1840,12 @@ impl Walker {
     }
 
     /// Write a local checkpoint using the daemon-provided CheckpointWriter.
+    ///
+    /// LIMITATION: the checkpoint persists cursor/step/state only — NOT the
+    /// `GraphAccounting` aggregate. A run resumed from a checkpoint
+    /// therefore reports only the cost spent AFTER resume; cost spent
+    /// before the checkpoint is not reconstructed. Persisting accounting
+    /// here (or rebuilding it from durable node receipts) is deferred.
     async fn write_checkpoint(
         &self,
         graph_run_id: &str,
@@ -2205,6 +2396,439 @@ config:
 
         assert!(result.success, "got: {:?}", result.error);
         assert_eq!(result.result, Some(json!(["first", "second"])));
+    }
+
+    #[tokio::test]
+    async fn graph_exposes_directive_outputs_and_cost() {
+        // P0/Phase A+C end-to-end: a directive node's declared `outputs`
+        // reach graph state via `${result.outputs.X}`, and the directive's
+        // reported cost lands in the aggregate + per-node accounting.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: reason
+  nodes:
+    reason:
+      node_type: action
+      action:
+        item_id: "directive:test/reason"
+      assign:
+        recommendations: "${result.outputs.recommendations}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+      output: "${state.recommendations}"
+"#;
+        let graph = make_graph(yaml);
+        // Native directive envelope: payload in `outputs`, cost reported.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": "directive_return",
+            "outputs": {"recommendations": ["a", "b"]},
+            "cost": {"input_tokens": 100, "output_tokens": 20, "total_usd": 0.001},
+            "warnings": []
+        });
+        let w = make_walker(graph, vec![envelope]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        // A1: structured outputs flowed through assign into the result.
+        assert_eq!(result.result, Some(json!(["a", "b"])));
+        // C: aggregate + per-node cost recorded.
+        let cost = result.cost.expect("graph cost should be populated");
+        assert_eq!(cost.input_tokens, 100);
+        assert_eq!(cost.output_tokens, 20);
+        assert_eq!(result.node_costs.len(), 1);
+        assert_eq!(result.node_costs[0].node, "reason");
+        assert_eq!(result.node_costs[0].item_id, "directive:test/reason");
+        assert_eq!(result.node_costs[0].cost.output_tokens, 20);
+    }
+
+    #[tokio::test]
+    async fn graph_aggregates_cost_across_two_directive_nodes() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: first
+  nodes:
+    first:
+      node_type: action
+      action:
+        item_id: "directive:test/a"
+      next:
+        type: unconditional
+        to: second
+    second:
+      node_type: action
+      action:
+        item_id: "directive:test/b"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let env = |i: u64, o: u64, usd: f64| {
+            json!({
+                "success": true,
+                "status": "completed",
+                "result": "directive_return",
+                "outputs": {"ok": true},
+                "cost": {"input_tokens": i, "output_tokens": o, "total_usd": usd},
+                "warnings": []
+            })
+        };
+        let w = make_walker(graph, vec![env(10, 5, 0.001), env(30, 7, 0.002)]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        let cost = result.cost.expect("aggregate cost");
+        assert_eq!(cost.input_tokens, 40);
+        assert_eq!(cost.output_tokens, 12);
+        assert!((cost.total_usd - 0.003).abs() < 1e-9);
+        assert_eq!(result.node_costs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn graph_without_child_cost_reports_no_cost() {
+        // A subprocess tool leaf carries no envelope `cost` — the graph
+        // must finalize `cost: None` rather than an all-zeros record.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: act
+  nodes:
+    act:
+      node_type: action
+      action:
+        item_id: "tool:test/echo"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        // Subprocess envelope: clean exit, no cost field.
+        let envelope = json!({
+            "outcome_code": "exit:0",
+            "result": {"ok": true},
+            "error": null,
+            "artifacts": []
+        });
+        let w = make_walker(graph, vec![envelope]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert!(result.cost.is_none(), "no child cost → no graph cost");
+        assert!(result.node_costs.is_empty());
+    }
+
+    // ── Phase C: failure-path / foreach / reset / cache cost accounting ──
+
+    fn native_envelope(success: bool, outputs: Value, cost: Option<(u64, u64, f64)>) -> Value {
+        let mut env = json!({
+            "success": success,
+            "status": if success { "completed" } else { "error" },
+            "result": if success { json!("directive_return") } else { json!({"error": "boom"}) },
+            "outputs": outputs,
+            "warnings": []
+        });
+        if let Some((i, o, usd)) = cost {
+            env["cost"] = json!({"input_tokens": i, "output_tokens": o, "total_usd": usd});
+        }
+        env
+    }
+
+    #[tokio::test]
+    async fn graph_failed_directive_child_reports_partial_cost() {
+        // A directive that burns tokens then fails (success:false + cost)
+        // must still surface its cost in the graph result and node_costs.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: reason
+  nodes:
+    reason:
+      node_type: action
+      action: {item_id: "directive:test/reason"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let env = native_envelope(false, Value::Null, Some((80, 0, 0.0008)));
+        let w = make_walker(make_graph(yaml), vec![env]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(!result.success);
+        let cost = result.cost.expect("failed child cost should be reported");
+        assert_eq!(cost.input_tokens, 80);
+        assert_eq!(result.node_costs.len(), 1);
+        assert_eq!(result.node_costs[0].node, "reason");
+    }
+
+    #[tokio::test]
+    async fn graph_cost_recorded_when_assign_fails_after_success() {
+        // Child succeeds (with cost), but `assign` interpolation fails →
+        // cost must still be accounted, not lost to the error path.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: reason
+  nodes:
+    reason:
+      node_type: action
+      action: {item_id: "directive:test/reason"}
+      assign: {x: "${result.outputs.missing}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let env = native_envelope(true, json!({"recommendations": ["a"]}), Some((50, 10, 0.0005)));
+        let w = make_walker(make_graph(yaml), vec![env]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(!result.success, "assign failure should fail the run");
+        let cost = result.cost.expect("cost from successful child must survive assign failure");
+        assert_eq!(cost.input_tokens, 50);
+    }
+
+    #[tokio::test]
+    async fn graph_on_error_continue_records_cost_of_failed_child() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: reason
+  on_error: continue
+  nodes:
+    reason:
+      node_type: action
+      action: {item_id: "directive:test/reason"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let env = native_envelope(false, Value::Null, Some((30, 0, 0.0003)));
+        let w = make_walker(make_graph(yaml), vec![env]);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "continue policy keeps the run successful");
+        assert_eq!(result.status, "completed_with_errors");
+        assert_eq!(result.cost.expect("cost recorded under continue").input_tokens, 30);
+    }
+
+    #[tokio::test]
+    async fn terminal_completion_and_runtime_carry_cost() {
+        // The cost aggregate must reach TerminalCompletion.cost (the
+        // callback wire), not just the in-process GraphResult.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: reason
+  nodes:
+    reason:
+      node_type: action
+      action: {item_id: "directive:test/reason"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let env = native_envelope(true, json!({"ok": true}), Some((100, 20, 0.001)));
+        let (w, recorder) = make_recording_walker(make_graph(yaml), vec![env], None);
+        let result = w.execute(json!({}), None).await;
+
+        assert!(result.success, "got: {:?}", result.error);
+        assert_eq!(result.cost.as_ref().unwrap().input_tokens, 100);
+        let costs = recorder.finalize_costs.lock().unwrap();
+        let last = costs.last().expect("a finalize_thread call").clone();
+        let cost = last.expect("TerminalCompletion.cost should be populated");
+        assert_eq!(cost["input_tokens"], 100);
+    }
+
+    #[tokio::test]
+    async fn foreach_aggregates_cost_including_failed_iteration_under_continue() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: continue
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: elem
+      action: {item_id: "directive:test/step"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        // iter 1 succeeds (cost 10), iter 2 fails (cost 5) → aggregate 15.
+        let results = vec![
+            native_envelope(true, json!({"ok": true}), Some((10, 0, 0.001))),
+            native_envelope(false, Value::Null, Some((5, 0, 0.0005))),
+        ];
+        let w = make_walker(make_graph(yaml), results);
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
+            .await;
+
+        assert!(result.success);
+        let cost = result.cost.expect("foreach aggregate cost");
+        assert_eq!(cost.input_tokens, 15);
+        assert_eq!(result.node_costs.len(), 1, "foreach aggregates to one record");
+        assert_eq!(result.node_costs[0].item_id, "directive:test/step");
+    }
+
+    #[tokio::test]
+    async fn parallel_foreach_aggregates_cost_across_iterations() {
+        // Parallel path: cost aggregation must not depend on iteration
+        // ordering. Sum is 15 regardless of which task drew which envelope.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  on_error: continue
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: elem
+      parallel: true
+      action: {item_id: "directive:test/step"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let results = vec![
+            native_envelope(true, json!({"ok": true}), Some((10, 0, 0.001))),
+            native_envelope(false, Value::Null, Some((5, 0, 0.0005))),
+        ];
+        let w = make_walker(make_graph(yaml), results);
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.cost.expect("parallel aggregate").input_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn foreach_reports_already_spent_cost_under_fail_policy() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: elem
+      action: {item_id: "directive:test/step"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let results = vec![
+            native_envelope(true, json!({"ok": true}), Some((10, 0, 0.001))),
+            native_envelope(false, Value::Null, Some((5, 0, 0.0005))),
+        ];
+        let w = make_walker(make_graph(yaml), results);
+        let result = w
+            .execute(json!({"inject_state": {"items": ["a", "b"]}}), None)
+            .await;
+
+        assert!(!result.success, "default fail policy aborts the foreach");
+        let cost = result.cost.expect("already-spent foreach cost on failure");
+        assert_eq!(cost.input_tokens, 15);
+    }
+
+    #[tokio::test]
+    async fn cost_accounting_resets_between_executes() {
+        // A Walker reused across execute() calls must not accumulate stale
+        // cost — each run reports only its own.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: reason
+  nodes:
+    reason:
+      node_type: action
+      action: {item_id: "directive:test/reason"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let results = vec![
+            native_envelope(true, json!({"ok": true}), Some((100, 20, 0.001))),
+            native_envelope(true, json!({"ok": true}), Some((100, 20, 0.001))),
+        ];
+        let w = make_walker(make_graph(yaml), results);
+        let r1 = w.execute(json!({}), None).await;
+        let r2 = w.execute(json!({}), None).await;
+
+        assert_eq!(r1.cost.unwrap().input_tokens, 100);
+        assert_eq!(
+            r2.cost.unwrap().input_tokens,
+            100,
+            "second run must not include first run's cost"
+        );
+    }
+
+    #[tokio::test]
+    async fn cost_bearing_cache_hit_does_not_rebill() {
+        // First run dispatches and bills cost; a second run hits the
+        // (disk-backed) cache, replays the stored result, and bills nothing.
+        let cache_dir = std::env::temp_dir()
+            .join("ryeos-graph-cache")
+            .join("cache_rebill/test");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+
+        let yaml = r#"
+version: "1.0.0"
+category: cache_rebill
+config:
+  start: reason
+  nodes:
+    reason:
+      node_type: action
+      cache: true
+      action: {item_id: "directive:test/reason"}
+      assign: {got: "${result.outputs.recommendations}"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      output: "${state.got}"
+"#;
+        let env = native_envelope(true, json!({"recommendations": ["a", "b"]}), Some((100, 20, 0.001)));
+        let w1 = make_walker(make_graph(yaml), vec![env]);
+        let r1 = w1.execute(json!({}), None).await;
+        assert!(r1.success, "got: {:?}", r1.error);
+        assert_eq!(r1.cost.expect("first run bills").input_tokens, 100);
+
+        // Second run: NO dispatch result supplied — success proves the
+        // cached result was replayed, and `cost: None` proves no re-bill.
+        let w2 = make_walker(make_graph(yaml), vec![]);
+        let r2 = w2.execute(json!({}), None).await;
+        assert!(r2.success, "cache hit should replay; got: {:?}", r2.error);
+        assert_eq!(r2.result, Some(json!(["a", "b"])), "cached result replayed");
+        assert!(r2.cost.is_none(), "cache hit must not re-bill cost");
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
     }
 
     #[tokio::test]
@@ -2780,6 +3404,7 @@ config:
             next: Some("done".to_string()),
             cache_hit: false,
             elapsed_ms: 42,
+            cost: None,
         };
         match outcome {
             StepOutcome::ActionOk {
@@ -2803,6 +3428,7 @@ config:
             error: "boom".to_string(),
             next_on_error: NextOnError::PolicyFail,
             elapsed_ms: 10,
+            cost: None,
         };
         match outcome {
             StepOutcome::LeafSoftError {
@@ -2824,6 +3450,7 @@ config:
             error: "permission denied".to_string(),
             next_on_error: NextOnError::Redirect("error_handler".to_string()),
             elapsed_ms: 1,
+            cost: None,
         };
         match outcome {
             StepOutcome::DispatchHardError {
@@ -2862,6 +3489,8 @@ config:
             assign_delta: json!({}),
             errors: Vec::new(),
             next: Some("done".to_string()),
+            item_id: "tool:test/echo".to_string(),
+            cost: None,
         };
         match outcome {
             StepOutcome::ForeachDone {
@@ -2936,6 +3565,8 @@ config:
         events: Mutex<Vec<(String, String, Value, String)>>,
         /// (thread_id, status) pairs from finalize_thread calls.
         finalizations: Mutex<Vec<(String, String)>>,
+        /// `TerminalCompletion.cost` (raw JSON) from finalize_thread calls.
+        finalize_costs: Mutex<Vec<Option<Value>>>,
         /// Collected artifacts from publish_artifact calls.
         artifacts: Mutex<Vec<Value>>,
     }
@@ -2946,6 +3577,7 @@ config:
                 dispatch_results: Mutex::new(dispatch_results),
                 events: Mutex::new(Vec::new()),
                 finalizations: Mutex::new(Vec::new()),
+                finalize_costs: Mutex::new(Vec::new()),
                 artifacts: Mutex::new(Vec::new()),
             }
         }
@@ -2979,6 +3611,10 @@ config:
             thread_id: &str,
             completion: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
+            self.finalize_costs
+                .lock()
+                .unwrap()
+                .push(completion.cost.clone());
             self.finalizations
                 .lock()
                 .unwrap()

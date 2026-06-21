@@ -8,9 +8,12 @@ mod budget;
 mod compose;
 mod dispatch;
 mod frontmatter;
+mod graph;
 mod ordering;
+mod query;
 mod render;
 mod types;
+mod validate;
 
 use std::io::Read;
 
@@ -146,6 +149,68 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_runtime::op_wire::BatchOpEnvelope;
+
+    fn envelope(op: &str, payload: serde_json::Value) -> BatchOpEnvelope {
+        BatchOpEnvelope {
+            schema_version: 1,
+            kind: "knowledge".into(),
+            op: op.into(),
+            thread_id: "T-test".into(),
+            callback: ryeos_runtime::envelope::EnvelopeCallback {
+                socket_path: std::path::PathBuf::from("/tmp/cb.sock"),
+                token: "tat-test".into(),
+            },
+            project_root: std::path::PathBuf::from("/tmp/proj"),
+            payload,
+        }
+    }
+
+    #[test]
+    fn parse_validate_reads_roots_from_inputs() {
+        // The executor nests op args under `payload.inputs`. The validate
+        // payload MUST pick up `inputs.roots` — a regression here silently
+        // dropped user-provided roots (top-level `roots` was ignored).
+        let env = envelope(
+            "validate",
+            serde_json::json!({
+                "items_by_ref": {},
+                "edges": [],
+                "inputs": { "roots": ["k/a", "k/b"] }
+            }),
+        );
+        let req = parse_request(&env).expect("validate envelope must parse");
+        match req {
+            KnowledgeRequest::Validate(p) => {
+                assert_eq!(p.inputs.roots, vec!["k/a".to_string(), "k/b".to_string()]);
+            }
+            other => panic!("expected Validate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_query_reads_inputs() {
+        let env = envelope(
+            "query",
+            serde_json::json!({
+                "items_by_ref": {},
+                "edges": [],
+                "inputs": { "query": "needle", "limit": 3 }
+            }),
+        );
+        match parse_request(&env).expect("query envelope must parse") {
+            KnowledgeRequest::Query(p) => {
+                assert_eq!(p.inputs.query, "needle");
+                assert_eq!(p.inputs.limit, 3);
+            }
+            other => panic!("expected Query, got {other:?}"),
+        }
+    }
 }
 
 /// Map a `KnowledgeError` into a structured `BatchOpError`,

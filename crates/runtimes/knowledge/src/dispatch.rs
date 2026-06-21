@@ -3,7 +3,10 @@
 use serde_json::Value;
 
 use crate::compose;
+use crate::graph;
+use crate::query;
 use crate::types::{KnowledgeError, KnowledgeRequest};
+use crate::validate;
 
 /// The single dispatch entry point. Called by main.rs after parsing
 /// the envelope.
@@ -17,18 +20,18 @@ pub fn dispatch(request: &KnowledgeRequest) -> Result<Value, KnowledgeError> {
             let out = compose::compose_positions(payload)?;
             serde_json::to_value(out).map_err(|e| KnowledgeError::Internal(e.to_string()))
         }
-        KnowledgeRequest::Query(_) => Err(KnowledgeError::NotImplemented {
-            op: "query".into(),
-            phase: 3,
-        }),
-        KnowledgeRequest::Graph(_) => Err(KnowledgeError::NotImplemented {
-            op: "graph".into(),
-            phase: 3,
-        }),
-        KnowledgeRequest::Validate(_) => Err(KnowledgeError::NotImplemented {
-            op: "validate".into(),
-            phase: 4,
-        }),
+        KnowledgeRequest::Query(payload) => {
+            let out = query::query(payload)?;
+            serde_json::to_value(out).map_err(|e| KnowledgeError::Internal(e.to_string()))
+        }
+        KnowledgeRequest::Graph(payload) => {
+            let out = graph::graph(payload)?;
+            serde_json::to_value(out).map_err(|e| KnowledgeError::Internal(e.to_string()))
+        }
+        KnowledgeRequest::Validate(payload) => {
+            let out = validate::validate(payload)?;
+            serde_json::to_value(out).map_err(|e| KnowledgeError::Internal(e.to_string()))
+        }
         KnowledgeRequest::Snapshot(_) => Err(KnowledgeError::NotImplemented {
             op: "snapshot".into(),
             phase: 5,

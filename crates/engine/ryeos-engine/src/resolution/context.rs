@@ -289,6 +289,85 @@ pub(crate) fn load_item_at(
     referenced_by: &str,
     step: ResolutionStepName,
 ) -> Result<LoadedItem, ResolutionError> {
+    let raw = load_item_raw(kinds, roots, trust_store, ref_, referenced_by, step)?;
+
+    let kind_schema = kinds
+        .get(&ref_.kind)
+        .ok_or_else(|| ResolutionError::StepFailed {
+            step,
+            reason: format!("unknown kind: {}", ref_.kind),
+        })?;
+    let source_format = kind_schema
+        .resolved_format_for(&raw.matched_ext)
+        .ok_or_else(|| ResolutionError::StepFailed {
+            step,
+            reason: format!("no source format for ext {}", raw.matched_ext),
+        })?;
+
+    let parsed = parsers
+        .dispatch(
+            &source_format.parser,
+            &raw.content,
+            Some(&raw.source_path),
+            &source_format.signature,
+        )
+        .map_err(|e| ResolutionError::StepFailed {
+            step,
+            reason: format!("parse {}: {e}", raw.source_path.display()),
+        })?;
+
+    // Path-anchoring validator. Runs at every load point — same
+    // contract as `Engine::resolve`. Daemon stays kind-agnostic; the
+    // schema declares which fields are required and anchored.
+    crate::kind_registry::validate_metadata_anchoring(
+        &parsed,
+        &kind_schema.extraction_rules,
+        &kind_schema.directory,
+        &raw.winner_ai_root,
+        &raw.source_path,
+    )
+    .map_err(|source| ResolutionError::MetadataAnchoringFailed {
+        item_ref: ref_.to_string(),
+        source: Box::new(source),
+    })?;
+
+    Ok(LoadedItem {
+        source_path: raw.source_path,
+        trust_class: raw.trust_class,
+        raw_content: raw.raw_content,
+        raw_content_digest: raw.raw_content_digest,
+        parsed,
+    })
+}
+
+/// The verified, signature-stripped bytes of a single item WITHOUT
+/// parsing its body or running metadata anchoring.
+///
+/// This is the part of item loading that does NOT depend on the body
+/// being well-formed: resolve the winner path, read, classify trust via
+/// Ed25519 verification, and strip+digest. Shared by [`load_item_at`]
+/// (which then parses + anchors) and the corpus projector (which must
+/// tolerate a malformed body so a bad item still reaches `validate`).
+pub(crate) struct RawLoadedItem {
+    pub source_path: PathBuf,
+    pub winner_ai_root: PathBuf,
+    pub matched_ext: String,
+    pub trust_class: TrustClass,
+    /// Original file content (signature intact) — the parser's input.
+    pub content: String,
+    /// Signature-stripped bytes shipped to runtimes.
+    pub raw_content: String,
+    pub raw_content_digest: String,
+}
+
+pub(crate) fn load_item_raw(
+    kinds: &KindRegistry,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    ref_: &CanonicalRef,
+    referenced_by: &str,
+    step: ResolutionStepName,
+) -> Result<RawLoadedItem, ResolutionError> {
     let kind_schema = kinds
         .get(&ref_.kind)
         .ok_or_else(|| ResolutionError::StepFailed {
@@ -346,58 +425,27 @@ pub(crate) fn load_item_at(
         None => TrustClass::Unsigned,
     };
 
-    let parsed = parsers
-        .dispatch(
-            &source_format.parser,
-            &content,
-            Some(&result.winner_path),
-            &source_format.signature,
-        )
-        .map_err(|e| ResolutionError::StepFailed {
-            step,
-            reason: format!("parse {}: {e}", result.winner_path.display()),
-        })?;
-
-    // Path-anchoring validator. Runs at every load point — same
-    // contract as `Engine::resolve`. Daemon stays kind-agnostic; the
-    // schema declares which fields are required and anchored.
-    crate::kind_registry::validate_metadata_anchoring(
-        &parsed,
-        &kind_schema.extraction_rules,
-        &kind_schema.directory,
-        &result.winner_ai_root,
-        &result.winner_path,
-    )
-    .map_err(|source| ResolutionError::MetadataAnchoringFailed {
-        item_ref: ref_.to_string(),
-        source: Box::new(source),
-    })?;
-
     // Strip the signature line so the envelope ships clean bytes —
     // runtimes don't need (or trust) the daemon-stripped signature.
-    //
-    // Envelope-aware: only strip lines that match THIS kind's
-    // signature envelope. A `# ryeos:signed:...` line in the body of a
-    // markdown directive (envelope `<!-- ... -->`) is NOT part of the
-    // bootstrap signature layer and must reach the runtime intact —
-    // identical to what the parser dispatcher sees.
+    // Envelope-aware: only strip lines matching THIS kind's signature
+    // envelope.
     let raw_content = lillux::signature::strip_signature_lines_with_envelope(
         &content,
         &source_format.signature.prefix,
         source_format.signature.suffix.as_deref(),
     );
-    // Hash the *post-strip* bytes — what the runtime actually parses
-    // and what the envelope binds to. Naming this `raw_content_digest`
-    // makes the relationship structural; the original-file digest was
-    // ambiguous and never re-verified by anyone downstream.
+    // Hash the *post-strip* bytes — what the runtime parses and what the
+    // envelope binds to.
     let raw_content_digest = crate::item_resolution::content_hash(&raw_content);
 
-    Ok(LoadedItem {
+    Ok(RawLoadedItem {
         source_path: result.winner_path,
+        winner_ai_root: result.winner_ai_root,
+        matched_ext: result.matched_ext,
         trust_class,
+        content,
         raw_content,
         raw_content_digest,
-        parsed,
     })
 }
 

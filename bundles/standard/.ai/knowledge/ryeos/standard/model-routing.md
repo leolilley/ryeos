@@ -1,11 +1,12 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:7696cae8abb16c9550e2b552ead5c19c89b2079b091bc2113643a7f4489f194d:3q2H42RthFxga4mBpWFf5pPURsdzuXuODChYycFWvInMS62eH3/WAn1aeZIfPuP3epBSNpFRx1888SBxJdtSAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-21T03:35:57Z:f4c9a5aa1581d47610ab08e210ac5554bfbcf0d885cf759ee43b2aa183669762:jEWYn6SHwWakQ56hdgr2crWO48xy1SbCoMxQTDlFTs1Ofs/mmCEL69Uo/QDa/NIrqz/MLfTN7o7qbEen9it5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [models, providers, routing, tiers, llm]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   How model routing works — the tier system, the routing table,
-  and the active provider configs (Anthropic, OpenAI, Zen).
+  and the active provider configs (Anthropic, OpenAI, Zen, local-openai),
+  including offline/local routing for internet-disabled eval.
 ---
 
 # Model Routing
@@ -71,11 +72,52 @@ Direct Anthropic Messages API access. Uses `x-api-key` auth,
 Direct OpenAI Chat Completions access. Uses `Bearer` token auth,
 standard `chat/completions` endpoint.
 
+### Local / offline (`config:ryeos-runtime/model-providers/local-openai`)
+An OpenAI-compatible server running on `localhost` (vLLM, llama.cpp,
+text-generation-webui, etc.), for environments where the internet is
+disabled — e.g. competition/eval mode. It uses the same
+`chat_completions` family and `delta_merge` streaming as OpenAI, but:
+
+- `base_url` points at `http://127.0.0.1:8000/v1`,
+- `auth: {}` — **no credential header is sent**, so no API key env var is
+  required and the directive adapter will not refuse the call,
+- `pricing` is zero (local weights cost nothing), so cost accounting still
+  records token counts without inventing a dollar figure.
+
+`stream_options.include_usage` is requested so token usage is reported in
+the final SSE chunk. If a particular server rejects that option, add a
+sibling `local-openai-basic` config without `stream_options`; generation
+still works, but usage/cost may be reported as zero.
+
 Prior provider tool descriptors were removed: the directive runtime now
 uses the runtime-level provider configs directly. Adding a provider means
 adding a signed config under `config/ryeos-runtime/model-providers/` and,
 if it should be selected by tier, pointing `model_routing.yaml` at that
 provider.
+
+## Offline eval: routing the same directives to a local model
+
+The point of tier-based routing is that a directive says `model: {tier:
+high}` (or relies on the default tier) and **never names a provider**. To
+run those exact directives offline, override only the routing table at the
+project level — no directive item changes:
+
+```yaml
+# config:ryeos-runtime/model_routing  (project-level override)
+category: "ryeos-runtime"
+tiers:
+  fast:         {provider: local-openai, model: Qwen/Qwen2.5-7B-Instruct,  context_window: 32768}
+  general:      {provider: local-openai, model: Qwen/Qwen2.5-7B-Instruct,  context_window: 32768}
+  high:         {provider: local-openai, model: Qwen/Qwen2.5-14B-Instruct, context_window: 32768}
+  orchestrator: {provider: local-openai, model: Qwen/Qwen2.5-14B-Instruct, context_window: 32768}
+```
+
+Dev (hosted, via Zen) → eval (local) becomes a routing-config swap, not a
+code or directive change. Note: provider configs are trust-enforced, so a
+project-root model-routing override that points at a provider is only
+honored under the daemon's project-config policy (e.g.
+`RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG=1`); otherwise sign the override into
+the active bundle.
 
 ## API Keys
 

@@ -52,7 +52,7 @@ use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl, TerminatorDecl,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl, OpScope, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -528,8 +528,8 @@ fn validate_op_inputs(inputs: Option<&Value>, op: &OperationDecl) -> Result<Valu
     for (name, decl) in &op.inputs {
         match inputs_map.get(name) {
             Some(val) => {
-                // Type-check the value against the declared type.
-                validate_input_type(val, &decl.ty, name, &op.name)?;
+                // Full declaration check: type + enum + min + array items.
+                validate_input_value(val, decl, name, &op.name)?;
             }
             None => {
                 if decl.required {
@@ -549,15 +549,25 @@ fn validate_op_inputs(inputs: Option<&Value>, op: &OperationDecl) -> Result<Valu
     Ok(Value::Object(inputs_map))
 }
 
-/// Check that a JSON value matches the declared `InputType`.
-fn validate_input_type(
+/// Validate a JSON value against a full input declaration: the declared
+/// type, plus the optional `enum`, `min`, and array-`items` constraints.
+/// Recurses into array elements so `array items: string` is enforced
+/// element-wise before the runtime is spawned.
+fn validate_input_value(
     val: &Value,
-    ty: &ryeos_engine::kind_registry::InputType,
+    decl: &ryeos_engine::kind_registry::InputDecl,
     name: &str,
     op_name: &str,
 ) -> Result<(), DispatchError> {
     use ryeos_engine::kind_registry::InputType;
-    let ok = match ty {
+
+    let err = |reason: String| DispatchError::OpInvalidInput {
+        op: op_name.to_string(),
+        reason,
+    };
+
+    // 1. Top-level type.
+    let ok = match decl.ty {
         InputType::String => val.is_string(),
         InputType::Integer => val.is_i64() || val.is_u64(),
         InputType::Boolean => val.is_boolean(),
@@ -565,11 +575,41 @@ fn validate_input_type(
         InputType::Object => val.is_object(),
     };
     if !ok {
-        return Err(DispatchError::OpInvalidInput {
-            op: op_name.to_string(),
-            reason: format!("input '{name}' expected type {:?}, got {}", ty, val),
-        });
+        return Err(err(format!(
+            "input '{name}' expected type {:?}, got {}",
+            decl.ty, val
+        )));
     }
+
+    // 2. enum (applies to string values).
+    if let Some(allowed) = &decl.enum_values {
+        if let Some(s) = val.as_str() {
+            if !allowed.iter().any(|a| a == s) {
+                return Err(err(format!(
+                    "input '{name}' must be one of {allowed:?}, got {s:?}"
+                )));
+            }
+        }
+    }
+
+    // 3. min (applies to integer values).
+    if let Some(min) = decl.min {
+        if let Some(n) = val.as_i64() {
+            if n < min {
+                return Err(err(format!("input '{name}' must be >= {min}, got {n}")));
+            }
+        }
+    }
+
+    // 4. Array element type, when declared via `items`.
+    if matches!(decl.ty, InputType::Array) {
+        if let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array()) {
+            for (i, el) in arr.iter().enumerate() {
+                validate_input_value(el, items_decl, &format!("{name}[{i}]"), op_name)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -577,43 +617,47 @@ fn validate_input_type(
 /// knowledge runtime. The daemon owns this conversion because it consumes
 /// an engine type (`ResolutionOutput`) and produces a knowledge type
 /// (`SingleRootPayload`).
-fn project_single_root(
-    resolution: &ryeos_engine::resolution::ResolutionOutput,
-) -> Result<ryeos_runtime::op_wire::SingleRootPayload, DispatchError> {
-    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, TrustClass, VerifiedItem};
-
-    let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
-        std::collections::BTreeMap::new();
-
-    // Helper to convert engine ResolvedAncestor → knowledge VerifiedItem.
-    let ancestor_to_verified = |a: &ryeos_engine::resolution::ResolvedAncestor| VerifiedItem {
+/// Convert an engine `ResolvedAncestor` (a verified, signature-checked
+/// item) into the wire `VerifiedItem`. Shared by single-root and corpus
+/// projection so trust-class and metadata mapping stay identical.
+fn verified_from(a: &ryeos_engine::resolution::ResolvedAncestor) -> ryeos_runtime::op_wire::VerifiedItem {
+    use ryeos_runtime::op_wire::{TrustClass, VerifiedItem};
+    VerifiedItem {
         raw_content: a.raw_content.clone(),
         raw_content_digest: a.raw_content_digest.clone(),
-        metadata: serde_json::to_value(serde_json::json!({
+        metadata: serde_json::json!({
             "source_path": a.source_path,
             "trust_class": format!("{:?}", a.trust_class),
             "requested_id": a.requested_id,
-        }))
-        .unwrap_or(Value::Null),
+        }),
         trust_class: match a.trust_class {
             ryeos_engine::resolution::TrustClass::TrustedBundle => TrustClass::TrustedBundle,
             ryeos_engine::resolution::TrustClass::TrustedProject => TrustClass::TrustedProject,
             ryeos_engine::resolution::TrustClass::UntrustedProject => TrustClass::UntrustedProject,
             ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Unsigned,
         },
-    };
+    }
+}
+
+fn project_single_root(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> Result<ryeos_runtime::op_wire::SingleRootPayload, DispatchError> {
+    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, VerifiedItem};
+
+    let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
+        std::collections::BTreeMap::new();
 
     // Root + ancestors.
     for resolved in std::iter::once(&resolution.root).chain(resolution.ancestors.iter()) {
         items_by_ref
             .entry(resolved.resolved_ref.clone())
-            .or_insert_with(|| ancestor_to_verified(resolved));
+            .or_insert_with(|| verified_from(resolved));
     }
     // Referenced items.
     for resolved in &resolution.referenced_items {
         items_by_ref
             .entry(resolved.resolved_ref.clone())
-            .or_insert_with(|| ancestor_to_verified(resolved));
+            .or_insert_with(|| verified_from(resolved));
     }
 
     // Build edges from extends chain + references.
@@ -660,6 +704,97 @@ fn project_single_root(
     })
 }
 
+/// Project the whole verified corpus of `kind` into `(items_by_ref, edges)`
+/// for a `scope: corpus` op (knowledge `query`/`graph`/`validate`).
+///
+/// Enumerates every item of the kind across resolution roots and projects
+/// each via the engine's TOLERANT corpus resolver
+/// (`resolve_item_for_corpus`). Differences from `project_single_root`:
+///   - there is no `root_ref` — the op operates over the whole set;
+///   - a malformed item is STILL included (with `raw_content`) so the
+///     runtime `validate` reports it — it is not silently dropped;
+///   - dangling reference edges are PRESERVED (targets not required to
+///     exist) so `graph`/`validate` can report them as `missing_refs`;
+///   - an integrity failure (bad signature, unreadable) is a HARD ERROR —
+///     a corpus op never presents a clean-looking partial corpus.
+///
+/// Generic over `kind`: the executor never names a specific kind here.
+fn project_corpus(
+    kind: &str,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, ryeos_runtime::op_wire::VerifiedItem>,
+        Vec<ryeos_runtime::op_wire::GraphEdge>,
+    ),
+    DispatchError,
+> {
+    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, VerifiedItem};
+
+    let kind_schema = ctx
+        .engine
+        .kinds
+        .get(kind)
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: "corpus op dispatched for a kind with no registered schema".into(),
+        })?;
+
+    let engine_roots = ctx
+        .engine
+        .resolution_roots(Some(request.project_path.to_path_buf()));
+    let effective_parsers = ctx
+        .engine
+        .effective_parser_dispatcher(Some(request.project_path))
+        .map_err(|e| {
+            DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}"))
+        })?;
+
+    let refs =
+        ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind);
+
+    let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
+        std::collections::BTreeMap::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+
+    for cref in &refs {
+        // Tolerant per-item projection: a malformed body still yields the
+        // item (so `validate` reports it); a bad signature is a hard error
+        // (so the corpus op fails loudly rather than looking clean).
+        let projection = ryeos_engine::resolution::resolve_item_for_corpus(
+            cref,
+            &ctx.engine.kinds,
+            &effective_parsers,
+            &engine_roots,
+            &ctx.engine.trust_store,
+        )
+        .map_err(|e| {
+            DispatchError::InvalidRef(cref.to_string(), format!("corpus projection failed: {e}"))
+        })?;
+
+        items_by_ref
+            .entry(projection.item.resolved_ref.clone())
+            .or_insert_with(|| verified_from(&projection.item));
+        // Edges point at declared targets even when the target is not in
+        // `items_by_ref` (dangling) — the runtime reports those.
+        for edge in projection.reference_edges {
+            edges.push(GraphEdge {
+                from: edge.from_ref,
+                to: edge.to_ref,
+                kind: EdgeKind::References,
+                depth_from_root: None,
+            });
+        }
+    }
+
+    // The same reference can surface from multiple items — dedup.
+    edges.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    edges.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
+
+    Ok((items_by_ref, edges))
+}
+
 // ── Op dispatch terminator ─────────────────────────────────────────────
 
 /// Dispatch an op-style kind by spawning its runtime with a
@@ -679,7 +814,7 @@ pub(crate) async fn dispatch_op(
     kind: &str,
     op_decl: &OperationDecl,
     canonical_ref: &CanonicalRef,
-    _hop_verified: Option<VerifiedItem>,
+    hop_verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
@@ -710,49 +845,88 @@ pub(crate) async fn dispatch_op(
     let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
     let executor_ref = format!("native:{bare}");
 
-    // 3. Run the engine resolution pipeline to get a full
-    //    ResolutionOutput (extends chain + references + content).
+    // Resolution roots are needed both for payload projection and for the
+    // launch/inventory step below, so compute them once at this scope.
     let engine_roots = ctx
         .engine
         .resolution_roots(Some(request.project_path.to_path_buf()));
-    let effective_parsers = ctx
-        .engine
-        .effective_parser_dispatcher(Some(request.project_path))
-        .map_err(|e| {
-            DispatchError::InvalidRef(canonical_ref.to_string(), format!("parser dispatcher: {e}"))
-        })?;
-    let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
-        canonical_ref,
-        &ctx.engine.kinds,
-        &effective_parsers,
-        &engine_roots,
-        &ctx.engine.trust_store,
-        &ctx.engine.composers,
-    )
-    .map_err(|e| {
-        DispatchError::InvalidRef(
-            canonical_ref.to_string(),
-            format!("resolution pipeline failed: {e}"),
-        )
-    })?;
 
-    crate::execution::launch::enforce_effective_trust(
-        resolution_output.effective_trust_class,
-        &canonical_ref.to_string(),
-        kind,
-    )
-    .map_err(|e| DispatchError::InvalidRef(canonical_ref.to_string(), e.to_string()))?;
-
-    // 4. Project the resolution output to a SingleRootPayload.
-    let single_root = project_single_root(&resolution_output)?;
-
-    // 5. Build the envelope payload: merge root + inputs.
-    //    The op-declared inputs are nested under an `inputs` key so
-    //    the runtime binary can deserialize them into its typed struct
-    //    (e.g. `ComposePayload { root: SingleRootPayload, inputs: ComposeInputs }`).
+    // 3-5. Build the envelope payload. The op's declared `scope` selects
+    //      the projection: a single resolved item (extends chain +
+    //      references) or the whole verified corpus of the kind. The
+    //      op-declared inputs are nested under `inputs` so the runtime
+    //      deserializes them into its typed struct. (No kind/op-name
+    //      literals here — the schema's `scope` drives the choice.)
     let op_name = &op_decl.name;
-    let mut payload =
-        serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?;
+    let mut payload = match op_decl.scope {
+        OpScope::SingleRoot => {
+            let effective_parsers = ctx
+                .engine
+                .effective_parser_dispatcher(Some(request.project_path))
+                .map_err(|e| {
+                    DispatchError::InvalidRef(
+                        canonical_ref.to_string(),
+                        format!("parser dispatcher: {e}"),
+                    )
+                })?;
+            let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
+                canonical_ref,
+                &ctx.engine.kinds,
+                &effective_parsers,
+                &engine_roots,
+                &ctx.engine.trust_store,
+                &ctx.engine.composers,
+            )
+            .map_err(|e| {
+                DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    format!("resolution pipeline failed: {e}"),
+                )
+            })?;
+
+            crate::execution::launch::enforce_effective_trust(
+                resolution_output.effective_trust_class,
+                &canonical_ref.to_string(),
+                kind,
+            )
+            .map_err(|e| DispatchError::InvalidRef(canonical_ref.to_string(), e.to_string()))?;
+
+            let single_root = project_single_root(&resolution_output)?;
+            serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?
+        }
+        OpScope::Corpus => {
+            // A corpus op still requires the invoked ref to resolve AND
+            // verify — it authorizes/routes the call even though it does
+            // not bound the corpus. `resolve_dispatch_hop` leaves
+            // `hop_verified` as `None` when resolution/verification failed,
+            // so a missing or unverifiable requested ref must be rejected
+            // here rather than silently running over the whole corpus.
+            let root = hop_verified.as_ref().ok_or_else(|| {
+                DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    "requested ref did not resolve/verify; a corpus op still requires a \
+                     valid invoked ref to authorize the call"
+                        .to_string(),
+                )
+            })?;
+            // Mirror spawn trust policy (`enforce_effective_trust`): refuse
+            // an unauthenticated root.
+            if matches!(
+                root.trust_class,
+                ryeos_engine::contracts::TrustClass::Unsigned
+            ) {
+                return Err(DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    "requested ref is Unsigned; refusing to run a corpus op on an \
+                     unauthenticated root"
+                        .to_string(),
+                ));
+            }
+
+            let (items_by_ref, edges) = project_corpus(kind, request, ctx)?;
+            serde_json::json!({ "items_by_ref": items_by_ref, "edges": edges })
+        }
+    };
     if let Value::Object(ref mut map) = payload {
         map.insert("inputs".to_string(), validated_inputs);
     }
@@ -2834,6 +3008,7 @@ runtime_vault:
             name: name.to_string(),
             side_effects: SideEffectClass::None,
             dispatch: OperationDispatch::RuntimeRegistry,
+            scope: OpScope::default(),
             inputs,
         }
     }
@@ -3005,6 +3180,63 @@ runtime_vault:
             r["count"], 10,
             "default must be applied when inputs is None"
         );
+    }
+
+    // ── validate_op_inputs: enum / min / array items ──────────────────
+
+    fn string_array_input() -> InputDecl {
+        InputDecl {
+            ty: InputType::Array,
+            required: false,
+            default: None,
+            enum_values: None,
+            min: None,
+            items: Some(Box::new(string_input(false))),
+        }
+    }
+
+    #[test]
+    fn validate_op_inputs_array_items_type_enforced() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("roots".to_string(), string_array_input());
+        let op = make_op("validate", inputs);
+
+        // All-string array passes.
+        assert!(validate_op_inputs(Some(&json!({"roots": ["a", "b"]})), &op).is_ok());
+
+        // A non-string element is rejected, naming the index.
+        let err = validate_op_inputs(Some(&json!({"roots": ["a", 7]})), &op)
+            .expect_err("non-string array element must error");
+        let msg = err.to_string();
+        assert!(msg.contains("roots[1]"), "must name the bad index, got: {msg}");
+    }
+
+    #[test]
+    fn validate_op_inputs_enum_enforced() {
+        let mut decl = string_input(false);
+        decl.enum_values = Some(vec!["lexical".into(), "semantic".into()]);
+        let mut inputs = BTreeMap::new();
+        inputs.insert("mode".to_string(), decl);
+        let op = make_op("query", inputs);
+
+        assert!(validate_op_inputs(Some(&json!({"mode": "lexical"})), &op).is_ok());
+        let err = validate_op_inputs(Some(&json!({"mode": "fuzzy"})), &op)
+            .expect_err("out-of-enum value must error");
+        assert!(err.to_string().contains("must be one of"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_op_inputs_min_enforced() {
+        let mut decl = integer_input(false, None);
+        decl.min = Some(1);
+        let mut inputs = BTreeMap::new();
+        inputs.insert("limit".to_string(), decl);
+        let op = make_op("query", inputs);
+
+        assert!(validate_op_inputs(Some(&json!({"limit": 5})), &op).is_ok());
+        let err = validate_op_inputs(Some(&json!({"limit": 0})), &op)
+            .expect_err("below-min value must error");
+        assert!(err.to_string().contains(">= 1"), "got: {err}");
     }
 
     // ── map_batch_error ──────────────────────────────────────────────

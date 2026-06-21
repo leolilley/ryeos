@@ -7,12 +7,14 @@
 
 pub mod alias;
 pub mod context;
+pub mod corpus;
 pub mod decl;
 pub mod steps;
 pub mod types;
 
 pub use alias::AliasResolver;
 pub use context::ResolutionContext;
+pub use corpus::{resolve_item_for_corpus, CorpusItemProjection, CorpusReferenceEdge};
 pub use decl::ResolutionStepDecl;
 pub use types::{
     effective_trust, AliasHop, KindComposedView, ResolutionEdge, ResolutionError, ResolutionOutput,

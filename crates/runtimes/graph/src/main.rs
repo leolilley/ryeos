@@ -291,7 +291,10 @@ fn main() -> anyhow::Result<()> {
         thread_id: resolved.thread_id.clone(),
         result: Some(serde_json::to_value(&graph_result)?),
         outputs: serde_json::Value::Null,
-        cost: None,
+        // Surface the graph's aggregate token/spend so the daemon's
+        // `/execute` response carries non-null cost for a graph that
+        // invoked cost-bearing children (directives/sub-graphs).
+        cost: graph_result.cost.clone(),
         warnings,
     };
 
