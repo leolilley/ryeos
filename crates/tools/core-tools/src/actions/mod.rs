@@ -13,6 +13,7 @@ pub mod hosted_policy;
 pub mod inspect;
 pub mod install;
 pub mod manifest_sign;
+pub mod node_logs;
 pub mod publish;
 pub mod remote_descriptor;
 pub mod sign;

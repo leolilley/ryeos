@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-21T04:03:58Z:53eb7298fbfee24713d419cf9b97ba6fc03d509746311569e9bf1fab19fadd19:gztDHF57hAY3oXN5W2wFvvz7hdxYUsv2TJVDuelzIkaMqEJB3ntqFQdkBpAxJGsm9QP485PLyNxzJXIDoxR0Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.logs
+availability: offline
+offline_execute: tool:ryeos/core/node/logs
+required_caps: []
+schema:
+  app_root: string?
+  lines: integer?
+description: "Tail the local node's trace events and startup stderr from the app root (offline; works when the daemon is down)."

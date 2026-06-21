@@ -103,6 +103,21 @@ enum Cmd {
         name: Option<String>,
     },
 
+    /// Tail the local node's trace events and startup stderr from the app root.
+    ///
+    /// Reads files directly, so it works offline — when the daemon failed to
+    /// start or crashed and no live handler can answer.
+    Logs {
+        /// App root (parent of `.ai/`). Defaults to RYEOS_APP_ROOT or the XDG
+        /// data dir.
+        #[arg(long)]
+        app_root: Option<PathBuf>,
+
+        /// Number of trailing lines to show from each log.
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+    },
+
     /// Verify a bundle source tree without rewriting files.
     BundleVerify {
         /// Bundle source root (directory containing `.ai/`).
@@ -475,6 +490,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::ManifestSign { bundle_source, name } => {
             run_manifest_sign(bundle_source, name, cli.stdin_json)
         }
+        Cmd::Logs { app_root, lines } => run_logs(app_root, lines, cli.stdin_json),
         Cmd::BundleVerify {
             source,
             registry_roots,
@@ -811,6 +827,38 @@ struct BundleManifestSignParams {
     source: PathBuf,
     #[serde(default)]
     name: Option<String>,
+}
+
+fn run_logs(app_root: Option<PathBuf>, lines: usize, stdin_json: bool) -> anyhow::Result<()> {
+    let (app_root, lines) = if stdin_json {
+        let params: NodeLogsParams = serde_json::from_value(read_stdin_json()?)?;
+        (params.app_root, params.lines.unwrap_or(200))
+    } else {
+        (app_root, lines)
+    };
+
+    let app_root = match app_root {
+        Some(p) => p,
+        None => std::env::var("RYEOS_APP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::data_dir()
+                    .map(|d| d.join("ryeos"))
+                    .expect("could not determine XDG data directory")
+            }),
+    };
+
+    let report = ryeos_tools::actions::node_logs::read_node_logs(&app_root, lines);
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct NodeLogsParams {
+    #[serde(default)]
+    app_root: Option<PathBuf>,
+    #[serde(default)]
+    lines: Option<usize>,
 }
 
 fn resolve_publish_owner(

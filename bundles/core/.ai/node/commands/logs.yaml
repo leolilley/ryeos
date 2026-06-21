@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-21T04:03:58Z:35a94a85e30d1ec8b048bb34b8706e6f916c5cd3fcfeec6398b594230588fb64:1O4YpB3DubCiKVKtb+Zbzqpa7d+BaN6cKvVrHxPGWy26CapOIKoMd0mjb/ufEEH1W+oj2gjrHhYTDJc6VIpLBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- logs
+description: Tail the local node's trace events and startup stderr (offline)
+dispatch:
+  kind: execute_ref
+  execute: service:node/logs
