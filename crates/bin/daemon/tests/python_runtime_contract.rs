@@ -101,6 +101,15 @@ fn write_python_tool(project_dir: &Path, rel: &str, runtime: &str, body: &str) {
 
 /// resolve → verify → build_plan → execute_plan against the live bundle.
 fn run_tool(project_dir: &Path, item_ref: &str, params: Value) -> ExecutionCompletion {
+    run_tool_with_hints(project_dir, item_ref, params, ExecutionHints::default())
+}
+
+fn run_tool_with_hints(
+    project_dir: &Path,
+    item_ref: &str,
+    params: Value,
+    hints: ExecutionHints,
+) -> ExecutionCompletion {
     ryeos_tracing::test::prime_callsites();
     let engine = build_engine_against_bundle();
 
@@ -114,7 +123,7 @@ fn run_tool(project_dir: &Path, item_ref: &str, params: Value) -> ExecutionCompl
         },
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
-        execution_hints: ExecutionHints::default(),
+        execution_hints: hints,
         validate_only: false,
     };
 
@@ -148,6 +157,62 @@ fn run_tool(project_dir: &Path, item_ref: &str, params: Value) -> ExecutionCompl
     engine
         .execute_plan(&engine_ctx, plan)
         .expect("execute_plan runs the subprocess")
+}
+
+#[test]
+fn debug_raw_attaches_resolved_subprocess_and_raw_stdio() {
+    let project_dir = unique_project_dir("debugraw");
+    write_python_tool(
+        &project_dir,
+        "probe/debug",
+        "script",
+        "import json\nprint(json.dumps({\"ok\": True}))\n",
+    );
+
+    let mut hints = ExecutionHints::default();
+    hints
+        .values
+        .insert("debug_raw".into(), serde_json::json!(true));
+    let completion = run_tool_with_hints(&project_dir, "tool:probe/debug", Value::Null, hints);
+
+    let debug = completion
+        .metadata
+        .as_ref()
+        .expect("completion metadata")
+        .get("debug")
+        .expect("debug block present under --debug-raw")
+        .clone();
+    assert_eq!(debug["exit_code"], 0, "debug: {debug}");
+    assert!(
+        debug["cmd"].as_str().is_some_and(|c| !c.is_empty()),
+        "debug must carry the resolved interpreter cmd: {debug}"
+    );
+    assert!(debug["args"].as_array().is_some(), "debug: {debug}");
+    assert!(
+        debug["stdout"].as_str().unwrap_or_default().contains("ok"),
+        "debug must carry raw stdout: {debug}"
+    );
+    assert!(debug["env_keys"].as_array().is_some(), "debug: {debug}");
+}
+
+#[test]
+fn debug_raw_absent_by_default() {
+    let project_dir = unique_project_dir("nodebugraw");
+    write_python_tool(
+        &project_dir,
+        "probe/nodebug",
+        "script",
+        "import json\nprint(json.dumps({\"ok\": True}))\n",
+    );
+    let completion = run_tool(&project_dir, "tool:probe/nodebug", Value::Null);
+    assert!(
+        completion
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("debug"))
+            .is_none(),
+        "no debug block without the hint"
+    );
 }
 
 #[test]

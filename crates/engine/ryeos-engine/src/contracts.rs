@@ -3230,6 +3230,12 @@ pub struct ExecutionPlan {
     /// Executor IDs traversed during chain resolution.
     #[serde(default)]
     pub executor_chain: Vec<String>,
+    /// When set (from `--debug-raw` via `execution_hints`), the dispatcher
+    /// attaches a `debug` block (resolved cmd/args/cwd/env keys + exit code and
+    /// size-limited raw stdout/stderr) to the completion. Default `false` —
+    /// the normal execution path is unaffected.
+    #[serde(default)]
+    pub debug_raw: bool,
 }
 
 // ── Execution completion ─────────────────────────────────────────────

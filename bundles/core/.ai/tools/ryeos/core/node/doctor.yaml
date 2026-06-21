@@ -1,0 +1,30 @@
+# ryeos:signed:2026-06-21T05:02:10Z:8008df47f8a986ba2f6d223f332485c1107736ee63f683be4479652f91843084:hYQV2gHCIwsZK9hOhzP5I2C7oOD1A+TX+LGxWCdWjxCzZDtDPR2sU28BNpVBy8gjWetacvWAmffoiatzmobjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/node"
+name: "doctor"
+executor_id: "@subprocess"
+required_caps: []
+description: "Offline preflight checklist for a project/bundle source."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "doctor"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 120
+
+config_schema:
+  type: object
+  properties:
+    source:
+      type: string
+      description: "Project/bundle source directory containing .ai/."
+    registry_root:
+      type: string
+      description: "Optional registry/dependency root. May be repeated via registry_roots."
+    registry_roots:
+      type: array
+      items:
+        type: string
+      description: "Optional registry/dependency roots supplying kind schemas + runtimes."
+  required: [source]

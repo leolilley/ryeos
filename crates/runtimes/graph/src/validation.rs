@@ -40,6 +40,21 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
             .push("config.nodes is empty — at least one node is required".into());
     }
 
+    // Bundle-event / vault capabilities are runtime authority: a signed manifest
+    // mints them; a graph's `permissions:` cannot. Flag any declared permission
+    // that overlaps that namespace so the author sees it up front. The daemon
+    // enforces this authoritatively at cap-assembly time regardless (this is UX).
+    for grant in &def.declared_permissions {
+        if ryeos_bundle::runtime_authority::composed_grant_overlaps_manifest_runtime_authority(grant)
+        {
+            result.errors.push(format!(
+                "graph permission '{grant}' is reserved: bundle-event and runtime-vault \
+                 capabilities are runtime authority, minted only by a signed manifest — \
+                 not grantable via graph permissions"
+            ));
+        }
+    }
+
     for (name, node) in &cfg.nodes {
         validate_node(name, node, cfg, &mut result);
     }
@@ -701,6 +716,70 @@ config:
                 .iter()
                 .any(|e| e.contains("orphan") && e.contains("ambiguous")),
             "expected error for node with no action/type, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_runtime_authority_permission() {
+        // A graph cannot self-grant bundle-event/vault runtime authority via
+        // `permissions:` — that authority comes only from a signed manifest.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+permissions:
+  - ryeos.append.bundle-events.foo/evt
+  - ryeos.execute.tool.echo
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("bundle-events.foo/evt") && e.contains("reserved")),
+            "expected runtime-authority reject, got: {:?}",
+            result.errors
+        );
+        // The ordinary execute permission must NOT be flagged.
+        assert!(
+            !result.errors.iter().any(|e| e.contains("tool.echo")),
+            "ordinary execute permission must not be flagged: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_wildcard_runtime_authority_permission() {
+        // A wildcard that intrudes on the runtime-authority namespace is flagged
+        // too, not only an exact cap.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+permissions:
+  - ryeos.scan.bundle-events.*
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("scan.bundle-events.*") && e.contains("reserved")),
+            "expected wildcard intrusion to be rejected, got: {:?}",
             result.errors
         );
     }

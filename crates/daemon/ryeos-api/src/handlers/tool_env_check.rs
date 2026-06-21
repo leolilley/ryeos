@@ -121,7 +121,27 @@ pub async fn handle(
         .map(|(n, _)| n.as_str())
         .collect();
 
-    Ok(serde_json::json!({
+    // Import dry-run via the shared probe (also used by `ryeos doctor`): for a
+    // python tool, reproduce the launch interpreter + sys.path and attempt the
+    // import (without calling `execute`), so an empty `.venv` or a
+    // `ModuleNotFoundError` surfaces here rather than at first run. The probe
+    // runs a bounded subprocess, so it goes off the async runtime.
+    let import_report = {
+        let engine = state.engine.clone();
+        let probe_names = names.clone();
+        tokio::task::spawn_blocking(move || {
+            ryeos_app::env_probe::import_dry_run(&engine, &plan_ctx, &verified, &probe_names)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            serde_json::json!({
+                "import_check": "unavailable",
+                "import_check_reason": format!("import probe task failed: {e}"),
+            })
+        })
+    };
+
+    let mut response = serde_json::json!({
         "item_ref": req.item_ref,
         "kind": canonical.kind,
         "secrets": secrets,
@@ -130,7 +150,13 @@ pub async fn handle(
         // `auth.env_var` is resolved at launch (preflight) and is not yet
         // enumerated here — surfaced so clients don't assume it was checked.
         "provider_auth_checked": false,
-    }))
+    });
+    if let (Some(obj), Some(extra)) = (response.as_object_mut(), import_report.as_object()) {
+        for (k, v) in extra {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(response)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

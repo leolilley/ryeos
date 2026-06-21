@@ -37,6 +37,11 @@ pub struct SignBundleReport {
     /// Items (re-)signed because unsigned, invalid, wrong signer, or content changed.
     pub signed: Vec<ItemOutcome>,
     pub failed: Vec<ItemOutcome>,
+    /// Non-fatal authoring warnings (e.g. an item whose effective bundle id
+    /// diverges from the bundle's). Empty on a clean tree. Populated by the
+    /// publish path, not the signer loop itself.
+    #[serde(default)]
+    pub warnings: Vec<ItemWarning>,
 }
 
 impl SignBundleReport {
@@ -55,6 +60,13 @@ pub struct ItemOutcome {
     pub item_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemWarning {
+    pub item_ref: String,
+    pub message: String,
 }
 
 /// Sign every signable item in the bundle at `source` using `signing_key`.
@@ -155,6 +167,7 @@ pub fn sign_bundle_items_with_trust(
         validated: Vec::new(),
         signed: Vec::new(),
         failed: Vec::new(),
+        warnings: Vec::new(),
     };
 
     let mut kind_names: Vec<String> = kinds.kinds().map(str::to_owned).collect();

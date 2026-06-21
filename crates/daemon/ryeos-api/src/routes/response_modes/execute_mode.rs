@@ -61,6 +61,10 @@ pub struct ExecuteRequest {
     pub inputs: Option<Value>,
     #[serde(default)]
     pub usage_subject: Option<ryeos_state::UsageSubject>,
+    /// When true, attach a `debug` block (resolved cmd/args/cwd/env keys +
+    /// exit code and size-limited raw stdout/stderr) to the result.
+    #[serde(default)]
+    pub debug_raw: bool,
 }
 
 fn default_launch_mode() -> String {
@@ -296,7 +300,15 @@ impl CompiledResponseMode for CompiledExecuteMode {
             },
             current_site_id: site_id.to_string(),
             origin_site_id: site_id.to_string(),
-            execution_hints: Default::default(),
+            execution_hints: {
+                let mut hints = ryeos_engine::contracts::ExecutionHints::default();
+                if request.debug_raw {
+                    hints
+                        .values
+                        .insert("debug_raw".to_string(), json!(true));
+                }
+                hints
+            },
             validate_only: request.validate_only,
         };
 
@@ -1069,6 +1081,7 @@ mod tests {
             operation: None,
             inputs: None,
             usage_subject: None,
+            debug_raw: false,
         }
     }
 

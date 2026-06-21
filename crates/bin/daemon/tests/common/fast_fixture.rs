@@ -279,11 +279,62 @@ pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -
         .with_context(|| format!("canonicalize {}", state_path.display()))?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!("kind: node\npath: {}\n", abs.display());
+    let body = node_bundle_record_body("core", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("core.yaml"), signed)?;
     Ok(())
+}
+
+/// The `command_registration_caps` the node-init bundle-registration grants
+/// assign to `bundle_name`, read from the same signed source the real install
+/// materializes from (`bundles/.ai/node/init/bundle-registration-grants/
+/// default.yaml`). Empty when the bundle declares no grants. Mirroring
+/// production here is what lets a fixture-registered bundle register a command
+/// whose dispatch kind is gated behind a registration capability — e.g.
+/// standard's `graph validate`, which dispatches `direct_execute_item_ref`.
+fn bundle_registration_caps(bundle_name: &str) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Grants {
+        #[serde(default)]
+        bundles: std::collections::BTreeMap<String, BundleGrant>,
+    }
+    #[derive(serde::Deserialize)]
+    struct BundleGrant {
+        #[serde(default)]
+        command_registration_caps: Vec<String>,
+    }
+    let source = super::workspace_root()
+        .join("bundles")
+        .join(AI_DIR)
+        .join("node")
+        .join("init")
+        .join("bundle-registration-grants")
+        .join("default.yaml");
+    let raw = fs::read_to_string(&source)
+        .with_context(|| format!("read bundle registration grants {}", source.display()))?;
+    let grants: Grants = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse bundle registration grants {}", source.display()))?;
+    Ok(grants
+        .bundles
+        .get(bundle_name)
+        .map(|g| g.command_registration_caps.clone())
+        .unwrap_or_default())
+}
+
+/// Render a signed-ready `kind: node` bundle record body for `bundle_name`,
+/// including any `command_registration_caps` the node-init grants assign it —
+/// the same shape the real install writes to `.ai/node/bundles/<name>.yaml`.
+fn node_bundle_record_body(bundle_name: &str, path: &Path) -> Result<String> {
+    let mut body = format!("kind: node\npath: {}\n", path.display());
+    let caps = bundle_registration_caps(bundle_name)?;
+    if !caps.is_empty() {
+        body.push_str("command_registration_caps:\n");
+        for cap in &caps {
+            body.push_str(&format!("  - {cap}\n"));
+        }
+    }
+    Ok(body)
 }
 
 /// Write a `kind: node` bundle record pointing at
@@ -299,7 +350,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     let abs = standard.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!("kind: node\npath: {}\n", abs.display());
+    let body = node_bundle_record_body("standard", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
@@ -320,7 +371,7 @@ pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Resul
     let abs = studio.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!("kind: node\npath: {}\n", abs.display());
+    let body = node_bundle_record_body("studio", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("studio.yaml"), signed)?;

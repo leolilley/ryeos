@@ -1488,6 +1488,11 @@ async fn dispatch_managed_subprocess(
                 remediation: crate::dispatch_error::required_secret_remediation(&first.name),
             }
         }
+        launch::BuildAndLaunchError::CapabilityRejected { reason } => {
+            DispatchError::CapabilityRejected {
+                reason: reason.clone(),
+            }
+        }
         _ => {
             let msg = e.to_string();
             if msg.contains("manifest")
@@ -1805,10 +1810,14 @@ async fn dispatch_tool_subprocess(
                 item_ref: item_ref_for_error,
                 detail: e.to_string(),
             })?;
-        Ok(json!({
+        let mut envelope = json!({
             "thread": result.finalized_thread,
             "result": result.result,
-        }))
+        });
+        if let Some(debug) = result.debug {
+            envelope["debug"] = debug;
+        }
+        Ok(envelope)
     }
 }
 
@@ -1851,8 +1860,12 @@ fn derive_manifest_runtime_caps(
         ));
     }
 
+    // The cap strings come from the manifest declarations themselves
+    // (`runtime_authority` module), so the minter and the daemon callback
+    // services that *require* these caps share one constructor. The validation
+    // below stays here — it is a trust-boundary check on the signed manifest.
     let mut caps = BTreeSet::new();
-    for decl in manifest.bundle_events {
+    for decl in &manifest.bundle_events {
         ryeos_state::objects::validate_bundle_identifier("event_kind", &decl.event_kind)
             .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
         if decl.operations.is_empty() {
@@ -1864,25 +1877,10 @@ fn derive_manifest_runtime_caps(
                 ),
             ));
         }
-        for op in decl.operations {
-            match op {
-                ryeos_bundle::manifest::BundleEventOperation::Append => {
-                    caps.insert(format!(
-                        "ryeos.append.bundle-events.{effective_bundle_id}/{}",
-                        decl.event_kind
-                    ));
-                }
-                ryeos_bundle::manifest::BundleEventOperation::Scan => {
-                    caps.insert(format!(
-                        "ryeos.scan.bundle-events.{effective_bundle_id}/{}",
-                        decl.event_kind
-                    ));
-                }
-            }
-        }
+        caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
     }
 
-    for decl in manifest.runtime_vault {
+    for decl in &manifest.runtime_vault {
         ryeos_app::vault::validate_runtime_vault_segment("namespace", &decl.namespace)
             .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
         if decl.operations.is_empty() {
@@ -1894,18 +1892,7 @@ fn derive_manifest_runtime_caps(
                 ),
             ));
         }
-        for op in decl.operations {
-            let verb = match op {
-                ryeos_bundle::manifest::RuntimeVaultOperation::Put => "put",
-                ryeos_bundle::manifest::RuntimeVaultOperation::Get => "get",
-                ryeos_bundle::manifest::RuntimeVaultOperation::Delete => "delete",
-                ryeos_bundle::manifest::RuntimeVaultOperation::List => "list",
-            };
-            caps.insert(format!(
-                "ryeos.{verb}.vault.{effective_bundle_id}/{}",
-                decl.namespace
-            ));
-        }
+        caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
     }
 
     Ok(caps.into_iter().collect())

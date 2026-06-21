@@ -67,9 +67,76 @@ enum Cmd {
         #[arg(long)]
         owner: Option<String>,
 
+        /// Effective bundle id the generated manifest must carry — the first
+        /// bare-id segment of the bundle's item refs. Defaults to the source
+        /// directory's basename. Runtime authority requires this to equal the
+        /// bundle id used in item refs.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Report and skip items that fail to sign instead of aborting the
+        /// publish. The manifest is still generated; the result is a PARTIAL
+        /// publish (`partial: true`, `skipped_unsignable: [...]`) and the trust
+        /// doc is suppressed. Default: fail fast on the first unsignable item.
+        #[arg(long)]
+        skip_unsignable: bool,
+
+        /// Publish even when an item's effective bundle id diverges from a
+        /// runtime-authority manifest's name. Default: fail (the daemon would
+        /// reject runtime-cap minting, making the manifest unusable).
+        #[arg(long)]
+        allow_namespace_mismatch: bool,
+
         /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
         #[arg(long)]
         no_trust_doc: bool,
+    },
+
+    /// Generate + sign `.ai/manifest.yaml` from `.ai/manifest.source.yaml`
+    /// without running the full publish pipeline.
+    ///
+    /// Touches only the manifest — no CAS clean, no item signing, no trust
+    /// doc. The signing key is auto-resolved from the user root. Use when
+    /// iterating on manifest declarations (`bundle_events:`, `runtime_vault:`).
+    ManifestSign {
+        /// Bundle source root (directory containing `.ai/`).
+        bundle_source: Option<PathBuf>,
+
+        /// Effective bundle id the manifest must carry — the first bare-id
+        /// segment of the bundle's item refs. Defaults to the source
+        /// directory's basename.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// Tail the local node's trace events and startup stderr from the app root.
+    ///
+    /// Reads files directly, so it works offline — when the daemon failed to
+    /// start or crashed and no live handler can answer.
+    Logs {
+        /// App root (parent of `.ai/`). Defaults to RYEOS_APP_ROOT or the XDG
+        /// data dir.
+        #[arg(long)]
+        app_root: Option<PathBuf>,
+
+        /// Number of trailing lines to show from each log.
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+    },
+
+    /// Offline preflight checklist for a project/bundle source.
+    ///
+    /// Runs deterministic checks with no daemon: manifest present +
+    /// name-consistent, bundle verify (headers/parsers/signatures), and a
+    /// python-tool import dry-run; advisory checks report `unknown`.
+    Doctor {
+        /// Project/bundle source root (directory containing `.ai/`).
+        source: Option<PathBuf>,
+
+        /// Registry/dependency root supplying kind schemas + runtimes.
+        /// Defaults to installed bundle roots. May be repeated.
+        #[arg(long = "registry-root")]
+        registry_roots: Vec<PathBuf>,
     },
 
     /// Verify a bundle source tree without rewriting files.
@@ -429,14 +496,28 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             bundle_source,
             registry_roots,
             owner,
+            name,
+            skip_unsignable,
+            allow_namespace_mismatch,
             no_trust_doc,
         } => run_build(
             bundle_source,
             registry_roots,
             owner,
+            name,
+            skip_unsignable,
+            allow_namespace_mismatch,
             no_trust_doc,
             cli.stdin_json,
         ),
+        Cmd::ManifestSign { bundle_source, name } => {
+            run_manifest_sign(bundle_source, name, cli.stdin_json)
+        }
+        Cmd::Logs { app_root, lines } => run_logs(app_root, lines, cli.stdin_json),
+        Cmd::Doctor {
+            source,
+            registry_roots,
+        } => run_doctor(source, registry_roots, cli.stdin_json),
         Cmd::BundleVerify {
             source,
             registry_roots,
@@ -644,33 +725,49 @@ fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_build(
     bundle_source: Option<PathBuf>,
     registry_roots: Vec<PathBuf>,
     owner: Option<String>,
+    name: Option<String>,
+    skip_unsignable: bool,
+    allow_namespace_mismatch: bool,
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let (bundle_source, registry_roots, owner, no_trust_doc) = if stdin_json {
-        if bundle_source.is_some() {
-            anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
-        }
-        let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
-        let registry_roots = params.registry_roots();
-        (
-            params.source,
-            registry_roots,
-            params.owner,
-            params.no_trust_doc,
-        )
-    } else {
-        let source = bundle_source
-            .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
-        (source, registry_roots, owner, no_trust_doc)
-    };
+    let (bundle_source, registry_roots, owner, name, skip_unsignable, allow_namespace_mismatch, no_trust_doc) =
+        if stdin_json {
+            if bundle_source.is_some() {
+                anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
+            }
+            let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
+            let registry_roots = params.registry_roots();
+            (
+                params.source,
+                registry_roots,
+                params.owner,
+                params.name,
+                params.skip_unsignable,
+                params.allow_namespace_mismatch,
+                params.no_trust_doc,
+            )
+        } else {
+            let source = bundle_source
+                .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
+            (
+                source,
+                registry_roots,
+                owner,
+                name,
+                skip_unsignable,
+                allow_namespace_mismatch,
+                no_trust_doc,
+            )
+        };
 
     let key_path = roots::runtime_root()
         .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
@@ -706,11 +803,185 @@ fn run_build(
         signing_key,
         base_trust_store: Some(base_trust_store),
         owner,
+        name,
+        skip_unsignable,
+        allow_namespace_mismatch,
         emit_trust_doc: !no_trust_doc,
     })?;
 
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn run_manifest_sign(
+    bundle_source: Option<PathBuf>,
+    name: Option<String>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    use ryeos_engine::roots;
+
+    let (bundle_source, name) = if stdin_json {
+        if bundle_source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
+        }
+        let params: BundleManifestSignParams = serde_json::from_value(read_stdin_json()?)?;
+        (params.source, params.name)
+    } else {
+        let source = bundle_source
+            .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
+        (source, name)
+    };
+
+    let key_path = roots::runtime_root()
+        .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
+        .operator_signing_key_path();
+    if !key_path.exists() {
+        anyhow::bail!(
+            "operator signing key not found at {} — run `ryeos init` first",
+            key_path.display()
+        );
+    }
+    let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+        .with_context(|| format!("load signing key from {}", key_path.display()))?;
+
+    let source_path = canonical_bundle_source(&bundle_source)?;
+    let report = ryeos_tools::actions::manifest_sign::manifest_sign(
+        &source_path,
+        name.as_deref(),
+        &signing_key,
+    )?;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct BundleManifestSignParams {
+    source: PathBuf,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+fn run_logs(app_root: Option<PathBuf>, lines: usize, stdin_json: bool) -> anyhow::Result<()> {
+    let (app_root, lines) = if stdin_json {
+        let params: NodeLogsParams = serde_json::from_value(read_stdin_json()?)?;
+        (params.app_root, params.lines.unwrap_or(200))
+    } else {
+        (app_root, lines)
+    };
+
+    let app_root = match app_root {
+        Some(p) => p,
+        None => std::env::var("RYEOS_APP_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::data_dir()
+                    .map(|d| d.join("ryeos"))
+                    .expect("could not determine XDG data directory")
+            }),
+    };
+
+    let report = ryeos_tools::actions::node_logs::read_node_logs(&app_root, lines);
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct NodeLogsParams {
+    #[serde(default)]
+    app_root: Option<PathBuf>,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+fn run_doctor(
+    source: Option<PathBuf>,
+    registry_roots: Vec<PathBuf>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let (source, registry_roots) = if stdin_json {
+        if source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional SOURCE");
+        }
+        let params: DoctorParams = serde_json::from_value(read_stdin_json()?)?;
+        let registry_roots = params.registry_roots();
+        (params.source, registry_roots)
+    } else {
+        let source =
+            source.ok_or_else(|| anyhow::anyhow!("SOURCE required (or pass --stdin-json)"))?;
+        (source, registry_roots)
+    };
+
+    let source_path = std::fs::canonicalize(&source)
+        .with_context(|| format!("resolve source path {}", source.display()))?;
+    if !source_path.is_dir() {
+        anyhow::bail!("--source is not a directory: {}", source_path.display());
+    }
+
+    let app_root = std::env::var("RYEOS_APP_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .map(|d| d.join("ryeos"))
+                .expect("could not determine XDG data directory")
+        });
+    let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
+    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
+
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.clone()),
+        ..Default::default()
+    })
+    .context("load config for offline doctor engine")?;
+    // A failed engine build is non-fatal: the static checks still run and the
+    // import dry-run reports `unavailable` (e.g. when doctoring a bundle that
+    // provides its own parsers, where the offline engine can't bootstrap them).
+    let engine = ryeos_app::engine_init::build_engine_for_roots(
+        &config,
+        &dependency_roots,
+        Some(&source_path),
+        None,
+    );
+    let engine_err = engine
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+
+    let report = ryeos_tools::actions::doctor::run_doctor(
+        engine.as_ref().map_err(|_| engine_err.as_str()),
+        &source_path,
+        &dependency_roots,
+        &operator_config_root,
+    );
+
+    let ok = report.ok;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    // Exit nonzero when any deterministic check failed, so preflight scripts
+    // can gate on the exit code (advisory `unknown` checks never fail `ok`).
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DoctorParams {
+    source: PathBuf,
+    #[serde(default)]
+    registry_root: Option<PathBuf>,
+    #[serde(default)]
+    registry_roots: Vec<PathBuf>,
+}
+
+impl DoctorParams {
+    fn registry_roots(&self) -> Vec<PathBuf> {
+        if self.registry_roots.is_empty() {
+            self.registry_root.iter().cloned().collect()
+        } else {
+            self.registry_roots.clone()
+        }
+    }
 }
 
 fn resolve_publish_owner(
@@ -736,6 +1007,12 @@ struct BundlePublishParams {
     registry_roots: Vec<PathBuf>,
     #[serde(default)]
     owner: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    skip_unsignable: bool,
+    #[serde(default)]
+    allow_namespace_mismatch: bool,
     #[serde(default)]
     no_trust_doc: bool,
 }

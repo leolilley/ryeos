@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T23:56:20Z:eeba4d80c3855246bc11a2d9dc6f0b5660fb6cf89291a05d336e68bba9339a87:G5BwutG7/qWn95Ncvj9U+81/iV+udjgqJ90uPGfuw/blYzpN6carFOZFvpDkqqT7ShC05L8Fqy/6FDlyiLIcDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-21T05:26:03Z:e5142db7feed30afb63ea534b17f08bf99783844d057e16feab8511b57dc36fa:EBQwM5egpYmfqPoK6aSOfzmyqk5Do/Oiwcq+8nB60bTDMVs7wWOUtKIk/BDIBXA8Pef5k104ID8Fjis0VqolAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "publish"
 executor_id: "@subprocess"
@@ -28,6 +28,17 @@ config_schema:
     owner:
       type: string
       description: "Owner label for PUBLISHER_TRUST.toml. Defaults to local-dev."
+    name:
+      type: string
+      description: "Effective bundle id the manifest must carry (first bare-id segment of the bundle's item refs). Defaults to the source directory basename."
+    skip_unsignable:
+      type: boolean
+      description: "Report and skip items that fail to sign instead of aborting. Produces a PARTIAL publish (partial: true, skipped_unsignable: [...]) and suppresses the trust doc."
+      default: false
+    allow_namespace_mismatch:
+      type: boolean
+      description: "Publish even when an item's effective bundle id diverges from a runtime-authority manifest's name. Default false (such a mismatch is fatal because the daemon rejects runtime-cap minting)."
+      default: false
     no_trust_doc:
       type: boolean
       description: "Suppress writing PUBLISHER_TRUST.toml."
