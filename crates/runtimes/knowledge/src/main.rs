@@ -20,33 +20,13 @@ use std::io::Read;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::op_wire::{BatchOpEnvelope, BatchOpError, BatchOpResult};
 
-use types::{KnowledgeError, KnowledgeRequest};
+use types::KnowledgeError;
 
-fn parse_request(envelope: &BatchOpEnvelope) -> Result<KnowledgeRequest, KnowledgeError> {
-    let mut tagged = serde_json::Map::new();
-    tagged.insert(
-        "operation".into(),
-        serde_json::Value::String(envelope.op.clone()),
-    );
-    if let Some(obj) = envelope.payload.as_object() {
-        for (k, v) in obj {
-            tagged.insert(k.clone(), v.clone());
-        }
-    } else {
-        return Err(KnowledgeError::MalformedEnvelope(
-            "BatchOpEnvelope.payload must be an object".into(),
-        ));
-    }
-    serde_json::from_value(serde_json::Value::Object(tagged)).map_err(|e| {
-        KnowledgeError::InvalidInput {
-            op: envelope.op.clone(),
-            reason: e.to_string(),
-        }
-    })
-}
-
+/// Dispatch the envelope's op against the handler table, keyed strictly on
+/// `envelope.op`. The op's typed payload is parsed inside the handler; a
+/// non-object or wrong-shaped payload surfaces as `InvalidInput`.
 fn dispatch_op(envelope: &BatchOpEnvelope) -> BatchOpResult {
-    match parse_request(envelope).and_then(|req| dispatch::dispatch(&req)) {
+    match dispatch::dispatch(&envelope.op, envelope.payload.clone()) {
         Ok(value) => BatchOpResult::success(envelope, value),
         Err(e) => BatchOpResult::failure(envelope, knowledge_to_batch_error(e)),
     }
@@ -151,10 +131,29 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
     result
 }
 
+// Op-dispatch behavior (including the `inputs.roots` regression and the
+// envelope-op-vs-payload-operation override) is covered by `dispatch`'s
+// own test module, now that dispatch keys directly off `envelope.op`.
+
+/// Map a `KnowledgeError` into a structured `BatchOpError`,
+/// preserving the variant taxonomy where it overlaps.
+fn knowledge_to_batch_error(err: KnowledgeError) -> BatchOpError {
+    match err {
+        KnowledgeError::NotImplemented { op, phase } => BatchOpError::NotImplemented { op, phase },
+        KnowledgeError::InvalidInput { op, reason } => BatchOpError::InvalidInput {
+            op,
+            field: None,
+            reason,
+        },
+        other => BatchOpError::OpFailed {
+            reason: other.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::op_wire::BatchOpEnvelope;
 
     fn envelope(op: &str, payload: serde_json::Value) -> BatchOpEnvelope {
         BatchOpEnvelope {
@@ -172,59 +171,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_validate_reads_roots_from_inputs() {
-        // The executor nests op args under `payload.inputs`. The validate
-        // payload MUST pick up `inputs.roots` — a regression here silently
-        // dropped user-provided roots (top-level `roots` was ignored).
-        let env = envelope(
-            "validate",
-            serde_json::json!({
-                "items_by_ref": {},
-                "edges": [],
-                "inputs": { "roots": ["k/a", "k/b"] }
-            }),
-        );
-        let req = parse_request(&env).expect("validate envelope must parse");
-        match req {
-            KnowledgeRequest::Validate(p) => {
-                assert_eq!(p.inputs.roots, vec!["k/a".to_string(), "k/b".to_string()]);
-            }
-            other => panic!("expected Validate, got {other:?}"),
-        }
+    fn error_mapping_preserves_taxonomy() {
+        assert!(matches!(
+            knowledge_to_batch_error(KnowledgeError::NotImplemented { op: "snapshot".into(), phase: 5 }),
+            BatchOpError::NotImplemented { phase: 5, .. }
+        ));
+        assert!(matches!(
+            knowledge_to_batch_error(KnowledgeError::InvalidInput { op: "query".into(), reason: "x".into() }),
+            BatchOpError::InvalidInput { field: None, .. }
+        ));
+        // Variants without a dedicated wire mapping collapse to OpFailed.
+        assert!(matches!(
+            knowledge_to_batch_error(KnowledgeError::Internal("boom".into())),
+            BatchOpError::OpFailed { .. }
+        ));
     }
 
     #[test]
-    fn parse_query_reads_inputs() {
-        let env = envelope(
-            "query",
-            serde_json::json!({
-                "items_by_ref": {},
-                "edges": [],
-                "inputs": { "query": "needle", "limit": 3 }
-            }),
-        );
-        match parse_request(&env).expect("query envelope must parse") {
-            KnowledgeRequest::Query(p) => {
-                assert_eq!(p.inputs.query, "needle");
-                assert_eq!(p.inputs.limit, 3);
-            }
-            other => panic!("expected Query, got {other:?}"),
-        }
-    }
-}
+    fn dispatch_op_maps_op_error_to_failure_result() {
+        // A reserved op surfaces as a structured failure result, not a panic
+        // or a success — exercises BatchOpEnvelope -> BatchOpResult.
+        let result = dispatch_op(&envelope("snapshot", serde_json::json!({})));
+        assert!(!result.success);
+        assert!(matches!(
+            result.error,
+            Some(BatchOpError::NotImplemented { phase: 5, .. })
+        ));
 
-/// Map a `KnowledgeError` into a structured `BatchOpError`,
-/// preserving the variant taxonomy where it overlaps.
-fn knowledge_to_batch_error(err: KnowledgeError) -> BatchOpError {
-    match err {
-        KnowledgeError::NotImplemented { op, phase } => BatchOpError::NotImplemented { op, phase },
-        KnowledgeError::InvalidInput { op, reason } => BatchOpError::InvalidInput {
-            op,
-            field: None,
-            reason,
-        },
-        other => BatchOpError::OpFailed {
-            reason: other.to_string(),
-        },
+        // Unknown op → InvalidInput failure.
+        let result = dispatch_op(&envelope("bogus", serde_json::json!({})));
+        assert!(!result.success);
+        assert!(matches!(result.error, Some(BatchOpError::InvalidInput { .. })));
+    }
+
+    #[test]
+    fn dispatch_op_success_result() {
+        let result = dispatch_op(&envelope(
+            "graph",
+            serde_json::json!({"items_by_ref": {}, "edges": [], "inputs": {}}),
+        ));
+        assert!(result.success, "error: {:?}", result.error);
+        assert!(result.output.is_some());
     }
 }

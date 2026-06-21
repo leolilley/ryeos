@@ -5,19 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-// -------- Tagged request enum --------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "operation", rename_all = "snake_case")]
-pub enum KnowledgeRequest {
-    Compose(ComposePayload),
-    ComposePositions(ComposeContextPayload),
-    Query(QueryPayload),
-    Graph(GraphPayload),
-    Validate(ValidatePayload),
-    Snapshot(serde_json::Value),
-    Index(serde_json::Value),
-}
+// Operations are dispatched by wire op name in `dispatch.rs` (keyed off
+// `BatchOpEnvelope.op`), each parsing its own typed payload below. There is
+// deliberately no enum mirror of the schema-declared op vocabulary here.
 
 // -------- Compose --------
 
@@ -257,9 +247,6 @@ pub enum KnowledgeError {
 
     #[error("frontmatter parse failure for {item_id}: {reason}")]
     FrontmatterParse { item_id: String, reason: String },
-
-    #[error("malformed envelope: {0}")]
-    MalformedEnvelope(String),
 
     #[error("internal: {0}")]
     Internal(String),
