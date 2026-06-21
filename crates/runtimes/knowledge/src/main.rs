@@ -139,7 +139,6 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
 /// preserving the variant taxonomy where it overlaps.
 fn knowledge_to_batch_error(err: KnowledgeError) -> BatchOpError {
     match err {
-        KnowledgeError::NotImplemented { op, phase } => BatchOpError::NotImplemented { op, phase },
         KnowledgeError::InvalidInput { op, reason } => BatchOpError::InvalidInput {
             op,
             field: None,
@@ -173,10 +172,6 @@ mod tests {
     #[test]
     fn error_mapping_preserves_taxonomy() {
         assert!(matches!(
-            knowledge_to_batch_error(KnowledgeError::NotImplemented { op: "snapshot".into(), phase: 5 }),
-            BatchOpError::NotImplemented { phase: 5, .. }
-        ));
-        assert!(matches!(
             knowledge_to_batch_error(KnowledgeError::InvalidInput { op: "query".into(), reason: "x".into() }),
             BatchOpError::InvalidInput { field: None, .. }
         ));
@@ -189,16 +184,8 @@ mod tests {
 
     #[test]
     fn dispatch_op_maps_op_error_to_failure_result() {
-        // A reserved op surfaces as a structured failure result, not a panic
-        // or a success — exercises BatchOpEnvelope -> BatchOpResult.
-        let result = dispatch_op(&envelope("snapshot", serde_json::json!({})));
-        assert!(!result.success);
-        assert!(matches!(
-            result.error,
-            Some(BatchOpError::NotImplemented { phase: 5, .. })
-        ));
-
-        // Unknown op → InvalidInput failure.
+        // An undeclared op surfaces as a structured failure result, not a
+        // panic or a success — exercises BatchOpEnvelope -> BatchOpResult.
         let result = dispatch_op(&envelope("bogus", serde_json::json!({})));
         assert!(!result.success);
         assert!(matches!(result.error, Some(BatchOpError::InvalidInput { .. })));

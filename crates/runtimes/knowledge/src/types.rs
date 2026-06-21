@@ -239,9 +239,6 @@ pub struct RenderedPosition {
 
 #[derive(Debug, Error)]
 pub enum KnowledgeError {
-    #[error("op `{op}` not implemented in phase 2 (ships in phase {phase})")]
-    NotImplemented { op: String, phase: u8 },
-
     #[error("invalid input for op `{op}`: {reason}")]
     InvalidInput { op: String, reason: String },
 

@@ -32,12 +32,6 @@ pub fn dispatch(op: &str, payload: Value) -> Result<Value, KnowledgeError> {
         "query" => op_query,
         "graph" => op_graph,
         "validate" => op_validate,
-        // `snapshot`/`index` are NOT in the knowledge kind schema (the
-        // daemon would reject them before they reach here). They survive
-        // only as legacy reserved runtime names; preserve their historical
-        // NotImplemented phases for direct-invocation parity.
-        "snapshot" => return Err(KnowledgeError::NotImplemented { op: op.into(), phase: 5 }),
-        "index" => return Err(KnowledgeError::NotImplemented { op: op.into(), phase: 6 }),
         other => {
             return Err(KnowledgeError::InvalidInput {
                 op: other.to_string(),
@@ -175,23 +169,15 @@ mod tests {
         assert!(out.get("rendered").is_some());
     }
 
-    // ── unknown / reserved ops ──────────────────────────────────────────
+    // ── unknown ops ─────────────────────────────────────────────────────
 
     #[test]
-    fn unknown_op_is_invalid_input() {
-        let err = dispatch("bogus", json!({})).expect_err("unknown op must error");
-        assert!(matches!(err, KnowledgeError::InvalidInput { .. }), "got: {err:?}");
-    }
-
-    #[test]
-    fn reserved_ops_keep_their_phases() {
-        match dispatch("snapshot", json!({})) {
-            Err(KnowledgeError::NotImplemented { phase, .. }) => assert_eq!(phase, 5),
-            other => panic!("expected NotImplemented phase 5, got {other:?}"),
-        }
-        match dispatch("index", json!({})) {
-            Err(KnowledgeError::NotImplemented { phase, .. }) => assert_eq!(phase, 6),
-            other => panic!("expected NotImplemented phase 6, got {other:?}"),
+    fn undeclared_ops_are_invalid_input() {
+        // Any op without a handler — a typo or a name the runtime does not
+        // implement — hits the single unknown arm.
+        for op in ["bogus", "snapshot", "index"] {
+            let err = dispatch(op, json!({})).expect_err("undeclared op must error");
+            assert!(matches!(err, KnowledgeError::InvalidInput { .. }), "{op}: {err:?}");
         }
     }
 
