@@ -3746,8 +3746,12 @@ metadata:
     #[test]
     fn shipped_knowledge_schema_declares_read_ops() {
         // The shipped standard knowledge kind schema must parse and declare
-        // the read-side operations (query/graph/validate) alongside the
-        // compose ops, so the daemon can dispatch them.
+        // exactly the GENERICALLY-DISPATCHABLE ops: compose (single-root) +
+        // the read side (query/graph/validate, corpus-scoped). It must NOT
+        // declare `compose_positions` — that op is handled by the runtime
+        // but driven only by the compose_context_positions launch
+        // augmentation, with a bespoke payload, so it is intentionally not
+        // generically dispatchable.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
             "../../../bundles/standard/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
         );
@@ -3762,9 +3766,13 @@ metadata:
             .iter()
             .map(|o| o.name.as_str())
             .collect();
-        for expected in ["compose", "compose_positions", "query", "graph", "validate"] {
+        for expected in ["compose", "query", "graph", "validate"] {
             assert!(ops.contains(&expected), "missing op `{expected}` in {ops:?}");
         }
+        assert!(
+            !ops.contains(&"compose_positions"),
+            "compose_positions is augmentation-driven and must NOT be a generic op: {ops:?}"
+        );
 
         // Read ops are non-mutating and corpus-scoped; compose is single-root.
         let op = |name: &str| -> OperationDecl {
