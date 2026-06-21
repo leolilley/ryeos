@@ -302,6 +302,19 @@ impl StudioCore {
                 }
                 Vec::new()
             }
+            StudioUiEvent::SetFold {
+                tile_id,
+                section,
+                collapsed,
+            } => {
+                let Some(tile_id) = parse_tile_id(&tile_id) else {
+                    return Vec::new();
+                };
+                if self.set_tile_fold(tile_id, section, collapsed) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             StudioUiEvent::ActivateFocused => action_for_focused_row(self)
                 .map_or_else(Vec::new, |action| self.dispatch_action(action)),
         }
@@ -325,9 +338,15 @@ impl StudioCore {
                 effects
             }
             StudioAction::OpenNewView { view } => {
-                let effects = self.add_center_tile(view);
-                self.bump_generation();
-                effects
+                // Single-lens surfaces have no "another tile": a new-view
+                // request collapses to replacing the one center lens.
+                if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens {
+                    self.open_view(view)
+                } else {
+                    let effects = self.add_center_tile(view);
+                    self.bump_generation();
+                    effects
+                }
             }
             StudioAction::CloseFocused => {
                 if self.close_tile_or_empty(self.workspace.focused_tile) {
@@ -440,6 +459,11 @@ impl StudioCore {
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
+            StudioAction::AimThread { thread_id } => self.apply_ui_affordance(
+                super::seat::KEY_INPUT_ROUTE.to_string(),
+                None,
+                Some(serde_json::json!({ "thread": thread_id })),
+            ),
             StudioAction::InspectSummary { title, detail } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
@@ -870,6 +894,24 @@ impl StudioCore {
         }
     }
 
+    fn set_tile_fold(&mut self, tile_id: TileId, section: usize, collapsed: bool) -> bool {
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return false;
+        };
+        match &mut tile.local {
+            ViewLocalState::GenericList {
+                collapsed: folds, ..
+            } => {
+                if collapsed {
+                    folds.insert(section)
+                } else {
+                    folds.remove(&section)
+                }
+            }
+            ViewLocalState::None => false,
+        }
+    }
+
     fn open_view(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
         for tile_id in self.workspace.tile_ids() {
             if self
@@ -879,6 +921,22 @@ impl StudioCore {
                 .is_some_and(|tile| tile.view == view)
             {
                 self.workspace.focused_tile = tile_id;
+                self.push_motion(StudioMotionEventVm::FocusChanged {
+                    tile_id: tile_id.0.to_string(),
+                });
+                self.bump_generation();
+                return self.effects_for_view(&view);
+            }
+        }
+
+        // Single-lens surfaces (the cell-grid TUI) hold exactly one center
+        // tile: opening a different view REPLACES the lens in place rather
+        // than splitting a second tile. Breadth comes from swapping the
+        // single lens, never from arranging panes.
+        if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
+            && !self.workspace.center_is_empty()
+        {
+            if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
                 self.push_motion(StudioMotionEventVm::FocusChanged {
                     tile_id: tile_id.0.to_string(),
                 });
@@ -3208,6 +3266,82 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::FetchSource { .. })
         ));
+    }
+
+    #[test]
+    fn single_lens_open_view_replaces_center_instead_of_splitting() {
+        // The cell-grid (TUI) composition: one center lens. Opening a
+        // different view swaps the lens in place — the tile count stays at
+        // one, no split, and the new view fetches.
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        seed_view(&mut core, "view:ryeos/items/space");
+        seed_view(&mut core, "view:test/services");
+
+        // First open fills the empty center with the one lens.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec {
+                        view_ref: "view:ryeos/items/space".to_string(),
+                    },
+                },
+            },
+        });
+        assert_eq!(core.workspace.tile_ids().len(), 1);
+        core.ui.motion.clear();
+
+        // Switching the lens replaces in place — still exactly one tile.
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec {
+                        view_ref: "view:test/services".to_string(),
+                    },
+                },
+            },
+        });
+
+        assert_eq!(
+            core.workspace.tile_ids().len(),
+            1,
+            "single-lens never splits a second tile"
+        );
+        assert!(matches!(
+            core.workspace.focused_view(),
+            Some(ViewSpec { view_ref }) if view_ref == "view:test/services"
+        ));
+        assert!(
+            !core
+                .ui
+                .motion
+                .iter()
+                .any(|event| matches!(event, StudioMotionEventVm::TileSplit { .. })),
+            "no split motion when swapping the single lens"
+        );
+        assert!(
+            matches!(
+                effects.first().map(|effect| &effect.kind),
+                Some(StudioEffectKind::FetchSource { .. })
+            ),
+            "the swapped-in lens fetches its source"
+        );
+
+        // OpenNewView also collapses to a replace — no second tile.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenNewView {
+                    view: ViewSpec {
+                        view_ref: "view:ryeos/items/space".to_string(),
+                    },
+                },
+            },
+        });
+        assert_eq!(
+            core.workspace.tile_ids().len(),
+            1,
+            "OpenNewView does not add a tile in single-lens"
+        );
     }
 
     #[test]

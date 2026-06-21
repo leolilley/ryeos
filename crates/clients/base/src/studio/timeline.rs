@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use super::content::{ProjectedRecord, TimelineRole};
 use super::effect::StudioEffect;
+use super::event::StudioAction;
 use super::model::StudioCore;
 use super::view_model::{tone_from_name, StudioTone};
 
@@ -47,6 +48,11 @@ pub enum StudioTimelineEntryVm {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<String>,
         tone: StudioTone,
+        /// What activating this entry (Enter on the point) does — e.g. a
+        /// forked-subthread line aims the route at that child thread so the
+        /// feed re-projects to its braid. Most lines carry no action.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<StudioAction>,
     },
     Pair {
         summary: String,
@@ -58,6 +64,76 @@ pub enum StudioTimelineEntryVm {
     Separator {
         label: String,
     },
+}
+
+/// The section (turn) index of each entry. A `Separator` opens a new turn,
+/// so it heads the section it begins; entries before the first separator are
+/// section 0. Used to fold a whole turn shut from its header.
+pub(crate) fn timeline_sections(entries: &[StudioTimelineEntryVm]) -> Vec<usize> {
+    let mut sections = Vec::with_capacity(entries.len());
+    let mut current = 0usize;
+    for (i, entry) in entries.iter().enumerate() {
+        if i != 0 && matches!(entry, StudioTimelineEntryVm::Separator { .. }) {
+            current += 1;
+        }
+        sections.push(current);
+    }
+    sections
+}
+
+/// A timeline with folds applied: collapsed turns keep only their header
+/// (the `Separator`, marked), their bodies hidden.
+pub(crate) struct FoldedTimeline {
+    pub entries: Vec<StudioTimelineEntryVm>,
+    /// Section index per *visible* entry (parallel to `entries`).
+    pub sections: Vec<usize>,
+    /// Sections that *can* be folded — those headed by a real `Separator`.
+    pub collapsible: std::collections::BTreeSet<usize>,
+}
+
+/// Apply the operator's folds to a coalesced timeline. A section is foldable
+/// only if it is headed by a `Separator` (section 0 without one can't collapse
+/// to nothing). Collapsed sections keep their header, marked `▸`, body hidden.
+pub(crate) fn fold_timeline(
+    full: Vec<StudioTimelineEntryVm>,
+    collapsed: &std::collections::BTreeSet<usize>,
+) -> FoldedTimeline {
+    let section_of = timeline_sections(&full);
+    let is_header: Vec<bool> = (0..full.len())
+        .map(|i| i == 0 || section_of[i] != section_of[i - 1])
+        .collect();
+    let mut collapsible = std::collections::BTreeSet::new();
+    for i in 0..full.len() {
+        if is_header[i] && matches!(full[i], StudioTimelineEntryVm::Separator { .. }) {
+            collapsible.insert(section_of[i]);
+        }
+    }
+    let mut entries = Vec::new();
+    let mut sections = Vec::new();
+    for (i, entry) in full.into_iter().enumerate() {
+        let sec = section_of[i];
+        let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
+        if folded && !is_header[i] {
+            continue;
+        }
+        let entry = if folded {
+            match entry {
+                StudioTimelineEntryVm::Separator { label } => StudioTimelineEntryVm::Separator {
+                    label: format!("{label} ▸"),
+                },
+                other => other,
+            }
+        } else {
+            entry
+        };
+        entries.push(entry);
+        sections.push(sec);
+    }
+    FoldedTimeline {
+        entries,
+        sections,
+        collapsible,
+    }
 }
 
 pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimelineEntryVm> {
@@ -174,6 +250,7 @@ fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
         primary: record.primary,
         meta: record.meta,
         tone: tone_from_name(record.tone.as_deref()),
+        action: None,
     }
 }
 
@@ -208,10 +285,19 @@ fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
         "thread_usage" => (usage_summary(payload?)?, None, StudioTone::Neutral),
         _ => return None,
     };
+    // A forked subthread is navigable: activating it aims the route at the
+    // child so the feed re-projects to that subthread's braid.
+    let action = match event_type {
+        "child_thread_spawned" => meta
+            .clone()
+            .map(|thread_id| StudioAction::AimThread { thread_id }),
+        _ => None,
+    };
     Some(StudioTimelineEntryVm::Line {
         primary,
         meta,
         tone,
+        action,
     })
 }
 
@@ -413,5 +499,165 @@ mod tests {
         assert!(execution_entry(&raw_record(json!({ "event_type": "cognition_out" }))).is_none());
         // A record with no event_type (e.g. the test `record` helper shape).
         assert!(execution_entry(&raw_record(json!({ "primary": "x" }))).is_none());
+    }
+
+    fn block(text: &str) -> StudioTimelineEntryVm {
+        StudioTimelineEntryVm::Block {
+            text: text.to_string(),
+            tone: StudioTone::Neutral,
+        }
+    }
+
+    fn separator(label: &str) -> StudioTimelineEntryVm {
+        StudioTimelineEntryVm::Separator {
+            label: label.to_string(),
+        }
+    }
+
+    #[test]
+    fn sections_increment_at_separators() {
+        let entries = vec![
+            block("pre"),         // section 0, no separator header
+            separator("turn 1"), // opens section 1
+            block("a"),
+            separator("turn 2"), // opens section 2
+            block("b"),
+        ];
+        assert_eq!(timeline_sections(&entries), vec![0, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn fold_timeline_collapses_a_turn_to_its_marked_header() {
+        let full = vec![
+            separator("turn 1"), // section 0, header
+            block("hi"),
+            separator("turn 2"), // section 1, header
+            block("bye"),
+        ];
+        // Both turns are headed by separators → both foldable.
+        let mut collapsed = std::collections::BTreeSet::new();
+        collapsed.insert(1);
+        let folded = fold_timeline(full, &collapsed);
+
+        assert!(folded.collapsible.contains(&0) && folded.collapsible.contains(&1));
+        // turn 1 stays open (header + body); turn 2 keeps only its marked header.
+        assert_eq!(folded.entries.len(), 3, "turn 2 body is hidden");
+        assert!(matches!(
+            &folded.entries[2],
+            StudioTimelineEntryVm::Separator { label } if label.contains("turn 2") && label.contains('▸')
+        ));
+        assert_eq!(folded.sections, vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn fold_timeline_will_not_collapse_a_headerless_section() {
+        // Section 0 has no separator header → not foldable, never hidden.
+        let full = vec![block("a"), block("b")];
+        let mut collapsed = std::collections::BTreeSet::new();
+        collapsed.insert(0);
+        let folded = fold_timeline(full, &collapsed);
+        assert!(folded.collapsible.is_empty());
+        assert_eq!(folded.entries.len(), 2, "headerless content is never folded away");
+    }
+
+    #[test]
+    fn child_thread_entry_is_actionable_aims_the_route() {
+        // A forked subthread is a navigable feed entry: activating it aims
+        // the route at the child so the feed re-projects to its braid.
+        let entry = execution_entry(&raw_record(json!({
+            "event_type": "child_thread_spawned",
+            "payload": { "child_thread_id": "T-child" }
+        })));
+        let Some(StudioTimelineEntryVm::Line { meta, action, .. }) = entry else {
+            panic!("expected a forked-subthread line");
+        };
+        assert_eq!(meta.as_deref(), Some("T-child"));
+        assert!(
+            matches!(action, Some(StudioAction::AimThread { thread_id }) if thread_id == "T-child"),
+            "the entry aims the route at the child thread"
+        );
+    }
+
+    #[test]
+    fn ordinary_milestone_entries_carry_no_action() {
+        let entry = execution_entry(&raw_record(json!({ "event_type": "thread_completed" })));
+        assert!(matches!(
+            entry,
+            Some(StudioTimelineEntryVm::Line { action: None, .. })
+        ));
+    }
+
+    /// End-to-end coalescer contract: the SHIPPED chain/timeline projection
+    /// (cognition_out→flow on `payload.content`, cognition_in→boundary,
+    /// tool_call_start/result→pair on `payload.call_id`) folded through
+    /// `project_records` + `timeline_entries`, asserting the three settled
+    /// shapes — a coalesced Block, a Separator, and a closed Pair — all appear.
+    /// This is the regression that links the view item's projection to the
+    /// coalescer; the per-piece tests above don't exercise the binding.
+    #[test]
+    fn chain_replay_projection_coalesces_into_block_separator_pair() {
+        use super::super::content::{project_records, ViewBinding};
+
+        // Mirrors bundles/studio/.ai/views/ryeos/chain/timeline.yaml.
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "timeline",
+            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "projections": {
+                "event_kinds": {
+                    "cognition_out": { "primary": "payload.content", "role": "flow" },
+                    "cognition_in": { "primary": "payload.turn", "meta": "event_type", "role": "boundary" },
+                    "tool_call_start": {
+                        "primary": "payload.tool", "meta": "payload.call_id",
+                        "role": "pair_open", "pair_key": "payload.call_id"
+                    },
+                    "tool_call_result": {
+                        "primary": "payload.tool", "meta": "payload.result_size_bytes",
+                        "role": "pair_close", "pair_key": "payload.call_id",
+                        "tone": {
+                            "field": "payload.truncated_reason", "missing": "good",
+                            "map": { "error_envelope": "danger" }, "default": "good"
+                        }
+                    }
+                },
+                "default": { "primary": "event_type", "meta": "ts" }
+            }
+        }))
+        .unwrap();
+
+        let response = json!({ "events": [
+            { "event_type": "cognition_in", "payload": { "turn": "turn 1" } },
+            { "event_type": "cognition_out", "payload": { "content": "Hello " } },
+            { "event_type": "cognition_out", "payload": { "content": "world" } },
+            { "event_type": "tool_call_start", "payload": { "tool": "read_file", "call_id": "c1" } },
+            { "event_type": "tool_call_result",
+              "payload": { "tool": "read_file", "call_id": "c1", "result_size_bytes": 128 } }
+        ]});
+
+        let entries = timeline_entries(project_records(&binding, &response));
+
+        // The boundary became a Separator.
+        assert!(
+            entries.iter().any(|e| matches!(
+                e, StudioTimelineEntryVm::Separator { label } if label == "turn 1"
+            )),
+            "cognition_in must fold to a Separator: {entries:?}"
+        );
+        // The two flow deltas coalesced into one settled Block.
+        assert!(
+            entries.iter().any(|e| matches!(
+                e, StudioTimelineEntryVm::Block { text, .. } if text == "Hello world"
+            )),
+            "consecutive cognition_out content must coalesce to one Block: {entries:?}"
+        );
+        // The tool call open+result settled into one closed Pair (good tone:
+        // truncated_reason absent → the `missing: good` branch).
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                StudioTimelineEntryVm::Pair { summary, pending: false, tone, .. }
+                    if summary == "read_file" && matches!(tone, StudioTone::Good)
+            )),
+            "tool_call_start/result must settle into one closed Pair: {entries:?}"
+        );
     }
 }

@@ -44,6 +44,10 @@ pub enum ViewLocalState {
     GenericList {
         cursor: usize,
         scroll: usize,
+        /// Feed sections (turns) the operator has folded shut, by section
+        /// index. Only the timeline lens uses this; row lists leave it empty.
+        #[serde(default)]
+        collapsed: std::collections::BTreeSet<usize>,
     },
     #[default]
     None,
@@ -75,6 +79,7 @@ impl ViewSpec {
         ViewLocalState::GenericList {
             cursor: 0,
             scroll: 0,
+            collapsed: std::collections::BTreeSet::new(),
         }
     }
 
@@ -115,7 +120,12 @@ pub struct TileState {
 ///   the stack region arranged along `stack.arrange`.
 pub fn compute_layout(tiling: &TilingSpec, tiles: &[TileId]) -> Option<LayoutTree> {
     match tiling.mode {
-        TilingModeSpec::MasterStack => master_stack_layout(tiling, tiles),
+        // Single-lens keeps the center at one tile, which master-stack
+        // already renders as a full-center monocle; share the layout so a
+        // stray extra tile still degrades safely rather than vanishing.
+        TilingModeSpec::MasterStack | TilingModeSpec::SingleLens => {
+            master_stack_layout(tiling, tiles)
+        }
     }
 }
 
@@ -646,7 +656,8 @@ mod tests {
             ws.tiles.get(&new_id).map(|t| &t.local),
             Some(ViewLocalState::GenericList {
                 cursor: 0,
-                scroll: 0
+                scroll: 0,
+                ..
             })
         ));
     }

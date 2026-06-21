@@ -103,6 +103,11 @@ pub enum StudioAction {
     SubmitThreadCommand {
         command: String,
     },
+    /// Aim the input route at a thread — the feed re-projects to its braid.
+    /// Activating a forked-subthread feed entry "enters" that subthread.
+    AimThread {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -179,6 +184,12 @@ pub enum StudioUiEvent {
     SetTileCursor {
         tile_id: String,
         index: usize,
+    },
+    /// Fold (`collapsed: true`) or unfold a turn-section of a feed lens.
+    SetFold {
+        tile_id: String,
+        section: usize,
+        collapsed: bool,
     },
     ActivateFocused,
 }

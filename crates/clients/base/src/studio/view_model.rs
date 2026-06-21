@@ -306,6 +306,16 @@ pub enum StudioViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<StudioTimelineEntryVm>,
+        /// The entry under the point (absolute index into `entries`), for
+        /// highlight + scroll. Derived from the tile cursor, which the feed
+        /// reads as distance-from-bottom (0 = newest), so the point sits at
+        /// the tail by default and arrow-up walks back into history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected: Option<usize>,
+        /// The foldable turn-section the point sits in, if any — what a fold
+        /// key toggles. `None` when the point is in unfoldable content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fold_section: Option<usize>,
     },
     Map {
         scene: StudioSceneModel,
@@ -744,7 +754,7 @@ fn dock_tile_vm(
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
-        view: bound_view_vm_keyed(core, &source_key, None, view_ref, &core.ui.atlas),
+        view: bound_view_vm_keyed(core, &source_key, None, None, view_ref, &core.ui.atlas),
         input: instance_input_vm(core, &source_key, view_ref),
     })
 }
@@ -769,6 +779,7 @@ fn bound_view_vm(core: &StudioCore, tile_id: TileId, view_ref: &str) -> StudioVi
         core,
         &tile_id.0.to_string(),
         selected_cursor(core, tile_id),
+        selected_collapsed(core, tile_id),
         view_ref,
         core.tile_atlas_state(tile_id),
     )
@@ -778,6 +789,7 @@ fn bound_view_vm_keyed(
     core: &StudioCore,
     source_key: &str,
     cursor: Option<usize>,
+    collapsed: Option<&std::collections::BTreeSet<usize>>,
     view_ref: &str,
     atlas: &crate::atlas::AtlasUiStateVm,
 ) -> StudioViewVm {
@@ -884,13 +896,31 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let mut entries = timeline_entries(super::content::project_records(binding, response));
-            append_live_delta(core, &mut entries);
+            let mut full = timeline_entries(super::content::project_records(binding, response));
+            append_live_delta(core, &mut full);
+            // Apply the operator's folds, then project over the VISIBLE list so
+            // the cursor, scroll, and point all address what's actually shown.
+            let empty = std::collections::BTreeSet::new();
+            let folded = super::timeline::fold_timeline(full, collapsed.unwrap_or(&empty));
+            // The feed reads the tile cursor as distance-from-bottom: 0 keeps
+            // the point on the newest entry (so it follows the live tail),
+            // larger values walk back into history. Empty feed → no point.
+            let selected = folded.entries.len().checked_sub(1).map(|last| {
+                let distance = cursor.unwrap_or(0).min(last);
+                last - distance
+            });
+            // The foldable section under the point — what a fold key toggles.
+            let fold_section = selected.and_then(|i| {
+                let section = folded.sections.get(i).copied()?;
+                folded.collapsible.contains(&section).then_some(section)
+            });
             StudioViewVm::Timeline {
                 title,
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
-                entries,
+                entries: folded.entries,
+                selected,
+                fold_section,
             }
         }
         ("key_value" | "text", Some(response)) => {
@@ -1404,6 +1434,19 @@ fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
 pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
+    // Feed lens: activation acts on the entry under the point (e.g. enter a
+    // forked subthread), not a row.
+    if let StudioViewVm::Timeline {
+        entries, selected, ..
+    } = bound_view_vm(core, tile_id, &view.view_ref)
+    {
+        return selected
+            .and_then(|i| entries.into_iter().nth(i))
+            .and_then(|entry| match entry {
+                StudioTimelineEntryVm::Line { action, .. } => action,
+                _ => None,
+            });
+    }
     let cursor = selected_cursor(core, tile_id).unwrap_or(0);
     let rows = focused_rows(core, view, tile_id);
     rows.get(cursor).and_then(|row| row.action.clone())
@@ -1425,6 +1468,16 @@ fn selected_cursor(core: &StudioCore, tile_id: TileId) -> Option<usize> {
     let tile = core.workspace.tiles.get(&tile_id)?;
     match &tile.local {
         ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
+        ViewLocalState::None => None,
+    }
+}
+
+fn selected_collapsed(
+    core: &StudioCore,
+    tile_id: TileId,
+) -> Option<&std::collections::BTreeSet<usize>> {
+    match &core.workspace.tiles.get(&tile_id)?.local {
+        ViewLocalState::GenericList { collapsed, .. } => Some(collapsed),
         ViewLocalState::None => None,
     }
 }
@@ -1685,6 +1738,7 @@ mod tests {
                     primary: "thinking".to_string(),
                     meta: None,
                     tone: StudioTone::Neutral,
+                    action: None,
                 },
             ]
         );
@@ -1706,6 +1760,7 @@ mod tests {
                 primary: "orphan close".to_string(),
                 meta: Some("done".to_string()),
                 tone: StudioTone::Good,
+                action: None,
             }]
         );
     }
@@ -1768,6 +1823,7 @@ mod tests {
                 primary: "message".to_string(),
                 meta: None,
                 tone: StudioTone::Neutral,
+                action: None,
             }]
         );
     }
