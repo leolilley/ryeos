@@ -10,6 +10,7 @@ pub mod config;
 pub mod engine_cache;
 pub mod engine_init;
 pub mod env_contract;
+pub mod env_probe;
 pub mod event_store_service;
 pub mod event_stream;
 pub mod execution_provenance;
