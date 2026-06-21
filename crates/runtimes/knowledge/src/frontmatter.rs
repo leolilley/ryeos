@@ -100,8 +100,7 @@ fn after_leading_signatures(content: &str) -> &str {
 
 /// Locate the raw YAML frontmatter block text (between delimiters), if any,
 /// after stripping leading signatures. Returns `None` when no `---` or
-/// ` ```yaml` block is present. Shared by [`parse_frontmatter`] and
-/// [`parse_frontmatter_result`] so detection is identical.
+/// ` ```yaml` block is present. Used by [`parse_frontmatter_result`].
 fn frontmatter_block(content: &str) -> Option<&str> {
     let trimmed = after_leading_signatures(content);
     if trimmed.starts_with("---") {
@@ -117,18 +116,6 @@ fn frontmatter_block(content: &str) -> Option<&str> {
     }
 }
 
-/// Best-effort parse of a document's frontmatter into a JSON object.
-///
-/// Used by the read ops to surface `title`, `tags`, and `category` for
-/// filtering and display. Tolerant: any failure (no block, unparseable,
-/// non-mapping) yields an empty object — a missing title is a warning, not
-/// a hard failure. For strict validation use [`parse_frontmatter_result`].
-pub fn parse_frontmatter(content: &str) -> serde_json::Value {
-    match parse_frontmatter_result(content) {
-        Ok(Some(v)) => v,
-        _ => serde_json::json!({}),
-    }
-}
 
 /// Strict frontmatter parse for integrity validation:
 ///   - `Ok(None)`        — no frontmatter block present (not an error),
@@ -146,6 +133,51 @@ pub fn parse_frontmatter_result(content: &str) -> Result<Option<serde_json::Valu
         Ok(v) if v.is_object() => Ok(Some(v)),
         Ok(_) => Ok(Some(serde_json::json!({}))),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Whether a knowledge item's source is a whole-document YAML file
+/// (`.yaml`/`.yml`) rather than a markdown file with a frontmatter block.
+/// The kind schema advertises both formats, so the read ops must validate
+/// both — not just markdown.
+fn is_yaml_source(source_path: &str) -> bool {
+    let p = source_path.to_ascii_lowercase();
+    p.ends_with(".yaml") || p.ends_with(".yml")
+}
+
+/// Format-aware strict metadata parse, keyed off the item's source path:
+///   - `.md`           → the markdown frontmatter block (see
+///     [`parse_frontmatter_result`]);
+///   - `.yaml`/`.yml`  → the WHOLE (signature-stripped) document is the
+///     metadata and must be syntactically valid YAML.
+///
+/// Returns `Err` only on genuine YAML syntax errors (an integrity failure
+/// the corpus `validate` must surface), `Ok(None)` when there is no
+/// metadata, and `Ok(Some(obj))` for a parsed mapping (or empty for a
+/// valid-but-non-mapping document).
+pub fn parse_metadata_result(
+    raw_content: &str,
+    source_path: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if is_yaml_source(source_path) {
+        match serde_yaml::from_str::<serde_json::Value>(raw_content) {
+            Ok(v) if v.is_object() => Ok(Some(v)),
+            Ok(serde_json::Value::Null) => Ok(None),
+            Ok(_) => Ok(Some(serde_json::json!({}))),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        parse_frontmatter_result(raw_content)
+    }
+}
+
+/// Tolerant format-aware metadata parse (empty object on any failure) —
+/// for query filters/display where a malformed item is simply unmatchable,
+/// not a hard error.
+pub fn parse_metadata(raw_content: &str, source_path: &str) -> serde_json::Value {
+    match parse_metadata_result(raw_content, source_path) {
+        Ok(Some(v)) => v,
+        _ => serde_json::json!({}),
     }
 }
 

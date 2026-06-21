@@ -20,6 +20,10 @@ use ryeos_engine::engine::Engine;
 /// Status of a single doctor check.
 pub const OK: &str = "ok";
 pub const FAIL: &str = "fail";
+/// Non-OK but non-blocking — a real risk a human/script should see, that the
+/// deterministic `ok` verdict does not fail on (e.g. a name/directory mismatch
+/// that publish, not doctor, is the authority for).
+pub const WARN: &str = "warning";
 pub const UNKNOWN: &str = "unknown";
 pub const NA: &str = "n/a";
 
@@ -85,11 +89,11 @@ fn check_manifest(source: &Path) -> CheckResult {
             json!({ "note": "no .ai/manifest.source.yaml — manifests are optional" }),
         );
     }
-    let declared_name = match std::fs::read_to_string(&source_path)
+    let source_manifest = match std::fs::read_to_string(&source_path)
         .ok()
         .and_then(|raw| serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(&raw).ok())
     {
-        Some(src) => src.name,
+        Some(src) => src,
         None => {
             return CheckResult::new(
                 "manifest",
@@ -98,6 +102,9 @@ fn check_manifest(source: &Path) -> CheckResult {
             );
         }
     };
+    let declared_name = source_manifest.name.clone();
+    let declares_runtime_authority =
+        !source_manifest.bundle_events.is_empty() || !source_manifest.runtime_vault.is_empty();
 
     let generated = ai_dir.join("manifest.yaml");
     if !generated.exists() {
@@ -116,15 +123,33 @@ fn check_manifest(source: &Path) -> CheckResult {
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let name_consistent = declared_name == dir_name;
+    // A name/directory mismatch is non-OK so a human/script can see it, but not
+    // a hard FAIL: the directory is only a heuristic for the effective bundle
+    // id, and publish is the authority that hard-fails a real item-level
+    // mismatch (especially for runtime-authority bundles, where the daemon
+    // rejects cap minting).
+    let (status, note) = if name_consistent {
+        (OK, Value::Null)
+    } else if declares_runtime_authority {
+        (
+            WARN,
+            json!("manifest name differs from the directory AND this bundle declares runtime authority — if the items' effective bundle id does not equal the manifest name, the daemon will reject runtime-cap minting. Verify with `ryeos bundle publish` (it hard-fails a real mismatch)."),
+        )
+    } else {
+        (
+            WARN,
+            json!("manifest name differs from the directory; pass --name on publish if the effective bundle id differs"),
+        )
+    };
     CheckResult::new(
         "manifest",
-        OK,
+        status,
         json!({
             "declared_name": declared_name,
             "directory": dir_name,
             "name_matches_directory": name_consistent,
-            "note": if name_consistent { Value::Null }
-                else { json!("manifest name differs from the directory; pass --name on publish if the effective bundle id differs") },
+            "declares_runtime_authority": declares_runtime_authority,
+            "note": note,
         }),
     )
 }
@@ -335,7 +360,8 @@ mod tests {
         );
         write(&tmp.path().join(".ai/manifest.yaml"), "name: arc\n");
         let r = check_manifest(tmp.path());
-        assert_eq!(r.status, OK);
+        // A name/directory mismatch is a non-OK warning (not OK, not FAIL).
+        assert_eq!(r.status, WARN);
         assert_eq!(r.detail["name_matches_directory"], false);
         assert!(r.detail["note"].is_string());
     }

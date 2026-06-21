@@ -943,7 +943,7 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
              verb tokens must be kebab-case or single words, not \
              underscore-separated. Did you mean to use a dot? \
              (e.g. 'ryeos.execute.service.system/push-head', not \
-             'ryeos.execute.service.system/push-head')",
+             'ryeos.execute_service.system/push-head')",
             scope, parts[1]
         ));
     }

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::frontmatter::{parse_frontmatter, strip_frontmatter};
+use crate::frontmatter::{parse_metadata, strip_frontmatter};
 use crate::types::{KnowledgeError, QueryFilters, QueryMatch, QueryOutput, QueryPayload};
 
 /// BM25 term-frequency saturation.
@@ -60,7 +60,12 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
         if !ref_prefix_ok(item_ref, &payload.inputs.filters) {
             continue;
         }
-        let fm = parse_frontmatter(&item.raw_content);
+        let source_path = item
+            .metadata
+            .get("source_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let fm = parse_metadata(&item.raw_content, source_path);
         if !meta_filters_ok(&fm, &payload.inputs.filters) {
             continue;
         }

@@ -7,7 +7,7 @@
 
 use ryeos_runtime::op_wire::TrustClass;
 
-use crate::frontmatter::{parse_frontmatter_result, strip_frontmatter};
+use crate::frontmatter::{parse_metadata_result, strip_frontmatter};
 use crate::types::{KnowledgeError, ValidateOutput, ValidatePayload};
 
 pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeError> {
@@ -54,13 +54,21 @@ pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeEr
             Err(e) => errors.push(format!("frontmatter parse failed for {item_ref}: {e}")),
         }
 
-        // Frontmatter must parse if a block is present — a malformed YAML
-        // frontmatter block is an integrity error, not a quality warning.
-        let fm = match parse_frontmatter_result(&item.raw_content) {
+        // Metadata must parse if present — a malformed YAML frontmatter
+        // block (markdown) OR a malformed whole-document YAML item is an
+        // integrity error, not a quality warning. Format is keyed off the
+        // item's source path so `.yaml`/`.yml` items (advertised by the
+        // kind schema) are validated too, not just markdown.
+        let source_path = item
+            .metadata
+            .get("source_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let fm = match parse_metadata_result(&item.raw_content, source_path) {
             Ok(Some(fm)) => fm,
             Ok(None) => serde_json::json!({}),
             Err(reason) => {
-                errors.push(format!("malformed frontmatter for {item_ref}: {reason}"));
+                errors.push(format!("malformed metadata for {item_ref}: {reason}"));
                 serde_json::json!({})
             }
         };
@@ -83,19 +91,22 @@ pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeEr
             warnings.push(format!("missing tags: {item_ref}"));
         }
 
-        // `references`, if present, must be a string or array of strings.
-        // A malformed shape (null, number, object, mixed array) otherwise
-        // silently degrades to "no edges" in the executor projector.
+        // `references`, if present, must be a string or array of strings,
+        // AND each string must be a syntactically valid ref token. A bad
+        // shape or an unparseable token (e.g. "bad ref with spaces")
+        // otherwise silently degrades to "no edge" in the corpus projector
+        // and the corpus would validate clean despite a broken reference.
         if let Some(refs_val) = fm.get("references") {
-            let ok = match refs_val {
-                serde_json::Value::String(_) => true,
-                serde_json::Value::Array(a) => a.iter().all(serde_json::Value::is_string),
-                _ => false,
-            };
-            if !ok {
-                errors.push(format!(
+            match refs_val {
+                serde_json::Value::String(s) => check_ref_token(s, item_ref, &mut errors),
+                serde_json::Value::Array(a) if a.iter().all(serde_json::Value::is_string) => {
+                    for v in a {
+                        check_ref_token(v.as_str().unwrap_or(""), item_ref, &mut errors);
+                    }
+                }
+                _ => errors.push(format!(
                     "invalid `references` for {item_ref}: must be a string or array of strings"
-                ));
+                )),
             }
         }
     }
@@ -107,6 +118,30 @@ pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeEr
         item_count: items.len(),
         edge_count: payload.edges.len(),
     })
+}
+
+/// Push an error if a declared reference string is not a syntactically
+/// valid ref token. This is a runtime-local sanity check (the engine owns
+/// full canonicalization/alias expansion) — it catches the junk the corpus
+/// projector would otherwise drop to "no edge": empty strings and tokens
+/// with whitespace or other illegal characters.
+fn check_ref_token(s: &str, item_ref: &str, errors: &mut Vec<String>) {
+    if !valid_ref_token(s) {
+        errors.push(format!(
+            "invalid reference `{s}` in {item_ref}: not a valid ref token"
+        ));
+    }
+}
+
+fn valid_ref_token(s: &str) -> bool {
+    let s = s.trim();
+    // A ref is `kind:bare/id`, a bare `bare/id`, or an `@alias`. Allowed
+    // characters cover those forms; notably whitespace is rejected, which
+    // is the silent-drop case the corpus projector cannot canonicalize.
+    !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@')
+        })
 }
 
 #[cfg(test)]
@@ -259,5 +294,78 @@ mod tests {
             "errors: {:?}",
             out.errors
         );
+    }
+
+    /// Build a `.yaml` knowledge item (whole-document YAML), tagged with a
+    /// `.yaml` source_path so format-aware validation parses it as YAML.
+    fn yaml_item(body: &str) -> VerifiedItem {
+        VerifiedItem {
+            raw_content: body.to_string(),
+            raw_content_digest: "d".into(),
+            metadata: serde_json::json!({ "source_path": "/x/k/a.yaml" }),
+            trust_class: TrustClass::TrustedBundle,
+        }
+    }
+
+    fn yaml_payload(item_ref: &str, body: &str) -> ValidatePayload {
+        let mut map = BTreeMap::new();
+        map.insert(item_ref.to_string(), yaml_item(body));
+        ValidatePayload {
+            items_by_ref: map,
+            edges: vec![],
+            inputs: crate::types::ValidateInputs { roots: vec![] },
+        }
+    }
+
+    #[test]
+    fn malformed_yaml_knowledge_item_invalidates() {
+        // A `.yaml` knowledge item with broken YAML must be an integrity
+        // error — not treated as opaque body that validates clean.
+        let p = yaml_payload("k/a", "title: A\n  bad: : indent:\n");
+        let out = validate(&p).unwrap();
+        assert!(!out.valid, "malformed YAML item must invalidate");
+        assert!(
+            out.errors.iter().any(|e| e.contains("malformed metadata")),
+            "errors: {:?}",
+            out.errors
+        );
+    }
+
+    #[test]
+    fn yaml_references_wrong_type_invalidates() {
+        // `references: 123` in a YAML item: now that YAML items are parsed,
+        // the shape check fires.
+        let p = yaml_payload("k/a", "title: A\ncategory: c\ntags: [t]\nreferences: 123\n");
+        let out = validate(&p).unwrap();
+        assert!(!out.valid);
+        assert!(out.errors.iter().any(|e| e.contains("invalid `references`")));
+    }
+
+    #[test]
+    fn unparseable_reference_token_invalidates() {
+        // Valid shape (array of strings) but a token the corpus projector
+        // cannot canonicalize → would silently produce no edge.
+        let p = payload(
+            &[(
+                "k/a",
+                "---\ntitle: A\ncategory: c\ntags: [t]\nreferences: [\"bad ref with spaces\"]\n---\nbody",
+            )],
+            vec![],
+            vec![],
+        );
+        let out = validate(&p).unwrap();
+        assert!(!out.valid, "unparseable ref token must invalidate");
+        assert!(
+            out.errors.iter().any(|e| e.contains("invalid reference")),
+            "errors: {:?}",
+            out.errors
+        );
+    }
+
+    #[test]
+    fn valid_yaml_item_is_valid() {
+        let p = yaml_payload("k/a", "title: A\ncategory: c\ntags: [t]\nreferences: [knowledge:k/b]\n");
+        let out = validate(&p).unwrap();
+        assert!(out.valid, "errors: {:?}", out.errors);
     }
 }

@@ -41,17 +41,16 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
     }
 
     // Bundle-event / vault capabilities are runtime authority: a signed manifest
-    // mints them; a graph's `permissions:` cannot. Flag any declared permission
-    // that overlaps that namespace so the author sees it up front. The daemon
-    // enforces this authoritatively at cap-assembly time regardless (this is UX).
+    // mints them; a graph's `permissions:` cannot. Surface the SAME refusals the
+    // daemon applies at cap-assembly time — both well-formed reserved grants AND
+    // malformed/partial-wildcard forms (e.g. `ryeos.p*.vault.*`) — so the author
+    // gets the feedback here, not only at launch. The daemon enforces this
+    // authoritatively regardless (this is UX).
     for grant in &def.declared_permissions {
-        if ryeos_bundle::runtime_authority::composed_grant_overlaps_manifest_runtime_authority(grant)
-        {
-            result.errors.push(format!(
-                "graph permission '{grant}' is reserved: bundle-event and runtime-vault \
-                 capabilities are runtime authority, minted only by a signed manifest — \
-                 not grantable via graph permissions"
-            ));
+        if let Err(err) = ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(
+            std::slice::from_ref(grant),
+        ) {
+            result.errors.push(format!("graph permission rejected: {err}"));
         }
     }
 
@@ -780,6 +779,33 @@ config:
                 .iter()
                 .any(|e| e.contains("scan.bundle-events.*") && e.contains("reserved")),
             "expected wildcard intrusion to be rejected, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_malformed_partial_wildcard_permission() {
+        // A partial-wildcard grant the scope grammar forbids (`ryeos.p*.vault.*`)
+        // must be flagged here too — the same refusal launch applies — not only
+        // at cap assembly.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+permissions:
+  - ryeos.p*.vault.*
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("ryeos.p*.vault.*") && e.contains("not a canonical")),
+            "expected malformed grant to be rejected, got: {:?}",
             result.errors
         );
     }
