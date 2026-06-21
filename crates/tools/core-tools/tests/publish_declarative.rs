@@ -127,6 +127,7 @@ fn run_publish_once_with_trust(
         owner: "test".to_string(),
         name: None,
         skip_unsignable: false,
+        allow_namespace_mismatch: false,
         emit_trust_doc: false,
     };
     ryeos_tools::actions::publish::run_publish(&opts)
@@ -200,6 +201,7 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
             owner: "test".to_string(),
             name: None,
             skip_unsignable: false,
+            allow_namespace_mismatch: false,
             emit_trust_doc: false,
         },
     )

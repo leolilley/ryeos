@@ -115,7 +115,11 @@ pub fn import_dry_run(
             .is_some_and(|s| s.contains("spec_from_file_location"))
     });
     if !is_python_function {
-        return json!({ "import_check": "n/a", "interpreter": spec.cmd });
+        return json!({
+            "import_check": "n/a",
+            "interpreter": spec.cmd,
+            "note": "import dry-run covers the python function runtime only; this item uses a different runtime and was not import-checked",
+        });
     }
     let dash_c = dash_c.expect("checked by is_python_function");
 

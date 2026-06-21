@@ -335,6 +335,11 @@ fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<ExecuteControlF
                 flags.debug_raw = true;
             }
             "--debug-raw=false" => {}
+            token if token.starts_with("--debug-raw=") => {
+                return Err(CliError::Local {
+                    detail: format!("invalid execute control flag value: {token}"),
+                });
+            }
             _ => out.push(token),
         }
     }

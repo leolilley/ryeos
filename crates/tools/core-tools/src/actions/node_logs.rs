@@ -25,23 +25,46 @@ pub struct NodeLogsReport {
     pub startup_stderr: LogStream,
 }
 
+/// Cap on how many trailing bytes are read to satisfy a tail, so a multi-GB
+/// `trace-events.ndjson` never has to be loaded whole.
+const TAIL_BYTE_CAP: u64 = 4 * 1024 * 1024;
+
 fn tail(path: PathBuf, n: usize) -> LogStream {
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            let all: Vec<&str> = content.lines().collect();
-            let start = all.len().saturating_sub(n);
-            let lines = all[start..].iter().map(|s| s.to_string()).collect();
-            LogStream {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => {
+            return LogStream {
                 path,
-                present: true,
-                lines,
+                present: false,
+                lines: Vec::new(),
             }
         }
-        Err(_) => LogStream {
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let read_from = len.saturating_sub(TAIL_BYTE_CAP);
+    if read_from > 0 && file.seek(SeekFrom::Start(read_from)).is_err() {
+        return LogStream {
             path,
-            present: false,
+            present: true,
             lines: Vec::new(),
-        },
+        };
+    }
+
+    let mut bytes = Vec::new();
+    let _ = file.take(TAIL_BYTE_CAP).read_to_end(&mut bytes);
+    let buf = String::from_utf8_lossy(&bytes);
+    let mut all: Vec<&str> = buf.lines().collect();
+    // When we started mid-file, the first line is a partial fragment — drop it.
+    if read_from > 0 && !all.is_empty() {
+        all.remove(0);
+    }
+    let start = all.len().saturating_sub(n);
+    LogStream {
+        path,
+        present: true,
+        lines: all[start..].iter().map(|s| s.to_string()).collect(),
     }
 }
 

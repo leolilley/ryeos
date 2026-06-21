@@ -81,6 +81,12 @@ enum Cmd {
         #[arg(long)]
         skip_unsignable: bool,
 
+        /// Publish even when an item's effective bundle id diverges from a
+        /// runtime-authority manifest's name. Default: fail (the daemon would
+        /// reject runtime-cap minting, making the manifest unusable).
+        #[arg(long)]
+        allow_namespace_mismatch: bool,
+
         /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
         #[arg(long)]
         no_trust_doc: bool,
@@ -492,6 +498,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             owner,
             name,
             skip_unsignable,
+            allow_namespace_mismatch,
             no_trust_doc,
         } => run_build(
             bundle_source,
@@ -499,6 +506,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             owner,
             name,
             skip_unsignable,
+            allow_namespace_mismatch,
             no_trust_doc,
             cli.stdin_json,
         ),
@@ -717,44 +725,49 @@ fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_build(
     bundle_source: Option<PathBuf>,
     registry_roots: Vec<PathBuf>,
     owner: Option<String>,
     name: Option<String>,
     skip_unsignable: bool,
+    allow_namespace_mismatch: bool,
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let (bundle_source, registry_roots, owner, name, skip_unsignable, no_trust_doc) = if stdin_json {
-        if bundle_source.is_some() {
-            anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
-        }
-        let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
-        let registry_roots = params.registry_roots();
-        (
-            params.source,
-            registry_roots,
-            params.owner,
-            params.name,
-            params.skip_unsignable,
-            params.no_trust_doc,
-        )
-    } else {
-        let source = bundle_source
-            .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
-        (
-            source,
-            registry_roots,
-            owner,
-            name,
-            skip_unsignable,
-            no_trust_doc,
-        )
-    };
+    let (bundle_source, registry_roots, owner, name, skip_unsignable, allow_namespace_mismatch, no_trust_doc) =
+        if stdin_json {
+            if bundle_source.is_some() {
+                anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
+            }
+            let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
+            let registry_roots = params.registry_roots();
+            (
+                params.source,
+                registry_roots,
+                params.owner,
+                params.name,
+                params.skip_unsignable,
+                params.allow_namespace_mismatch,
+                params.no_trust_doc,
+            )
+        } else {
+            let source = bundle_source
+                .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
+            (
+                source,
+                registry_roots,
+                owner,
+                name,
+                skip_unsignable,
+                allow_namespace_mismatch,
+                no_trust_doc,
+            )
+        };
 
     let key_path = roots::runtime_root()
         .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?
@@ -792,6 +805,7 @@ fn run_build(
         owner,
         name,
         skip_unsignable,
+        allow_namespace_mismatch,
         emit_trust_doc: !no_trust_doc,
     })?;
 
@@ -934,7 +948,13 @@ fn run_doctor(
         &operator_config_root,
     );
 
+    let ok = report.ok;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    // Exit nonzero when any deterministic check failed, so preflight scripts
+    // can gate on the exit code (advisory `unknown` checks never fail `ok`).
+    if !ok {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
@@ -984,6 +1004,8 @@ struct BundlePublishParams {
     name: Option<String>,
     #[serde(default)]
     skip_unsignable: bool,
+    #[serde(default)]
+    allow_namespace_mismatch: bool,
     #[serde(default)]
     no_trust_doc: bool,
 }

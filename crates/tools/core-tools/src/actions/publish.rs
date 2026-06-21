@@ -61,6 +61,11 @@ pub struct PublishOptions {
     /// suppressed so a partial publish never looks like a clean release.
     /// Default `false` (fail-fast).
     pub skip_unsignable: bool,
+    /// If `true`, publish a bundle that declares runtime authority even when an
+    /// item's effective bundle id diverges from the manifest name. By default
+    /// such a mismatch is fatal, because the daemon hard-fails runtime-cap
+    /// minting for it — a published-but-unusable manifest. Default `false`.
+    pub allow_namespace_mismatch: bool,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
     /// operators to pin via `ryeos trust pin`. Default `true`.
@@ -201,6 +206,23 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         sign_report.warnings = lint_item_namespaces(&sign_report, &expected);
         for w in &sign_report.warnings {
             tracing::warn!(item = %w.item_ref, "{}", w.message);
+        }
+        // For a bundle that declares runtime authority, a namespace mismatch is
+        // fatal: the daemon hard-fails cap minting at runtime, so the manifest
+        // would publish but never work. Refuse unless explicitly overridden.
+        if !sign_report.warnings.is_empty()
+            && !opts.allow_namespace_mismatch
+            && manifest_declares_runtime_authority(&ai_dir)?
+        {
+            bail!(
+                "refusing to publish: {} item(s) have an effective bundle id that diverges \
+                 from '{}', but the manifest declares runtime authority (bundle_events / \
+                 runtime_vault). The daemon rejects runtime-cap minting for such items, so the \
+                 manifest would be unusable. Fix the item namespaces (or pass \
+                 --allow-namespace-mismatch to override).",
+                sign_report.warnings.len(),
+                expected
+            );
         }
     }
 
@@ -511,6 +533,20 @@ fn lint_expected_bundle_id(ai_dir: &Path, name_override: Option<&str>) -> Result
     Ok(Some(src.name))
 }
 
+/// True when the bundle's manifest source declares any runtime authority
+/// (`bundle_events:` or `runtime_vault:`).
+fn manifest_declares_runtime_authority(ai_dir: &Path) -> Result<bool> {
+    let source_path = ai_dir.join("manifest.source.yaml");
+    if !source_path.exists() {
+        return Ok(false);
+    }
+    let raw = fs::read_to_string(&source_path)
+        .with_context(|| format!("read manifest source {}", source_path.display()))?;
+    let src: BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+    Ok(!src.bundle_events.is_empty() || !src.runtime_vault.is_empty())
+}
+
 /// Effective bundle id of a signer-report ref `kind:bare_id` — the first
 /// `/`-segment of the bare id, mirroring the daemon's
 /// `effective_bundle_id_from_item_ref`. `None` when the ref carries no bare id.
@@ -705,5 +741,29 @@ mod tests {
     fn lint_clean_when_all_items_match() {
         let report = validated_report(&["tool:arc/play", "graph:arc/agent"]);
         assert!(lint_item_namespaces(&report, "arc").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod runtime_authority_publish_tests {
+    use super::manifest_declares_runtime_authority;
+
+    #[test]
+    fn detects_runtime_authority_declaration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        std::fs::create_dir_all(&ai).unwrap();
+        // No manifest source → false.
+        assert!(!manifest_declares_runtime_authority(&ai).unwrap());
+        // Plain manifest → false.
+        std::fs::write(ai.join("manifest.source.yaml"), "name: arc\nversion: \"0.1.0\"\n").unwrap();
+        assert!(!manifest_declares_runtime_authority(&ai).unwrap());
+        // bundle_events declared → true.
+        std::fs::write(
+            ai.join("manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\nbundle_events:\n  - event_kind: ev\n    operations: [append]\n",
+        )
+        .unwrap();
+        assert!(manifest_declares_runtime_authority(&ai).unwrap());
     }
 }
