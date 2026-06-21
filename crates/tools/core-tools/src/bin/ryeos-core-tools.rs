@@ -933,16 +933,23 @@ fn run_doctor(
         ..Default::default()
     })
     .context("load config for offline doctor engine")?;
+    // A failed engine build is non-fatal: the static checks still run and the
+    // import dry-run reports `unavailable` (e.g. when doctoring a bundle that
+    // provides its own parsers, where the offline engine can't bootstrap them).
     let engine = ryeos_app::engine_init::build_engine_for_roots(
         &config,
         &dependency_roots,
         Some(&source_path),
         None,
-    )
-    .context("build offline engine for doctor")?;
+    );
+    let engine_err = engine
+        .as_ref()
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
 
     let report = ryeos_tools::actions::doctor::run_doctor(
-        &engine,
+        engine.as_ref().map_err(|_| engine_err.as_str()),
         &source_path,
         &dependency_roots,
         &operator_config_root,

@@ -49,8 +49,12 @@ pub struct DoctorReport {
 }
 
 /// Run the full offline preflight checklist over `source`.
+///
+/// `engine` is `Err(reason)` when an offline engine could not be built; the
+/// static checks still run and the import check reports `unavailable` rather
+/// than the whole command failing.
 pub fn run_doctor(
-    engine: &Engine,
+    engine: Result<&Engine, &str>,
     source: &Path,
     dependency_roots: &[PathBuf],
     operator_config_root: &Path,
@@ -153,7 +157,7 @@ fn check_verify(source: &Path, dependency_roots: &[PathBuf], operator_config_roo
 }
 
 /// Python-tool import dry-run via the shared probe over an offline engine.
-fn check_imports(engine: &Engine, source: &Path) -> Vec<CheckResult> {
+fn check_imports(engine: Result<&Engine, &str>, source: &Path) -> Vec<CheckResult> {
     let refs = python_tool_refs(source);
     if refs.is_empty() {
         return vec![CheckResult::new(
@@ -162,6 +166,20 @@ fn check_imports(engine: &Engine, source: &Path) -> Vec<CheckResult> {
             json!({ "note": "no python tools found under .ai/tools" }),
         )];
     }
+    let engine = match engine {
+        Ok(e) => e,
+        Err(reason) => {
+            return vec![CheckResult::new(
+                "imports",
+                NA,
+                json!({
+                    "import_check": "unavailable",
+                    "import_check_reason": format!("offline engine unavailable: {reason}"),
+                    "note": "static checks ran; python imports were not dry-run",
+                }),
+            )];
+        }
+    };
 
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
