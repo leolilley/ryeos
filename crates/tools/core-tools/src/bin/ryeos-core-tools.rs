@@ -890,8 +890,33 @@ fn run_logs(app_root: Option<PathBuf>, lines: usize, stdin_json: bool) -> anyhow
 struct NodeLogsParams {
     #[serde(default)]
     app_root: Option<PathBuf>,
-    #[serde(default)]
+    // CLI flags arrive as strings through command-arg binding, so accept either
+    // a JSON number or a numeric string (e.g. `--lines 3` → "3").
+    #[serde(default, deserialize_with = "de_opt_usize")]
     lines: Option<usize>,
+}
+
+/// Deserialize an optional `usize` from either a JSON number or a numeric
+/// string — CLI args bind as strings, daemon/stdin callers may send numbers.
+fn de_opt_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(usize),
+        Str(String),
+    }
+    match Option::<NumOrStr>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(NumOrStr::Num(n)) => Ok(Some(n)),
+        Some(NumOrStr::Str(s)) => s
+            .parse()
+            .map(Some)
+            .map_err(|e| serde::de::Error::custom(format!("invalid `lines` value '{s}': {e}"))),
+    }
 }
 
 fn run_doctor(
