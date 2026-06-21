@@ -233,7 +233,7 @@ mod tests {
         );
         let out = validate(&p).unwrap();
         assert!(!out.valid, "malformed frontmatter must invalidate");
-        assert!(out.errors.iter().any(|e| e.contains("malformed frontmatter")));
+        assert!(out.errors.iter().any(|e| e.contains("malformed metadata")));
     }
 
     #[test]
