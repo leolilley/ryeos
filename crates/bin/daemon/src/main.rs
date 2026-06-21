@@ -18,7 +18,7 @@ use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
 use ryeos_executor::executor as service_executor;
 use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
-use ryeosd::{bootstrap, reconcile, scheduler, uds};
+use ryeosd::{bootstrap, lifecycle_marker, reconcile, scheduler, uds};
 
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
@@ -105,6 +105,13 @@ async fn main() -> Result<()> {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(
         &config.app_root,
     ));
+
+    // Surface how the previous run ended (clean, or an inferred crash from a
+    // stale `running` marker), warn on low disk, then mark this run as running.
+    let state_dir = config.runtime_state_dir();
+    lifecycle_marker::report_previous_exit(&state_dir);
+    lifecycle_marker::check_disk_space(&state_dir);
+    lifecycle_marker::record_running(&state_dir);
 
     // Repair only daemon-local artifacts. Missing operator artifacts
     // (user signing key, trust docs) fail with guidance to run
@@ -623,6 +630,10 @@ async fn main() -> Result<()> {
             result.context("uds task join failed")??;
         }
     }
+
+    // Record a clean, handled shutdown so the next startup can distinguish it
+    // from a crash/SIGKILL (which leaves the `running` marker behind).
+    lifecycle_marker::record_exit(&state_dir, "signal");
 
     // Drain running threads on shutdown
     drain_running_threads(&app_state);
