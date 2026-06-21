@@ -76,20 +76,6 @@ fn skip_signature_comment(content: &str) -> &str {
     trimmed
 }
 
-/// Strip signed YAML frontmatter (`# ryeos:signed:...` line + body).
-/// Returns the body verbatim.
-pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
-    let mut lines = content.lines();
-    // Skip the signature line
-    if let Some(first) = lines.next() {
-        if first.trim().starts_with("# ryeos:signed:") || first.trim().starts_with("# ryeos: cas:")
-        {
-            return lines.collect::<Vec<_>>().join("\n");
-        }
-    }
-    content.to_string()
-}
-
 /// Skip a leading HTML signature comment (`<!-- ryeos:signed:… -->`) and/or
 /// a `# ryeos:signed:`/`# ryeos: cas:` line, returning the trimmed
 /// remainder. Both envelope styles are handled so the SAME helper serves
@@ -217,9 +203,11 @@ mod tests {
     }
 
     #[test]
-    fn strip_signed_yaml_frontmatter_basic() {
+    fn strip_frontmatter_signed_yaml_body() {
+        // A signed-YAML item (`# ryeos:signed:` line, no `---`/```yaml
+        // block) returns the post-signature body verbatim.
         let input = "# ryeos:signed:v1:abc:def:123\nactual body\nmore body";
-        let result = strip_signed_yaml_frontmatter(input);
+        let result = strip_frontmatter(input, "test:item").unwrap();
         assert_eq!(result, "actual body\nmore body");
     }
 
