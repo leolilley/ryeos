@@ -144,6 +144,12 @@ pub struct TilingSpec {
 pub enum TilingModeSpec {
     #[default]
     MasterStack,
+    /// One center lens at a time: the center holds exactly one tile and
+    /// opening a view REPLACES it rather than splitting. The cell-grid
+    /// (TUI) composition — breadth comes from swapping the single lens,
+    /// not arranging panes. `compute_layout` already renders one tile as a
+    /// full-center monocle; this mode keeps the tile count at one.
+    SingleLens,
 }
 
 /// Master region: side, internal arrangement, share, and tile count.
@@ -603,6 +609,19 @@ impl LoadedSurface {
     /// Whether this is a local preview (untrusted).
     pub fn is_local_preview(&self) -> bool {
         matches!(self, LoadedSurface::LocalPreview { .. })
+    }
+
+    /// Embed resolved `view:` bindings into the surface. The local-preview
+    /// path loads the spec from an untrusted file but still resolves its
+    /// views through the trusted daemon, so a layout can be previewed with
+    /// real content without a populate/install.
+    pub fn set_views(&mut self, views: serde_json::Value) {
+        let spec = match self {
+            LoadedSurface::Builtin { spec } => spec,
+            LoadedSurface::LocalPreview { spec, .. } => spec,
+            LoadedSurface::RyeResolved { spec, .. } => spec,
+        };
+        spec.views = Some(views);
     }
 
     /// Create a RyeResolved surface from daemon response.

@@ -126,6 +126,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
     seat::OPEN_DESCRIPTOR,
+    seat::LIST_DESCRIPTOR,
     seat::APPEND_DESCRIPTOR,
     seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,

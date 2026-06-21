@@ -187,6 +187,45 @@ mod tests {
     }
 
     #[test]
+    fn replay_fold_equals_live_fold_full_cycle() {
+        // The proof that "the seat is a thread": fold-from-braid (reattach)
+        // must equal the live fold. Open, append facets, persist the braid,
+        // simulate a restart with a fresh log, replay, assert the folds match.
+        let mut live = SeatLog::default();
+        live.append_facet(KEY_SELECTION, json!({"item": "a"}));
+        live.append_facet(KEY_INPUT_ROUTE, json!({"thread": "T-7"}));
+        live.append_facet(KEY_SELECTION, json!({"item": "b"}));
+        let before = live.fold();
+
+        // Persist the braid exactly as the daemon would (seat.facet events).
+        let braid: Vec<Value> = live
+            .events()
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect();
+
+        // Restart: a fresh, empty log reattaches by replaying the braid.
+        let mut reattached = SeatLog::default();
+        for event in &braid {
+            let seat_event: SeatEvent = serde_json::from_value(event.clone()).unwrap();
+            reattached.append_replayed(seat_event);
+        }
+
+        assert_eq!(
+            reattached.fold(),
+            before,
+            "replay fold must equal the live fold"
+        );
+        // Appending after reattach continues the sequence, not restarts it.
+        let seq = reattached.append_facet(KEY_SELECTION, json!({"item": "c"}));
+        assert_eq!(seq, 3);
+        assert_eq!(
+            reattached.fold().get(KEY_SELECTION),
+            Some(&json!({"item": "c"}))
+        );
+    }
+
+    #[test]
     fn replayed_events_advance_next_seq() {
         let mut log = SeatLog::default();
         log.append_replayed(SeatEvent {

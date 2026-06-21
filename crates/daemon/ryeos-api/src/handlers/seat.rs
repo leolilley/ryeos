@@ -206,6 +206,59 @@ pub async fn handle_close(
     Ok(json!({ "thread_id": finalized.thread_id, "status": finalized.status }))
 }
 
+// ── seat/list ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListRequest {
+    /// Optional surface filter — only seats presenting this surface.
+    #[serde(default)]
+    surface_ref: Option<String>,
+}
+
+/// List the caller's RUNNING seat sessions, freshest first. Discovery for
+/// reattach: the client reattaches the most recent running seat instead of
+/// filtering `threads/list` itself — the `seat_session` kind stays daemon-side.
+pub async fn handle_list(
+    params: Value,
+    ctx: HandlerContext,
+    state: Arc<AppState>,
+) -> Result<Value> {
+    let caller = require_operator(&ctx)?;
+    let req: ListRequest = if params.is_null() {
+        ListRequest::default()
+    } else {
+        serde_json::from_value(params)
+            .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?
+    };
+    let mut seats: Vec<_> = state
+        .state_store
+        .list_threads_filtered(200, Some(&caller))
+        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .into_iter()
+        .filter(|thread| thread.kind == SEAT_KIND && thread.status == "running")
+        .filter(|thread| {
+            req.surface_ref
+                .as_deref()
+                .map_or(true, |surface| thread.item_ref == surface)
+        })
+        .collect();
+    // Freshest first, so the client reattaches the most recent running seat.
+    seats.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let seats: Vec<Value> = seats
+        .into_iter()
+        .map(|thread| {
+            json!({
+                "thread_id": thread.thread_id,
+                "chain_root_id": thread.chain_root_id,
+                "surface_ref": thread.item_ref,
+                "updated_at": thread.updated_at,
+            })
+        })
+        .collect();
+    Ok(json!({ "seats": seats }))
+}
+
 // ── descriptors ─────────────────────────────────────────────────────────
 
 pub static OPEN_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -214,6 +267,14 @@ pub static OPEN_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.seat/open"],
     handler: |params, ctx, state| Box::pin(handle_open(params, ctx, state)),
+};
+
+pub static LIST_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
+    service_ref: "service:seat/list",
+    endpoint: "seat.list",
+    availability: ServiceAvailability::DaemonOnly,
+    required_caps: &["ryeos.execute.service.seat/list"],
+    handler: |params, ctx, state| Box::pin(handle_list(params, ctx, state)),
 };
 
 pub static APPEND_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

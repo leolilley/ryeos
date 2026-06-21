@@ -2,8 +2,15 @@
 //! background with the buffer and a block cursor. The bottom border
 //! carries quiet context: the submit target on the left (what you're
 //! aiming at — the seat route, e.g. "→ … (new chain)" / "→ chained on
-//! T-…") and the project path on the right. No `$`, no hint line, no
-//! title — the border, target, and cursor are the whole signal.
+//! T-…") and the project path on the right. No `$`, no title — the
+//! border, target, and cursor are the whole signal in normal use.
+//!
+//! The one contextual exception is command completion: while the buffer
+//! is in command mode (`completion` non-empty) a single muted hint line
+//! sits under the buffer, showing the candidate tokens or — once a
+//! command matches — its argument grammar with the *current* argument
+//! accented (`[name]`). It appears only while completing, so the box
+//! stays clean the rest of the time.
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::StudioInputVm;
@@ -11,7 +18,7 @@ use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 
 use super::primitives::fill_rect;
 use super::text::{display_width, input_cursor_byte, truncate};
-use super::theme::{BG, FG, MUTED};
+use super::theme::{ACCENT, BG, FG, MUTED};
 
 pub fn draw_input_tile(
     surface: &mut TextSurface,
@@ -93,6 +100,41 @@ pub fn draw_input_tile(
         cursor_char,
         Style::new().fg(BG).bg(FG),
     );
+
+    // Contextual completion hint: only while in command mode, and only if
+    // there is room for a line between the buffer and the bottom border.
+    let hint_y = row_y + 1;
+    if let Some(hint) = input.completion.first() {
+        if hint_y < bottom_y {
+            draw_hint(surface, inner_x, hint_y, hint, avail);
+        }
+    }
+}
+
+/// Draw the completion hint muted, accenting any `[current-arg]` segments
+/// so the argument the operator is on stands out. Single line, width-bounded.
+fn draw_hint(surface: &mut TextSurface, x: usize, y: usize, hint: &str, max_w: usize) {
+    let line = truncate(hint, max_w);
+    let mut col = 0usize;
+    let mut accent = false;
+    for ch in line.chars() {
+        if col >= max_w {
+            break;
+        }
+        if ch == '[' {
+            accent = true;
+        }
+        let style = if accent {
+            Style::new().fg(ACCENT).bg(BG)
+        } else {
+            Style::new().fg(MUTED).bg(BG)
+        };
+        surface.draw_char(x + col, y, ch, style);
+        if ch == ']' {
+            accent = false;
+        }
+        col += display_width(&ch.to_string()).max(1);
+    }
 }
 
 fn shorten_home(path: &str) -> String {
@@ -122,6 +164,61 @@ mod tests {
 
     fn row_text(surface: &TextSurface, w: usize, y: usize) -> String {
         (0..w).map(|x| surface.get(x, y).rune).collect()
+    }
+
+    fn cell_fg(surface: &TextSurface, x: usize, y: usize) -> ryeos_client_base::text_surface::Color {
+        surface.get(x, y).fg
+    }
+
+    #[test]
+    fn completion_hint_renders_only_in_command_mode_with_arg_accented() {
+        let mut surface = TextSurface::new(60, 7);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 60,
+            h: 7,
+        };
+        let mut vm = input_vm("→ /commands");
+        vm.text = "/thread input".to_string();
+        // The arg grammar with the current argument bracketed, as the
+        // engine's `argument_hint` produces it.
+        vm.completion = vec!["args: [line] — send input to a thread".to_string()];
+        draw_input_tile(&mut surface, rect, &vm, None, Some(Border::Sharp));
+
+        // The hint sits on the row below the buffer (buffer is row 1).
+        let hint_row = row_text(&surface, 60, 2);
+        assert!(
+            hint_row.contains("[line]"),
+            "completion hint missing from row below buffer: {hint_row:?}"
+        );
+
+        // The bracketed current argument is accented; the surrounding text muted.
+        let bracket_x = hint_row.find('[').expect("bracket present");
+        assert_eq!(cell_fg(&surface, bracket_x, 2), ACCENT, "current arg accented");
+        let pre_x = hint_row.find('a').expect("the 'args:' label is present");
+        assert_eq!(cell_fg(&surface, pre_x, 2), MUTED, "hint body muted");
+    }
+
+    #[test]
+    fn no_completion_hint_when_not_completing() {
+        let mut surface = TextSurface::new(60, 7);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 60,
+            h: 7,
+        };
+        let mut vm = input_vm("→ service:foo/bar (new chain)");
+        vm.text = "hello world".to_string();
+        // No completion in plain prose mode.
+        draw_input_tile(&mut surface, rect, &vm, None, Some(Border::Sharp));
+        // Interior only (exclude the box's left/right border columns).
+        let interior: String = (2..58).map(|x| surface.get(x, 2).rune).collect();
+        assert!(
+            interior.trim().is_empty(),
+            "no hint line should show outside command mode: {interior:?}"
+        );
     }
 
     #[test]

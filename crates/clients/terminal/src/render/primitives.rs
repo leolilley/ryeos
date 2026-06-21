@@ -1,11 +1,11 @@
-//! Raw surface operations shared by every composition: fills, shadows,
-//! plain line stacks. No VM knowledge here beyond styles.
+//! Raw surface operations shared by every composition: fills and plain
+//! line stacks. No VM knowledge here beyond styles.
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::text::truncate;
-use super::theme::{style_fg, style_selected, PANEL, SHADOW, WARN};
+use super::theme::{style_fg, style_selected, PANEL, WARN};
 
 pub fn fill_rect(surface: &mut TextSurface, rect: Rect, style: Style) {
     let x = rect.x as usize;
@@ -54,19 +54,6 @@ fn dim_color(
         }
         _ => c,
     }
-}
-
-pub fn draw_shadow(surface: &mut TextSurface, rect: Rect) {
-    if rect.w < 2 || rect.h < 2 {
-        return;
-    }
-    let shadow = Rect::new(
-        rect.x.saturating_add(1),
-        rect.y.saturating_add(1),
-        rect.w.saturating_sub(1),
-        rect.h.saturating_sub(1),
-    );
-    fill_rect(surface, shadow, Style::new().fg(SHADOW).bg(SHADOW));
 }
 
 pub fn draw_lines(surface: &mut TextSurface, rect: Rect, lines: &[String]) {

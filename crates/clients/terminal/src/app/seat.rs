@@ -33,30 +33,21 @@ pub async fn reattach_seat_thread(client: &DaemonClient, core: &mut StudioCore) 
         .session
         .as_ref()
         .map(|session| session.surface_ref.clone())?;
+    // Discovery via `service:seat/list`: the daemon filters by the
+    // `seat_session` kind, running status, and surface, and sorts freshest
+    // first — the client just takes the most recent. The kind name stays
+    // daemon-side rather than leaking into a `threads/list` client filter.
     let body = serde_json::json!({
-        "item_ref": "service:threads/list",
-        "parameters": { "limit": 100 },
+        "item_ref": "service:seat/list",
+        "parameters": { "surface_ref": surface_ref },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
-    let threads = envelope
+    let thread_id = envelope
         .get("result")
-        .and_then(|result| result.get("threads"))
-        .and_then(serde_json::Value::as_array)?;
-    let thread_id = threads
-        .iter()
-        .filter(|thread| {
-            thread.get("kind").and_then(serde_json::Value::as_str) == Some("seat_session")
-                && thread.get("status").and_then(serde_json::Value::as_str) == Some("running")
-                && thread.get("item_ref").and_then(serde_json::Value::as_str)
-                    == Some(surface_ref.as_str())
-        })
-        .max_by_key(|thread| {
-            thread
-                .get("updated_at")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-        })
-        .and_then(|thread| thread.get("thread_id"))
+        .and_then(|result| result.get("seats"))
+        .and_then(serde_json::Value::as_array)?
+        .first()
+        .and_then(|seat| seat.get("thread_id"))
         .and_then(serde_json::Value::as_str)?
         .to_string();
 
