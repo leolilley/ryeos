@@ -137,6 +137,12 @@ enum Cmd {
         /// Defaults to installed bundle roots. May be repeated.
         #[arg(long = "registry-root")]
         registry_roots: Vec<PathBuf>,
+
+        /// Exit nonzero when any deterministic check fails (for CI/preflight
+        /// gating). Default: always exit 0 and report; the JSON `ok` field
+        /// carries the verdict.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Verify a bundle source tree without rewriting files.
@@ -517,7 +523,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Doctor {
             source,
             registry_roots,
-        } => run_doctor(source, registry_roots, cli.stdin_json),
+            strict,
+        } => run_doctor(source, registry_roots, strict, cli.stdin_json),
         Cmd::BundleVerify {
             source,
             registry_roots,
@@ -922,19 +929,20 @@ where
 fn run_doctor(
     source: Option<PathBuf>,
     registry_roots: Vec<PathBuf>,
+    strict: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    let (source, registry_roots) = if stdin_json {
+    let (source, registry_roots, strict) = if stdin_json {
         if source.is_some() {
             anyhow::bail!("--stdin-json is mutually exclusive with positional SOURCE");
         }
         let params: DoctorParams = serde_json::from_value(read_stdin_json()?)?;
         let registry_roots = params.registry_roots();
-        (params.source, registry_roots)
+        (params.source, registry_roots, params.strict)
     } else {
         let source =
             source.ok_or_else(|| anyhow::anyhow!("SOURCE required (or pass --stdin-json)"))?;
-        (source, registry_roots)
+        (source, registry_roots, strict)
     };
 
     let source_path = std::fs::canonicalize(&source)
@@ -982,9 +990,11 @@ fn run_doctor(
 
     let ok = report.ok;
     println!("{}", serde_json::to_string_pretty(&report)?);
-    // Exit nonzero when any deterministic check failed, so preflight scripts
-    // can gate on the exit code (advisory `unknown` checks never fail `ok`).
-    if !ok {
+    // Default: always exit 0 and let the `ok` field carry the verdict (so an
+    // offline-dispatched `ryeos doctor` isn't reported as a failed tool). With
+    // --strict, exit nonzero on any deterministic failure for CI/preflight
+    // gating (advisory `unknown` checks never fail `ok`).
+    if strict && !ok {
         std::process::exit(1);
     }
     Ok(())
@@ -997,6 +1007,8 @@ struct DoctorParams {
     registry_root: Option<PathBuf>,
     #[serde(default)]
     registry_roots: Vec<PathBuf>,
+    #[serde(default)]
+    strict: bool,
 }
 
 impl DoctorParams {
