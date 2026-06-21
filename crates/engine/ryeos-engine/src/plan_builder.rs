@@ -510,6 +510,12 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
+        debug_raw: input
+            .hints
+            .values
+            .get("debug_raw")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 

@@ -554,6 +554,9 @@ fn finalize_completion(
 pub struct InlineResult {
     pub finalized_thread: ThreadDetail,
     pub result: Value,
+    /// The `--debug-raw` block (resolved cmd/args/cwd/env keys + exit code and
+    /// size-limited raw stdout/stderr), present only when the flag was set.
+    pub debug: Option<Value>,
 }
 
 /// Result of a detached execution launch.
@@ -845,6 +848,14 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         }
     };
 
+    // Lift the `--debug-raw` block out of the completion metadata before
+    // finalization consumes the completion. `None` on the normal path.
+    let debug_block = completion
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("debug"))
+        .cloned();
+
     if !params.provenance.is_borrowed_child() {
         let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
         post_execution_foldback(PostExecutionFoldbackParams {
@@ -879,6 +890,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     Ok(InlineResult {
         finalized_thread: finalized,
         result: serde_json::to_value(&result).unwrap_or(json!(null)),
+        debug: debug_block,
     })
 }
 

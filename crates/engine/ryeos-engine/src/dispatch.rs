@@ -28,7 +28,7 @@ pub fn execute_plan(
             PlanNode::DispatchSubprocess { spec, .. } => {
                 tracing::info!(cmd = %spec.cmd, "launching subprocess");
                 let start = std::time::Instant::now();
-                let completion = dispatch_subprocess(spec, ctx)?;
+                let completion = dispatch_subprocess(spec, plan.debug_raw, ctx)?;
                 let elapsed = start.elapsed();
                 tracing::debug!(
                     cmd = %spec.cmd,
@@ -75,12 +75,72 @@ pub fn execute_plan(
 /// Converts a finalized `PlanSubprocessSpec` into a `lillux::SubprocessRequest`.
 fn dispatch_subprocess(
     spec: &PlanSubprocessSpec,
-
+    debug_raw: bool,
     _ctx: &EngineContext,
 ) -> Result<ExecutionCompletion, EngineError> {
     let request = spec_to_request(spec)?;
+    let capture = debug_raw.then(|| DebugCapture::from_spec(spec));
     let result = lillux::run(request);
-    Ok(translate_result(result))
+    let debug = capture.map(|c| c.into_block(&result));
+    let mut completion = translate_result(result);
+    if let Some(debug) = debug {
+        inject_debug(&mut completion, debug);
+    }
+    Ok(completion)
+}
+
+/// Size cap on each raw stream captured for `--debug-raw`.
+const DEBUG_STDIO_CAP: usize = 16 * 1024;
+
+/// Resolved subprocess facts captured for `--debug-raw`, paired with the
+/// process result to form the debug block. Holds env *keys* only — never
+/// values — and the stdio is size-capped when rendered.
+struct DebugCapture {
+    cmd: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env_keys: Vec<String>,
+}
+
+impl DebugCapture {
+    fn from_spec(spec: &PlanSubprocessSpec) -> Self {
+        let mut env_keys: Vec<String> = spec.env.keys().cloned().collect();
+        env_keys.sort_unstable();
+        Self {
+            cmd: spec.cmd.clone(),
+            args: spec.args.clone(),
+            cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            env_keys,
+        }
+    }
+
+    fn into_block(self, result: &lillux::SubprocessResult) -> Value {
+        serde_json::json!({
+            "cmd": self.cmd,
+            // For runtime tools the resolved interpreter IS the command.
+            "interpreter": self.cmd,
+            "args": self.args,
+            "cwd": self.cwd,
+            "env_keys": self.env_keys,
+            "exit_code": result.exit_code,
+            "timed_out": result.timed_out,
+            "duration_ms": result.duration_ms,
+            "stdout": truncate_for_error(&result.stdout, DEBUG_STDIO_CAP),
+            "stderr": truncate_for_error(&result.stderr, DEBUG_STDIO_CAP),
+        })
+    }
+}
+
+/// Attach a `debug` block under the completion's `metadata`.
+fn inject_debug(completion: &mut ExecutionCompletion, debug: Value) {
+    match completion.metadata.as_mut().and_then(|m| m.as_object_mut()) {
+        Some(obj) => {
+            obj.insert("debug".to_string(), debug);
+        }
+        None => {
+            completion.metadata = Some(serde_json::json!({ "debug": debug }));
+        }
+    }
 }
 
 /// Convert a `PlanSubprocessSpec` + daemon context into a `lillux::SubprocessRequest`.
@@ -175,13 +235,21 @@ pub struct SpawnedExecution {
     pub pid: u32,
     pub pgid: i64,
     running: lillux::RunningProcess,
+    /// Present only under `--debug-raw`; consumed in [`wait`](Self::wait) to
+    /// build the debug block once the process result is available.
+    debug: Option<DebugCapture>,
 }
 
 impl SpawnedExecution {
     /// Block until the subprocess completes and return the completion.
     pub fn wait(self) -> ExecutionCompletion {
         let result = self.running.wait();
-        translate_result(result)
+        let debug = self.debug.map(|c| c.into_block(&result));
+        let mut completion = translate_result(result);
+        if let Some(debug) = debug {
+            inject_debug(&mut completion, debug);
+        }
+        completion
     }
 }
 
@@ -194,7 +262,7 @@ pub fn spawn_plan(
     if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
-                return spawn_subprocess(spec, ctx);
+                return spawn_subprocess(spec, plan.debug_raw, ctx);
             }
             PlanNode::SpawnChild { child_ref, .. } => {
                 return Err(EngineError::Internal(format!(
@@ -213,15 +281,22 @@ pub fn spawn_plan(
 
 fn spawn_subprocess(
     spec: &PlanSubprocessSpec,
+    debug_raw: bool,
     _ctx: &EngineContext,
 ) -> Result<SpawnedExecution, EngineError> {
     let request = spec_to_request(spec)?;
+    let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
     match lillux::spawn(request) {
         Ok(running) => {
             let pid = running.pid;
             let pgid = running.pgid;
-            Ok(SpawnedExecution { pid, pgid, running })
+            Ok(SpawnedExecution {
+                pid,
+                pgid,
+                running,
+                debug,
+            })
         }
         Err(err_result) => Err(EngineError::ExecutionFailed {
             reason: format!("subprocess spawn failed: {}", err_result.stderr),
@@ -283,6 +358,7 @@ mod tests {
             materialization_requirements: Vec::new(),
             cache_key: "test".into(),
             executor_chain: vec!["@test".into()],
+            debug_raw: false,
         }
     }
 
@@ -315,6 +391,54 @@ mod tests {
         assert!(completion.metadata.as_ref().unwrap()["pid"]
             .as_u64()
             .is_some());
+        // No flag ⇒ no debug block (the normal path is untouched).
+        assert!(
+            completion.metadata.as_ref().unwrap().get("debug").is_none(),
+            "debug block must be absent without --debug-raw"
+        );
+    }
+
+    #[test]
+    fn debug_raw_attaches_debug_block_with_keys_not_values() {
+        let mut env = HashMap::new();
+        env.insert("EXAMPLE_SECRET".to_string(), "super-secret-value".to_string());
+        let mut plan = make_plan(vec![
+            PlanNode::DispatchSubprocess {
+                id: PlanNodeId("entry:test".into()),
+                spec: PlanSubprocessSpec {
+                    cmd: "/bin/echo".into(),
+                    args: vec!["hello debug".into()],
+                    cwd: None,
+                    env,
+                    env_sources: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                    execution: Default::default(),
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
+            },
+            PlanNode::Complete {
+                id: PlanNodeId("complete:test".into()),
+            },
+        ]);
+        plan.debug_raw = true;
+
+        let ctx = test_engine_context();
+        let completion = execute_plan(&plan, &ctx).unwrap();
+        let debug = completion.metadata.as_ref().unwrap()["debug"].clone();
+        assert_eq!(debug["cmd"], "/bin/echo");
+        assert_eq!(debug["interpreter"], "/bin/echo");
+        assert_eq!(debug["args"][0], "hello debug");
+        assert_eq!(debug["exit_code"], 0);
+        assert_eq!(debug["timed_out"], false);
+        assert!(debug["stdout"].as_str().unwrap().contains("hello debug"));
+        assert_eq!(debug["env_keys"][0], "EXAMPLE_SECRET");
+        // The block carries env KEYS only — never values.
+        assert!(
+            !debug.to_string().contains("super-secret-value"),
+            "debug block must not leak env values: {debug}"
+        );
     }
 
     #[test]

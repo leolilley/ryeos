@@ -1810,10 +1810,14 @@ async fn dispatch_tool_subprocess(
                 item_ref: item_ref_for_error,
                 detail: e.to_string(),
             })?;
-        Ok(json!({
+        let mut envelope = json!({
             "thread": result.finalized_thread,
             "result": result.result,
-        }))
+        });
+        if let Some(debug) = result.debug {
+            envelope["debug"] = debug;
+        }
+        Ok(envelope)
     }
 }
 

@@ -150,6 +150,9 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     if let Some(project_path) = &resolved.project_path {
         body["project_path"] = Value::String(project_path.to_string_lossy().into_owned());
     }
+    if resolved.debug_raw {
+        body["debug_raw"] = Value::Bool(true);
+    }
 
     // Stream a live execution log for `execute` runs on a terminal, unless the
     // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
@@ -190,6 +193,8 @@ struct CliResolvedExecute {
     /// Streaming preference: `None` = auto (TTY-detect), `Some(true)` =
     /// `--stream` (force on), `Some(false)` = `--no-stream`/`--json` (force off).
     stream: Option<bool>,
+    /// `--debug-raw`: request the debug block on the execution result.
+    debug_raw: bool,
 }
 
 /// Control flags stripped from an `execute` command tail before parameter bind.
@@ -198,6 +203,9 @@ struct ExecuteControlFlags {
     async_launch: bool,
     /// See `CliResolvedExecute::stream`.
     stream: Option<bool>,
+    /// `--debug-raw`: attach a debug block (cmd/args/cwd/env keys + exit code
+    /// and size-limited raw stdout/stderr) to the result.
+    debug_raw: bool,
 }
 
 fn resolve_command_for_daemon(
@@ -286,6 +294,7 @@ fn resolve_command_for_daemon_with_commands(
         async_launch: control.async_launch,
         direct_execute,
         stream: control.stream,
+        debug_raw: control.debug_raw,
     })
 }
 
@@ -321,6 +330,11 @@ fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<ExecuteControlF
                 }
                 flags.stream = Some(false);
             }
+            // Attach the resolved subprocess + raw stdio to the result.
+            "--debug-raw" | "--debug-raw=true" => {
+                flags.debug_raw = true;
+            }
+            "--debug-raw=false" => {}
             _ => out.push(token),
         }
     }
