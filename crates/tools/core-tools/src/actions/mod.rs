@@ -9,6 +9,7 @@
 
 pub mod authorize;
 pub mod build_bundle;
+pub mod doctor;
 pub mod hosted_policy;
 pub mod inspect;
 pub mod install;

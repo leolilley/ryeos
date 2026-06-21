@@ -118,6 +118,21 @@ enum Cmd {
         lines: usize,
     },
 
+    /// Offline preflight checklist for a project/bundle source.
+    ///
+    /// Runs deterministic checks with no daemon: manifest present +
+    /// name-consistent, bundle verify (headers/parsers/signatures), and a
+    /// python-tool import dry-run; advisory checks report `unknown`.
+    Doctor {
+        /// Project/bundle source root (directory containing `.ai/`).
+        source: Option<PathBuf>,
+
+        /// Registry/dependency root supplying kind schemas + runtimes.
+        /// Defaults to installed bundle roots. May be repeated.
+        #[arg(long = "registry-root")]
+        registry_roots: Vec<PathBuf>,
+    },
+
     /// Verify a bundle source tree without rewriting files.
     BundleVerify {
         /// Bundle source root (directory containing `.ai/`).
@@ -491,6 +506,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             run_manifest_sign(bundle_source, name, cli.stdin_json)
         }
         Cmd::Logs { app_root, lines } => run_logs(app_root, lines, cli.stdin_json),
+        Cmd::Doctor {
+            source,
+            registry_roots,
+        } => run_doctor(source, registry_roots, cli.stdin_json),
         Cmd::BundleVerify {
             source,
             registry_roots,
@@ -859,6 +878,83 @@ struct NodeLogsParams {
     app_root: Option<PathBuf>,
     #[serde(default)]
     lines: Option<usize>,
+}
+
+fn run_doctor(
+    source: Option<PathBuf>,
+    registry_roots: Vec<PathBuf>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let (source, registry_roots) = if stdin_json {
+        if source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional SOURCE");
+        }
+        let params: DoctorParams = serde_json::from_value(read_stdin_json()?)?;
+        let registry_roots = params.registry_roots();
+        (params.source, registry_roots)
+    } else {
+        let source =
+            source.ok_or_else(|| anyhow::anyhow!("SOURCE required (or pass --stdin-json)"))?;
+        (source, registry_roots)
+    };
+
+    let source_path = std::fs::canonicalize(&source)
+        .with_context(|| format!("resolve source path {}", source.display()))?;
+    if !source_path.is_dir() {
+        anyhow::bail!("--source is not a directory: {}", source_path.display());
+    }
+
+    let app_root = std::env::var("RYEOS_APP_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::data_dir()
+                .map(|d| d.join("ryeos"))
+                .expect("could not determine XDG data directory")
+        });
+    let dependency_roots = bundle_verify_dependency_roots(&source_path, registry_roots, &app_root)?;
+    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(app_root.clone()).config();
+
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.clone()),
+        ..Default::default()
+    })
+    .context("load config for offline doctor engine")?;
+    let engine = ryeos_app::engine_init::build_engine_for_roots(
+        &config,
+        &dependency_roots,
+        Some(&source_path),
+        None,
+    )
+    .context("build offline engine for doctor")?;
+
+    let report = ryeos_tools::actions::doctor::run_doctor(
+        &engine,
+        &source_path,
+        &dependency_roots,
+        &operator_config_root,
+    );
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct DoctorParams {
+    source: PathBuf,
+    #[serde(default)]
+    registry_root: Option<PathBuf>,
+    #[serde(default)]
+    registry_roots: Vec<PathBuf>,
+}
+
+impl DoctorParams {
+    fn registry_roots(&self) -> Vec<PathBuf> {
+        if self.registry_roots.is_empty() {
+            self.registry_root.iter().cloned().collect()
+        } else {
+            self.registry_roots.clone()
+        }
+    }
 }
 
 fn resolve_publish_owner(

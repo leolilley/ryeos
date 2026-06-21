@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-21T05:02:10Z:1659bd0bcc213069936f461f7411bb064dccf1b4b6535bc43c05fb706ae3688b:gXUeAI1JzYrUp5Dbpe8yfLpJdytyIw5vVt8jivzxfdUbCGwY06YpBRb+oD1eNKLW9u1hTCJXbZBIoAggb0A1Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: node.doctor
+availability: offline
+offline_execute: tool:ryeos/core/node/doctor
+required_caps: []
+schema:
+  source: string
+  registry_root: string?
+  registry_roots: array?
+description: "Offline preflight checklist: manifest present/name-consistent, bundle verify, python import dry-run, advisory checks. Runs locally with or without the daemon."
