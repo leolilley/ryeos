@@ -55,16 +55,42 @@ pub struct ExecuteRequest {
     pub validate_only: bool,
     #[serde(default)]
     pub project_source: Option<ProjectSource>,
+    /// Method call: `{ method, args }`. The method selector is control
+    /// plane — it chooses daemon-owned projection/validation/trust before
+    /// the runtime is spawned — while the args are data plane. Absent for
+    /// terminator/delegate kinds, which ignore it.
     #[serde(default)]
-    pub operation: Option<String>,
-    #[serde(default)]
-    pub inputs: Option<Value>,
+    pub call: Option<ExecuteCall>,
     #[serde(default)]
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     /// When true, attach a `debug` block (resolved cmd/args/cwd/env keys +
     /// exit code and size-limited raw stdout/stderr) to the result.
     #[serde(default)]
     pub debug_raw: bool,
+}
+
+/// The `call` block of an `/execute` request: a method selector plus its
+/// args. Separated from the top-level request because the method is a
+/// daemon-visible behavior selector, not just another input value.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecuteCall {
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub args: Option<Value>,
+}
+
+impl ExecuteRequest {
+    /// The requested method name, if a `call.method` was provided.
+    pub fn method(&self) -> Option<String> {
+        self.call.as_ref().and_then(|c| c.method.clone())
+    }
+
+    /// The requested method args, if `call.args` was provided.
+    pub fn args(&self) -> Option<Value> {
+        self.call.as_ref().and_then(|c| c.args.clone())
+    }
 }
 
 fn default_launch_mode() -> String {
@@ -320,8 +346,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // resolution flows through this Arc.
             engine: project_ctx.request_engine.clone(),
             plan_ctx,
-            requested_op: request.operation.clone(),
-            requested_inputs: request.inputs.clone(),
+            requested_method: request.method(),
+            requested_args: request.args(),
         };
 
         // Parse the user-supplied root ref.
@@ -578,8 +604,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     validate_only: false,
                     usage_subject: usage_subject.clone(),
                     usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    operation: request.operation.clone(),
-                    inputs: request.inputs.clone(),
+                    method: request.method(),
+                    args: request.args(),
                     previous_thread_id: None,
                 },
             );
@@ -620,8 +646,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let request_can_need_remote_config = request.launch_mode == "inline"
             && !request.validate_only
             && matches!(project_source, ProjectSource::LiveFs)
-            && request.operation.is_none()
-            && request.inputs.is_none();
+            && request.method().is_none()
+            && request.args().is_none();
         let remotes = if remote_target_requested && request_can_need_remote_config {
             let project_for_layering: Option<&std::path::Path> = if no_project_requested {
                 None
@@ -679,8 +705,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     parameters: request.parameters.clone(),
                     acting_principal: &caller_principal_id,
                     remote_ignore: &remote_ignore,
-                    operation: None,
-                    inputs: None,
+                    method: None,
+                    args: None,
                 };
                 match crate::remote::forward::execute_unary_forward(
                     &state_arc,
@@ -719,8 +745,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             pre_minted_thread_id: None,
             usage_subject,
             usage_subject_asserted_by,
-            operation: request.operation.clone(),
-            inputs: request.inputs.clone(),
+            method: request.method(),
+            args: request.args(),
             previous_thread_id: None,
         };
 
@@ -803,10 +829,10 @@ fn plan_target_site_forward(
         ));
     }
 
-    if request.operation.is_some() || request.inputs.is_some() {
+    if request.method().is_some() || request.args().is_some() {
         return Err(target_site_unsupported(
             target_site_id,
-            "operation/inputs are not supported for target-site forwarding v1",
+            "call.method/call.args are not supported for target-site forwarding v1",
         ));
     }
 
@@ -1076,8 +1102,7 @@ mod tests {
             target_site_id: target_site_id.map(String::from),
             validate_only: false,
             project_source: None,
-            operation: None,
-            inputs: None,
+            call: None,
             usage_subject: None,
             debug_raw: false,
         }
@@ -1191,9 +1216,12 @@ mod tests {
     }
 
     #[test]
-    fn target_site_plan_rejects_operation_or_inputs() {
+    fn target_site_plan_rejects_method_or_args() {
         let mut req = target_request(Some("site:remote"));
-        req.operation = Some("op".into());
+        req.call = Some(ExecuteCall {
+            method: Some("query".into()),
+            args: None,
+        });
         let err = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1203,7 +1231,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("operation/inputs"));
+        assert!(err.to_string().contains("call.method/call.args"));
     }
 
     #[test]

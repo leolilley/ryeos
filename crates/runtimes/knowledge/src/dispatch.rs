@@ -1,13 +1,13 @@
-//! Op dispatch: wire op name → handler.
+//! Method dispatch: wire method name → handler.
 //!
-//! The kind schema is the source of truth for generically dispatchable ops:
-//! the daemon validates/routes/authorizes on it and rejects undeclared generic
-//! requests before this runtime is spawned. This module registers runtime
-//! handler implementations keyed directly on the `BatchOpEnvelope.op` string.
-//! It also contains augmentation-private handlers, currently
-//! `compose_positions`, invoked only by daemon launch augmentations with a
-//! bespoke payload. There is no enum mirror of either vocabulary and no
-//! payload-retagging step.
+//! The kind schema is the source of truth for generically dispatchable
+//! methods: the daemon validates/routes/authorizes on it and rejects
+//! undeclared generic requests before this runtime is spawned. This module
+//! registers runtime handler implementations keyed directly on the
+//! `MethodCallEnvelope.method` string. It also contains augmentation-private
+//! handlers, currently `compose_positions`, invoked only by daemon launch
+//! augmentations with a bespoke payload. There is no enum mirror of either
+//! vocabulary and no payload-retagging step.
 
 use serde_json::Value;
 
@@ -17,41 +17,41 @@ use crate::types::{
 };
 use crate::{compose, graph, query, validate};
 
-type OpHandler = fn(Value) -> Result<Value, KnowledgeError>;
+type MethodHandler = fn(Value) -> Result<Value, KnowledgeError>;
 
-/// Single dispatch point: wire op name → handler.
+/// Single dispatch point: wire method name → handler.
 ///
 /// SECONDARY guard: the daemon already resolves generic requests against
 /// the kind schema before spawning the runtime, and launch augmentations own
-/// their private target op names, so an unhandled op here means direct
+/// their private target method names, so an unhandled method here means direct
 /// invocation or schema/runtime skew. Report it — never silently no-op.
-/// Keyed strictly off `op` (the envelope field), so a payload that happens
-/// to carry an `"operation"` key cannot influence which handler runs.
-pub fn dispatch(op: &str, payload: Value) -> Result<Value, KnowledgeError> {
-    let handler: OpHandler = match op {
-        "compose" => op_compose,
-        "compose_positions" => op_compose_positions,
-        "query" => op_query,
-        "graph" => op_graph,
-        "validate" => op_validate,
+/// Keyed strictly off `method` (the envelope field), so a payload that happens
+/// to carry a `"method"` key cannot influence which handler runs.
+pub fn dispatch(method: &str, payload: Value) -> Result<Value, KnowledgeError> {
+    let handler: MethodHandler = match method {
+        "compose" => method_compose,
+        "compose_positions" => method_compose_positions,
+        "query" => method_query,
+        "graph" => method_graph,
+        "validate" => method_validate,
         other => {
-            return Err(KnowledgeError::InvalidInput {
-                op: other.to_string(),
-                reason: "no handler registered for this operation".into(),
+            return Err(KnowledgeError::InvalidArg {
+                method: other.to_string(),
+                reason: "no handler registered for this method".into(),
             })
         }
     };
     handler(payload)
 }
 
-/// Deserialize an op payload into its typed shape; a malformed/wrong-shaped
-/// payload (including a non-object) surfaces as `InvalidInput`.
+/// Deserialize a method payload into its typed shape; a malformed/wrong-shaped
+/// payload (including a non-object) surfaces as `InvalidArg`.
 fn parse_payload<T: serde::de::DeserializeOwned>(
-    op: &'static str,
+    method: &'static str,
     payload: Value,
 ) -> Result<T, KnowledgeError> {
-    serde_json::from_value(payload).map_err(|e| KnowledgeError::InvalidInput {
-        op: op.into(),
+    serde_json::from_value(payload).map_err(|e| KnowledgeError::InvalidArg {
+        method: method.into(),
         reason: e.to_string(),
     })
 }
@@ -60,27 +60,27 @@ fn to_json<T: serde::Serialize>(value: T) -> Result<Value, KnowledgeError> {
     serde_json::to_value(value).map_err(|e| KnowledgeError::Internal(e.to_string()))
 }
 
-fn op_compose(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_compose(payload: Value) -> Result<Value, KnowledgeError> {
     let p: ComposePayload = parse_payload("compose", payload)?;
     to_json(compose::compose(&p)?)
 }
 
-fn op_compose_positions(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_compose_positions(payload: Value) -> Result<Value, KnowledgeError> {
     let p: ComposeContextPayload = parse_payload("compose_positions", payload)?;
     to_json(compose::compose_positions(&p)?)
 }
 
-fn op_query(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_query(payload: Value) -> Result<Value, KnowledgeError> {
     let p: QueryPayload = parse_payload("query", payload)?;
     to_json(query::query(&p)?)
 }
 
-fn op_graph(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_graph(payload: Value) -> Result<Value, KnowledgeError> {
     let p: GraphPayload = parse_payload("graph", payload)?;
     to_json(graph::graph(&p)?)
 }
 
-fn op_validate(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_validate(payload: Value) -> Result<Value, KnowledgeError> {
     let p: ValidatePayload = parse_payload("validate", payload)?;
     to_json(validate::validate(&p)?)
 }
@@ -93,10 +93,10 @@ mod tests {
     // ── active-handler smoke tests (routing + real wire shape) ──────────
 
     #[test]
-    fn query_dispatches_and_reads_inputs() {
+    fn query_dispatches_and_reads_args() {
         let out = dispatch(
             "query",
-            json!({"items_by_ref": {}, "edges": [], "inputs": {"query": "needle", "limit": 3}}),
+            json!({"items_by_ref": {}, "edges": [], "args": {"query": "needle", "limit": 3}}),
         )
         .expect("query must dispatch");
         assert_eq!(out["query"], "needle");
@@ -104,11 +104,11 @@ mod tests {
 
     #[test]
     fn validate_dispatches_and_reads_nested_roots() {
-        // Proves `inputs.roots` still flows (regression for the earlier
-        // nested-roots bug) AND that the op routes to validate.
+        // Proves `args.roots` still flows (regression for the earlier
+        // nested-roots bug) AND that the method routes to validate.
         let out = dispatch(
             "validate",
-            json!({"items_by_ref": {}, "edges": [], "inputs": {"roots": ["k/a"]}}),
+            json!({"items_by_ref": {}, "edges": [], "args": {"roots": ["k/a"]}}),
         )
         .expect("validate must dispatch");
         assert_eq!(out["valid"], false);
@@ -122,7 +122,7 @@ mod tests {
     fn graph_dispatches_on_empty_corpus() {
         let out = dispatch(
             "graph",
-            json!({"items_by_ref": {}, "edges": [], "inputs": {}}),
+            json!({"items_by_ref": {}, "edges": [], "args": {}}),
         )
         .expect("graph must dispatch");
         assert!(out["nodes"].as_array().unwrap().is_empty());
@@ -145,7 +145,7 @@ mod tests {
                 "root_ref": "k/a",
                 "items_by_ref": {"k/a": trusted_item("---\ntitle: A\n---\nbody")},
                 "edges": [],
-                "inputs": {"token_budget": 100}
+                "args": {"token_budget": 100}
             }),
         )
         .expect("compose must dispatch");
@@ -170,17 +170,17 @@ mod tests {
         assert!(out.get("rendered").is_some());
     }
 
-    // ── unknown ops ─────────────────────────────────────────────────────
+    // ── unknown methods ─────────────────────────────────────────────────
 
     #[test]
-    fn undeclared_ops_are_invalid_input() {
-        // Any op without a handler — a typo or a name the runtime does not
-        // implement — hits the single unknown arm.
-        for op in ["bogus", "snapshot", "index"] {
-            let err = dispatch(op, json!({})).expect_err("undeclared op must error");
+    fn undeclared_methods_are_invalid_arg() {
+        // Any method without a handler — a typo or a name the runtime does
+        // not implement — hits the single unknown arm.
+        for method in ["bogus", "snapshot", "index"] {
+            let err = dispatch(method, json!({})).expect_err("undeclared method must error");
             assert!(
-                matches!(err, KnowledgeError::InvalidInput { .. }),
-                "{op}: {err:?}"
+                matches!(err, KnowledgeError::InvalidArg { .. }),
+                "{method}: {err:?}"
             );
         }
     }
@@ -188,16 +188,17 @@ mod tests {
     // ── correctness regressions ─────────────────────────────────────────
 
     #[test]
-    fn envelope_op_wins_over_payload_operation_key() {
-        // A payload carrying a top-level "operation" must NOT override the
-        // dispatched op. This routes as validate (per `op`), not query.
+    fn envelope_method_wins_over_payload_method_key() {
+        // A payload carrying a top-level "method" must NOT override the
+        // dispatched method. This routes as validate (per the `method`
+        // argument), not query.
         let out = dispatch(
             "validate",
             json!({
-                "operation": "query",
+                "method": "query",
                 "items_by_ref": {},
                 "edges": [],
-                "inputs": {"roots": ["k/a"]}
+                "args": {"roots": ["k/a"]}
             }),
         )
         .expect("must dispatch");
@@ -210,10 +211,10 @@ mod tests {
     }
 
     #[test]
-    fn non_object_payload_is_invalid_input() {
+    fn non_object_payload_is_invalid_arg() {
         let err = dispatch("query", json!("not an object")).expect_err("must error");
         assert!(
-            matches!(err, KnowledgeError::InvalidInput { .. }),
+            matches!(err, KnowledgeError::InvalidArg { .. }),
             "got: {err:?}"
         );
     }

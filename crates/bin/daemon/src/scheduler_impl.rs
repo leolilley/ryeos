@@ -109,8 +109,8 @@ impl SchedulerContext for AppSchedulerContext {
             pre_minted_thread_id: Some(thread_id.to_string()),
             usage_subject: None,
             usage_subject_asserted_by: None,
-            operation: None,
-            inputs: None,
+            method: None,
+            args: None,
             previous_thread_id: None,
         };
 
@@ -133,8 +133,8 @@ impl SchedulerContext for AppSchedulerContext {
                 execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
                 validate_only: false,
             },
-            requested_op: None,
-            requested_inputs: None,
+            requested_method: None,
+            requested_args: None,
         };
 
         ryeos_executor::dispatch::dispatch(&spec.item_ref, &dispatch_req, &exec_ctx, &self.0)

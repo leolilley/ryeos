@@ -64,12 +64,13 @@ pub struct ExecutionContext {
     pub engine: Arc<ryeos_engine::engine::Engine>,
     /// Plan context for engine operations.
     pub plan_ctx: ryeos_engine::contracts::PlanContext,
-    /// **Op dispatch**: the operation name from the `/execute` request.
-    /// Used by `resolve_dispatch_hop` when the kind schema declares
-    /// `operations`. Ignored for terminator/delegate paths.
-    pub requested_op: Option<String>,
-    /// **Op dispatch**: op-specific inputs from the `/execute` request.
-    pub requested_inputs: Option<serde_json::Value>,
+    /// **Method dispatch**: the method name from the `/execute` request's
+    /// `call.method`. Used by `resolve_dispatch_hop` when the kind schema
+    /// declares `methods`. Ignored for terminator/delegate paths.
+    pub requested_method: Option<String>,
+    /// **Method dispatch**: method args from the `/execute` request's
+    /// `call.args`.
+    pub requested_args: Option<serde_json::Value>,
 }
 
 /// Result of a service execution, including metadata for audit.
@@ -346,8 +347,8 @@ pub async fn execute_service_verified(
                     }
                 }
                 ryeos_app::handler_error::HandlerError::BadRequest(msg) => {
-                    crate::dispatch_error::DispatchError::OpInvalidInput {
-                        op: endpoint.clone(),
+                    crate::dispatch_error::DispatchError::MethodInvalidArg {
+                        method: endpoint.clone(),
                         reason: msg.clone(),
                     }
                 }

@@ -52,7 +52,7 @@ use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    DelegationVia, ExecutionSchema, InProcessRegistryKind, OpScope, OperationDecl, TerminatorDecl,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, MethodDecl, MethodScope, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -115,14 +115,17 @@ pub struct DispatchRequest<'a> {
     pub pre_minted_thread_id: Option<String>,
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
-    /// **Op dispatch**: the operation name from the `/execute` request.
-    /// When `None`, the op resolver uses `default_operation` from the
-    /// schema. When `Some` but the kind has no `operations`, the field
-    /// is ignored (terminator/delegate paths don't use it).
-    pub operation: Option<String>,
-    /// **Op dispatch**: op-specific inputs from the `/execute` request.
-    /// Validated against the op's `InputDecl` spec before dispatch.
-    pub inputs: Option<Value>,
+    /// **Method dispatch**: the method name from the `/execute` request's
+    /// `call.method`. When `None`, the method resolver uses
+    /// `method_dispatch.default` from the schema. When `Some` for a kind
+    /// that declares no `methods`, dispatch REJECTS the request rather than
+    /// ignoring the field (a terminator/delegate kind does not interpret a
+    /// method call).
+    pub method: Option<String>,
+    /// **Method dispatch**: method-specific args from the `/execute`
+    /// request's `call.args`. Validated against the method's `ArgDecl`
+    /// spec before dispatch.
+    pub args: Option<Value>,
     /// Chained-resume turn: when `Some`, the launch envelope carries this
     /// as `EnvelopeRequest.previous_thread_id` and the runtime replays the
     /// prior thread's events into the new run (conversation = thread
@@ -195,14 +198,15 @@ pub(crate) enum HopAction {
     /// default runtime — chase its canonical_ref next iteration. This
     /// is an EXPLICIT named registry hop, not a silent fallback.
     UseRegistry(CanonicalRef),
-    /// Schema declares `operations` (op-dispatch path). The kind is
-    /// dispatched by resolving the requested op, validating inputs,
-    /// and spawning the kind's runtime with a `BatchOpEnvelope`.
-    /// Carries the kind name (from the schema, not hardcoded) and
-    /// the resolved `OperationDecl`.
-    DispatchOp {
+    /// Schema declares `methods` (method-dispatch path). The kind is
+    /// dispatched by resolving the requested method, validating args,
+    /// and spawning the kind's runtime with a `MethodCallEnvelope`.
+    /// Carries the kind name (from the schema, not hardcoded), the
+    /// resolved method name, and its `MethodDecl`.
+    DispatchMethod {
         kind: String,
-        op_decl: OperationDecl,
+        method_name: String,
+        method_decl: MethodDecl,
     },
 }
 
@@ -346,27 +350,24 @@ pub(crate) fn resolve_dispatch_hop(
         None
     };
 
-    // **Op-dispatch path**: if the schema declares `operations`, take
-    // the op-dispatch path instead of terminator/alias/delegate. The
-    // boot-time mixed-dispatch reject guarantees `operations` is never
+    // **Method-dispatch path**: if the schema declares `methods`, take
+    // the method-dispatch path instead of terminator/alias/delegate. The
+    // boot-time mixed-dispatch reject guarantees `methods` is never
     // non-empty alongside terminator/alias/delegate, so this branch is
     // unambiguous.
-    if !exec.operations.is_empty() {
-        let requested_op = ctx.requested_op.as_deref();
-        let op_decl = resolve_requested_op(
-            requested_op,
-            &exec.default_operation,
-            &exec.operations,
-            &schema_kind,
-        )?;
+    if !exec.methods.is_empty() {
+        let requested_method = ctx.requested_method.as_deref();
+        let (method_name, method_decl) =
+            resolve_requested_method(requested_method, exec, &schema_kind)?;
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
             thread_profile,
             runtime,
-            next: HopAction::DispatchOp {
+            next: HopAction::DispatchMethod {
                 kind: schema_kind,
-                op_decl,
+                method_name,
+                method_decl,
             },
         });
     }
@@ -468,115 +469,139 @@ pub(crate) fn resolve_dispatch_hop(
     })
 }
 
-// ── Op dispatch helpers ───────────────────────────────────────────────
+// ── Method dispatch helpers ───────────────────────────────────────────
 
-/// Resolve the requested operation name to a declared `OperationDecl`.
+/// Resolve the requested method name to its declared `(name, MethodDecl)`.
 ///
-/// If the caller provided an explicit op name, look it up in the schema's
-/// `operations`. If no op was requested, use `default_operation` (which
-/// MUST be declared on an op-bearing schema). Unknown/missing ops produce
-/// structured errors listing the declared ops (Rule 8).
-fn resolve_requested_op(
+/// If the caller provided an explicit method name, look it up in the
+/// schema's `methods`. If no method was requested, use
+/// `method_dispatch.default` (which MUST be declared on a method-bearing
+/// schema). Unknown/missing methods produce structured errors listing the
+/// declared methods (Rule 8).
+fn resolve_requested_method(
     requested: Option<&str>,
-    default_operation: &Option<String>,
-    operations: &[OperationDecl],
+    exec: &ExecutionSchema,
     kind: &str,
-) -> Result<OperationDecl, DispatchError> {
-    let op_name = match requested {
+) -> Result<(String, MethodDecl), DispatchError> {
+    let method_name = match requested {
         Some(name) => name,
-        None => default_operation
-            .as_deref()
+        None => exec
+            .method_dispatch
+            .as_ref()
+            .and_then(|md| md.default.as_deref())
             .ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
-                detail: "schema declares operations but no default_operation, and no \
-                         operation was specified in the request"
+                detail: "schema declares methods but no method_dispatch.default, and no \
+                         method was specified in the request"
                     .into(),
             })?,
     };
 
-    operations
-        .iter()
-        .find(|op| op.name == op_name)
+    exec.methods
+        .get(method_name)
         .cloned()
+        .map(|decl| (method_name.to_string(), decl))
         .ok_or_else(|| {
-            let declared: Vec<String> = operations.iter().map(|op| op.name.clone()).collect();
-            DispatchError::UnknownOp {
+            let declared: Vec<String> = exec.methods.keys().cloned().collect();
+            DispatchError::UnknownMethod {
                 kind: kind.to_string(),
-                requested: op_name.to_string(),
+                requested: method_name.to_string(),
                 declared: declared.join(", "),
             }
         })
 }
 
-/// Validate the caller's `inputs` object against the op's typed spec.
-/// Each declared input with `required: true` must be present and match
-/// the declared type. Optional inputs with defaults are filled in.
+/// Validate the caller's `args` object against the method's typed spec.
+/// Each declared arg with `required: true` must be present and match the
+/// declared type. Optional args with defaults are filled in. Args not
+/// declared on the method are REJECTED — the declared arg set is a strict
+/// contract.
 ///
-/// Returns the validated+defaulted inputs as a `serde_json::Value::Object`.
-fn validate_op_inputs(inputs: Option<&Value>, op: &OperationDecl) -> Result<Value, DispatchError> {
-    let mut inputs_map = match inputs {
+/// Returns the validated+defaulted args as a `serde_json::Value::Object`.
+fn validate_method_args(
+    args: Option<&Value>,
+    method_name: &str,
+    method: &MethodDecl,
+) -> Result<Value, DispatchError> {
+    let mut args_map = match args {
         Some(Value::Object(map)) => map.clone(),
         Some(other) => {
-            return Err(DispatchError::OpInvalidInput {
-                op: op.name.clone(),
-                reason: format!("inputs must be an object, got {}", other),
+            return Err(DispatchError::MethodInvalidArg {
+                method: method_name.to_string(),
+                reason: format!("args must be an object, got {}", other),
             });
         }
         None => serde_json::Map::new(),
     };
 
-    for (name, decl) in &op.inputs {
-        match inputs_map.get(name) {
+    // Reject any arg the method does not declare. This makes the declared
+    // arg set a real contract rather than a permissive suggestion.
+    for key in args_map.keys() {
+        if !method.args.contains_key(key) {
+            let mut declared: Vec<&String> = method.args.keys().collect();
+            declared.sort();
+            return Err(DispatchError::MethodInvalidArg {
+                method: method_name.to_string(),
+                reason: format!("unknown arg '{key}'; declared args: {declared:?}"),
+            });
+        }
+    }
+
+    for (name, decl) in &method.args {
+        match args_map.get(name) {
             Some(val) => {
                 // Full declaration check: type + enum + min + array items.
-                validate_input_value(val, decl, name, &op.name)?;
+                validate_arg_value(val, decl, name, method_name)?;
             }
             None => {
                 if decl.required {
-                    return Err(DispatchError::OpInvalidInput {
-                        op: op.name.clone(),
-                        reason: format!("required input '{name}' is missing"),
+                    return Err(DispatchError::MethodInvalidArg {
+                        method: method_name.to_string(),
+                        reason: format!("required arg '{name}' is missing"),
                     });
                 }
-                // Apply default if present.
+                // Apply default if present. Validate it against the
+                // declaration too — a schema default that violates its own
+                // type/enum/min would otherwise reach the runtime unchecked.
                 if let Some(default) = &decl.default {
-                    inputs_map.insert(name.clone(), default.clone());
+                    validate_arg_value(default, decl, name, method_name)?;
+                    args_map.insert(name.clone(), default.clone());
                 }
             }
         }
     }
 
-    Ok(Value::Object(inputs_map))
+    Ok(Value::Object(args_map))
 }
 
-/// Validate a JSON value against a full input declaration: the declared
+/// Validate a JSON value against a full arg declaration: the declared
 /// type, plus the optional `enum`, `min`, and array-`items` constraints.
 /// Recurses into array elements so `array items: string` is enforced
 /// element-wise before the runtime is spawned.
-fn validate_input_value(
+fn validate_arg_value(
     val: &Value,
-    decl: &ryeos_engine::kind_registry::InputDecl,
+    decl: &ryeos_engine::kind_registry::ArgDecl,
     name: &str,
-    op_name: &str,
+    method_name: &str,
 ) -> Result<(), DispatchError> {
-    use ryeos_engine::kind_registry::InputType;
+    use ryeos_engine::kind_registry::ArgType;
 
-    let err = |reason: String| DispatchError::OpInvalidInput {
-        op: op_name.to_string(),
+    let err = |reason: String| DispatchError::MethodInvalidArg {
+        method: method_name.to_string(),
         reason,
     };
 
     // 1. Top-level type.
     let ok = match decl.ty {
-        InputType::String => val.is_string(),
-        InputType::Integer => val.is_i64() || val.is_u64(),
-        InputType::Boolean => val.is_boolean(),
-        InputType::Array => val.is_array(),
-        InputType::Object => val.is_object(),
+        ArgType::String => val.is_string(),
+        ArgType::Integer => val.is_i64() || val.is_u64(),
+        ArgType::Boolean => val.is_boolean(),
+        ArgType::Array => val.is_array(),
+        ArgType::Object => val.is_object(),
     };
     if !ok {
         return Err(err(format!(
-            "input '{name}' expected type {:?}, got {}",
+            "arg '{name}' expected type {:?}, got {}",
             decl.ty, val
         )));
     }
@@ -586,7 +611,7 @@ fn validate_input_value(
         if let Some(s) = val.as_str() {
             if !allowed.iter().any(|a| a == s) {
                 return Err(err(format!(
-                    "input '{name}' must be one of {allowed:?}, got {s:?}"
+                    "arg '{name}' must be one of {allowed:?}, got {s:?}"
                 )));
             }
         }
@@ -596,16 +621,16 @@ fn validate_input_value(
     if let Some(min) = decl.min {
         if let Some(n) = val.as_i64() {
             if n < min {
-                return Err(err(format!("input '{name}' must be >= {min}, got {n}")));
+                return Err(err(format!("arg '{name}' must be >= {min}, got {n}")));
             }
         }
     }
 
     // 4. Array element type, when declared via `items`.
-    if matches!(decl.ty, InputType::Array) {
+    if matches!(decl.ty, ArgType::Array) {
         if let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array()) {
             for (i, el) in arr.iter().enumerate() {
-                validate_input_value(el, items_decl, &format!("{name}[{i}]"), op_name)?;
+                validate_arg_value(el, items_decl, &format!("{name}[{i}]"), method_name)?;
             }
         }
     }
@@ -622,8 +647,8 @@ fn validate_input_value(
 /// projection so trust-class and metadata mapping stay identical.
 fn verified_from(
     a: &ryeos_engine::resolution::ResolvedAncestor,
-) -> ryeos_runtime::op_wire::VerifiedItem {
-    use ryeos_runtime::op_wire::{TrustClass, VerifiedItem};
+) -> ryeos_runtime::method_wire::VerifiedItem {
+    use ryeos_runtime::method_wire::{TrustClass, VerifiedItem};
     VerifiedItem {
         raw_content: a.raw_content.clone(),
         raw_content_digest: a.raw_content_digest.clone(),
@@ -643,8 +668,8 @@ fn verified_from(
 
 fn project_single_root(
     resolution: &ryeos_engine::resolution::ResolutionOutput,
-) -> Result<ryeos_runtime::op_wire::SingleRootPayload, DispatchError> {
-    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, VerifiedItem};
+) -> Result<ryeos_runtime::method_wire::SingleRootPayload, DispatchError> {
+    use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, VerifiedItem};
 
     let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
         std::collections::BTreeMap::new();
@@ -699,7 +724,7 @@ fn project_single_root(
         }
     }
 
-    Ok(ryeos_runtime::op_wire::SingleRootPayload {
+    Ok(ryeos_runtime::method_wire::SingleRootPayload {
         root_ref: resolution.root.resolved_ref.clone(),
         items_by_ref,
         edges,
@@ -707,18 +732,18 @@ fn project_single_root(
 }
 
 /// Project the whole verified corpus of `kind` into `(items_by_ref, edges)`
-/// for a `scope: corpus` op (knowledge `query`/`graph`/`validate`).
+/// for a `scope: corpus` method (knowledge `query`/`graph`/`validate`).
 ///
 /// Enumerates every item of the kind across resolution roots and projects
 /// each via the engine's TOLERANT corpus resolver
 /// (`resolve_item_for_corpus`). Differences from `project_single_root`:
-///   - there is no `root_ref` — the op operates over the whole set;
+///   - there is no `root_ref` — the method operates over the whole set;
 ///   - a malformed item is STILL included (with `raw_content`) so the
 ///     runtime `validate` reports it — it is not silently dropped;
 ///   - dangling reference edges are PRESERVED (targets not required to
 ///     exist) so `graph`/`validate` can report them as `missing_refs`;
 ///   - an integrity failure (bad signature, unreadable) is a HARD ERROR —
-///     a corpus op never presents a clean-looking partial corpus.
+///     a corpus method never presents a clean-looking partial corpus.
 ///
 /// Generic over `kind`: the executor never names a specific kind here.
 fn project_corpus(
@@ -727,12 +752,12 @@ fn project_corpus(
     ctx: &ExecutionContext,
 ) -> Result<
     (
-        std::collections::BTreeMap<String, ryeos_runtime::op_wire::VerifiedItem>,
-        Vec<ryeos_runtime::op_wire::GraphEdge>,
+        std::collections::BTreeMap<String, ryeos_runtime::method_wire::VerifiedItem>,
+        Vec<ryeos_runtime::method_wire::GraphEdge>,
     ),
     DispatchError,
 > {
-    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, VerifiedItem};
+    use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, VerifiedItem};
 
     let kind_schema =
         ctx.engine
@@ -740,7 +765,7 @@ fn project_corpus(
             .get(kind)
             .ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
-                detail: "corpus op dispatched for a kind with no registered schema".into(),
+                detail: "corpus method dispatched for a kind with no registered schema".into(),
             })?;
 
     let engine_roots = ctx
@@ -760,7 +785,7 @@ fn project_corpus(
     for cref in &refs {
         // Tolerant per-item projection: a malformed body still yields the
         // item (so `validate` reports it); a bad signature is a hard error
-        // (so the corpus op fails loudly rather than looking clean).
+        // (so the corpus method fails loudly rather than looking clean).
         let projection = ryeos_engine::resolution::resolve_item_for_corpus(
             cref,
             &ctx.engine.kinds,
@@ -794,24 +819,25 @@ fn project_corpus(
     Ok((items_by_ref, edges))
 }
 
-// ── Op dispatch terminator ─────────────────────────────────────────────
+// ── Method dispatch terminator ─────────────────────────────────────────
 
-/// Dispatch an op-style kind by spawning its runtime with a
-/// `BatchOpEnvelope`. This is the generic op-dispatch path:
+/// Dispatch a method-style kind by spawning its runtime with a
+/// `MethodCallEnvelope`. This is the generic method-dispatch path:
 ///
-/// 1. Validate inputs against the op's typed spec.
+/// 1. Validate args against the method's typed spec.
 /// 2. Look up the runtime via `RuntimeRegistry::lookup_for(kind)`.
 /// 3. Run the engine's resolution pipeline for the item.
-/// 4. Project to `SingleRootPayload` (single-root ops only).
+/// 4. Project to `SingleRootPayload` (single-root methods only).
 /// 5. Mint thread record + callback token.
-/// 6. Build `BatchOpEnvelope` and spawn via lillux::run.
-/// 7. Parse `BatchOpResult` and return the output.
+/// 6. Build `MethodCallEnvelope` and spawn via lillux::run.
+/// 7. Parse `MethodCallResult` and return the output.
 ///
 /// The runtime binary (e.g. `ryeos-knowledge-runtime`) handles the
-/// actual op logic. The daemon never calls ops in-process (Rule 1).
-pub(crate) async fn dispatch_op(
+/// actual method logic. The daemon never calls methods in-process (Rule 1).
+pub(crate) async fn dispatch_method(
     kind: &str,
-    op_decl: &OperationDecl,
+    method_name: &str,
+    method_decl: &MethodDecl,
     canonical_ref: &CanonicalRef,
     hop_verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
@@ -819,8 +845,8 @@ pub(crate) async fn dispatch_op(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    // 1. Validate inputs against the op's spec.
-    let validated_inputs = validate_op_inputs(request.inputs.as_ref(), op_decl)?;
+    // 1. Validate args against the method's spec.
+    let validated_args = validate_method_args(request.args.as_ref(), method_name, method_decl)?;
 
     // 2. Look up the runtime via registry.
     let verified_runtime = ctx.engine.runtimes.lookup_for(kind).map_err(|_| {
@@ -834,7 +860,7 @@ pub(crate) async fn dispatch_op(
         DispatchError::SchemaMisconfigured {
             kind: kind.to_string(),
             detail: format!(
-                "no runtime serves kind '{kind}' for op dispatch \
+                "no runtime serves kind '{kind}' for method dispatch \
                  (registered runtimes: [{}])",
                 serves.join(", ")
             ),
@@ -850,15 +876,14 @@ pub(crate) async fn dispatch_op(
         .engine
         .resolution_roots(Some(request.project_path.to_path_buf()));
 
-    // 3-5. Build the envelope payload. The op's declared `scope` selects
-    //      the projection: a single resolved item (extends chain +
+    // 3-5. Build the envelope payload. The method's declared `scope`
+    //      selects the projection: a single resolved item (extends chain +
     //      references) or the whole verified corpus of the kind. The
-    //      op-declared inputs are nested under `inputs` so the runtime
-    //      deserializes them into its typed struct. (No kind/op-name
+    //      method-declared args are nested under `args` so the runtime
+    //      deserializes them into its typed struct. (No kind/method-name
     //      literals here — the schema's `scope` drives the choice.)
-    let op_name = &op_decl.name;
-    let mut payload = match op_decl.scope {
-        OpScope::SingleRoot => {
+    let mut payload = match method_decl.scope {
+        MethodScope::SingleRoot => {
             let effective_parsers = ctx
                 .engine
                 .effective_parser_dispatcher(Some(request.project_path))
@@ -893,8 +918,8 @@ pub(crate) async fn dispatch_op(
             let single_root = project_single_root(&resolution_output)?;
             serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?
         }
-        OpScope::Corpus => {
-            // A corpus op still requires the invoked ref to resolve AND
+        MethodScope::Corpus => {
+            // A corpus method still requires the invoked ref to resolve AND
             // verify — it authorizes/routes the call even though it does
             // not bound the corpus. `resolve_dispatch_hop` leaves
             // `hop_verified` as `None` when resolution/verification failed,
@@ -903,7 +928,7 @@ pub(crate) async fn dispatch_op(
             let root = hop_verified.as_ref().ok_or_else(|| {
                 DispatchError::InvalidRef(
                     canonical_ref.to_string(),
-                    "requested ref did not resolve/verify; a corpus op still requires a \
+                    "requested ref did not resolve/verify; a corpus method still requires a \
                      valid invoked ref to authorize the call"
                         .to_string(),
                 )
@@ -916,7 +941,7 @@ pub(crate) async fn dispatch_op(
             ) {
                 return Err(DispatchError::InvalidRef(
                     canonical_ref.to_string(),
-                    "requested ref is Unsigned; refusing to run a corpus op on an \
+                    "requested ref is Unsigned; refusing to run a corpus method on an \
                      unauthenticated root"
                         .to_string(),
                 ));
@@ -927,18 +952,65 @@ pub(crate) async fn dispatch_op(
         }
     };
     if let Value::Object(ref mut map) = payload {
-        map.insert("inputs".to_string(), validated_inputs);
+        map.insert("args".to_string(), validated_args);
     }
 
-    // 6. Mint thread record + callback token.
     let thread_profile_str =
         thread_profile
             .as_deref()
             .ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
-                detail: "op dispatch requires execution.thread_profile".into(),
+                detail: "method dispatch requires execution.thread_profile".into(),
             })?;
-    let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+
+    // 6. Validate the launch mode up front — BEFORE the validate_only
+    //    short-circuit, so a `validate_only` request with a bad mode is
+    //    rejected rather than reported valid. Method dispatch runs the
+    //    runtime synchronously and returns its result, so it only supports
+    //    `inline`: `detached` is a known-but-unsupported capability, and
+    //    anything else is an outright invalid mode (which must not be
+    //    silently recorded on the thread or surface as an opaque internal
+    //    error).
+    match request.launch_mode {
+        "inline" => {}
+        "detached" => {
+            return Err(DispatchError::CapabilityRejected {
+                reason: "detached mode not yet supported for method dispatch".into(),
+            });
+        }
+        other => {
+            return Err(DispatchError::InvalidLaunchMode {
+                other: other.to_string(),
+            });
+        }
+    }
+
+    // 7. validate_only: the full pre-spawn path (args validation, runtime
+    //    lookup, resolution/trust, corpus projection, launch-mode check)
+    //    has run, so report the call as valid without minting a thread or
+    //    spawning the runtime. Mirrors the subprocess/service validate
+    //    paths.
+    if request.validate_only {
+        return Ok(json!({
+            "validated": true,
+            "item_ref": canonical_ref.to_string(),
+            "kind": kind,
+            "method": method_name,
+            "executor_ref": executor_ref,
+        }));
+    }
+
+    // 8. Mint the thread record + callback token. Honor a pre-minted
+    //    thread id when the caller supplied one: the SSE/gateway source
+    //    mints the id up front so it can subscribe to the event hub
+    //    BEFORE dispatch begins — minting a fresh id here would orphan
+    //    that subscription and the stream would observe no events.
+    //    Launch mode and usage attribution are carried from the request,
+    //    not hardcoded.
+    let thread_id = request
+        .pre_minted_thread_id
+        .clone()
+        .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
     let chain_root_id = thread_id.clone(); // top-level, chain_root == self
 
     state
@@ -949,17 +1021,17 @@ pub(crate) async fn dispatch_op(
             kind: thread_profile_str.to_string(),
             item_ref: canonical_ref.to_string(),
             executor_ref: executor_ref.clone(),
-            launch_mode: "inline".to_string(),
+            launch_mode: request.launch_mode.to_string(),
             current_site_id: ctx.plan_ctx.current_site_id.clone(),
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(request.acting_principal.to_string()),
-            usage_subject: None,
-            usage_subject_asserted_by: None,
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         })
         .map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
 
-    // Generate callback token. The op child borrows the dispatch
+    // Generate callback token. The method child borrows the dispatch
     // provenance instead of minting an unprovenanced token.
     let ttl = ryeos_app::callback_token::compute_ttl(None);
     let child_provenance = request.provenance.clone_for_borrowed_child();
@@ -967,62 +1039,70 @@ pub(crate) async fn dispatch_op(
         &thread_id,
         request.project_path.to_path_buf(),
         ttl,
-        Vec::new(), // op threads have no caps for now
+        Vec::new(), // method threads have no caps for now
         child_provenance,
         None,
         Some(canonical_ref.to_string()),
     );
 
-    let callback = ryeos_runtime::envelope::EnvelopeCallback {
-        socket_path: state.config.uds_path.clone(),
-        token: cap.token.clone(),
-    };
-
-    let envelope = ryeos_runtime::op_wire::BatchOpEnvelope {
-        schema_version: 1,
-        kind: kind.to_string(),
-        op: op_name.clone(),
-        thread_id: thread_id.clone(),
-        callback,
-        project_root: request.project_path.to_path_buf(),
-        payload,
-    };
-
-    let stdin_data =
-        serde_json::to_string(&envelope).map_err(|e| DispatchError::Internal(e.into()))?;
-
-    // 7. Mint thread auth token and build env injections. The op-dispatch
-    //    subprocess needs the same daemon env vars as the normal subprocess
-    //    path: socket path, callback token, thread ID, thread auth token,
-    //    and optionally project path. System/user roots come from the
-    //    daemon-root layer, not per-spawn env.
+    // 9. Mint the thread-auth token now, so BOTH the callback and
+    //    thread-auth tokens exist before the guarded block below and are
+    //    revoked by its cleanup regardless of which post-mint step fails.
     let thread_auth = state.thread_auth.mint(
         &thread_id,
         request.acting_principal.to_string(),
         ctx.caller_scopes.clone(),
         ttl,
     );
-    let callback_token_str = cap.token.clone();
-    let thread_auth_token_str = thread_auth.token.clone();
-    let socket_path_str = state.config.uds_path.to_string_lossy().to_string();
 
-    let mut per_spawn: Vec<(String, String)> = vec![
-        ("RYEOSD_SOCKET_PATH".to_string(), socket_path_str),
-        ("RYEOSD_CALLBACK_TOKEN".to_string(), callback_token_str),
-        ("RYEOSD_THREAD_ID".to_string(), thread_id.clone()),
-        (
-            "RYEOSD_THREAD_AUTH_TOKEN".to_string(),
-            thread_auth_token_str,
-        ),
-    ];
-    if !request.project_path.as_os_str().is_empty() {
-        per_spawn.push((
-            "RYEOSD_PROJECT_PATH".to_string(),
-            request.project_path.to_string_lossy().to_string(),
-        ));
-    }
+    // 10-11. All post-mint work runs inside this guarded block. ANY failure
+    //       here — envelope serialize, native executor resolution, env
+    //       build, spawn join, or result parse — returns `Err` and still
+    //       falls through to the cleanup below, which finalizes the thread
+    //       as failed (if the runtime did not already) and revokes both
+    //       borrowed-child tokens. The runtime self-finalizes via its
+    //       callback, so on the normal path the cleanup's finalize no-ops.
+    let outcome: Result<Value, DispatchError> = async {
+        let callback = ryeos_runtime::envelope::EnvelopeCallback {
+            socket_path: state.config.uds_path.clone(),
+            token: cap.token.clone(),
+        };
 
-    // 8. Resolve the native executor path and spawn via lillux.
+        let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
+            schema_version: 1,
+            kind: kind.to_string(),
+            method: method_name.to_string(),
+            thread_id: thread_id.clone(),
+            callback,
+            project_root: request.project_path.to_path_buf(),
+            payload,
+        };
+
+        let stdin_data =
+            serde_json::to_string(&envelope).map_err(|e| DispatchError::Internal(e.into()))?;
+
+        // The method subprocess needs the same daemon env vars as the
+        // normal subprocess path: socket path, callback token, thread ID,
+        // thread auth token, and optionally project path. System/user roots
+        // come from the daemon-root layer, not per-spawn env.
+        let socket_path_str = state.config.uds_path.to_string_lossy().to_string();
+        let mut per_spawn: Vec<(String, String)> = vec![
+            ("RYEOSD_SOCKET_PATH".to_string(), socket_path_str),
+            ("RYEOSD_CALLBACK_TOKEN".to_string(), cap.token.clone()),
+            ("RYEOSD_THREAD_ID".to_string(), thread_id.clone()),
+            (
+                "RYEOSD_THREAD_AUTH_TOKEN".to_string(),
+                thread_auth.token.clone(),
+            ),
+        ];
+        if !request.project_path.as_os_str().is_empty() {
+            per_spawn.push((
+                "RYEOSD_PROJECT_PATH".to_string(),
+                request.project_path.to_string_lossy().to_string(),
+            ));
+        }
+
+    // 9. Resolve the native executor path and spawn via lillux.
     let bundle_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
         .iter()
@@ -1075,107 +1155,152 @@ pub(crate) async fn dispatch_op(
     .await
     .map_err(|e| DispatchError::Internal(e.into()))?;
 
-    if !result.success {
-        // Try to parse a BatchOpResult from stdout for structured error.
-        if let Ok(batch_result) =
-            serde_json::from_str::<ryeos_runtime::op_wire::BatchOpResult>(&result.stdout)
-        {
-            if let Some(error) = batch_result.error {
-                // Finalize thread as failed.
-                let _ = state
-                    .threads
-                    .finalize_thread(&finalize_params(&thread_id, "failed", None));
-                return Err(map_batch_error(kind, op_name, error));
+        // Process the runtime result. On failure, return `Err` and let the
+        // cleanup below finalize the thread; on success the runtime already
+        // self-finalized via its callback, so only fallback-finalize.
+        if !result.success {
+            // Trust a structured error only if the runtime echoed the
+            // dispatched kind/method; otherwise fall through to a generic
+            // failure so a confused result cannot masquerade as a typed one.
+            if let Ok(batch_result) =
+                serde_json::from_str::<ryeos_runtime::method_wire::MethodCallResult>(&result.stdout)
+            {
+                if batch_result.kind == kind && batch_result.method == method_name {
+                    if let Some(error) = batch_result.error {
+                        return Err(map_method_error(kind, method_name, error));
+                    }
+                }
             }
+            return Err(DispatchError::MethodFailed {
+                kind: kind.to_string(),
+                method: method_name.to_string(),
+                reason: format!(
+                    "exit_code={}, stderr={}",
+                    result.exit_code,
+                    result.stderr.trim()
+                ),
+            });
         }
-        let _ = state
-            .threads
-            .finalize_thread(&finalize_params(&thread_id, "failed", None));
-        return Err(DispatchError::OpFailed {
-            kind: kind.to_string(),
-            op: op_name.clone(),
-            reason: format!(
-                "exit_code={}, stderr={}",
-                result.exit_code,
-                result.stderr.trim()
-            ),
-        });
-    }
 
-    // 8. Parse BatchOpResult.
-    let batch_result: ryeos_runtime::op_wire::BatchOpResult = serde_json::from_str(&result.stdout)
-        .map_err(|e| {
-            let _ = state
-                .threads
-                .finalize_thread(&finalize_params(&thread_id, "failed", None));
-            DispatchError::OpFailed {
+        let batch_result: ryeos_runtime::method_wire::MethodCallResult =
+            serde_json::from_str(&result.stdout).map_err(|e| DispatchError::MethodFailed {
                 kind: kind.to_string(),
-                op: op_name.clone(),
-                reason: format!("failed to parse BatchOpResult: {e}"),
-            }
-        })?;
+                method: method_name.to_string(),
+                reason: format!("failed to parse MethodCallResult: {e}"),
+            })?;
 
-    if !batch_result.success {
-        let _ = state
-            .threads
-            .finalize_thread(&finalize_params(&thread_id, "failed", None));
-        return Err(match batch_result.error {
-            Some(error) => map_batch_error(kind, op_name, error),
-            None => DispatchError::OpFailed {
+        // The runtime must echo back the dispatched kind/method. A mismatch
+        // means schema/runtime skew or a confused result — never trust it.
+        if batch_result.kind != kind || batch_result.method != method_name {
+            return Err(DispatchError::MethodFailed {
                 kind: kind.to_string(),
-                op: op_name.clone(),
-                reason: "runtime returned success=false with no error detail".into(),
+                method: method_name.to_string(),
+                reason: format!(
+                    "runtime returned a result for '{}/{}' but '{}/{}' was dispatched",
+                    batch_result.kind, batch_result.method, kind, method_name
+                ),
+            });
+        }
+
+        if !batch_result.success {
+            return Err(match batch_result.error {
+                Some(error) => map_method_error(kind, method_name, error),
+                None => DispatchError::MethodFailed {
+                    kind: kind.to_string(),
+                    method: method_name.to_string(),
+                    reason: "runtime returned success=false with no error detail".into(),
+                },
+            });
+        }
+
+        // Success: the runtime self-finalized via its callback. Finalize as
+        // a fallback only if that callback did not land.
+        finalize_method_thread_if_needed(
+            state,
+            &thread_id,
+            "completed",
+            batch_result.output.clone(),
+        );
+
+        Ok(json!({
+            "thread": {
+                "thread_id": thread_id.clone(),
+                "kind": thread_profile_str,
+                "item_ref": canonical_ref.to_string(),
+                "status": "completed",
             },
-        });
+            "result": batch_result.output.unwrap_or(Value::Null),
+        }))
     }
+    .await;
 
-    // Finalize thread as completed.
-    let _ = state.threads.finalize_thread(&finalize_params(
-        &thread_id,
-        "completed",
-        batch_result.output.clone(),
-    ));
+    // Cleanup on every path. If the run errored, finalize the thread as
+    // failed unless the runtime already drove it terminal; then revoke both
+    // borrowed-child tokens, mirroring the subprocess runner's guard. This
+    // covers post-mint failures (executor resolution, env build, spawn
+    // join) that return before the runtime ever touched the thread.
+    if outcome.is_err() {
+        finalize_method_thread_if_needed(state, &thread_id, "failed", None);
+    }
+    state.callback_tokens.invalidate(&cap.token);
+    state.callback_tokens.invalidate_for_thread(&thread_id);
+    state.thread_auth.invalidate(&thread_auth.token);
+    state.thread_auth.invalidate_for_thread(&thread_id);
 
-    Ok(json!({
-        "thread": {
-            "thread_id": thread_id,
-            "kind": thread_profile_str,
-            "item_ref": canonical_ref.to_string(),
-            "status": "completed",
-        },
-        "result": batch_result.output.unwrap_or(Value::Null),
-    }))
+    outcome
 }
 
-/// Map a `BatchOpError` from the runtime to a `DispatchError`.
-fn map_batch_error(
+/// Finalize a method-dispatch thread only when the runtime's callback did
+/// not already drive it terminal. Method runtimes self-finalize via the
+/// callback client (borrowed-child model); the executor finalizes only on
+/// the paths where the runtime crashed or its callback never landed. This
+/// no-ops if the thread is already terminal, so the normal path never
+/// double-finalizes.
+pub(crate) fn finalize_method_thread_if_needed(
+    state: &AppState,
+    thread_id: &str,
+    status: &str,
+    result: Option<Value>,
+) {
+    if let Ok(Some(detail)) = state.threads.get_thread(thread_id) {
+        if matches!(detail.status.as_str(), "completed" | "failed" | "cancelled") {
+            return;
+        }
+    }
+    let _ = state
+        .threads
+        .finalize_thread(&finalize_params(thread_id, status, result));
+}
+
+/// Map a `MethodCallError` from the runtime to a `DispatchError`.
+fn map_method_error(
     kind: &str,
-    op: &str,
-    error: ryeos_runtime::op_wire::BatchOpError,
+    method: &str,
+    error: ryeos_runtime::method_wire::MethodCallError,
 ) -> DispatchError {
-    use ryeos_runtime::op_wire::BatchOpError;
+    use ryeos_runtime::method_wire::MethodCallError;
     match error {
-        BatchOpError::NotImplemented { phase, .. } => DispatchError::OpNotImplemented {
+        MethodCallError::NotImplemented { phase, .. } => DispatchError::MethodNotImplemented {
             kind: kind.to_string(),
-            op: op.to_string(),
+            method: method.to_string(),
             phase,
         },
-        BatchOpError::InvalidInput { reason, .. } => DispatchError::OpInvalidInput {
-            op: op.to_string(),
+        MethodCallError::InvalidArg { reason, .. } => DispatchError::MethodInvalidArg {
+            method: method.to_string(),
             reason,
         },
-        BatchOpError::UnknownOp {
+        MethodCallError::UnknownMethod {
             requested,
             declared,
             ..
-        } => DispatchError::UnknownOp {
+        } => DispatchError::UnknownMethod {
             kind: kind.to_string(),
             requested,
             declared: declared.join(", "),
         },
-        BatchOpError::OpFailed { reason } => DispatchError::OpFailed {
+        MethodCallError::MethodFailed { reason } => DispatchError::MethodFailed {
             kind: kind.to_string(),
-            op: op.to_string(),
+            method: method.to_string(),
             reason,
         },
     }
@@ -2194,6 +2319,36 @@ pub async fn dispatch(
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
 
+    // Reject a method call (`call.method`/`call.args`) aimed at a kind that
+    // does not declare method dispatch. The method selector is control
+    // plane for method-bearing kinds only; a directive/tool/service does
+    // not interpret it, so silently ignoring it would hide a caller error.
+    // Method kinds are always invoked directly (they never sit behind an
+    // alias/delegate hop — mixed dispatch is forbidden), so the root ref's
+    // kind is authoritative here.
+    if ctx.requested_method.is_some() || ctx.requested_args.is_some() {
+        let has_methods = ctx
+            .engine
+            .kinds
+            .get(&current_ref.kind)
+            .and_then(|s| s.execution())
+            .map(|e| !e.methods.is_empty())
+            .unwrap_or(false);
+        if !has_methods {
+            return Err(DispatchError::MethodInvalidArg {
+                method: ctx
+                    .requested_method
+                    .clone()
+                    .unwrap_or_else(|| "<unspecified>".to_string()),
+                reason: format!(
+                    "kind '{}' does not support method dispatch (no `methods` declared); \
+                     `call.method`/`call.args` are not accepted for this kind",
+                    current_ref.kind
+                ),
+            });
+        }
+    }
+
     // P1.1: root subject captured from the first hop's resolution.
     // For direct paths, root_subject IS the runtime. For indirect
     // paths, it's the directive/tool that initiated the chain.
@@ -2296,10 +2451,15 @@ pub async fn dispatch(
             HopAction::FollowAlias(next_ref) | HopAction::UseRegistry(next_ref) => {
                 current_ref = next_ref;
             }
-            HopAction::DispatchOp { kind, op_decl } => {
-                return dispatch_op(
+            HopAction::DispatchMethod {
+                kind,
+                method_name,
+                method_decl,
+            } => {
+                return dispatch_method(
                     &kind,
-                    &op_decl,
+                    &method_name,
+                    &method_decl,
                     &hop_ref,
                     verified,
                     thread_profile,
@@ -2493,8 +2653,8 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(build_test_engine()),
             plan_ctx: test_plan_context(project_path),
-            requested_op: None,
-            requested_inputs: None,
+            requested_method: None,
+            requested_args: None,
         }
     }
 
@@ -3348,8 +3508,8 @@ requires:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx,
-            requested_op: None,
-            requested_inputs: None,
+            requested_method: None,
+            requested_args: None,
         };
         // `unknown` kind has no schema; only `runtime` was loaded.
         // For non-runtime kinds the resolver tries engine.resolve()
@@ -3368,32 +3528,53 @@ requires:
         );
     }
 
-    // ── Op dispatch unit tests ───────────────────────────────────────
+    // ── Method dispatch unit tests ───────────────────────────────────
 
     use axum::http::StatusCode;
     use ryeos_engine::kind_registry::{
-        InputDecl, InputType, OperationDecl, OperationDispatch, SideEffectClass,
+        ArgDecl, ArgType, ExecutionSchema, MethodDecl, MethodDispatchDecl, MethodDispatchVia,
+        MethodScope,
     };
     use ryeos_engine::resolution::{
         ResolutionEdge, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
         TrustClass as EngineTrustClass,
     };
-    use ryeos_runtime::op_wire::{BatchOpError, TrustClass as WireTrustClass};
+    use ryeos_runtime::method_wire::{MethodCallError, TrustClass as WireTrustClass};
     use std::collections::BTreeMap;
 
-    fn make_op(name: &str, inputs: BTreeMap<String, InputDecl>) -> OperationDecl {
-        OperationDecl {
-            name: name.to_string(),
-            side_effects: SideEffectClass::None,
-            dispatch: OperationDispatch::RuntimeRegistry,
-            scope: OpScope::default(),
-            inputs,
+    fn make_method(args: BTreeMap<String, ArgDecl>) -> MethodDecl {
+        MethodDecl {
+            scope: MethodScope::default(),
+            args,
         }
     }
 
-    fn string_input(required: bool) -> InputDecl {
-        InputDecl {
-            ty: InputType::String,
+    /// Build a method-bearing `ExecutionSchema` from method names + an
+    /// optional default, so the `resolve_requested_method` tests exercise
+    /// the real lookup path.
+    fn exec_with_methods(names: &[&str], default: Option<&str>) -> ExecutionSchema {
+        let mut methods = BTreeMap::new();
+        for n in names {
+            methods.insert(n.to_string(), make_method(BTreeMap::new()));
+        }
+        ExecutionSchema {
+            aliases: std::collections::HashMap::new(),
+            alias_max_depth: 8,
+            terminator: None,
+            delegate: None,
+            thread_profile: None,
+            method_dispatch: Some(MethodDispatchDecl {
+                via: MethodDispatchVia::RuntimeRegistry,
+                default: default.map(|s| s.to_string()),
+            }),
+            methods,
+            launch_augmentations: Vec::new(),
+        }
+    }
+
+    fn string_arg(required: bool) -> ArgDecl {
+        ArgDecl {
+            ty: ArgType::String,
             required,
             default: None,
             enum_values: None,
@@ -3402,9 +3583,9 @@ requires:
         }
     }
 
-    fn integer_input(required: bool, default: Option<i64>) -> InputDecl {
-        InputDecl {
-            ty: InputType::Integer,
+    fn integer_arg(required: bool, default: Option<i64>) -> ArgDecl {
+        ArgDecl {
+            ty: ArgType::Integer,
             required,
             default: default.map(|v| json!(v)),
             enum_values: None,
@@ -3413,52 +3594,44 @@ requires:
         }
     }
 
-    // ── resolve_requested_op ─────────────────────────────────────────
+    // ── resolve_requested_method ─────────────────────────────────────────
 
     #[test]
-    fn resolve_requested_op_explicit_known() {
-        let ops = vec![make_op("compose", BTreeMap::new())];
-        let r = resolve_requested_op(Some("compose"), &None, &ops, "knowledge");
+    fn resolve_requested_method_explicit_known() {
+        let exec = exec_with_methods(&["compose"], None);
+        let r = resolve_requested_method(Some("compose"), &exec, "knowledge");
         assert!(r.is_ok());
-        assert_eq!(r.unwrap().name, "compose");
+        assert_eq!(r.unwrap().0, "compose");
     }
 
     #[test]
-    fn resolve_requested_op_explicit_unknown_lists_declared() {
-        let ops = vec![
-            make_op("compose", BTreeMap::new()),
-            make_op("query", BTreeMap::new()),
-        ];
-        let err = resolve_requested_op(Some("bogus"), &None, &ops, "knowledge")
-            .expect_err("unknown op must error");
+    fn resolve_requested_method_explicit_unknown_lists_declared() {
+        let exec = exec_with_methods(&["compose", "query"], None);
+        let err = resolve_requested_method(Some("bogus"), &exec, "knowledge")
+            .expect_err("unknown method must error");
         let msg = err.to_string();
-        assert!(msg.contains("bogus"), "must name requested op, got: {msg}");
+        assert!(msg.contains("bogus"), "must name requested method, got: {msg}");
         assert!(msg.contains("compose"), "must list compose, got: {msg}");
         assert!(msg.contains("query"), "must list query, got: {msg}");
         assert!(
-            matches!(err, DispatchError::UnknownOp { .. }),
-            "must be UnknownOp variant"
+            matches!(err, DispatchError::UnknownMethod { .. }),
+            "must be UnknownMethod variant"
         );
     }
 
     #[test]
-    fn resolve_requested_op_rejects_augmentation_private_compose_positions() {
+    fn resolve_requested_method_rejects_augmentation_private_compose_positions() {
         // `compose_positions` is a knowledge runtime handler used only by
         // the compose_context_positions launch augmentation. It must not be
-        // accepted as a generic requested op unless the kind schema declares
-        // it in `operations`.
-        let ops = vec![
-            make_op("compose", BTreeMap::new()),
-            make_op("query", BTreeMap::new()),
-            make_op("graph", BTreeMap::new()),
-            make_op("validate", BTreeMap::new()),
-        ];
-        let err = resolve_requested_op(Some("compose_positions"), &None, &ops, "knowledge")
+        // accepted as a generic requested method unless the kind schema
+        // declares it in `methods`.
+        let exec = exec_with_methods(&["compose", "query", "graph", "validate"], None);
+        let err = resolve_requested_method(Some("compose_positions"), &exec, "knowledge")
             .expect_err("augmentation-private handler must be rejected generically");
         assert!(
             matches!(
                 err,
-                DispatchError::UnknownOp {
+                DispatchError::UnknownMethod {
                     ref requested,
                     ref declared,
                     ..
@@ -3471,18 +3644,17 @@ requires:
     }
 
     #[test]
-    fn resolve_requested_op_falls_back_to_default() {
-        let ops = vec![make_op("compose", BTreeMap::new())];
-        let default = Some("compose".to_string());
-        let r = resolve_requested_op(None, &default, &ops, "knowledge");
+    fn resolve_requested_method_falls_back_to_default() {
+        let exec = exec_with_methods(&["compose"], Some("compose"));
+        let r = resolve_requested_method(None, &exec, "knowledge");
         assert!(r.is_ok());
-        assert_eq!(r.unwrap().name, "compose");
+        assert_eq!(r.unwrap().0, "compose");
     }
 
     #[test]
-    fn resolve_requested_op_no_request_no_default_is_misconfigured() {
-        let ops = vec![make_op("compose", BTreeMap::new())];
-        let err = resolve_requested_op(None, &None, &ops, "knowledge")
+    fn resolve_requested_method_no_request_no_default_is_misconfigured() {
+        let exec = exec_with_methods(&["compose"], None);
+        let err = resolve_requested_method(None, &exec, "knowledge")
             .expect_err("missing default must error");
         assert!(
             matches!(err, DispatchError::SchemaMisconfigured { .. }),
@@ -3491,33 +3663,39 @@ requires:
     }
 
     #[test]
-    fn resolve_requested_op_empty_ops_list() {
-        let err = resolve_requested_op(Some("anything"), &None, &[], "tool")
-            .expect_err("empty ops must error");
-        assert!(matches!(err, DispatchError::UnknownOp { declared, .. } if declared.is_empty()));
+    fn resolve_requested_method_empty_methods() {
+        let exec = exec_with_methods(&[], None);
+        let err = resolve_requested_method(Some("anything"), &exec, "tool")
+            .expect_err("empty methods must error");
+        assert!(matches!(err, DispatchError::UnknownMethod { declared, .. } if declared.is_empty()));
     }
 
-    // ── validate_op_inputs ───────────────────────────────────────────
+    // ── validate_method_args ──────────────────────────────────────────
 
     #[test]
-    fn validate_op_inputs_all_required_present() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_all_required_present() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello"})), &op);
+        let r = validate_method_args(Some(&json!({"question": "hello"})), "ask", &method);
         assert!(r.is_ok());
         let val = r.unwrap();
         assert_eq!(val["question"], "hello");
     }
 
     #[test]
-    fn validate_op_inputs_missing_required() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_missing_required() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let err = validate_op_inputs(Some(&json!({"other": "val"})), &op)
+        let err = validate_method_args(Some(&json!({"question": null})), "ask", &method)
+            .expect_err("wrong-typed required must error");
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
+
+        // Truly absent required arg is also rejected.
+        let err = validate_method_args(Some(&json!({})), "ask", &method)
             .expect_err("missing required must error");
         let msg = err.to_string();
         assert!(
@@ -3525,94 +3703,129 @@ requires:
             "must name missing field, got: {msg}"
         );
         assert!(
-            matches!(err, DispatchError::OpInvalidInput { .. }),
-            "must be OpInvalidInput variant"
+            matches!(err, DispatchError::MethodInvalidArg { .. }),
+            "must be MethodInvalidArg variant"
         );
     }
 
     #[test]
-    fn validate_op_inputs_optional_default_filled() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        inputs.insert("max_tokens".to_string(), integer_input(false, Some(42)));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_unknown_arg_rejected() {
+        // Strict contract: an arg the method does not declare is rejected.
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello"})), &op).unwrap();
+        let err = validate_method_args(
+            Some(&json!({"question": "hi", "bogus": 1})),
+            "ask",
+            &method,
+        )
+        .expect_err("undeclared arg must error");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown arg 'bogus'"), "got: {msg}");
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
+    }
+
+    #[test]
+    fn validate_method_args_optional_default_filled() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        args.insert("max_tokens".to_string(), integer_arg(false, Some(42)));
+        let method = make_method(args);
+
+        let r = validate_method_args(Some(&json!({"question": "hello"})), "ask", &method).unwrap();
         assert_eq!(r["max_tokens"], 42, "default must be filled");
     }
 
     #[test]
-    fn validate_op_inputs_optional_with_explicit_value() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        inputs.insert("max_tokens".to_string(), integer_input(false, Some(42)));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_rejects_invalid_default() {
+        // A schema default that violates its own declaration must be caught
+        // before it reaches the runtime, not silently inserted.
+        let mut decl = integer_arg(false, Some(0));
+        decl.min = Some(1);
+        let mut args = BTreeMap::new();
+        args.insert("limit".to_string(), decl);
+        let method = make_method(args);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello", "max_tokens": 100})), &op)
-            .unwrap();
+        let err = validate_method_args(None, "query", &method)
+            .expect_err("an out-of-range default must error");
+        assert!(err.to_string().contains(">= 1"), "got: {err}");
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
+    }
+
+    #[test]
+    fn validate_method_args_optional_with_explicit_value() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        args.insert("max_tokens".to_string(), integer_arg(false, Some(42)));
+        let method = make_method(args);
+
+        let r = validate_method_args(
+            Some(&json!({"question": "hello", "max_tokens": 100})),
+            "ask",
+            &method,
+        )
+        .unwrap();
         assert_eq!(r["max_tokens"], 100, "explicit value must override default");
     }
 
     #[test]
-    fn validate_op_inputs_wrong_type() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_wrong_type() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let err = validate_op_inputs(Some(&json!({"question": 123})), &op)
+        let err = validate_method_args(Some(&json!({"question": 123})), "ask", &method)
             .expect_err("wrong type must error");
         assert!(
-            matches!(err, DispatchError::OpInvalidInput { .. }),
-            "must be OpInvalidInput variant, got: {err:?}"
+            matches!(err, DispatchError::MethodInvalidArg { .. }),
+            "must be MethodInvalidArg variant, got: {err:?}"
         );
     }
 
     #[test]
-    fn validate_op_inputs_non_object_rejected() {
-        let op = make_op("ask", BTreeMap::new());
-        let err = validate_op_inputs(Some(&json!("not an object")), &op)
+    fn validate_method_args_non_object_rejected() {
+        let method = make_method(BTreeMap::new());
+        let err = validate_method_args(Some(&json!("not an object")), "ask", &method)
             .expect_err("non-object must error");
         let msg = err.to_string();
         assert!(msg.contains("must be an object"), "got: {msg}");
     }
 
     #[test]
-    fn validate_op_inputs_none_uses_defaults() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("count".to_string(), integer_input(false, Some(10)));
-        let op = make_op("list", inputs);
+    fn validate_method_args_none_uses_defaults() {
+        let mut args = BTreeMap::new();
+        args.insert("count".to_string(), integer_arg(false, Some(10)));
+        let method = make_method(args);
 
-        let r = validate_op_inputs(None, &op).unwrap();
-        assert_eq!(
-            r["count"], 10,
-            "default must be applied when inputs is None"
-        );
+        let r = validate_method_args(None, "list", &method).unwrap();
+        assert_eq!(r["count"], 10, "default must be applied when args is None");
     }
 
-    // ── validate_op_inputs: enum / min / array items ──────────────────
+    // ── validate_method_args: enum / min / array items ────────────────
 
-    fn string_array_input() -> InputDecl {
-        InputDecl {
-            ty: InputType::Array,
+    fn string_array_arg() -> ArgDecl {
+        ArgDecl {
+            ty: ArgType::Array,
             required: false,
             default: None,
             enum_values: None,
             min: None,
-            items: Some(Box::new(string_input(false))),
+            items: Some(Box::new(string_arg(false))),
         }
     }
 
     #[test]
-    fn validate_op_inputs_array_items_type_enforced() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("roots".to_string(), string_array_input());
-        let op = make_op("validate", inputs);
+    fn validate_method_args_array_items_type_enforced() {
+        let mut args = BTreeMap::new();
+        args.insert("roots".to_string(), string_array_arg());
+        let method = make_method(args);
 
         // All-string array passes.
-        assert!(validate_op_inputs(Some(&json!({"roots": ["a", "b"]})), &op).is_ok());
+        assert!(validate_method_args(Some(&json!({"roots": ["a", "b"]})), "validate", &method).is_ok());
 
         // A non-string element is rejected, naming the index.
-        let err = validate_op_inputs(Some(&json!({"roots": ["a", 7]})), &op)
+        let err = validate_method_args(Some(&json!({"roots": ["a", 7]})), "validate", &method)
             .expect_err("non-string array element must error");
         let msg = err.to_string();
         assert!(
@@ -3622,47 +3835,47 @@ requires:
     }
 
     #[test]
-    fn validate_op_inputs_enum_enforced() {
-        let mut decl = string_input(false);
+    fn validate_method_args_enum_enforced() {
+        let mut decl = string_arg(false);
         decl.enum_values = Some(vec!["lexical".into(), "semantic".into()]);
-        let mut inputs = BTreeMap::new();
-        inputs.insert("mode".to_string(), decl);
-        let op = make_op("query", inputs);
+        let mut args = BTreeMap::new();
+        args.insert("mode".to_string(), decl);
+        let method = make_method(args);
 
-        assert!(validate_op_inputs(Some(&json!({"mode": "lexical"})), &op).is_ok());
-        let err = validate_op_inputs(Some(&json!({"mode": "fuzzy"})), &op)
+        assert!(validate_method_args(Some(&json!({"mode": "lexical"})), "query", &method).is_ok());
+        let err = validate_method_args(Some(&json!({"mode": "fuzzy"})), "query", &method)
             .expect_err("out-of-enum value must error");
         assert!(err.to_string().contains("must be one of"), "got: {err}");
     }
 
     #[test]
-    fn validate_op_inputs_min_enforced() {
-        let mut decl = integer_input(false, None);
+    fn validate_method_args_min_enforced() {
+        let mut decl = integer_arg(false, None);
         decl.min = Some(1);
-        let mut inputs = BTreeMap::new();
-        inputs.insert("limit".to_string(), decl);
-        let op = make_op("query", inputs);
+        let mut args = BTreeMap::new();
+        args.insert("limit".to_string(), decl);
+        let method = make_method(args);
 
-        assert!(validate_op_inputs(Some(&json!({"limit": 5})), &op).is_ok());
-        let err = validate_op_inputs(Some(&json!({"limit": 0})), &op)
+        assert!(validate_method_args(Some(&json!({"limit": 5})), "query", &method).is_ok());
+        let err = validate_method_args(Some(&json!({"limit": 0})), "query", &method)
             .expect_err("below-min value must error");
         assert!(err.to_string().contains(">= 1"), "got: {err}");
     }
 
-    // ── map_batch_error ──────────────────────────────────────────────
+    // ── map_method_error ──────────────────────────────────────────────
 
     #[test]
-    fn map_batch_error_not_implemented_preserves_phase() {
-        let err = map_batch_error(
+    fn map_method_error_not_implemented_preserves_phase() {
+        let err = map_method_error(
             "knowledge",
             "query",
-            BatchOpError::NotImplemented {
-                op: "query".into(),
+            MethodCallError::NotImplemented {
+                method: "query".into(),
                 phase: 3,
             },
         );
         assert!(
-            matches!(err, DispatchError::OpNotImplemented { phase: 3, .. }),
+            matches!(err, DispatchError::MethodNotImplemented { phase: 3, .. }),
             "phase must be preserved"
         );
         // HTTP mapping: BAD_GATEWAY (502)
@@ -3670,71 +3883,71 @@ requires:
     }
 
     #[test]
-    fn map_batch_error_invalid_input() {
-        let err = map_batch_error(
+    fn map_method_error_invalid_arg() {
+        let err = map_method_error(
             "knowledge",
             "compose",
-            BatchOpError::InvalidInput {
-                op: "compose".into(),
+            MethodCallError::InvalidArg {
+                method: "compose".into(),
                 field: Some("token_budget".into()),
                 reason: "must be positive".into(),
             },
         );
-        assert!(matches!(err, DispatchError::OpInvalidInput { .. }));
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
         // HTTP mapping: BAD_REQUEST (400)
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
-    fn map_batch_error_unknown_op() {
-        let err = map_batch_error(
+    fn map_method_error_unknown_method() {
+        let err = map_method_error(
             "knowledge",
             "delete",
-            BatchOpError::UnknownOp {
+            MethodCallError::UnknownMethod {
                 kind: "knowledge".into(),
                 requested: "delete".into(),
                 declared: vec!["compose".into(), "query".into()],
             },
         );
         assert!(
-            matches!(err, DispatchError::UnknownOp { ref requested, ref declared, .. }
+            matches!(err, DispatchError::UnknownMethod { ref requested, ref declared, .. }
             if requested == "delete" && declared.contains("compose"))
         );
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
-    fn map_batch_error_op_failed() {
-        let err = map_batch_error(
+    fn map_method_error_method_failed() {
+        let err = map_method_error(
             "knowledge",
             "compose",
-            BatchOpError::OpFailed {
+            MethodCallError::MethodFailed {
                 reason: "OOM".into(),
             },
         );
-        assert!(matches!(err, DispatchError::OpFailed { ref reason, .. } if reason == "OOM"));
+        assert!(matches!(err, DispatchError::MethodFailed { ref reason, .. } if reason == "OOM"));
         assert_eq!(err.http_status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]
-    fn map_batch_error_not_implemented_is_not_op_failed() {
-        // Critical assertion: NotImplemented must produce OpNotImplemented,
-        // NOT OpFailed (which would lose the phase information).
-        let err = map_batch_error(
+    fn map_method_error_not_implemented_is_not_method_failed() {
+        // Critical assertion: NotImplemented must produce MethodNotImplemented,
+        // NOT MethodFailed (which would lose the phase information).
+        let err = map_method_error(
             "knowledge",
             "query",
-            BatchOpError::NotImplemented {
-                op: "query".into(),
+            MethodCallError::NotImplemented {
+                method: "query".into(),
                 phase: 5,
             },
         );
         assert!(
-            !matches!(err, DispatchError::OpFailed { .. }),
-            "NotImplemented must NOT map to OpFailed — phase info would be lost"
+            !matches!(err, DispatchError::MethodFailed { .. }),
+            "NotImplemented must NOT map to MethodFailed — phase info would be lost"
         );
         assert!(
-            matches!(err, DispatchError::OpNotImplemented { phase: 5, .. }),
-            "NotImplemented must map to OpNotImplemented with correct phase"
+            matches!(err, DispatchError::MethodNotImplemented { phase: 5, .. }),
+            "NotImplemented must map to MethodNotImplemented with correct phase"
         );
     }
 
@@ -3818,7 +4031,7 @@ requires:
         assert_eq!(payload.edges[0].to, "directive:mid");
         assert_eq!(
             payload.edges[0].kind,
-            ryeos_runtime::op_wire::EdgeKind::Extends
+            ryeos_runtime::method_wire::EdgeKind::Extends
         );
         assert_eq!(payload.edges[0].depth_from_root, Some(1));
 
@@ -3864,7 +4077,7 @@ requires:
         assert_eq!(payload.edges[0].to, "knowledge:other");
         assert_eq!(
             payload.edges[0].kind,
-            ryeos_runtime::op_wire::EdgeKind::References
+            ryeos_runtime::method_wire::EdgeKind::References
         );
         assert_eq!(
             payload.edges[0].depth_from_root, None,

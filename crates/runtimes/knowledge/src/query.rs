@@ -37,10 +37,10 @@ struct Doc {
 }
 
 pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
-    let q = payload.inputs.query.trim();
+    let q = payload.args.query.trim();
     if q.is_empty() {
-        return Err(KnowledgeError::InvalidInput {
-            op: "query".into(),
+        return Err(KnowledgeError::InvalidArg {
+            method: "query".into(),
             reason: "query string is empty".into(),
         });
     }
@@ -57,7 +57,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
     //    relative to what the caller actually searched.
     let mut docs: Vec<Doc> = Vec::new();
     for (item_ref, item) in &payload.items_by_ref {
-        if !ref_prefix_ok(item_ref, &payload.inputs.filters) {
+        if !ref_prefix_ok(item_ref, &payload.args.filters) {
             continue;
         }
         let source_path = item
@@ -66,7 +66,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let fm = parse_metadata(&item.raw_content, source_path);
-        if !meta_filters_ok(&fm, &payload.inputs.filters) {
+        if !meta_filters_ok(&fm, &payload.args.filters) {
             continue;
         }
         let body = strip_frontmatter(&item.raw_content, item_ref)
@@ -128,7 +128,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.1.item_ref.cmp(&b.1.item_ref))
     });
-    scored.truncate(payload.inputs.limit);
+    scored.truncate(payload.args.limit);
 
     let matches = scored
         .into_iter()
@@ -140,7 +140,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
             metadata: d.metadata.clone(),
             raw_content_digest: d.digest.clone(),
             content: payload
-                .inputs
+                .args
                 .include_content
                 .then(|| d.raw_content.clone()),
         })
@@ -283,10 +283,10 @@ fn make_excerpt(body: &str, terms: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::op_wire::{TrustClass, VerifiedItem};
+    use ryeos_runtime::method_wire::{TrustClass, VerifiedItem};
     use std::collections::BTreeMap;
 
-    use crate::types::QueryInputs;
+    use crate::types::QueryArgs;
 
     fn item(body: &str) -> VerifiedItem {
         VerifiedItem {
@@ -297,7 +297,7 @@ mod tests {
         }
     }
 
-    fn payload(items: &[(&str, &str)], inputs: QueryInputs) -> QueryPayload {
+    fn payload(items: &[(&str, &str)], inputs: QueryArgs) -> QueryPayload {
         let mut map = BTreeMap::new();
         for (r, body) in items {
             map.insert(r.to_string(), item(body));
@@ -305,12 +305,12 @@ mod tests {
         QueryPayload {
             items_by_ref: map,
             edges: Vec::new(),
-            inputs,
+            args: inputs,
         }
     }
 
-    fn inputs(q: &str) -> QueryInputs {
-        QueryInputs {
+    fn inputs(q: &str) -> QueryArgs {
+        QueryArgs {
             query: q.to_string(),
             limit: 10,
             include_content: false,
@@ -375,7 +375,7 @@ mod tests {
                 ("k/a", "---\ntitle: A\ntags: [keep]\n---\nshared term here"),
                 ("k/b", "---\ntitle: B\ntags: [drop]\n---\nshared term here"),
             ],
-            QueryInputs {
+            QueryArgs {
                 query: "shared".into(),
                 limit: 10,
                 include_content: false,
@@ -394,7 +394,7 @@ mod tests {
     fn ref_prefix_filter_restricts_corpus() {
         let p = payload(
             &[("memory/a", "needle"), ("notes/b", "needle")],
-            QueryInputs {
+            QueryArgs {
                 query: "needle".into(),
                 limit: 10,
                 include_content: false,

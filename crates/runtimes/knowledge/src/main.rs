@@ -1,5 +1,5 @@
-//! Knowledge runtime — receives a BatchOpEnvelope on stdin, dispatches
-//! the requested op, and writes a BatchOpResult to stdout.
+//! Knowledge runtime — receives a MethodCallEnvelope on stdin, dispatches
+//! the requested method, and writes a MethodCallResult to stdout.
 //!
 //! Spawned exclusively by `ryeosd` via `lillux::run`. Single mode:
 //! always a thread, always wires CallbackClient lifecycle.
@@ -18,17 +18,17 @@ mod validate;
 use std::io::Read;
 
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::op_wire::{BatchOpEnvelope, BatchOpError, BatchOpResult};
+use ryeos_runtime::method_wire::{MethodCallEnvelope, MethodCallError, MethodCallResult};
 
 use types::KnowledgeError;
 
-/// Dispatch the envelope's op against the handler table, keyed strictly on
-/// `envelope.op`. The op's typed payload is parsed inside the handler; a
-/// non-object or wrong-shaped payload surfaces as `InvalidInput`.
-fn dispatch_op(envelope: &BatchOpEnvelope) -> BatchOpResult {
-    match dispatch::dispatch(&envelope.op, envelope.payload.clone()) {
-        Ok(value) => BatchOpResult::success(envelope, value),
-        Err(e) => BatchOpResult::failure(envelope, knowledge_to_batch_error(e)),
+/// Dispatch the envelope's method against the handler table, keyed strictly
+/// on `envelope.method`. The method's typed payload is parsed inside the
+/// handler; a non-object or wrong-shaped payload surfaces as `InvalidArg`.
+fn dispatch_method(envelope: &MethodCallEnvelope) -> MethodCallResult {
+    match dispatch::dispatch(&envelope.method, envelope.payload.clone()) {
+        Ok(value) => MethodCallResult::success(envelope, value),
+        Err(e) => MethodCallResult::failure(envelope, knowledge_to_batch_error(e)),
     }
 }
 
@@ -38,16 +38,16 @@ fn main() -> anyhow::Result<()> {
     let mut stdin_data = Vec::new();
     std::io::stdin().read_to_end(&mut stdin_data)?;
     if stdin_data.is_empty() {
-        eprintln!("ryeos-knowledge-runtime: empty stdin; BatchOpEnvelope required");
+        eprintln!("ryeos-knowledge-runtime: empty stdin; MethodCallEnvelope required");
         std::process::exit(1);
     }
 
-    let envelope: BatchOpEnvelope = serde_json::from_slice(&stdin_data)
-        .map_err(|e| anyhow::anyhow!("invalid BatchOpEnvelope: {e}"))?;
+    let envelope: MethodCallEnvelope = serde_json::from_slice(&stdin_data)
+        .map_err(|e| anyhow::anyhow!("invalid MethodCallEnvelope: {e}"))?;
 
     tracing::info!(
         kind = %envelope.kind,
-        op = %envelope.op,
+        method = %envelope.method,
         thread_id = %envelope.thread_id,
         "knowledge runtime launch",
     );
@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
+async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
     let thread_auth_token = std::env::var("RYEOSD_THREAD_AUTH_TOKEN")
         .expect("RYEOSD_THREAD_AUTH_TOKEN must be set by daemon");
     let client = CallbackClient::new(
@@ -72,9 +72,9 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
     );
 
     if let Err(e) = client.mark_running().await {
-        return BatchOpResult::failure(
+        return MethodCallResult::failure(
             envelope,
-            BatchOpError::OpFailed {
+            MethodCallError::MethodFailed {
                 reason: format!("mark_running failed: {e}"),
             },
         );
@@ -84,21 +84,21 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
     let envelope_owned = envelope.clone();
     let thread_id = envelope.thread_id.clone();
     let kind = envelope.kind.clone();
-    let op = envelope.op.clone();
-    let result = tokio::task::spawn_blocking(move || dispatch_op(&envelope_owned))
+    let method = envelope.method.clone();
+    let result = tokio::task::spawn_blocking(move || dispatch_method(&envelope_owned))
         .await
         .unwrap_or_else(|e| {
-            BatchOpResult::failure(
-                &BatchOpEnvelope {
+            MethodCallResult::failure(
+                &MethodCallEnvelope {
                     schema_version: 1,
                     kind,
-                    op,
+                    method,
                     thread_id,
                     callback: envelope.callback.clone(),
                     project_root: envelope.project_root.clone(),
                     payload: serde_json::Value::Null,
                 },
-                BatchOpError::OpFailed {
+                MethodCallError::MethodFailed {
                     reason: format!("dispatch panicked: {e}"),
                 },
             )
@@ -131,20 +131,20 @@ async fn run_thread(envelope: &BatchOpEnvelope) -> BatchOpResult {
     result
 }
 
-// Op-dispatch behavior (including the `inputs.roots` regression and the
-// envelope-op-vs-payload-operation override) is covered by `dispatch`'s
-// own test module, now that dispatch keys directly off `envelope.op`.
+// Method-dispatch behavior (including the `args.roots` regression and the
+// envelope-method-vs-payload-method override) is covered by `dispatch`'s
+// own test module, now that dispatch keys directly off `envelope.method`.
 
-/// Map a `KnowledgeError` into a structured `BatchOpError`,
+/// Map a `KnowledgeError` into a structured `MethodCallError`,
 /// preserving the variant taxonomy where it overlaps.
-fn knowledge_to_batch_error(err: KnowledgeError) -> BatchOpError {
+fn knowledge_to_batch_error(err: KnowledgeError) -> MethodCallError {
     match err {
-        KnowledgeError::InvalidInput { op, reason } => BatchOpError::InvalidInput {
-            op,
+        KnowledgeError::InvalidArg { method, reason } => MethodCallError::InvalidArg {
+            method,
             field: None,
             reason,
         },
-        other => BatchOpError::OpFailed {
+        other => MethodCallError::MethodFailed {
             reason: other.to_string(),
         },
     }
@@ -154,11 +154,11 @@ fn knowledge_to_batch_error(err: KnowledgeError) -> BatchOpError {
 mod tests {
     use super::*;
 
-    fn envelope(op: &str, payload: serde_json::Value) -> BatchOpEnvelope {
-        BatchOpEnvelope {
+    fn envelope(method: &str, payload: serde_json::Value) -> MethodCallEnvelope {
+        MethodCallEnvelope {
             schema_version: 1,
             kind: "knowledge".into(),
-            op: op.into(),
+            method: method.into(),
             thread_id: "T-test".into(),
             callback: ryeos_runtime::envelope::EnvelopeCallback {
                 socket_path: std::path::PathBuf::from("/tmp/cb.sock"),
@@ -172,36 +172,36 @@ mod tests {
     #[test]
     fn error_mapping_preserves_taxonomy() {
         assert!(matches!(
-            knowledge_to_batch_error(KnowledgeError::InvalidInput {
-                op: "query".into(),
+            knowledge_to_batch_error(KnowledgeError::InvalidArg {
+                method: "query".into(),
                 reason: "x".into()
             }),
-            BatchOpError::InvalidInput { field: None, .. }
+            MethodCallError::InvalidArg { field: None, .. }
         ));
-        // Variants without a dedicated wire mapping collapse to OpFailed.
+        // Variants without a dedicated wire mapping collapse to MethodFailed.
         assert!(matches!(
             knowledge_to_batch_error(KnowledgeError::Internal("boom".into())),
-            BatchOpError::OpFailed { .. }
+            MethodCallError::MethodFailed { .. }
         ));
     }
 
     #[test]
-    fn dispatch_op_maps_op_error_to_failure_result() {
-        // An undeclared op surfaces as a structured failure result, not a
-        // panic or a success — exercises BatchOpEnvelope -> BatchOpResult.
-        let result = dispatch_op(&envelope("bogus", serde_json::json!({})));
+    fn dispatch_method_maps_method_error_to_failure_result() {
+        // An undeclared method surfaces as a structured failure result, not a
+        // panic or a success — exercises MethodCallEnvelope -> MethodCallResult.
+        let result = dispatch_method(&envelope("bogus", serde_json::json!({})));
         assert!(!result.success);
         assert!(matches!(
             result.error,
-            Some(BatchOpError::InvalidInput { .. })
+            Some(MethodCallError::InvalidArg { .. })
         ));
     }
 
     #[test]
-    fn dispatch_op_success_result() {
-        let result = dispatch_op(&envelope(
+    fn dispatch_method_success_result() {
+        let result = dispatch_method(&envelope(
             "graph",
-            serde_json::json!({"items_by_ref": {}, "edges": [], "inputs": {}}),
+            serde_json::json!({"items_by_ref": {}, "edges": [], "args": {}}),
         ));
         assert!(result.success, "error: {:?}", result.error);
         assert!(result.output.is_some());

@@ -8,23 +8,26 @@ resolution:
 effective_trust:
   include_references: false
 execution:
-  # Op-dispatch execution model. The daemon resolves the requested op
-  # (default: `compose`) against the declared operations, validates
-  # inputs, then spawns the kind's runtime with a BatchOpEnvelope.
-  # Mixed-dispatch reject forbids `operations` + `delegate`/`terminator`.
+  # Method-dispatch execution model. The daemon resolves the requested
+  # method (default: `compose`) against the declared methods, validates
+  # args, then spawns the kind's runtime with a MethodCallEnvelope.
+  # Mixed-dispatch reject forbids `methods` + `delegate`/`terminator`.
   #
-  # `operations:` lists the GENERICALLY-DISPATCHABLE ops (invocable via
-  # `execute … op=<name>`). It is NOT the full set the runtime implements:
-  # `compose_positions` (multi-root context composition) is also handled by
-  # the knowledge runtime, but ONLY via the `compose_context_positions`
-  # launch augmentation, which builds a bespoke multi-root payload and is
-  # not generically dispatchable. It is intentionally absent here so a
-  # direct `op=compose_positions` is cleanly rejected as undeclared.
-  operations:
-    - name: compose
-      side_effects: writes_chain
-      dispatch: { via: runtime_registry }
-      inputs:
+  # `methods:` lists the GENERICALLY-DISPATCHABLE methods (invocable via
+  # `execute … call.method=<name>`). It is NOT the full set the runtime
+  # implements: `compose_positions` (multi-root context composition) is also
+  # handled by the knowledge runtime, but ONLY via the
+  # `compose_context_positions` launch augmentation, which builds a bespoke
+  # multi-root payload and is not generically dispatchable. It is
+  # intentionally absent here so a direct `call.method=compose_positions`
+  # is cleanly rejected as undeclared.
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose:
+      scope: single_root
+      args:
         token_budget:
           type: integer
           required: false
@@ -35,14 +38,11 @@ execution:
             type: string
           required: false
           default: []
-    # Read side. These ops do not mutate state (side_effects: none); the
-    # daemon builds the verified corpus (items_by_ref/edges) and the
-    # runtime computes over it.
-    - name: query
-      side_effects: none
-      dispatch: { via: runtime_registry }
+    # Read side. These methods do not mutate state; the daemon builds the
+    # verified corpus (items_by_ref/edges) and the runtime computes over it.
+    query:
       scope: corpus
-      inputs:
+      args:
         query:
           type: string
           required: true
@@ -57,11 +57,9 @@ execution:
         filters:
           type: object
           required: false
-    - name: graph
-      side_effects: none
-      dispatch: { via: runtime_registry }
+    graph:
       scope: corpus
-      inputs:
+      args:
         roots:
           type: array
           items:
@@ -72,18 +70,15 @@ execution:
           type: integer
           required: false
           default: 3
-    - name: validate
-      side_effects: none
-      dispatch: { via: runtime_registry }
+    validate:
       scope: corpus
-      inputs:
+      args:
         roots:
           type: array
           items:
             type: string
           required: false
           default: []
-  default_operation: compose
   thread_profile:
     name: knowledge_run
     root_executable: true

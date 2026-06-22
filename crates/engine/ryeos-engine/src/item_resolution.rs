@@ -360,8 +360,8 @@ mod tests {
                 terminator: None,
                 delegate: None,
                 thread_profile: None,
-                default_operation: None,
-                operations: Vec::new(),
+                method_dispatch: None,
+                methods: std::collections::BTreeMap::new(),
                 launch_augmentations: Vec::new(),
             }),
             extensions: extensions
