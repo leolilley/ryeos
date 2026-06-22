@@ -6,7 +6,7 @@ forms:
 - slots:
   - field: surface
 defaults:
-  surface: surface:ryeos/studio/base
+  surface: surface:ryeos/studio/lens
 project:
   resolution: optional
   bind_parameter: project
