@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:40337fe1119dc1fe3b8a6e8509d84a336b8ad25e36b459ca895601b69072e87a:fP54z8aG05yp3rfSsMnO93ipDjG5PzFTmRhZ/jvHmDpJ6/tbFcBBYcNA/YVgMU/O0EqpLsFfQCPWRAHiwbFYDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T02:50:09Z:bfeb5216f66d838e2ffab21ab459681076016553cef2d21f9dd3f3f9af74dcd5:SxNF5LxgjIGcnKlDqV1uqEQy/oJVDNwaxKZGoWGK5LwZOhLroBchBXG2U7bqJlRmWiOkicg2PViUDUsjcS1PBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -16,8 +16,10 @@ Invariant: a directive file is signed markdown whose YAML metadata is composed a
 ---
 category: my/project
 description: Do one specific job.
-permissions:
-  execute: []
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.echo
 ---
 
 Instructions for the runtime.
@@ -26,11 +28,12 @@ Instructions for the runtime.
 ## Important fields
 
 - `extends`: parent directive ref. Children inherit through `extends-chain`.
-- `permissions.execute`: capability strings. Children may narrow but not widen parent effective permissions.
+- `requires.capabilities.declared`: a flat list of self-asserted capability strings (the cap encodes its own verb, e.g. `ryeos.execute.tool.echo`). Children may narrow but not widen the parent's declared set.
+- `requires.capabilities.manifest`: runtime callback authority (bundle events / vault) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
 - `context`: knowledge refs grouped by position (`system`, `before`, `after`).
 - `model`: optional explicit provider/model/context window; otherwise routing tiers apply.
 - `limits`: runtime limits such as turn/token/spend budgets.
 - `inputs` / `outputs`: structured contract for callers and summaries.
 - `actions`: tool or service actions the runtime may call through callbacks.
 
-Keep directives focused: one job, clear inputs, explicit permissions, and no hidden reliance on project-root provider configs unless trust policy allows it.
+Keep directives focused: one job, clear inputs, explicit declared capabilities, and no hidden reliance on project-root provider configs unless trust policy allows it.

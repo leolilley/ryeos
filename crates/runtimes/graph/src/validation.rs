@@ -722,13 +722,15 @@ config:
     #[test]
     fn validate_graph_rejects_runtime_authority_permission() {
         // A graph cannot self-grant bundle-event/vault runtime authority via
-        // `permissions:` — that authority comes only from a signed manifest.
+        // `declared` — that authority comes only from a signed manifest.
         let yaml = r#"
 version: "1.0.0"
 category: test
-permissions:
-  - ryeos.append.bundle-events.foo/evt
-  - ryeos.execute.tool.echo
+requires:
+  capabilities:
+    declared:
+      - ryeos.append.bundle-events.foo/evt
+      - ryeos.execute.tool.echo
 config:
   start: step1
   nodes:
@@ -764,8 +766,10 @@ config:
         let yaml = r#"
 version: "1.0.0"
 category: test
-permissions:
-  - ryeos.scan.bundle-events.*
+requires:
+  capabilities:
+    declared:
+      - ryeos.scan.bundle-events.*
 config:
   start: done
   nodes:
@@ -791,8 +795,10 @@ config:
         let yaml = r#"
 version: "1.0.0"
 category: test
-permissions:
-  - ryeos.p*.vault.*
+requires:
+  capabilities:
+    declared:
+      - ryeos.p*.vault.*
 config:
   start: done
   nodes:

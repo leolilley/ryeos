@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:17:40Z:cde1b8594111d1305beef473532773d5377df6aa658251dcb71b411c5cb523e2:e8OmXjfoPUbbjjZHVf7k65b/ZEU8SWVZleY5LqYATMITAEcJYiiYGfnacA9UrmONZzOaW6n0++tSZ3WWVVOOCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T04:23:12Z:b0a6bf5eaa4597b19e7ee64d5fc48f74ca844b8ad983d66059c6e2de8c2ffa53:o90Pm3X9RNoBqNAblQhiHpHiSptb+79jj0S1+smUssIepBtTb2PYpQBr7URor3S+fuUNzNk1CzFpRQgIbP6FCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -171,7 +171,7 @@ launched.
 ### 3. Thread Launch → Effective Caps
 
 The engine composition pipeline (kind handlers like `extends-chain` and
-`graph-permissions`) lifts `permissions.execute` declarations into
+`graph-permissions`) lifts `requires.capabilities.declared` declarations into
 `effective_caps` — the composed capability set for the launched item.
 This is what the item is allowed to dispatch back to the daemon.
 
@@ -226,8 +226,8 @@ authorized:
 - `require_all(&[])` → trivially satisfied (but composing to empty
   effective_caps from an empty permissions declaration means deny-all)
 
-## No Permissions = Safe
+## No Declared Caps = Safe
 
-A directive with `permissions.execute: []` cannot invoke any tools or
-services. This is the safest default for read-only or prompt-only
-workflows.
+A directive with `requires.capabilities.declared: []` (or no `requires` block)
+cannot invoke any tools or services. This is the safest default for read-only or
+prompt-only workflows.

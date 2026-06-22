@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:4ae8dfd0d508247db707ed1e8acc2cc61dbfa9940b29ad6c345d34a9fed59890:xJ0WLjzySPQ7T1Aj7N0iac1YOqTwnabUURTs1x9izcxV67P6a2nD5J3+md9IUnsujbPSuKZD/jKaPMpHJh9zAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-22T02:50:09Z:695e06ea86da0fd6b7a6b2d9aae398992f5e30f4e6e54eca91f7162d8690f713:IBF5elRgsQ0wXerhGCCGUhsnTCW566EcTpIuuBGA3BmofHf1TXRHmx/lh4yG23COSWIrt9slBNqdASxX8dPPBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -25,11 +25,10 @@ formats:
     parser: parser:ryeos/core/yaml/yaml
     signature:
       prefix: "#"
-# Graph permissions composer — lifts `permissions:` from the graph item
-# into `policy_facts.effective_caps` so the daemon-side callback cap
-# enforcement (V5.5 P2) gates graph action callbacks the same way it
-# gates directive tool callbacks. Replaces the identity composer which
-# produced no policy facts (deny-all at the daemon boundary).
+# Graph permissions composer — lifts `requires.capabilities.declared` from the
+# graph item into `policy_facts.effective_caps` so the daemon-side callback cap
+# enforcement gates graph action callbacks the same way it gates directive tool
+# callbacks, and rejects a legacy top-level `permissions:` block.
 composer: handler:ryeos/core/graph-permissions
 composed_value_contract:
   root_type: mapping
@@ -41,12 +40,10 @@ composed_value_contract:
     config:
       type: single
       prim: mapping
-    permissions:
-      type: single
-      prim: sequence
-    # Structured runtime capability requirements. The daemon mints the
-    # requested manifest-backed subset into the callback token at launch —
-    # this is NOT self-grantable authority like `permissions:`.
+    # Unified capability requirements: `declared` (self-asserted action
+    # authority, lifted into effective_caps by the graph-permissions composer)
+    # and `manifest` (runtime authority minted from the signed manifest at
+    # launch). Graph composition is leaf-only — no ancestor narrowing.
     requires:
       type: single
       prim: mapping

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:26cee595ebce82046174c227b74aa8051130cec8782a2e9984f7afe2f253b4eb:pVb102jgi7+fIWYTCb+JrtpzRNo/YJ6/Rg7nYYoqOhgGTS/O/qMTUcLdrQflE70NfHlTXK4NT3cJmr2M5TloAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T04:23:12Z:4698b75c21c895f6410cc75525b0adf24d2fe8d10512746b95703ea561125963:r1o7THHzxkkIPAZF/BskKSN7xd4ge1+zueJMZ9YixKSaBZHktNbVuasFgAZdYj5Kk8Oqlns8eqA13Dy8ajPsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, addressing, refs]
@@ -72,5 +72,5 @@ Inside directive YAML frontmatter, canonical refs appear in:
 
 - `extends: "directive:base/workflow"` — inheritance chain
 - `context:` blocks — `ref: "knowledge:ryeos/core/signing"`
-- `permissions.execute:` — `["ryeos.execute.tool.ryeos.file-system.*"]`
+- `requires.capabilities.declared:` — `["ryeos.execute.tool.ryeos.file-system.*"]`
 - Action targets — `item_id: "tool:my/project/deploy"`

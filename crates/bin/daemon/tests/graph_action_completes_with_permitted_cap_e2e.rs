@@ -4,8 +4,8 @@
 //!   walker → callback runtime.dispatch_action → daemon enforce_callback_caps
 //!   → dispatch → tool executor chain → subprocess → result returned to walker
 //!
-//! The graph has `permissions: [ryeos.execute.tool.echo]` which the daemon
-//! composes into effective_caps on the callback token. The tool `echo.py`
+//! The graph has `requires.capabilities.declared: [ryeos.execute.tool.echo]`
+//! which the daemon composes into effective_caps on the callback token. The tool `echo.py`
 //! is a planted Python script that reads params from stdin and returns JSON.
 //!
 //! G2 must land first (walker self-check removed) so that this test pins
@@ -74,14 +74,16 @@ fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Res
     // EdgeSpec is internally tagged as of wave-5 phase D; `next` must be
     // an object with a `type` discriminator (was a bare scalar before).
     //
-    // `permissions` populates the callback token's effective_caps via the
-    // graph_permissions composer; the cap shape mirrors `enforce_callback_caps`
-    // in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>` where the
-    // bare id keeps its `/` separators (canonical Capability format).
+    // `requires.capabilities.declared` populates the callback token's
+    // effective_caps via the graph_permissions composer; the cap shape mirrors
+    // `enforce_callback_caps` in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>`
+    // where the bare id keeps its `/` separators (canonical Capability format).
     let body = r#"category: ""
 version: "1.0.0"
-permissions:
-  - ryeos.execute.tool.echo/echo
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.echo/echo
 config:
   start: greet
   nodes:
@@ -130,15 +132,18 @@ config:
     Ok(())
 }
 
-/// Plant a graph that tries to self-grant bundle-event runtime authority via
-/// `permissions:`. The daemon must reject this at launch, before the graph runs.
+/// Plant a graph that tries to self-grant bundle-event runtime authority by
+/// naming it under `requires.capabilities.declared`. The daemon must reject this
+/// at launch, before the graph runs — runtime authority is manifest-backed only.
 fn plant_runtime_authority_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: ""
 version: "1.0.0"
-permissions:
-  - ryeos.append.bundle-events.echo/some_event
+requires:
+  capabilities:
+    declared:
+      - ryeos.append.bundle-events.echo/some_event
 config:
   start: done
   nodes:
@@ -147,6 +152,31 @@ config:
 "#;
     let signed = lillux::signature::sign_content(body, signer, "#", None);
     std::fs::write(graphs_dir.join("reserved.yaml"), signed)?;
+    Ok(())
+}
+
+/// Plant a graph using the removed `requires.capabilities.callbacks` key. The
+/// daemon's `graph_permissions` composer must reject it at compose time — no
+/// silent acceptance — so the graph never runs.
+fn plant_legacy_callbacks_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+requires:
+  capabilities:
+    callbacks:
+      bundle_events:
+        - event_kind: some_event
+          operations: [append]
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("legacy.yaml"), signed)?;
     Ok(())
 }
 
@@ -500,9 +530,10 @@ async fn graph_action_completes_with_permitted_cap() {
     );
 }
 
-/// A graph whose `permissions:` names a manifest runtime-authority capability
-/// (bundle events / vault) must be refused at the cap-assembly boundary — that
-/// authority is minted only from a signed manifest, never self-granted. The
+/// A graph whose `requires.capabilities.declared` names a manifest
+/// runtime-authority capability (bundle events / vault) must be refused at the
+/// cap-assembly boundary — that authority is minted only from a signed manifest,
+/// never self-granted. The
 /// daemon returns a typed `capability_rejected` (HTTP 400) at launch, before the
 /// graph runs at all (distinct from the in-run callback denial above).
 #[tokio::test(flavor = "multi_thread")]
@@ -557,6 +588,60 @@ async fn graph_with_runtime_authority_permission_rejected_at_launch() {
     assert!(
         body_str.contains("bundle-events.echo/some_event"),
         "error must name the offending grant; got body={body:#}"
+    );
+}
+
+/// A graph using the removed `requires.capabilities.callbacks` key must be
+/// rejected by the daemon (at compose time, in `graph_permissions`) — it must
+/// never run. No back-compat: old authoring fails loud.
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_with_legacy_callbacks_rejected() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_legacy_callbacks_graph(project.path(), &fixture.publisher)
+        .expect("plant legacy-callbacks graph");
+
+    let post_fut = h.post_execute(
+        "graph:legacy",
+        project.path().to_str().unwrap(),
+        serde_json::json!({}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("POST /execute timed out after 30s.\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+
+    // The daemon must reject the graph before running it. The exact HTTP code
+    // for a compose-time rejection is less important than "not a success".
+    assert!(
+        !status.is_success(),
+        "legacy `callbacks` graph must be rejected, not run; got {status}\nbody={body:#}"
+    );
+    let stderr = h.drain_stderr_nonblocking().await;
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
+    assert!(
+        body_str.contains("callbacks") || stderr.contains("callbacks"),
+        "rejection must surface the removed `callbacks` key; got body={body:#}\nstderr={stderr}"
     );
 }
 

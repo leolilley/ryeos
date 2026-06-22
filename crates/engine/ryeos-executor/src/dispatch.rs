@@ -1998,7 +1998,7 @@ async fn dispatch_tool_subprocess(
 /// Mint the bundle-event / runtime-vault callback caps an item is entitled to.
 ///
 /// Launch-time satisfaction of the item's runtime capability *requirement
-/// contract* (`requires.capabilities.callbacks`). `requires_value` is the raw
+/// contract* (`requires.capabilities.manifest`). `requires_value` is the raw
 /// `requires:` mapping from whichever source the caller trusts:
 ///
 /// - **graph/directive (managed path):** the *composed* view, after the
@@ -2025,7 +2025,7 @@ pub(crate) fn mint_runtime_capability_caps(
     };
     let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
         .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
-    if reqs.callbacks.bundle_events.is_empty() && reqs.callbacks.runtime_vault.is_empty() {
+    if reqs.manifest.bundle_events.is_empty() && reqs.manifest.runtime_vault.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -2044,11 +2044,11 @@ pub(crate) fn mint_runtime_capability_caps(
     // shape (known keys, valid ops, non-empty arrays) was already enforced by
     // `parse_runtime_requires`; this checks the bundle-id segment grammar that
     // the cap-string scheme depends on.
-    for req in &reqs.callbacks.bundle_events {
+    for req in &reqs.manifest.bundle_events {
         ryeos_state::objects::validate_bundle_identifier("event_kind", &req.event_kind)
             .map_err(|err| err.to_string())?;
     }
-    for req in &reqs.callbacks.runtime_vault {
+    for req in &reqs.manifest.runtime_vault {
         ryeos_app::vault::validate_runtime_vault_segment("namespace", &req.namespace)
             .map_err(|err| err.to_string())?;
     }
@@ -2102,16 +2102,37 @@ pub(crate) fn mint_runtime_capability_caps(
 /// Tool-path entry point: source the `requires` block from the resolved item's
 /// extracted metadata. Graph/directive mint from the composed/narrowed view at
 /// launch instead (see `build_and_launch`).
+///
+/// A tool has no composer to lift `requires.capabilities.declared` into
+/// `effective_caps`, and self-asserted action authority is not part of the tool
+/// surface — so a tool declaring `declared` is rejected rather than accepted and
+/// silently ignored. Only `requires.capabilities.manifest` (runtime authority,
+/// minted against the signed manifest) is honored for tools.
 fn derive_manifest_runtime_caps(
     resolved: &ResolvedExecutionRequest,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
-    mint_runtime_capability_caps(
-        resolved.resolved_item.metadata.extra.get("requires"),
-        resolved,
-        &ctx.engine.trust_store,
-    )
-    .map_err(|reason| DispatchError::InvalidRef(resolved.item_ref.clone(), reason))
+    let requires_value = resolved.resolved_item.metadata.extra.get("requires");
+    if let Some(rv) = requires_value {
+        // Reject the `declared` *key's presence* — tools have no surface to
+        // honor self-declared action authority, so even an empty `declared: []`
+        // is a category error, not an accept-and-ignore.
+        let declares = rv
+            .get("capabilities")
+            .and_then(|c| c.get("declared"))
+            .is_some();
+        if declares {
+            return Err(DispatchError::InvalidRef(
+                resolved.item_ref.clone(),
+                "tool items cannot self-declare action authority under \
+                 `requires.capabilities.declared`; only `requires.capabilities.manifest` \
+                 (manifest-backed runtime authority) is honored for tools"
+                    .into(),
+            ));
+        }
+    }
+    mint_runtime_capability_caps(requires_value, resolved, &ctx.engine.trust_store)
+        .map_err(|reason| DispatchError::InvalidRef(resolved.item_ref.clone(), reason))
 }
 
 fn resolved_item_ai_dir(item: &ResolvedItem) -> Option<std::path::PathBuf> {
@@ -2642,7 +2663,7 @@ metadata:
     }
 
     /// Build a `metadata.extra` map carrying a `requires:` block (the value is
-    /// the content of `requires:`, i.e. `{capabilities: {callbacks: …}}`).
+    /// the content of `requires:`, i.e. `{capabilities: {manifest: …}}`).
     fn requires_extra(
         requires: serde_json::Value,
     ) -> std::collections::HashMap<String, serde_json::Value> {
@@ -2674,7 +2695,7 @@ runtime_vault:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ],
@@ -2731,7 +2752,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["scan"] }
                     ]
@@ -2755,7 +2776,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "runtime_vault": [
                         { "namespace": "oauth", "operations": ["get", "put"] }
                     ]
@@ -2780,7 +2801,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ]
@@ -2815,7 +2836,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ]
@@ -2836,7 +2857,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "../bad", "operations": ["append"] }
                     ]
@@ -2850,7 +2871,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "runtime_vault": [
                         { "namespace": "../bad", "operations": ["get"] }
                     ]
@@ -2873,7 +2894,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": [] }
                     ]
@@ -2902,7 +2923,7 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "callbacks": {
+                "capabilities": { "manifest": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ]
@@ -2990,14 +3011,14 @@ metadata:
         let kinds = KindRegistry::load_base(&[kinds_dir], &ts).expect("load kind schema");
         let schema = kinds.get("tool").expect("tool kind registered");
 
-        // 2. A real item document carrying a `requires.capabilities.callbacks`
+        // 2. A real item document carrying a `requires.capabilities.manifest`
         //    block (as a parser would produce it).
         let item_yaml = r#"
 version: "1.0.0"
 category: example-bundle
 requires:
   capabilities:
-    callbacks:
+    manifest:
       bundle_events:
         - event_kind: example_event
           operations: [append]
@@ -3087,6 +3108,28 @@ requires:
             assert!(
                 !schema.extraction_rules.contains_key("requires"),
                 "{kind} must NOT carry `requires` on the metadata rail (it uses the composed view)"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_declared_action_authority_rejected() {
+        // Tools have no surface to honor self-declared action authority — the
+        // `declared` *key's presence* is rejected, not silently ignored. Both a
+        // populated list and an empty `declared: []` fail.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        for declared in [json!(["ryeos.execute.tool.echo"]), json!([])] {
+            let resolved = resolved_tool_with_extra(
+                &bundle,
+                "tool:example-bundle/send",
+                requires_extra(json!({ "capabilities": { "declared": declared } })),
+            );
+            let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot self-declare action authority"),
+                "declared={declared}: got {err}"
             );
         }
     }

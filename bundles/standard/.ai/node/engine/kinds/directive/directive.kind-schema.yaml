@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:e6623417fa42354f0e0024059818dffc325079749fd5e88bd7f6c3c00be2c7fa:TJG1WHZAkP+ewxyRlVz//xTtI03I+j6CCSyKxLIYSs9JxMKhOGYzk1AMuzjxR5D92FZ2iv69bfHOs4ktHzKlCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-22T02:50:09Z:5bbae28d54dac7b2c7c80823ab8a2440ae5821100c31735492a2b3496737937a:6sJm68vYaxZzv8Zbgi9Kr8TvPhCrYUB1SLxPdX2LtsH/5uohbNqsBTy2q1QJ68j/zP3Czsj6VrozWUzYruqBAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -53,15 +53,13 @@ composer_config:
       required: true
       expect_value_type: string
       derive_as: body
-    - name: permissions
-      strategy: narrow_against_parent_effective
-      expect_value_type: mapping
-    # Structured runtime capability requirements. Narrowed against the parent
-    # exactly like `permissions`: a child directive can never request more
-    # callback authority than its parent template. The signed bundle manifest
-    # is still the final upper bound at launch.
+    # Unified capability requirements. `declared` (self-asserted action
+    # authority → effective_caps) narrows against the parent by dropping;
+    # `manifest` (runtime authority, manifest-backed) narrows by failing on
+    # widen. A child can never request more than its parent template; the signed
+    # bundle manifest is the final upper bound for `manifest` at launch.
     - name: requires
-      strategy: narrow_runtime_requires_against_parent
+      strategy: narrow_requires_capabilities
       expect_value_type: mapping
     - name: context
       strategy: dict_merge_string_seq_root_last
@@ -80,7 +78,7 @@ composer_config:
       expect_value_type: sequence
   policy_facts:
     - name: effective_caps
-      path: [permissions, execute]
+      path: [requires, capabilities, declared]
       expect: array_of_strings
 composed_value_contract:
   root_type: mapping
@@ -92,9 +90,6 @@ composed_value_contract:
     extends:
       type: union
       prims: [string, "null"]
-    permissions:
-      type: single
-      prim: mapping
     context:
       type: single
       prim: mapping
@@ -107,11 +102,11 @@ composed_value_contract:
     inputs:
       type: single
       prim: sequence
-    # Structured runtime capability requirements. Narrowed against the parent
-    # through `extends` (see composer_config) and bounded by the signed bundle
-    # manifest (the authority upper bound); the daemon mints the satisfied
-    # subset into the callback token at launch. Distinct from `permissions:`,
-    # which is tool-execution authority.
+    # Unified capability requirements (`capabilities.declared` self-asserted
+    # action authority + `capabilities.manifest` manifest-backed runtime
+    # authority). Narrowed against the parent through `extends` (see
+    # composer_config); `manifest` is additionally bounded by the signed bundle
+    # manifest at launch.
     requires:
       type: single
       prim: mapping
