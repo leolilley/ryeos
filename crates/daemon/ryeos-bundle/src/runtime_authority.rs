@@ -112,28 +112,32 @@ impl RuntimeVaultDecl {
 
 // ── Item-level runtime capability requirements ───────────────────────
 //
-// A signed manifest declares the bundle's *upper bound* runtime authority
-// (see `BundleManifest::bundle_events` / `runtime_vault`). An individual item
-// declares the exact subset it needs under:
+// An item declares everything it needs under one `requires.capabilities` tree,
+// split by who is the authority:
 //
 //     requires:
 //       capabilities:
-//         callbacks:
-//           bundle_events:
+//         declared:                       # the signed item is the authority
+//           - ryeos.execute.tool.echo     # → composed into effective_caps
+//         manifest:                       # the signed bundle manifest is the authority
+//           bundle_events:                # → minted only as the manifest backs it
 //             - event_kind: arc_pattern_event
 //               operations: [append]
 //           runtime_vault:
 //             - namespace: oauth
 //               operations: [get]
 //
-// This is a *requirement contract*, not a grant: the daemon mints into the
-// callback token only the requested caps that the signed manifest actually
-// backs. Absent requirements mint nothing — runtime authority is never granted
-// merely because the manifest declares it.
+// `declared` is honored because the launcher refuses to spawn an unsigned
+// effective item — a signed item may assert its own execution authority.
+// `manifest` is a *requirement contract*, not a grant: the daemon mints only
+// the requested caps the signed manifest actually backs. Absent requirements
+// mint nothing — runtime authority is never granted merely because the manifest
+// declares it.
 
-/// The `requires:` block of an item, as authored. Only the
-/// `capabilities` sub-tree is modelled; unknown keys are rejected so a typo
-/// (`capabilites:`) fails loudly rather than silently minting nothing.
+/// The `requires:` block of an item, as authored. The whole tree is modelled
+/// with `deny_unknown_fields` at every level so a typo (`capabilites:`,
+/// `manifst:`, an unknown verb) fails loudly rather than silently dropping
+/// authority.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeRequires {
@@ -141,21 +145,28 @@ pub struct RuntimeRequires {
     pub capabilities: RuntimeCapabilityRequirements,
 }
 
-/// The `requires.capabilities` sub-tree. Today only `callbacks` exists;
-/// future surfaces (`actions`, `network`, …) are added here, keeping the
-/// callback-token authority distinct from other requirement classes.
+/// The `requires.capabilities` sub-tree, split by authority source:
+/// `declared` (self-asserted action authority) and `manifest` (runtime
+/// authority backed by the signed bundle manifest).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCapabilityRequirements {
+    /// Self-asserted action authority — a flat list of canonical cap strings
+    /// the signed item declares for itself (the cap encodes its own verb, e.g.
+    /// `ryeos.execute.tool.echo`). Composed into `effective_caps`; never minted
+    /// from the manifest.
     #[serde(default)]
-    pub callbacks: CallbackCapabilityRequirements,
+    pub declared: Vec<String>,
+    #[serde(default)]
+    pub manifest: ManifestCapabilityRequirements,
 }
 
-/// Runtime callback-token authority an item requires: bundle-event and
-/// runtime-vault operations the daemon must mint into the callback token.
+/// Manifest-backed runtime authority an item requires: bundle-event and
+/// runtime-vault operations the daemon mints into the callback token only when
+/// the signed manifest declares them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CallbackCapabilityRequirements {
+pub struct ManifestCapabilityRequirements {
     #[serde(default)]
     pub bundle_events: Vec<BundleEventRequirement>,
     #[serde(default)]
@@ -205,16 +216,17 @@ impl RuntimeVaultRequirement {
     }
 }
 
-/// The exact set of callback caps `reqs` requests for `bundle_id`.
+/// The exact set of manifest-backed runtime caps `reqs` requests for
+/// `bundle_id` (the `manifest` sub-tree; `declared` caps are not minted here).
 pub fn requested_runtime_caps(
     reqs: &RuntimeCapabilityRequirements,
     bundle_id: &str,
 ) -> BTreeSet<String> {
     let mut caps = BTreeSet::new();
-    for req in &reqs.callbacks.bundle_events {
+    for req in &reqs.manifest.bundle_events {
         caps.extend(req.requested_caps(bundle_id));
     }
-    for req in &reqs.callbacks.runtime_vault {
+    for req in &reqs.manifest.runtime_vault {
         caps.extend(req.requested_caps(bundle_id));
     }
     caps
@@ -245,7 +257,7 @@ pub fn parse_runtime_requires(value: &Value) -> Result<RuntimeCapabilityRequirem
 pub fn validate_runtime_capability_requirements(
     caps: &RuntimeCapabilityRequirements,
 ) -> Result<(), String> {
-    for req in &caps.callbacks.bundle_events {
+    for req in &caps.manifest.bundle_events {
         if req.event_kind.trim().is_empty() {
             return Err("bundle_events entry has an empty `event_kind`".to_string());
         }
@@ -256,7 +268,7 @@ pub fn validate_runtime_capability_requirements(
             ));
         }
     }
-    for req in &caps.callbacks.runtime_vault {
+    for req in &caps.manifest.runtime_vault {
         if req.namespace.trim().is_empty() {
             return Err("runtime_vault entry has an empty `namespace`".to_string());
         }
@@ -327,10 +339,11 @@ impl std::fmt::Display for ComposedGrantError {
             ),
             ComposedGrantError::Reserved { grant } => write!(
                 f,
-                "composed permission '{grant}' is reserved: bundle-event and runtime-vault \
-                 capabilities are manifest-backed runtime requirements. Declare them under \
-                 `requires.capabilities.callbacks`, not `permissions:` — the signed manifest is \
-                 the authority upper bound and the item selects the subset it needs"
+                "capability '{grant}' is reserved: bundle-event and runtime-vault capabilities are \
+                 manifest-backed runtime authority. Declare them under \
+                 `requires.capabilities.manifest`, not `requires.capabilities.declared` — the \
+                 signed manifest is the authority upper bound and the item selects the subset it \
+                 needs"
             ),
         }
     }
@@ -485,7 +498,7 @@ mod tests {
     fn requirement_caps_match_canonical_wire_form() {
         let reqs = parse_runtime_requires(&json!({
             "capabilities": {
-                "callbacks": {
+                "manifest": {
                     "bundle_events": [
                         { "event_kind": "arc_pattern_event", "operations": ["append", "scan"] }
                     ],
@@ -517,11 +530,14 @@ mod tests {
     #[test]
     fn unknown_keys_fail_static_validation() {
         for value in [
-            json!({ "capabilites": {} }),                       // top-level typo
-            json!({ "capabilities": { "callback": {} } }),      // callbacks typo
-            json!({ "capabilities": { "callbacks": {
+            json!({ "capabilites": {} }),                       // capabilities typo
+            json!({ "capabilities": { "manfest": {} } }),       // manifest typo
+            json!({ "capabilities": { "callbacks": {} } }),     // dropped legacy key
+            json!({ "capabilities": { "manifest": {
                 "bundle_events": [ { "event_kind": "e", "operations": ["append"], "extra": 1 } ]
             } } }),                                              // unknown entry field
+            json!({ "capabilities": { "declared": { "execute": [] } } }), // declared must be a list, not a map
+            json!({ "capabilities": { "declared": [1] } }),      // non-string cap
         ] {
             assert!(
                 parse_runtime_requires(&value).is_err(),
@@ -531,8 +547,20 @@ mod tests {
     }
 
     #[test]
+    fn declared_caps_parse_but_are_not_minted_as_runtime_caps() {
+        // `declared` is self-asserted action authority — it parses and validates,
+        // but `requested_runtime_caps` only mints the manifest-backed sub-tree.
+        let reqs = parse_runtime_requires(&json!({
+            "capabilities": { "declared": ["ryeos.execute.tool.echo"] }
+        }))
+        .unwrap();
+        assert_eq!(reqs.declared, vec!["ryeos.execute.tool.echo".to_string()]);
+        assert!(requested_runtime_caps(&reqs, "arc").is_empty());
+    }
+
+    #[test]
     fn unknown_operation_fails_static_validation() {
-        let value = json!({ "capabilities": { "callbacks": {
+        let value = json!({ "capabilities": { "manifest": {
             "bundle_events": [ { "event_kind": "e", "operations": ["frobnicate"] } ]
         } } });
         assert!(parse_runtime_requires(&value).is_err());
@@ -540,13 +568,13 @@ mod tests {
 
     #[test]
     fn empty_operations_fail_static_validation() {
-        let value = json!({ "capabilities": { "callbacks": {
+        let value = json!({ "capabilities": { "manifest": {
             "bundle_events": [ { "event_kind": "e", "operations": [] } ]
         } } });
         let err = parse_runtime_requires(&value).unwrap_err();
         assert!(err.contains("at least one operation"), "got: {err}");
 
-        let value = json!({ "capabilities": { "callbacks": {
+        let value = json!({ "capabilities": { "manifest": {
             "runtime_vault": [ { "namespace": "oauth", "operations": [] } ]
         } } });
         let err = parse_runtime_requires(&value).unwrap_err();
@@ -556,7 +584,7 @@ mod tests {
     #[test]
     fn raw_cap_strings_fail_static_validation() {
         // Authors must not paste `ryeos.*` strings under requires.
-        let value = json!({ "capabilities": { "callbacks": {
+        let value = json!({ "capabilities": { "manifest": {
             "bundle_events": ["ryeos.append.bundle-events.arc/arc_pattern_event"]
         } } });
         assert!(parse_runtime_requires(&value).is_err());
@@ -564,12 +592,12 @@ mod tests {
 
     #[test]
     fn empty_event_kind_or_namespace_fails() {
-        let value = json!({ "capabilities": { "callbacks": {
+        let value = json!({ "capabilities": { "manifest": {
             "bundle_events": [ { "event_kind": "", "operations": ["append"] } ]
         } } });
         assert!(parse_runtime_requires(&value).is_err());
 
-        let value = json!({ "capabilities": { "callbacks": {
+        let value = json!({ "capabilities": { "manifest": {
             "runtime_vault": [ { "namespace": "  ", "operations": ["get"] } ]
         } } });
         assert!(parse_runtime_requires(&value).is_err());

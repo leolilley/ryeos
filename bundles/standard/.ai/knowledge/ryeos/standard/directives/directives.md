@@ -1,10 +1,10 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:fb36c48f35d4a62ba9ae7dfaeca60ef7ce9b6e8a61133631f2a939cadc813529:NCENZwoQCkVMwkIkUH+ku8FlPh86ie+U6T7MM95x31oM1of9VGGBB5ChCEkAu9oNDh2ce0iPNs04wrQB7S5VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T02:50:09Z:d61bcac6c0f98ea4820f731f30a0b4b7b14adfb0b6dfc7238d819ee0a0f3442e:UNGmRYxzDNQclKPMOH5kVxlHvYsmamXS+t0TK4S/shIwNs59K/I4Z6ABKCH825zhFgZOFCXM+6nQV1GtLpLLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.0.0"
 description: >
   How directives work — YAML frontmatter, XML process body,
-  inheritance (extends), permissions, limits, and context blocks.
+  inheritance (extends), capability requirements, limits, and context blocks.
 ---
 
 # Directives
@@ -22,9 +22,10 @@ version: "1.0.0"
 extends: "directive:base/workflow"
 model:
   tier: high
-permissions:
-  execute:
-    - ryeos.execute.tool.ryeos.file-system.*
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.ryeos.file-system.*
 limits:
   turns: 10
   tokens: 8000
@@ -88,15 +89,20 @@ Rules:
 - `model.name` — explicit model name (overrides tier)
 - `model.context_window` — override context window size
 
-### Permissions
-- `permissions.execute` — list of capability strings required.
-  Uses dot-namespaced glob patterns:
+### Capabilities
+- `requires.capabilities.declared` — a flat list of self-asserted capability
+  strings the item is allowed to invoke (the cap encodes its own verb). Uses
+  dot-namespaced glob patterns:
   - `["ryeos.execute.tool.ryeos.file-system.*"]` — all FS tools
   - `["ryeos.execute.service.fetch"]` — just the fetch service
-  - `[]` — no tool execution (read-only directive)
+  - `[]` (or omitted) — no tool execution (read-only directive)
+- `requires.capabilities.manifest` — runtime callback authority (bundle events /
+  vault) the daemon mints only as the signed bundle manifest backs it; not
+  self-grantable.
 
-Permissions **narrow** through extends chains — a child can only reduce
-the parent's permissions, never expand them.
+`declared` **narrows** through extends chains — a child can only reduce the
+parent's declared set, never expand it. `manifest` is stricter: a child that
+widens beyond the parent fails compose.
 
 ### Limits
 - `limits.turns` — max LLM round-trips
@@ -135,12 +141,12 @@ and merges fields with declared strategies:
 | Field          | Strategy                          |
 |----------------|-----------------------------------|
 | `body`         | `root_verbatim` — child replaces parent body |
-| `permissions`  | `narrow_against_parent_effective` — child ⊆ parent |
+| `requires`     | `narrow_requires_capabilities` — `declared` child ⊆ parent (drop); `manifest` fails on widen |
 | `context`      | `dict_merge_string_seq_root_last` — child appended |
 
 This means:
 - A child directive always overrides the prompt body
-- A child can never gain more permissions than its parent
+- A child can never gain more capabilities than its parent
 - Context accumulates: parent context + child context
 
 ## Execution Lifecycle

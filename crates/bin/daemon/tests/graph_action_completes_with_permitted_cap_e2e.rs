@@ -4,8 +4,8 @@
 //!   walker → callback runtime.dispatch_action → daemon enforce_callback_caps
 //!   → dispatch → tool executor chain → subprocess → result returned to walker
 //!
-//! The graph has `permissions: [ryeos.execute.tool.echo]` which the daemon
-//! composes into effective_caps on the callback token. The tool `echo.py`
+//! The graph has `requires.capabilities.declared: [ryeos.execute.tool.echo]`
+//! which the daemon composes into effective_caps on the callback token. The tool `echo.py`
 //! is a planted Python script that reads params from stdin and returns JSON.
 //!
 //! G2 must land first (walker self-check removed) so that this test pins
@@ -74,14 +74,16 @@ fn plant_permitted_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Res
     // EdgeSpec is internally tagged as of wave-5 phase D; `next` must be
     // an object with a `type` discriminator (was a bare scalar before).
     //
-    // `permissions` populates the callback token's effective_caps via the
-    // graph_permissions composer; the cap shape mirrors `enforce_callback_caps`
-    // in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>` where the
-    // bare id keeps its `/` separators (canonical Capability format).
+    // `requires.capabilities.declared.execute` populates the callback token's
+    // effective_caps via the graph_permissions composer; the cap shape mirrors
+    // `enforce_callback_caps` in runtime_dispatch.rs — `ryeos.execute.<kind>.<bare_id>`
+    // where the bare id keeps its `/` separators (canonical Capability format).
     let body = r#"category: ""
 version: "1.0.0"
-permissions:
-  - ryeos.execute.tool.echo/echo
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.echo/echo
 config:
   start: greet
   nodes:
@@ -130,15 +132,18 @@ config:
     Ok(())
 }
 
-/// Plant a graph that tries to self-grant bundle-event runtime authority via
-/// `permissions:`. The daemon must reject this at launch, before the graph runs.
+/// Plant a graph that tries to self-grant bundle-event runtime authority by
+/// naming it under `requires.capabilities.declared`. The daemon must reject this
+/// at launch, before the graph runs — runtime authority is manifest-backed only.
 fn plant_runtime_authority_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     let body = r#"category: ""
 version: "1.0.0"
-permissions:
-  - ryeos.append.bundle-events.echo/some_event
+requires:
+  capabilities:
+    declared:
+      - ryeos.append.bundle-events.echo/some_event
 config:
   start: done
   nodes:
@@ -500,9 +505,10 @@ async fn graph_action_completes_with_permitted_cap() {
     );
 }
 
-/// A graph whose `permissions:` names a manifest runtime-authority capability
-/// (bundle events / vault) must be refused at the cap-assembly boundary — that
-/// authority is minted only from a signed manifest, never self-granted. The
+/// A graph whose `requires.capabilities.declared` names a manifest
+/// runtime-authority capability (bundle events / vault) must be refused at the
+/// cap-assembly boundary — that authority is minted only from a signed manifest,
+/// never self-granted. The
 /// daemon returns a typed `capability_rejected` (HTTP 400) at launch, before the
 /// graph runs at all (distinct from the in-run callback denial above).
 #[tokio::test(flavor = "multi_thread")]

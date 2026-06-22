@@ -1316,7 +1316,7 @@ required:
   body: { type: single, prim: string }
 optional:
   extends: { type: union, prims: [string, \"null\"] }
-  permissions: { type: single, prim: mapping }
+  requires: { type: single, prim: mapping }
   context: { type: single, prim: mapping }
 ";
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("well-formed shape parses");
@@ -1511,7 +1511,7 @@ required:
   body: { type: single, prim: string }
 optional:
   extends: { type: union, prims: [string, \"null\"] }
-  permissions: { type: single, prim: mapping }
+  requires: { type: single, prim: mapping }
   context: { type: single, prim: mapping }
 ",
             // surface

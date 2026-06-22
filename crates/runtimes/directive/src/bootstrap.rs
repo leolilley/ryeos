@@ -55,7 +55,6 @@ pub fn bootstrap(
     tracing::info!(
         directive_name = ?header.name.as_deref(),
         has_model = header.model.is_some(),
-        has_permissions = header.permissions.is_some(),
         has_limits = header.limits.is_some(),
         context_position_count = header.context.as_ref().map(|c| c.len()).unwrap_or(0),
         hooks_count = header.hooks.as_ref().map(|h| h.len()).unwrap_or(0),

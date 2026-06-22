@@ -474,92 +474,224 @@ fn apply_strategy(
                 }
             }
         }
-        ComposerStrategy::NarrowRuntimeRequiresAgainstParent => {
-            let child_has = root_parsed
-                .get(&rule.name)
-                .map(|v| !v.is_null())
-                .unwrap_or(false);
-
-            if !child_has {
-                // Child omitted the field — inherit from the first ancestor
-                // that declares it (the nearest ceiling), verbatim.
-                for parent in ancestor_parsed {
-                    if let Some(v) = parent.get(&rule.name) {
-                        if !v.is_null() {
-                            if let Value::Object(obj) = composed {
-                                obj.insert(rule.name.clone(), v.clone());
-                            }
-                            break;
-                        }
-                    }
-                }
-            } else {
-                // Child declared the field — require it to be covered by the
-                // nearest ancestor that declares it. With no such ancestor
-                // there is no parent ceiling, so the child's block stands
-                // verbatim (the manifest still bounds it at launch). A child
-                // requirement is a hard runtime requirement, not a preference:
-                // if it widens beyond its parent, fail compose instead of
-                // silently dropping the missing operations/resources.
-                let child_val = root_parsed.get(&rule.name).unwrap();
-                match ancestor_parsed
-                    .iter()
-                    .find_map(|p| p.get(&rule.name).filter(|v| !v.is_null()))
-                {
-                    Some(parent_val) => validate_runtime_requires_subset(child_val, parent_val)?,
-                    None => {}
-                }
-                if let Value::Object(obj) = composed {
-                    obj.insert(rule.name.clone(), child_val.clone());
-                }
-            }
+        ComposerStrategy::NarrowRequiresCapabilities => {
+            narrow_requires_capabilities(&rule.name, composed, ancestor_parsed, root_parsed)?;
         }
     }
     Ok(())
 }
 
-/// Navigate `requires.capabilities.callbacks` to its mapping, if present.
-fn callbacks_of(requires: &Value) -> Option<&Map<String, Value>> {
-    requires.get("capabilities")?.get("callbacks")?.as_object()
+/// Compose `requires.capabilities` for a child against its ancestors. See
+/// [`ComposerStrategy::NarrowRequiresCapabilities`].
+fn narrow_requires_capabilities(
+    field: &str,
+    composed: &mut Value,
+    ancestor_parsed: &[&Value],
+    root_parsed: &Value,
+) -> Result<(), (ResolutionStepNameWire, String)> {
+    // Legacy authoring fails loudly — no silent ignore, no back-compat.
+    reject_legacy_permissions(root_parsed)?;
+    validate_requires_shape(root_parsed)?;
+    for parent in ancestor_parsed {
+        reject_legacy_permissions(parent)?;
+        validate_requires_shape(parent)?;
+    }
+
+    // `declared` and `manifest` inherit/narrow independently, so a child that
+    // changes one subtree never drops the other.
+    let declared = compose_declared(root_parsed, ancestor_parsed)?;
+    let manifest = compose_manifest(root_parsed, ancestor_parsed)?;
+
+    let mut capabilities = Map::new();
+    if let Some(d) = declared {
+        capabilities.insert("declared".to_string(), d);
+    }
+    if let Some(m) = manifest {
+        capabilities.insert("manifest".to_string(), m);
+    }
+    if let Value::Object(obj) = composed {
+        if capabilities.is_empty() {
+            obj.remove(field);
+        } else {
+            let mut requires = Map::new();
+            requires.insert("capabilities".to_string(), Value::Object(capabilities));
+            obj.insert(field.to_string(), Value::Object(requires));
+        }
+    }
+    Ok(())
 }
 
-/// Validate that a child `requires` block is covered by a parent's. Runtime
-/// requirements are hard requirements; a child may narrow its parent by asking
-/// for fewer `(resource, operation)` pairs, but it may not silently widen. The
-/// manifest remains the final launch-time upper bound.
-fn validate_runtime_requires_subset(
-    child: &Value,
-    parent: &Value,
-) -> Result<(), (ResolutionStepNameWire, String)> {
-    let missing = runtime_requires_missing(child, parent);
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err((
+/// Reject a legacy top-level `permissions:` block. It is removed from the
+/// schema, but `composed_value_contract` ignores extra top-level keys, so an
+/// old item would otherwise silently lose its authority — fail it instead.
+fn reject_legacy_permissions(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+    if parsed
+        .get("permissions")
+        .map(|v| !v.is_null())
+        .unwrap_or(false)
+    {
+        return Err((
             ResolutionStepNameWire::PipelineInit,
-            format!(
-                "requires.capabilities.callbacks widens parent requirement: {}",
-                missing.join(", ")
-            ),
-        ))
+            "top-level `permissions:` is removed — declare action authority under \
+             `requires.capabilities.declared` (e.g. `declared.execute`)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the `requires` tree's known keys so typos and dropped legacy keys
+/// (e.g. `callbacks`) fail loudly at compose time rather than minting nothing.
+fn validate_requires_shape(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+    let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
+    let Some(requires) = parsed.get("requires").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let req_map = requires
+        .as_object()
+        .ok_or_else(|| err("`requires` must be a mapping".to_string()))?;
+    for key in req_map.keys() {
+        if key != "capabilities" {
+            return Err(err(format!(
+                "unknown key `requires.{key}` (only `capabilities` is allowed)"
+            )));
+        }
+    }
+    let Some(caps) = req_map.get("capabilities").filter(|v| !v.is_null()) else {
+        return Ok(());
+    };
+    let caps_map = caps
+        .as_object()
+        .ok_or_else(|| err("`requires.capabilities` must be a mapping".to_string()))?;
+    for key in caps_map.keys() {
+        if key != "declared" && key != "manifest" {
+            return Err(err(format!(
+                "unknown key `requires.capabilities.{key}` \
+                 (only `declared` and `manifest` are allowed)"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `requires.capabilities.<sub>` mapping for `parsed`, if present.
+fn capability_subtree<'a>(parsed: &'a Value, sub: &str) -> Option<&'a Map<String, Value>> {
+    parsed
+        .get("requires")?
+        .get("capabilities")?
+        .get(sub)?
+        .as_object()
+}
+
+/// `requires.capabilities.declared` value (a list of cap strings), if present.
+fn declared_value<'a>(parsed: &'a Value) -> Option<&'a Value> {
+    parsed
+        .get("requires")?
+        .get("capabilities")?
+        .get("declared")
+        .filter(|v| !v.is_null())
+}
+
+/// Compose the `declared` list: child caps narrowed against the nearest
+/// ancestor declaring `declared` (drop semantics — an allowance, safe to trim);
+/// inherited verbatim when the child omits it.
+fn compose_declared(
+    root_parsed: &Value,
+    ancestor_parsed: &[&Value],
+) -> Result<Option<Value>, (ResolutionStepNameWire, String)> {
+    let child = declared_value(root_parsed);
+    let parent = ancestor_parsed.iter().find_map(|p| declared_value(p));
+    match (child, parent) {
+        (None, None) => Ok(None),
+        (None, Some(p)) => {
+            validate_declared_shape(p)?;
+            Ok(Some(p.clone()))
+        }
+        (Some(c), None) => {
+            validate_declared_shape(c)?;
+            Ok(Some(c.clone()))
+        }
+        (Some(c), Some(p)) => {
+            validate_declared_shape(c)?;
+            validate_declared_shape(p)?;
+            let narrowed = narrow_verb(&string_array(c), &string_array(p));
+            Ok(Some(Value::Array(
+                narrowed.into_iter().map(Value::String).collect(),
+            )))
+        }
     }
 }
 
-fn runtime_requires_missing(child: &Value, parent: &Value) -> Vec<String> {
-    let child_cb = callbacks_of(child);
-    let parent_cb = callbacks_of(parent);
+/// Strict shape check for `declared`: a list of cap strings (the cap encodes
+/// its own verb). Fails (does not filter) so malformed authority is caught at
+/// compose rather than silently turned into deny-all / partial caps.
+fn validate_declared_shape(declared: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+    let err = |m: &str| (ResolutionStepNameWire::PipelineInit, m.to_string());
+    let arr = declared
+        .as_array()
+        .ok_or_else(|| err("`requires.capabilities.declared` must be a list of cap strings"))?;
+    if arr.iter().any(|v| !v.is_string()) {
+        return Err(err(
+            "`requires.capabilities.declared` must contain only strings",
+        ));
+    }
+    Ok(())
+}
 
+fn string_array(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Compose the `manifest` sub-tree: child must be a subset of the nearest
+/// ancestor declaring `manifest` (fail-on-widen — a hard requirement);
+/// inherited verbatim when the child omits it.
+fn compose_manifest(
+    root_parsed: &Value,
+    ancestor_parsed: &[&Value],
+) -> Result<Option<Value>, (ResolutionStepNameWire, String)> {
+    let child = capability_subtree(root_parsed, "manifest");
+    let parent = ancestor_parsed
+        .iter()
+        .find_map(|p| capability_subtree(p, "manifest"));
+    match (child, parent) {
+        (None, None) => Ok(None),
+        (None, Some(p)) => Ok(Some(Value::Object(p.clone()))),
+        (Some(c), None) => Ok(Some(Value::Object(c.clone()))),
+        (Some(c), Some(p)) => {
+            let missing = manifest_missing(c, p);
+            if missing.is_empty() {
+                Ok(Some(Value::Object(c.clone())))
+            } else {
+                Err((
+                    ResolutionStepNameWire::PipelineInit,
+                    format!(
+                        "requires.capabilities.manifest widens parent requirement: {}",
+                        missing.join(", ")
+                    ),
+                ))
+            }
+        }
+    }
+}
+
+fn manifest_missing(child: &Map<String, Value>, parent: &Map<String, Value>) -> Vec<String> {
     let mut missing = Vec::new();
     collect_missing_resource_requirements(
-        child_cb.and_then(|m| m.get("bundle_events")),
-        parent_cb.and_then(|m| m.get("bundle_events")),
+        child.get("bundle_events"),
+        parent.get("bundle_events"),
         "event_kind",
         "bundle_events",
         &mut missing,
     );
     collect_missing_resource_requirements(
-        child_cb.and_then(|m| m.get("runtime_vault")),
-        parent_cb.and_then(|m| m.get("runtime_vault")),
+        child.get("runtime_vault"),
+        parent.get("runtime_vault"),
         "namespace",
         "runtime_vault",
         &mut missing,
@@ -786,14 +918,21 @@ enum ComposerStrategy {
     DictMergeStringSeqRootLast,
     KeyedSeqMergeRootLast,
     NarrowAgainstParentEffective,
-    /// Narrow an item's structured runtime-capability requirements
-    /// (`requires.capabilities.callbacks`) against the nearest ancestor that
-    /// declares them. Child omits → inherit the ancestor's block; child
-    /// declares → it must be a subset of the ancestor's `(event_kind,
-    /// operation)` / `(namespace, operation)` pairs or compose fails. A child
-    /// can never request callback authority its parent template did not. (The
-    /// signed bundle manifest is still the final upper bound at launch.)
-    NarrowRuntimeRequiresAgainstParent,
+    /// Compose the unified `requires.capabilities` tree, narrowing each sub-tree
+    /// against the nearest ancestor that declares it, independently:
+    ///
+    /// - `declared` (self-asserted action authority) narrows by **dropping** —
+    ///   a child keeps only the caps its parent also grants (an allowance, safe
+    ///   to trim).
+    /// - `manifest` (runtime authority) narrows by **failing** — a child that
+    ///   widens beyond its parent's `(event_kind, op)` / `(namespace, op)` pairs
+    ///   fails compose, because dropping a hard requirement would only defer the
+    ///   failure to a callback authz error.
+    ///
+    /// Also rejects legacy top-level `permissions:` and any unknown key under
+    /// `requires.capabilities` so old authoring fails loudly. The signed bundle
+    /// manifest remains the final upper bound for `manifest` at launch.
+    NarrowRequiresCapabilities,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -967,7 +1106,7 @@ mod tests {
                 },
                 {
                     "name": "requires",
-                    "strategy": "narrow_runtime_requires_against_parent",
+                    "strategy": "narrow_requires_capabilities",
                     "expect_value_type": "mapping"
                 }
             ]
@@ -981,7 +1120,7 @@ mod tests {
             .composed
             .get("requires")
             .and_then(|r| r.get("capabilities"))
-            .and_then(|c| c.get("callbacks"));
+            .and_then(|c| c.get("manifest"));
         if let Some(cb) = cb {
             for (list, id_key, tag) in [
                 ("bundle_events", "event_kind", "be"),
@@ -1005,11 +1144,25 @@ mod tests {
 
     fn requires_block(bundle_events: Value, runtime_vault: Value) -> Value {
         json!({
-            "capabilities": { "callbacks": {
+            "capabilities": { "manifest": {
                 "bundle_events": bundle_events,
                 "runtime_vault": runtime_vault,
             } }
         })
+    }
+
+    /// A `requires` block carrying a `declared` list.
+    fn declared_block(caps: Value) -> Value {
+        json!({ "capabilities": { "declared": caps } })
+    }
+
+    fn declared_execute(view: &ComposeSuccess) -> Vec<String> {
+        view.composed
+            .get("requires")
+            .and_then(|r| r.get("capabilities"))
+            .and_then(|c| c.get("declared"))
+            .map(string_array)
+            .unwrap_or_default()
     }
 
     #[test]
@@ -1205,6 +1358,133 @@ mod tests {
             "got: {}",
             err.1
         );
+    }
+
+    // ── declared sub-tree (drop semantics) ───────────────────────────
+
+    #[test]
+    fn declared_child_narrowed_against_parent_silently_drops() {
+        // `declared` is an allowance, not a hard requirement — a child that
+        // names a cap the parent lacks is narrowed (dropped), NOT failed.
+        let parent = json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
+        let child = json!({
+            "extends": "parent",
+            "requires": declared_block(json!(["ryeos.execute.tool.read", "ryeos.execute.tool.bash"])),
+            "body": "b"
+        });
+        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
+        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+    }
+
+    #[test]
+    fn declared_child_omits_inherits_parent() {
+        let parent = json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
+        let child = json!({ "extends": "parent", "body": "b" });
+        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
+        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+    }
+
+    #[test]
+    fn declared_root_level_kept_verbatim() {
+        let child = json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "b" });
+        let view = run(requires_config(), child, vec![]).unwrap();
+        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+    }
+
+    // ── mixed-subtree inheritance (declared and manifest independent) ─
+
+    #[test]
+    fn changing_declared_preserves_inherited_manifest() {
+        let parent = json!({
+            "requires": json!({ "capabilities": {
+                "declared": ["ryeos.execute.tool.read"],
+                "manifest": { "bundle_events": [{ "event_kind": "e", "operations": ["append"] }] }
+            } }),
+            "body": ""
+        });
+        // Child re-declares only `declared` (a subset); parent `manifest` must survive.
+        let child = json!({
+            "extends": "parent",
+            "requires": declared_block(json!(["ryeos.execute.tool.read"])),
+            "body": "b"
+        });
+        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
+        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
+    }
+
+    #[test]
+    fn changing_manifest_preserves_inherited_declared() {
+        let parent = json!({
+            "requires": json!({ "capabilities": {
+                "declared": ["ryeos.execute.tool.read"],
+                "manifest": { "bundle_events": [{ "event_kind": "e", "operations": ["append"] }] }
+            } }),
+            "body": ""
+        });
+        // Child re-states only `manifest` (a subset); parent `declared` must survive.
+        let child = json!({
+            "extends": "parent",
+            "requires": requires_block(
+                json!([{ "event_kind": "e", "operations": ["append"] }]),
+                json!([]),
+            ),
+            "body": "b"
+        });
+        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
+        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
+    }
+
+    // ── legacy rejection + strict shape (fail loud, no back-compat) ───
+
+    #[test]
+    fn legacy_top_level_permissions_rejected() {
+        let child = json!({ "permissions": ["ryeos.execute.tool.read"], "body": "b" });
+        let err = run(requires_config(), child, vec![]).unwrap_err();
+        assert!(
+            err.1.contains("`permissions:` is removed") && err.1.contains("requires.capabilities.declared"),
+            "got: {}",
+            err.1
+        );
+    }
+
+    #[test]
+    fn legacy_callbacks_key_rejected() {
+        let child = json!({
+            "requires": { "capabilities": { "callbacks": {
+                "bundle_events": [{ "event_kind": "e", "operations": ["append"] }]
+            } } },
+            "body": "b"
+        });
+        let err = run(requires_config(), child, vec![]).unwrap_err();
+        assert!(
+            err.1.contains("unknown key `requires.capabilities.callbacks`"),
+            "got: {}",
+            err.1
+        );
+    }
+
+    #[test]
+    fn declared_as_map_rejected() {
+        // `declared` is a flat list of cap strings — a verb-bucketed mapping
+        // (the legacy shape) fails loudly.
+        let child = json!({
+            "requires": { "capabilities": { "declared": { "execute": ["x"] } } },
+            "body": "b"
+        });
+        let err = run(requires_config(), child, vec![]).unwrap_err();
+        assert!(err.1.contains("must be a list"), "got: {}", err.1);
+    }
+
+    #[test]
+    fn declared_non_string_cap_rejected() {
+        let child = json!({
+            "requires": { "capabilities": { "declared": [42] } },
+            "body": "b"
+        });
+        let err = run(requires_config(), child, vec![]).unwrap_err();
+        assert!(err.1.contains("only strings"), "got: {}", err.1);
     }
 
     fn derived_string_seq_map(view: &ComposeSuccess, name: &str) -> HashMap<String, Vec<String>> {

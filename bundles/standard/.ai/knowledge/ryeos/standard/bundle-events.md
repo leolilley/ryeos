@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-19T13:42:34Z:1aabcf8bd5d00bdd446556d91a59c2c66dfdd47bfbcff81c66ab98975313f26d:tqibQmUayY4ki1HdIhqaZhQeDK4AKb63pTt4wbPOAtefc2UXHBgZCHKfrRUu3YxgfdOFU79tqXe+CY+paAlyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T02:50:09Z:0a5b251e749a5181defc521055785c38254f4376f3b3278ff2371db805c16514:8J0yHtI/1GW19u0eqW+JY9nt1nX9dM4PjnMhre9oyMgCwO5n/8sadmkqcaq2ksFNg5DlG4py7QXKnnQqqjCeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -6,7 +6,7 @@ version: "1.0.0"
 description: >
   Durable bundle events and the runtime-authority model — how a tool gains the
   capability to append/read its bundle's event chains, and why that authority
-  comes only from a signed manifest, never from graph or directive permissions.
+  comes only from a signed manifest, never self-granted by an item.
 ---
 
 # Bundle events and runtime authority
@@ -20,8 +20,9 @@ trails that must survive across runs.
 Access is gated by capabilities. The important rule:
 
 > Bundle-event (and runtime-vault) capabilities are **runtime authority**: the
-> daemon mints them **only** from a signed bundle manifest. They can **never**
-> be granted through a graph's or directive's `permissions:` block.
+> daemon mints them **only** from a signed bundle manifest. An item *requests*
+> them under `requires.capabilities.manifest`; they can **never** be self-granted
+> under `requires.capabilities.declared`.
 
 This is the manifest runtime-authority model — see
 `ryeos/future/tool-runtime-authority`. Authority is always minted by the daemon
@@ -84,23 +85,40 @@ ryeos.scan.bundle-events.arc/arc_pattern_event
 
 ## What does NOT work
 
-Listing the capability in a graph or directive `permissions:` block:
+Self-granting the capability under `requires.capabilities.declared`:
 
 ```yaml
-# graph.yaml — INERT, and now rejected
-permissions:
-  - ryeos.append.bundle-events.arc/arc_pattern_event
+# graph.yaml / directive — rejected
+requires:
+  capabilities:
+    declared:
+      - ryeos.append.bundle-events.arc/arc_pattern_event
 ```
 
-This never grants access — the daemon does not accept runtime authority from
-composed permissions. As of the manifest-runtime-authority policy it is
-**rejected** outright: `ryeos graph validate` reports it up front, and the daemon
-refuses to mint a callback token that carries a self-granted runtime-authority
-capability. Declare it in the signed manifest instead.
+This never grants access — `declared` is self-asserted action authority, and the
+daemon **rejects** a runtime-authority capability there outright: `ryeos graph
+validate` reports it up front, and the daemon refuses to mint a callback token
+that carries a self-granted runtime-authority capability.
+
+## What works
+
+Declare the authority in the signed manifest, then *request* the subset the item
+needs under `requires.capabilities.manifest`:
+
+```yaml
+# item — requested, and minted only because the signed manifest backs it
+requires:
+  capabilities:
+    manifest:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: [append]
+```
 
 ## Runtime vault
 
 Runtime-vault capabilities (`ryeos.<verb>.vault.<bundle-id>/<namespace>`, verbs
 `put`/`get`/`delete`/`list`) follow the identical model: declared as
-`runtime_vault:` in the signed manifest, minted by the daemon, never grantable
-via `permissions:`.
+`runtime_vault:` in the signed manifest, requested under
+`requires.capabilities.manifest`, minted by the daemon, never self-grantable
+under `requires.capabilities.declared`.
