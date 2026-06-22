@@ -3407,6 +3407,35 @@ requires:
     }
 
     #[test]
+    fn resolve_requested_op_rejects_augmentation_private_compose_positions() {
+        // `compose_positions` is a knowledge runtime handler used only by
+        // the compose_context_positions launch augmentation. It must not be
+        // accepted as a generic requested op unless the kind schema declares
+        // it in `operations`.
+        let ops = vec![
+            make_op("compose", BTreeMap::new()),
+            make_op("query", BTreeMap::new()),
+            make_op("graph", BTreeMap::new()),
+            make_op("validate", BTreeMap::new()),
+        ];
+        let err = resolve_requested_op(Some("compose_positions"), &None, &ops, "knowledge")
+            .expect_err("augmentation-private handler must be rejected generically");
+        assert!(
+            matches!(
+                err,
+                DispatchError::UnknownOp {
+                    ref requested,
+                    ref declared,
+                    ..
+                } if requested == "compose_positions"
+                    && !declared.contains("compose_positions")
+            ),
+            "must reject compose_positions as undeclared, got: {err:?}"
+        );
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
     fn resolve_requested_op_falls_back_to_default() {
         let ops = vec![make_op("compose", BTreeMap::new())];
         let default = Some("compose".to_string());

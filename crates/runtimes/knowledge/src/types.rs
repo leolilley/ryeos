@@ -6,8 +6,10 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 // Operations are dispatched by wire op name in `dispatch.rs` (keyed off
-// `BatchOpEnvelope.op`), each parsing its own typed payload below. There is
-// deliberately no enum mirror of the schema-declared op vocabulary here.
+// `BatchOpEnvelope.op`), each parsing its own typed payload below. Generic
+// requests come from schema-declared ops; augmentation-private handlers such
+// as `compose_positions` are daemon-invoked with bespoke payloads. There is
+// deliberately no enum mirror of either vocabulary here.
 
 // -------- Compose --------
 

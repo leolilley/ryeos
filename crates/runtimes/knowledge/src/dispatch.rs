@@ -1,11 +1,13 @@
 //! Op dispatch: wire op name → handler.
 //!
-//! The kind schema is the source of truth for the operation vocabulary —
-//! the daemon validates/routes/authorizes on it and rejects undeclared ops
-//! before this runtime is spawned. This module registers the runtime's
-//! handler implementations against that contract, keyed directly on the
-//! `BatchOpEnvelope.op` string. There is no enum mirror of the vocabulary
-//! and no payload-retagging step.
+//! The kind schema is the source of truth for generically dispatchable ops:
+//! the daemon validates/routes/authorizes on it and rejects undeclared generic
+//! requests before this runtime is spawned. This module registers runtime
+//! handler implementations keyed directly on the `BatchOpEnvelope.op` string.
+//! It also contains augmentation-private handlers, currently
+//! `compose_positions`, invoked only by daemon launch augmentations with a
+//! bespoke payload. There is no enum mirror of either vocabulary and no
+//! payload-retagging step.
 
 use serde_json::Value;
 
@@ -19,12 +21,12 @@ type OpHandler = fn(Value) -> Result<Value, KnowledgeError>;
 
 /// Single dispatch point: wire op name → handler.
 ///
-/// SECONDARY guard: the daemon already resolves the requested op against
-/// the kind schema and rejects undeclared ops before spawning the runtime,
-/// so an unhandled op here means direct invocation or schema/runtime skew.
-/// Report it — never silently no-op. Keyed strictly off `op` (the envelope
-/// field), so a payload that happens to carry an `"operation"` key cannot
-/// influence which handler runs.
+/// SECONDARY guard: the daemon already resolves generic requests against
+/// the kind schema before spawning the runtime, and launch augmentations own
+/// their private target op names, so an unhandled op here means direct
+/// invocation or schema/runtime skew. Report it — never silently no-op.
+/// Keyed strictly off `op` (the envelope field), so a payload that happens
+/// to carry an `"operation"` key cannot influence which handler runs.
 pub fn dispatch(op: &str, payload: Value) -> Result<Value, KnowledgeError> {
     let handler: OpHandler = match op {
         "compose" => op_compose,

@@ -618,13 +618,16 @@ pub struct OperationDecl {
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum LaunchAugmentationDecl {
     /// Compose context positions by dispatching a multi-root compose
-    /// op on `target_kind`'s runtime as a child thread of the parent
-    /// launch. Daemon owns interpretation entirely.
+    /// handler on `target_kind`'s runtime as a child thread of the parent
+    /// launch. Daemon owns interpretation entirely; this target need not be
+    /// listed among the kind's generically dispatchable schema operations.
     ComposeContextPositions {
         /// Which kind handles composition. Daemon's interpreter uses
         /// this for prefix validation and runtime lookup.
         target_kind: String,
-        /// Op name on `target_kind`'s schema to dispatch.
+        /// Runtime handler op name to dispatch. For knowledge this defaults
+        /// to augmentation-private `compose_positions`, which is intentionally
+        /// not a generic schema operation.
         #[serde(default = "default_target_op")]
         target_op: String,
         /// Derived field on the consumer kind's KindComposedView
