@@ -52,7 +52,7 @@ use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl, OpScope, TerminatorDecl,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, OpScope, OperationDecl, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -620,7 +620,9 @@ fn validate_input_value(
 /// Convert an engine `ResolvedAncestor` (a verified, signature-checked
 /// item) into the wire `VerifiedItem`. Shared by single-root and corpus
 /// projection so trust-class and metadata mapping stay identical.
-fn verified_from(a: &ryeos_engine::resolution::ResolvedAncestor) -> ryeos_runtime::op_wire::VerifiedItem {
+fn verified_from(
+    a: &ryeos_engine::resolution::ResolvedAncestor,
+) -> ryeos_runtime::op_wire::VerifiedItem {
     use ryeos_runtime::op_wire::{TrustClass, VerifiedItem};
     VerifiedItem {
         raw_content: a.raw_content.clone(),
@@ -732,14 +734,14 @@ fn project_corpus(
 > {
     use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, VerifiedItem};
 
-    let kind_schema = ctx
-        .engine
-        .kinds
-        .get(kind)
-        .ok_or_else(|| DispatchError::SchemaMisconfigured {
-            kind: kind.to_string(),
-            detail: "corpus op dispatched for a kind with no registered schema".into(),
-        })?;
+    let kind_schema =
+        ctx.engine
+            .kinds
+            .get(kind)
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: kind.to_string(),
+                detail: "corpus op dispatched for a kind with no registered schema".into(),
+            })?;
 
     let engine_roots = ctx
         .engine
@@ -747,12 +749,9 @@ fn project_corpus(
     let effective_parsers = ctx
         .engine
         .effective_parser_dispatcher(Some(request.project_path))
-        .map_err(|e| {
-            DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}"))
-        })?;
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}")))?;
 
-    let refs =
-        ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind);
+    let refs = ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind);
 
     let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
         std::collections::BTreeMap::new();
@@ -2741,7 +2740,8 @@ bundle_events:
         );
         let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
         assert!(
-            err.to_string().contains("not declared in the signed manifest"),
+            err.to_string()
+                .contains("not declared in the signed manifest"),
             "got: {err}"
         );
     }
@@ -3039,9 +3039,8 @@ requires:
         // Validates the ACTUAL repo schema edits. Only `tool` uses the metadata
         // rail (`path_value`); graph + directive carry `requires` through the
         // composed view, so they must NOT declare a `requires` metadata rule.
-        // Re-signs the live bodies with the test key so the stale on-disk
-        // signature (awaiting the final populate pass) does not block loading.
         use ryeos_engine::kind_registry::{ExtractionRule, KindRegistry};
+        use ryeos_engine::trust::{PublisherTrustDoc, TrustStore, TrustedSigner};
 
         fn workspace_root() -> PathBuf {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3051,34 +3050,24 @@ requires:
                 .to_path_buf()
         }
 
-        let schemas = [
-            (
-                "graph",
-                "bundles/standard/.ai/node/engine/kinds/graph/graph.kind-schema.yaml",
-            ),
-            (
-                "tool",
-                "bundles/core/.ai/node/engine/kinds/tool/tool.kind-schema.yaml",
-            ),
-            (
-                "directive",
-                "bundles/standard/.ai/node/engine/kinds/directive/directive.kind-schema.yaml",
-            ),
-        ];
         let root = workspace_root();
-        let kinds_dir = tempdir();
-        for (kind, rel) in schemas {
-            let raw =
-                fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-            let body = lillux::signature::strip_signature_lines(&raw);
-            let signed = lillux::signature::sign_content(&body, &signing_key(), "#", None);
-            let dir = kinds_dir.join(kind);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join(format!("{kind}.kind-schema.yaml")), signed).unwrap();
-        }
-        let ts = trust_store();
+        let trust_text = fs::read_to_string(root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml"))
+            .expect("read dev publisher trust doc");
+        let trust_doc =
+            PublisherTrustDoc::parse(&trust_text).expect("parse dev publisher trust doc");
+        let ts = TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: trust_doc.fingerprint.clone(),
+            verifying_key: trust_doc
+                .decode_verifying_key()
+                .expect("decode dev publisher key"),
+            label: Some(trust_doc.owner.clone()),
+        }]);
+        let schema_roots = [
+            root.join("bundles/core/.ai/node/engine/kinds"),
+            root.join("bundles/standard/.ai/node/engine/kinds"),
+        ];
         let kinds =
-            KindRegistry::load_base(&[kinds_dir], &ts).expect("edited kind schemas load cleanly");
+            KindRegistry::load_base(&schema_roots, &ts).expect("repo kind schemas load cleanly");
 
         // Tool: metadata rail → `requires` extracted via path_value.
         let tool = kinds.get("tool").expect("tool kind registered");
@@ -3092,7 +3081,9 @@ requires:
 
         // Graph + directive: composed-view rail → NO `requires` metadata rule.
         for kind in ["graph", "directive"] {
-            let schema = kinds.get(kind).unwrap_or_else(|| panic!("{kind} kind registered"));
+            let schema = kinds
+                .get(kind)
+                .unwrap_or_else(|| panic!("{kind} kind registered"));
             assert!(
                 !schema.extraction_rules.contains_key("requires"),
                 "{kind} must NOT carry `requires` on the metadata rail (it uses the composed view)"
@@ -3580,7 +3571,10 @@ requires:
         let err = validate_op_inputs(Some(&json!({"roots": ["a", 7]})), &op)
             .expect_err("non-string array element must error");
         let msg = err.to_string();
-        assert!(msg.contains("roots[1]"), "must name the bad index, got: {msg}");
+        assert!(
+            msg.contains("roots[1]"),
+            "must name the bad index, got: {msg}"
+        );
     }
 
     #[test]

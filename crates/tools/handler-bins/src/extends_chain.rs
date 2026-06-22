@@ -494,20 +494,23 @@ fn apply_strategy(
                     }
                 }
             } else {
-                // Child declared the field — narrow against the nearest
-                // ancestor that declares it. With no such ancestor there is no
-                // parent ceiling, so the child's block stands verbatim (the
-                // manifest still bounds it at launch).
+                // Child declared the field — require it to be covered by the
+                // nearest ancestor that declares it. With no such ancestor
+                // there is no parent ceiling, so the child's block stands
+                // verbatim (the manifest still bounds it at launch). A child
+                // requirement is a hard runtime requirement, not a preference:
+                // if it widens beyond its parent, fail compose instead of
+                // silently dropping the missing operations/resources.
                 let child_val = root_parsed.get(&rule.name).unwrap();
-                let narrowed = match ancestor_parsed
+                match ancestor_parsed
                     .iter()
                     .find_map(|p| p.get(&rule.name).filter(|v| !v.is_null()))
                 {
-                    Some(parent_val) => narrow_runtime_requires(child_val, parent_val),
-                    None => child_val.clone(),
-                };
+                    Some(parent_val) => validate_runtime_requires_subset(child_val, parent_val)?,
+                    None => {}
+                }
                 if let Value::Object(obj) = composed {
-                    obj.insert(rule.name.clone(), narrowed);
+                    obj.insert(rule.name.clone(), child_val.clone());
                 }
             }
         }
@@ -520,47 +523,62 @@ fn callbacks_of(requires: &Value) -> Option<&Map<String, Value>> {
     requires.get("capabilities")?.get("callbacks")?.as_object()
 }
 
-/// Narrow a child `requires` block against a parent's: keep only the
-/// `(resource, operation)` pairs the parent also declares. Re-emits the
-/// canonical `requires.capabilities.callbacks.{bundle_events,runtime_vault}`
-/// shape; an entry whose operations are all dropped, or whose resource id is
-/// absent from the parent, is removed entirely.
-fn narrow_runtime_requires(child: &Value, parent: &Value) -> Value {
+/// Validate that a child `requires` block is covered by a parent's. Runtime
+/// requirements are hard requirements; a child may narrow its parent by asking
+/// for fewer `(resource, operation)` pairs, but it may not silently widen. The
+/// manifest remains the final launch-time upper bound.
+fn validate_runtime_requires_subset(
+    child: &Value,
+    parent: &Value,
+) -> Result<(), (ResolutionStepNameWire, String)> {
+    let missing = runtime_requires_missing(child, parent);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err((
+            ResolutionStepNameWire::PipelineInit,
+            format!(
+                "requires.capabilities.callbacks widens parent requirement: {}",
+                missing.join(", ")
+            ),
+        ))
+    }
+}
+
+fn runtime_requires_missing(child: &Value, parent: &Value) -> Vec<String> {
     let child_cb = callbacks_of(child);
     let parent_cb = callbacks_of(parent);
 
-    let mut callbacks = Map::new();
-    if let Some(be) = narrow_resource_list(
+    let mut missing = Vec::new();
+    collect_missing_resource_requirements(
         child_cb.and_then(|m| m.get("bundle_events")),
         parent_cb.and_then(|m| m.get("bundle_events")),
         "event_kind",
-    ) {
-        callbacks.insert("bundle_events".to_string(), be);
-    }
-    if let Some(rv) = narrow_resource_list(
+        "bundle_events",
+        &mut missing,
+    );
+    collect_missing_resource_requirements(
         child_cb.and_then(|m| m.get("runtime_vault")),
         parent_cb.and_then(|m| m.get("runtime_vault")),
         "namespace",
-    ) {
-        callbacks.insert("runtime_vault".to_string(), rv);
-    }
-
-    let mut capabilities = Map::new();
-    capabilities.insert("callbacks".to_string(), Value::Object(callbacks));
-    let mut requires = Map::new();
-    requires.insert("capabilities".to_string(), Value::Object(capabilities));
-    Value::Object(requires)
+        "runtime_vault",
+        &mut missing,
+    );
+    missing.sort();
+    missing
 }
 
-/// Narrow one resource list (`bundle_events` or `runtime_vault`) keyed by
-/// `id_key` (`event_kind` / `namespace`). Returns `None` when the child has no
-/// such list (so the caller omits the key entirely).
-fn narrow_resource_list(
+/// Collect child resource/operation pairs that are not covered by the parent.
+fn collect_missing_resource_requirements(
     child: Option<&Value>,
     parent: Option<&Value>,
     id_key: &str,
-) -> Option<Value> {
-    let child_arr = child.and_then(|v| v.as_array())?;
+    tag: &str,
+    missing: &mut Vec<String>,
+) {
+    let Some(child_arr) = child.and_then(|v| v.as_array()) else {
+        return;
+    };
 
     let parent_index: HashMap<String, HashSet<String>> = parent
         .and_then(|v| v.as_array())
@@ -575,28 +593,26 @@ fn narrow_resource_list(
         })
         .unwrap_or_default();
 
-    let mut out = Vec::new();
     for entry in child_arr {
         let Some(id) = entry.get(id_key).and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some(parent_ops) = parent_index.get(id) else {
-            continue; // resource not granted by parent → drop
-        };
-        let kept: Vec<Value> = operation_set(entry)
-            .into_iter()
-            .filter(|op| parent_ops.contains(op))
-            .map(Value::String)
-            .collect();
-        if kept.is_empty() {
-            continue; // no operations survive → drop
+        let child_ops = operation_set(entry);
+        match parent_index.get(id) {
+            Some(parent_ops) => {
+                for op in child_ops {
+                    if !parent_ops.contains(&op) {
+                        missing.push(format!("{tag}.{id}.{op}"));
+                    }
+                }
+            }
+            None => {
+                for op in child_ops {
+                    missing.push(format!("{tag}.{id}.{op}"));
+                }
+            }
         }
-        let mut e = Map::new();
-        e.insert(id_key.to_string(), Value::String(id.to_string()));
-        e.insert("operations".to_string(), Value::Array(kept));
-        out.push(Value::Object(e));
     }
-    Some(Value::Array(out))
 }
 
 /// Collect the string `operations` of a requirement entry into a set.
@@ -773,9 +789,9 @@ enum ComposerStrategy {
     /// Narrow an item's structured runtime-capability requirements
     /// (`requires.capabilities.callbacks`) against the nearest ancestor that
     /// declares them. Child omits → inherit the ancestor's block; child
-    /// declares → keep only the `(event_kind, operation)` /
-    /// `(namespace, operation)` pairs the ancestor also grants. A child can
-    /// never request callback authority its parent template did not. (The
+    /// declares → it must be a subset of the ancestor's `(event_kind,
+    /// operation)` / `(namespace, operation)` pairs or compose fails. A child
+    /// can never request callback authority its parent template did not. (The
     /// signed bundle manifest is still the final upper bound at launch.)
     NarrowRuntimeRequiresAgainstParent,
 }
@@ -997,7 +1013,33 @@ mod tests {
     }
 
     #[test]
-    fn requires_child_narrowed_against_parent() {
+    fn requires_child_subset_kept_verbatim() {
+        let parent = json!({
+            "requires": requires_block(
+                json!([{ "event_kind": "e", "operations": ["append", "scan"] }]),
+                json!([]),
+            ),
+            "body": ""
+        });
+        let child = json!({
+            "extends": "parent",
+            "requires": requires_block(
+                json!([{ "event_kind": "e", "operations": ["append"] }]),
+                json!([]),
+            ),
+            "body": "b"
+        });
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
+    }
+
+    #[test]
+    fn requires_child_operation_absent_from_parent_fails() {
         let parent = json!({
             "requires": requires_block(
                 json!([{ "event_kind": "e", "operations": ["append"] }]),
@@ -1013,9 +1055,18 @@ mod tests {
             ),
             "body": "b"
         });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        // `scan` is not in the parent → dropped; only `append` survives.
-        assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
+        let err = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap_err();
+        assert!(matches!(err.0, ResolutionStepNameWire::PipelineInit));
+        assert!(
+            err.1.contains("widens parent requirement") && err.1.contains("bundle_events.e.scan"),
+            "got: {}",
+            err.1
+        );
     }
 
     #[test]
@@ -1028,7 +1079,12 @@ mod tests {
             "body": ""
         });
         let child = json!({ "extends": "parent", "body": "b" });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
         assert_eq!(
             requires_pairs(&view),
             vec!["be:e:append".to_string(), "rv:oauth:get".to_string()]
@@ -1036,7 +1092,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_child_resource_absent_from_parent_dropped() {
+    fn requires_child_resource_absent_from_parent_fails() {
         let parent = json!({
             "requires": requires_block(
                 json!([{ "event_kind": "e", "operations": ["append"] }]),
@@ -1055,13 +1111,21 @@ mod tests {
             ),
             "body": "b"
         });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        // `f` is not declared by the parent → dropped entirely.
-        assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
+        let err = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap_err();
+        assert!(
+            err.1.contains("widens parent requirement") && err.1.contains("bundle_events.f.append"),
+            "got: {}",
+            err.1
+        );
     }
 
     #[test]
-    fn requires_vault_and_events_narrow_independently() {
+    fn requires_vault_and_events_widening_fails_independently() {
         let parent = json!({
             "requires": requires_block(
                 json!([{ "event_kind": "e", "operations": ["append"] }]),
@@ -1077,11 +1141,16 @@ mod tests {
             ),
             "body": "b"
         });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        // scan + put both dropped (not in parent); get + append survive.
-        assert_eq!(
-            requires_pairs(&view),
-            vec!["be:e:append".to_string(), "rv:oauth:get".to_string()]
+        let err = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap_err();
+        assert!(
+            err.1.contains("bundle_events.e.scan") && err.1.contains("runtime_vault.oauth.put"),
+            "got: {}",
+            err.1
         );
     }
 
@@ -1104,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_child_narrows_against_grandparent_when_parent_omits() {
+    fn requires_child_checked_against_grandparent_when_parent_omits() {
         let grandparent = json!({
             "requires": requires_block(
                 json!([{ "event_kind": "e", "operations": ["append"] }]),
@@ -1122,7 +1191,7 @@ mod tests {
             "body": "b"
         });
         // Ancestors nearest-first: [parent, grandparent].
-        let view = run(
+        let err = run(
             requires_config(),
             child,
             vec![
@@ -1130,9 +1199,12 @@ mod tests {
                 ancestor_input("grandparent", grandparent),
             ],
         )
-        .unwrap();
-        // Parent omits requires → narrow against grandparent: scan dropped.
-        assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
+        .unwrap_err();
+        assert!(
+            err.1.contains("widens parent requirement") && err.1.contains("bundle_events.e.scan"),
+            "got: {}",
+            err.1
+        );
     }
 
     fn derived_string_seq_map(view: &ComposeSuccess, name: &str) -> HashMap<String, Vec<String>> {
