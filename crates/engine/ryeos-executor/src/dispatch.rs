@@ -2102,16 +2102,37 @@ pub(crate) fn mint_runtime_capability_caps(
 /// Tool-path entry point: source the `requires` block from the resolved item's
 /// extracted metadata. Graph/directive mint from the composed/narrowed view at
 /// launch instead (see `build_and_launch`).
+///
+/// A tool has no composer to lift `requires.capabilities.declared` into
+/// `effective_caps`, and self-asserted action authority is not part of the tool
+/// surface — so a tool declaring `declared` is rejected rather than accepted and
+/// silently ignored. Only `requires.capabilities.manifest` (runtime authority,
+/// minted against the signed manifest) is honored for tools.
 fn derive_manifest_runtime_caps(
     resolved: &ResolvedExecutionRequest,
     ctx: &ExecutionContext,
 ) -> Result<Vec<String>, DispatchError> {
-    mint_runtime_capability_caps(
-        resolved.resolved_item.metadata.extra.get("requires"),
-        resolved,
-        &ctx.engine.trust_store,
-    )
-    .map_err(|reason| DispatchError::InvalidRef(resolved.item_ref.clone(), reason))
+    let requires_value = resolved.resolved_item.metadata.extra.get("requires");
+    if let Some(rv) = requires_value {
+        // Reject the `declared` *key's presence* — tools have no surface to
+        // honor self-declared action authority, so even an empty `declared: []`
+        // is a category error, not an accept-and-ignore.
+        let declares = rv
+            .get("capabilities")
+            .and_then(|c| c.get("declared"))
+            .is_some();
+        if declares {
+            return Err(DispatchError::InvalidRef(
+                resolved.item_ref.clone(),
+                "tool items cannot self-declare action authority under \
+                 `requires.capabilities.declared`; only `requires.capabilities.manifest` \
+                 (manifest-backed runtime authority) is honored for tools"
+                    .into(),
+            ));
+        }
+    }
+    mint_runtime_capability_caps(requires_value, resolved, &ctx.engine.trust_store)
+        .map_err(|reason| DispatchError::InvalidRef(resolved.item_ref.clone(), reason))
 }
 
 fn resolved_item_ai_dir(item: &ResolvedItem) -> Option<std::path::PathBuf> {
@@ -3087,6 +3108,28 @@ requires:
             assert!(
                 !schema.extraction_rules.contains_key("requires"),
                 "{kind} must NOT carry `requires` on the metadata rail (it uses the composed view)"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_declared_action_authority_rejected() {
+        // Tools have no surface to honor self-declared action authority — the
+        // `declared` *key's presence* is rejected, not silently ignored. Both a
+        // populated list and an empty `declared: []` fail.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        for declared in [json!(["ryeos.execute.tool.echo"]), json!([])] {
+            let resolved = resolved_tool_with_extra(
+                &bundle,
+                "tool:example-bundle/send",
+                requires_extra(json!({ "capabilities": { "declared": declared } })),
+            );
+            let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot self-declare action authority"),
+                "declared={declared}: got {err}"
             );
         }
     }

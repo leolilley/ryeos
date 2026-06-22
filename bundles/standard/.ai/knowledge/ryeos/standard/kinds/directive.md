@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:98ea17bea94cb4b47cf209becb10f86657a47863506ee5b76f513b89b29514fc:SNF+mE3j8ibko8pPg4nq2Y11rhTHRhRRr8eA93Av02ZXs2XuryUNVGtO9sHu0uaHsOpnN18SjJ6mEJLx2KofDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T04:23:11Z:8316696c77836a446ace577106f7e4cd6f8156772d00cc9c43d1bbd9e57f5387:DoPSij+zynb1byVV2WSNHIiCIfbSszCh9vWZ6FuYg2I2bmMiUiIjPfaRKliYFxH/zHCVz138HqWoe9M4VaPlBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/kinds
 tags: [kind, directive, llm, workflow]
@@ -14,7 +14,7 @@ Invariant: directives are markdown LLM workflows whose effective body, permissio
 - Format: `.md` via `parser:ryeos/core/markdown/directive`
 - Composer: `handler:ryeos/core/extends-chain`
 - Execution: delegates through runtime registry to `runtime:directive-runtime`
-- Policy facts: `permissions.execute` becomes `effective_caps`
+- Policy facts: `requires.capabilities.declared` becomes `effective_caps`
 - Launch augmentation: composed context positions are rendered through the knowledge runtime before launch
 
 Directive inheritance keeps the root body verbatim, narrows child permissions against parent effective permissions, and merges context blocks root-last by position.

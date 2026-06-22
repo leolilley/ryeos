@@ -503,7 +503,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
 
 // ── P3b.5: Cap denial fails cleanly ────────────────────────────────────
 //
-// The directive declares a `declared.execute` cap that does NOT
+// The directive declares a `declared` cap that does NOT
 // match the tool the LLM tries to invoke. The runner's
 // `DispatchingTools` state catches this BEFORE any
 // `callback.dispatch_action` call: it pushes a synthetic

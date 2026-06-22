@@ -489,12 +489,19 @@ fn narrow_requires_capabilities(
     ancestor_parsed: &[&Value],
     root_parsed: &Value,
 ) -> Result<(), (ResolutionStepNameWire, String)> {
-    // Legacy authoring fails loudly — no silent ignore, no back-compat.
+    // Legacy authoring fails loudly — no silent ignore, no back-compat. Both
+    // sub-trees are strict-validated for root + ancestors before composition.
     reject_legacy_permissions(root_parsed)?;
     validate_requires_shape(root_parsed)?;
+    if let Some(m) = manifest_value(root_parsed) {
+        validate_manifest_shape(m)?;
+    }
     for parent in ancestor_parsed {
         reject_legacy_permissions(parent)?;
         validate_requires_shape(parent)?;
+        if let Some(m) = manifest_value(parent) {
+            validate_manifest_shape(m)?;
+        }
     }
 
     // `declared` and `manifest` inherit/narrow independently, so a child that
@@ -524,7 +531,7 @@ fn narrow_requires_capabilities(
 /// Reject a legacy top-level `permissions:` block. It is removed from the
 /// schema, but `composed_value_contract` ignores extra top-level keys, so an
 /// old item would otherwise silently lose its authority — fail it instead.
-fn reject_legacy_permissions(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+pub(crate) fn reject_legacy_permissions(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
     if parsed
         .get("permissions")
         .map(|v| !v.is_null())
@@ -532,8 +539,8 @@ fn reject_legacy_permissions(parsed: &Value) -> Result<(), (ResolutionStepNameWi
     {
         return Err((
             ResolutionStepNameWire::PipelineInit,
-            "top-level `permissions:` is removed — declare action authority under \
-             `requires.capabilities.declared` (e.g. `declared.execute`)"
+            "top-level `permissions:` is removed — declare action authority as a flat list \
+             under `requires.capabilities.declared`"
                 .to_string(),
         ));
     }
@@ -542,7 +549,7 @@ fn reject_legacy_permissions(parsed: &Value) -> Result<(), (ResolutionStepNameWi
 
 /// Validate the `requires` tree's known keys so typos and dropped legacy keys
 /// (e.g. `callbacks`) fail loudly at compose time rather than minting nothing.
-fn validate_requires_shape(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+pub(crate) fn validate_requires_shape(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
     let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
     let Some(requires) = parsed.get("requires").filter(|v| !v.is_null()) else {
         return Ok(());
@@ -584,7 +591,7 @@ fn capability_subtree<'a>(parsed: &'a Value, sub: &str) -> Option<&'a Map<String
 }
 
 /// `requires.capabilities.declared` value (a list of cap strings), if present.
-fn declared_value<'a>(parsed: &'a Value) -> Option<&'a Value> {
+pub(crate) fn declared_value<'a>(parsed: &'a Value) -> Option<&'a Value> {
     parsed
         .get("requires")?
         .get("capabilities")?
@@ -625,7 +632,7 @@ fn compose_declared(
 /// Strict shape check for `declared`: a list of cap strings (the cap encodes
 /// its own verb). Fails (does not filter) so malformed authority is caught at
 /// compose rather than silently turned into deny-all / partial caps.
-fn validate_declared_shape(declared: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+pub(crate) fn validate_declared_shape(declared: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
     let err = |m: &str| (ResolutionStepNameWire::PipelineInit, m.to_string());
     let arr = declared
         .as_array()
@@ -646,6 +653,102 @@ fn string_array(v: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// Canonical operation vocabularies live in
+// `ryeos_bundle::runtime_authority` (`BundleEventOperation` /
+// `RuntimeVaultOperation`). Mirrored here so the composer can fail loud at
+// compose time without a dependency on that crate; the launch-time parser is
+// still the authoritative gate.
+const BUNDLE_EVENT_OPS: &[&str] = &["append", "scan"];
+const RUNTIME_VAULT_OPS: &[&str] = &["put", "get", "delete", "list"];
+
+/// `requires.capabilities.manifest` value, if present and non-null.
+pub(crate) fn manifest_value(parsed: &Value) -> Option<&Value> {
+    parsed
+        .get("requires")?
+        .get("capabilities")?
+        .get("manifest")
+        .filter(|v| !v.is_null())
+}
+
+/// Strict shape check for the `manifest` sub-tree at compose time: only the
+/// `bundle_events` / `runtime_vault` resource lists, each entry a mapping with a
+/// non-empty id and a non-empty list of known operations. Fails loud rather than
+/// deferring malformed authoring to the launch parser.
+pub(crate) fn validate_manifest_shape(
+    manifest: &Value,
+) -> Result<(), (ResolutionStepNameWire, String)> {
+    let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
+    let map = manifest
+        .as_object()
+        .ok_or_else(|| err("`requires.capabilities.manifest` must be a mapping".to_string()))?;
+    for key in map.keys() {
+        if key != "bundle_events" && key != "runtime_vault" {
+            return Err(err(format!(
+                "unknown key `requires.capabilities.manifest.{key}` \
+                 (only `bundle_events` and `runtime_vault` are allowed)"
+            )));
+        }
+    }
+    validate_manifest_resources(map.get("bundle_events"), "event_kind", BUNDLE_EVENT_OPS, "bundle_events")?;
+    validate_manifest_resources(map.get("runtime_vault"), "namespace", RUNTIME_VAULT_OPS, "runtime_vault")?;
+    Ok(())
+}
+
+fn validate_manifest_resources(
+    list: Option<&Value>,
+    id_key: &str,
+    valid_ops: &[&str],
+    tag: &str,
+) -> Result<(), (ResolutionStepNameWire, String)> {
+    let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
+    let Some(value) = list else {
+        return Ok(());
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| err(format!("`requires.capabilities.manifest.{tag}` must be a list")))?;
+    for entry in arr {
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| err(format!("each `{tag}` entry must be a mapping")))?;
+        for k in obj.keys() {
+            if k != id_key && k != "operations" {
+                return Err(err(format!(
+                    "unknown key `{k}` in a `{tag}` entry (allowed: `{id_key}`, `operations`)"
+                )));
+            }
+        }
+        let id = obj
+            .get(id_key)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| err(format!("a `{tag}` entry is missing a string `{id_key}`")))?;
+        if id.trim().is_empty() {
+            return Err(err(format!("a `{tag}` entry has an empty `{id_key}`")));
+        }
+        let ops = obj
+            .get("operations")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| err(format!("`{tag}` entry `{id}` must list `operations` as an array")))?;
+        if ops.is_empty() {
+            return Err(err(format!(
+                "`{tag}` entry `{id}` must list at least one operation"
+            )));
+        }
+        for op in ops {
+            let op_str = op
+                .as_str()
+                .ok_or_else(|| err(format!("`{tag}` operations must be strings")))?;
+            if !valid_ops.contains(&op_str) {
+                return Err(err(format!(
+                    "invalid operation `{op_str}` for `{tag}` (allowed: {})",
+                    valid_ops.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Compose the `manifest` sub-tree: child must be a subset of the nearest
