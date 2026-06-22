@@ -5,7 +5,7 @@
 //! quality signals (empty body, missing title/category/tags) that do not
 //! invalidate the corpus.
 
-use ryeos_runtime::op_wire::TrustClass;
+use ryeos_runtime::method_wire::TrustClass;
 
 use crate::frontmatter::{parse_metadata_result, strip_frontmatter};
 use crate::types::{KnowledgeError, ValidateOutput, ValidatePayload};
@@ -15,9 +15,9 @@ pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeEr
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
-    // Roots must exist in the corpus. (Read from `inputs.roots` — the
+    // Roots must exist in the corpus. (Read from `args.roots` — the
     // shape the executor sends.)
-    for r in &payload.inputs.roots {
+    for r in &payload.args.roots {
         if !items.contains_key(r) {
             errors.push(format!("root not found in corpus: {r}"));
         }
@@ -146,7 +146,7 @@ fn valid_ref_token(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, TrustClass, VerifiedItem};
+    use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, TrustClass, VerifiedItem};
     use std::collections::BTreeMap;
 
     fn item(body: &str) -> VerifiedItem {
@@ -170,7 +170,7 @@ mod tests {
         ValidatePayload {
             items_by_ref: map,
             edges,
-            inputs: crate::types::ValidateInputs { roots },
+            args: crate::types::ValidateArgs { roots },
         }
     }
 
@@ -275,7 +275,7 @@ mod tests {
         let p = ValidatePayload {
             items_by_ref: map,
             edges: vec![],
-            inputs: crate::types::ValidateInputs { roots: vec![] },
+            args: crate::types::ValidateArgs { roots: vec![] },
         };
         let out = validate(&p).unwrap();
         assert!(!out.valid, "unsigned corpus member must invalidate");
@@ -321,7 +321,7 @@ mod tests {
         ValidatePayload {
             items_by_ref: map,
             edges: vec![],
-            inputs: crate::types::ValidateInputs { roots: vec![] },
+            args: crate::types::ValidateArgs { roots: vec![] },
         }
     }
 

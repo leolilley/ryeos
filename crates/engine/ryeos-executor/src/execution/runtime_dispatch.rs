@@ -165,8 +165,8 @@ async fn handle_execute(
         // Use the parent's per-request engine — never the daemon engine.
         engine: child_provenance.request_engine().clone(),
         plan_ctx,
-        requested_op: None,
-        requested_inputs: None,
+        requested_method: None,
+        requested_args: None,
     };
 
     let project_path = child_provenance.effective_path().to_path_buf();
@@ -182,8 +182,8 @@ async fn handle_execute(
         pre_minted_thread_id: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
-        operation: None,
-        inputs: None,
+        method: None,
+        args: None,
         previous_thread_id: None,
     };
 

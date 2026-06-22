@@ -533,12 +533,11 @@ impl RemoteClient {
         self.signed_post("/execute", &body).await
     }
 
-    /// POST /execute with full request options (operation, inputs).
+    /// POST /execute with a full method call (`call.method`, `call.args`).
     ///
-    /// This is the extended variant used by target-site forwarding
-    /// which needs to forward operation and inputs fields that the
-    /// basic `execute()` method does not support.
-    /// POST /execute with optional operation/inputs overrides.
+    /// This is the extended variant used by remote method forwarding,
+    /// which needs to forward the `call` block that the basic `execute()`
+    /// method does not support.
     ///
     /// Used by the shared unary forward helper. Note: `target_site_id`
     /// is intentionally **not** forwarded to prevent forwarding loops —
@@ -550,8 +549,8 @@ impl RemoteClient {
         project_path: &str,
         parameters: &Value,
         project_source: &str,
-        operation: Option<&str>,
-        inputs: Option<&Value>,
+        method: Option<&str>,
+        args: Option<&Value>,
     ) -> Result<Value> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
@@ -559,11 +558,16 @@ impl RemoteClient {
             "parameters": parameters,
             "project_source": { "kind": project_source },
         });
-        if let Some(op) = operation {
-            body["operation"] = Value::String(op.to_string());
-        }
-        if let Some(inputs) = inputs {
-            body["inputs"] = inputs.clone();
+        // Build the `call` block only when a method and/or args are present.
+        if method.is_some() || args.is_some() {
+            let mut call = serde_json::Map::new();
+            if let Some(m) = method {
+                call.insert("method".to_string(), Value::String(m.to_string()));
+            }
+            if let Some(a) = args {
+                call.insert("args".to_string(), a.clone());
+            }
+            body["call"] = Value::Object(call);
         }
         self.signed_post("/execute", &body).await
     }

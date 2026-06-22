@@ -1,27 +1,28 @@
 //! Knowledge request types, output types, and error types.
 
-use ryeos_runtime::op_wire::{GraphEdge, VerifiedItem};
+use ryeos_runtime::method_wire::{GraphEdge, VerifiedItem};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-// Operations are dispatched by wire op name in `dispatch.rs` (keyed off
-// `BatchOpEnvelope.op`), each parsing its own typed payload below. Generic
-// requests come from schema-declared ops; augmentation-private handlers such
-// as `compose_positions` are daemon-invoked with bespoke payloads. There is
-// deliberately no enum mirror of either vocabulary here.
+// Methods are dispatched by wire method name in `dispatch.rs` (keyed off
+// `MethodCallEnvelope.method`), each parsing its own typed payload below.
+// Generic requests come from schema-declared methods; augmentation-private
+// handlers such as `compose_positions` are daemon-invoked with bespoke
+// payloads. There is deliberately no enum mirror of either vocabulary here.
 
 // -------- Compose --------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposePayload {
     #[serde(flatten)]
-    pub root: ryeos_runtime::op_wire::SingleRootPayload,
-    pub inputs: ComposeInputs,
+    pub root: ryeos_runtime::method_wire::SingleRootPayload,
+    pub args: ComposeArgs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComposeInputs {
+#[serde(deny_unknown_fields)]
+pub struct ComposeArgs {
     pub token_budget: usize,
     #[serde(default)]
     pub exclude_refs: Vec<String>,
@@ -95,11 +96,12 @@ pub struct QueryPayload {
     pub items_by_ref: BTreeMap<String, VerifiedItem>,
     #[serde(default)]
     pub edges: Vec<GraphEdge>,
-    pub inputs: QueryInputs,
+    pub args: QueryArgs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryInputs {
+#[serde(deny_unknown_fields)]
+pub struct QueryArgs {
     pub query: String,
     #[serde(default = "default_query_limit")]
     pub limit: usize,
@@ -114,6 +116,7 @@ fn default_query_limit() -> usize {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryFilters {
     #[serde(default)]
     pub ref_prefixes: Vec<String>,
@@ -148,11 +151,12 @@ pub struct GraphPayload {
     pub items_by_ref: BTreeMap<String, VerifiedItem>,
     #[serde(default)]
     pub edges: Vec<GraphEdge>,
-    pub inputs: GraphInputs,
+    pub args: GraphArgs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphInputs {
+#[serde(deny_unknown_fields)]
+pub struct GraphArgs {
     /// Roots to traverse from. Empty means "every item is a root" — the
     /// whole provided corpus is returned.
     #[serde(default)]
@@ -191,15 +195,16 @@ pub struct ValidatePayload {
     pub items_by_ref: BTreeMap<String, VerifiedItem>,
     #[serde(default)]
     pub edges: Vec<GraphEdge>,
-    // Op inputs are nested under `inputs` by the executor (it merges
-    // schema-validated op args under `payload.inputs`), so `roots` must
+    // Method args are nested under `args` by the executor (it merges
+    // schema-validated method args under `payload.args`), so `roots` must
     // live here — NOT at the top level, where it would be silently dropped.
     #[serde(default)]
-    pub inputs: ValidateInputs,
+    pub args: ValidateArgs,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ValidateInputs {
+#[serde(deny_unknown_fields)]
+pub struct ValidateArgs {
     #[serde(default)]
     pub roots: Vec<String>,
 }
@@ -241,8 +246,8 @@ pub struct RenderedPosition {
 
 #[derive(Debug, Error)]
 pub enum KnowledgeError {
-    #[error("invalid input for op `{op}`: {reason}")]
-    InvalidInput { op: String, reason: String },
+    #[error("invalid args for method `{method}`: {reason}")]
+    InvalidArg { method: String, reason: String },
 
     #[error("frontmatter parse failure for {item_id}: {reason}")]
     FrontmatterParse { item_id: String, reason: String },

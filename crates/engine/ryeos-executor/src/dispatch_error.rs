@@ -175,27 +175,27 @@ pub enum DispatchError {
     /// could not be checked out from CAS.
     #[error("project source checkout failed: {0}")]
     ProjectSourceCheckoutFailed(String),
-    // ── Op dispatch errors ─────────────────────────────────────────
-    /// The requested operation is not declared on the kind's schema.
-    #[error("unknown op '{requested}' for kind '{kind}'; declared ops: [{declared}]")]
-    UnknownOp {
+    // ── Method dispatch errors ─────────────────────────────────────
+    /// The requested method is not declared on the kind's schema.
+    #[error("unknown method '{requested}' for kind '{kind}'; declared methods: [{declared}]")]
+    UnknownMethod {
         kind: String,
         requested: String,
         declared: String,
     },
-    /// A required input for the op is missing or has wrong type.
-    #[error("invalid input for op '{op}': {reason}")]
-    OpInvalidInput { op: String, reason: String },
-    /// The op's runtime returned a structured failure.
-    #[error("op '{op}' on kind '{kind}' failed: {reason}")]
-    OpFailed {
+    /// A required arg for the method is missing or has wrong type.
+    #[error("invalid arg for method '{method}': {reason}")]
+    MethodInvalidArg { method: String, reason: String },
+    /// The method's runtime returned a structured failure.
+    #[error("method '{method}' on kind '{kind}' failed: {reason}")]
+    MethodFailed {
         kind: String,
-        op: String,
+        method: String,
         reason: String,
     },
-    /// The op returned NotImplemented (phase gate).
-    #[error("op '{op}' on kind '{kind}' is not implemented (phase {phase})")]
-    OpNotImplemented { kind: String, op: String, phase: u8 },
+    /// The method returned NotImplemented (phase gate).
+    #[error("method '{method}' on kind '{kind}' is not implemented (phase {phase})")]
+    MethodNotImplemented { kind: String, method: String, phase: u8 },
     /// Projection invariant violated during slim-payload construction.
     #[error("projection invariant violated: {reason}")]
     ProjectionInvariant { reason: String },
@@ -313,10 +313,10 @@ impl DispatchError {
             | Self::RuntimeMaterializationFailed { .. }
             | Self::RequiredSecretMissing { .. }
             | Self::ProjectSourceCheckoutFailed(_)
-            | Self::OpFailed { .. }
-            | Self::OpNotImplemented { .. } => StatusCode::BAD_GATEWAY,
-            Self::UnknownOp { .. }
-            | Self::OpInvalidInput { .. }
+            | Self::MethodFailed { .. }
+            | Self::MethodNotImplemented { .. } => StatusCode::BAD_GATEWAY,
+            Self::UnknownMethod { .. }
+            | Self::MethodInvalidArg { .. }
             | Self::ProjectionInvariant { .. }
             | Self::InvalidLaunchMode { .. }
             | Self::ComposedValueContractViolation { .. }
@@ -359,10 +359,10 @@ impl DispatchError {
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
             Self::MissingCap { .. } => "missing_cap",
             Self::NotFound => "not_found",
-            Self::UnknownOp { .. } => "unknown_op",
-            Self::OpInvalidInput { .. } => "op_invalid_input",
-            Self::OpFailed { .. } => "op_failed",
-            Self::OpNotImplemented { .. } => "op_not_implemented",
+            Self::UnknownMethod { .. } => "unknown_method",
+            Self::MethodInvalidArg { .. } => "method_invalid_arg",
+            Self::MethodFailed { .. } => "method_failed",
+            Self::MethodNotImplemented { .. } => "method_not_implemented",
             Self::ProjectionInvariant { .. } => "projection_invariant",
             Self::ProtocolNotRegistered(_) => "protocol_not_registered",
             Self::StreamingNotDetachable => "streaming_not_detachable",

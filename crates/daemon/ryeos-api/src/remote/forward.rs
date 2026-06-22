@@ -52,12 +52,12 @@ pub struct RemoteForwardRequest<'a> {
     pub acting_principal: &'a str,
     /// Ignore rules for project ingest.
     pub remote_ignore: &'a IgnoreMatcher,
-    /// Optional operation name. If `None`, the remote uses its
-    /// default. Forwarded as-is to the remote /execute body.
-    pub operation: Option<&'a str>,
-    /// Optional op-specific inputs. Forwarded as-is to the remote
-    /// /execute body.
-    pub inputs: Option<Value>,
+    /// Optional method name. If `None`, the remote uses its default.
+    /// Forwarded as-is to the remote /execute body's `call.method`.
+    pub method: Option<&'a str>,
+    /// Optional method-specific args. Forwarded as-is to the remote
+    /// /execute body's `call.args`.
+    pub args: Option<Value>,
 }
 
 /// Result from the shared unary forward helper.
@@ -275,8 +275,8 @@ pub async fn execute_unary_forward(
             req.remote_project_path,
             &req.parameters,
             "pushed_head",
-            req.operation,
-            req.inputs.as_ref(),
+            req.method,
+            req.args.as_ref(),
         )
         .await
     {

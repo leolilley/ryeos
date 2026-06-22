@@ -23,13 +23,13 @@ execution:
   # Launch augmentation: before the directive runtime is spawned, the
   # daemon pre-resolves knowledge refs declared in the directive's
   # `context:` block, dispatches a child knowledge-runtime compose
-  # op, and writes the rendered strings into `rendered_contexts`.
+  # method, and writes the rendered strings into `rendered_contexts`.
   # If `composed_context` is missing or empty, the augmentation is a
   # no-op — directives without context blocks are unaffected.
   launch_augmentations:
     - step: compose_context_positions
       target_kind: knowledge
-      target_op: compose_positions
+      target_method: compose_positions
       source_derived: composed_context
       output_derived: rendered_contexts
       meta_output_derived: rendered_contexts_meta

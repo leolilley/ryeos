@@ -43,6 +43,11 @@ pub struct Request {
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
+    /// Optional method call `{ method, args }` forwarded to the remote
+    /// for method-dispatch kinds (knowledge query/graph/validate, …).
+    /// Absent for terminator/delegate kinds.
+    #[serde(default)]
+    pub call: Option<crate::routes::response_modes::execute_mode::ExecuteCall>,
 }
 
 fn default_remote() -> String {
@@ -177,8 +182,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             parameters: req.parameters.clone(),
             acting_principal: "",
             remote_ignore: &remote_ignore,
-            operation: None,
-            inputs: None,
+            method: req.call.as_ref().and_then(|c| c.method.as_deref()),
+            args: req.call.as_ref().and_then(|c| c.args.clone()),
         },
     )
     .await

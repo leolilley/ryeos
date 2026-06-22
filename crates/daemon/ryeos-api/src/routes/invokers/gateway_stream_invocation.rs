@@ -47,14 +47,26 @@ pub(crate) struct LaunchRequest {
     /// Whether to validate descriptor composition only, without execution.
     #[serde(default)]
     pub(crate) validate_only: bool,
-    /// Optional operation name for multi-op items.
+    /// Method call: `{ method, args }`. The method selects daemon-owned
+    /// behavior; the args are data. Absent for terminator/delegate kinds.
     #[serde(default)]
-    pub(crate) operation: Option<String>,
-    /// Optional op-specific inputs.
-    #[serde(default)]
-    pub(crate) inputs: Option<Value>,
+    pub(crate) call: Option<
+        crate::routes::response_modes::execute_mode::ExecuteCall,
+    >,
     #[serde(default)]
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
+}
+
+impl LaunchRequest {
+    /// The requested method name, if `call.method` was provided.
+    pub(crate) fn method(&self) -> Option<String> {
+        self.call.as_ref().and_then(|c| c.method.clone())
+    }
+
+    /// The requested method args, if `call.args` was provided.
+    pub(crate) fn args(&self) -> Option<Value> {
+        self.call.as_ref().and_then(|c| c.args.clone())
+    }
 }
 
 fn default_launch_mode() -> String {
@@ -334,14 +346,17 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
+        // Extract method/args before moving the rest of `req` into options.
+        let call_method = req.method();
+        let call_args = req.args();
         let options = crate::routes::launch::DispatchLaunchOptions {
             launch_mode: req.launch_mode,
             target_site_id: req.target_site_id,
             validate_only: req.validate_only,
             usage_subject,
             usage_subject_asserted_by,
-            operation: req.operation,
-            inputs: req.inputs,
+            method: call_method,
+            args: call_args,
             previous_thread_id: None,
         };
 
@@ -585,8 +600,8 @@ mod tests {
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
         assert_eq!(req.validate_only, false);
-        assert_eq!(req.operation, None);
-        assert_eq!(req.inputs, None);
+        assert_eq!(req.method(), None);
+        assert_eq!(req.args(), None);
     }
 
     #[test]
@@ -598,16 +613,15 @@ mod tests {
             "launch_mode": "detached",
             "target_site_id": "site:remote",
             "validate_only": true,
-            "operation": "run",
-            "inputs": {"arg": 42}
+            "call": {"method": "run", "args": {"arg": 42}}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "tool:x/y");
         assert_eq!(req.launch_mode, "detached");
         assert_eq!(req.target_site_id.as_deref(), Some("site:remote"));
         assert!(req.validate_only);
-        assert_eq!(req.operation.as_deref(), Some("run"));
-        assert_eq!(req.inputs.as_ref().unwrap()["arg"], 42);
+        assert_eq!(req.method().as_deref(), Some("run"));
+        assert_eq!(req.args().unwrap()["arg"], 42);
     }
 
     #[test]
@@ -631,18 +645,17 @@ mod tests {
     }
 
     #[test]
-    fn launch_request_defaults_match_previous_hardcoded_behavior() {
+    fn launch_request_defaults_are_inline_local() {
         let json = serde_json::json!({
             "item_ref": "directive:x",
             "project_path": "/tmp/p",
             "parameters": {}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
-        // Verify defaults match what was previously hard-coded in launch.rs
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
-        assert_eq!(req.operation, None);
-        assert_eq!(req.inputs, None);
+        assert_eq!(req.method(), None);
+        assert_eq!(req.args(), None);
     }
 }

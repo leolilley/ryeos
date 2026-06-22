@@ -1,7 +1,7 @@
 //! Composition ordering policies.
 
 use crate::types::ComposeRole;
-use ryeos_runtime::op_wire::{EdgeKind, GraphEdge};
+use ryeos_runtime::method_wire::{EdgeKind, GraphEdge};
 
 /// Item in composition order with its role.
 pub struct OrderedItem {
@@ -78,7 +78,7 @@ fn collect_extends_post_order(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::op_wire::EdgeKind;
+    use ryeos_runtime::method_wire::EdgeKind;
 
     #[test]
     fn single_item_no_edges() {

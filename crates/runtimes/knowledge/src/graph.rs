@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use ryeos_runtime::op_wire::EdgeKind;
+use ryeos_runtime::method_wire::EdgeKind;
 
 use crate::types::{GraphEdgeOut, GraphOutput, GraphPayload, KnowledgeError};
 
@@ -28,10 +28,10 @@ pub fn graph(payload: &GraphPayload) -> Result<GraphOutput, KnowledgeError> {
     }
 
     // Empty roots means "the whole corpus" — every item is a root.
-    let roots: Vec<String> = if payload.inputs.roots.is_empty() {
+    let roots: Vec<String> = if payload.args.roots.is_empty() {
         items.keys().cloned().collect()
     } else {
-        payload.inputs.roots.clone()
+        payload.args.roots.clone()
     };
 
     // BFS bounded by depth (edges traversed, not nodes visited). Only
@@ -50,7 +50,7 @@ pub fn graph(payload: &GraphPayload) -> Result<GraphOutput, KnowledgeError> {
         }
     }
     while let Some((node, depth)) = queue.pop_front() {
-        if depth >= payload.inputs.depth {
+        if depth >= payload.args.depth {
             continue;
         }
         if let Some(neighbors) = adj.get(node.as_str()) {
@@ -100,10 +100,10 @@ fn edge_kind_str(kind: EdgeKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_runtime::op_wire::{GraphEdge, TrustClass, VerifiedItem};
+    use ryeos_runtime::method_wire::{GraphEdge, TrustClass, VerifiedItem};
     use std::collections::BTreeMap;
 
-    use crate::types::GraphInputs;
+    use crate::types::GraphArgs;
 
     fn item() -> VerifiedItem {
         VerifiedItem {
@@ -123,7 +123,7 @@ mod tests {
         }
     }
 
-    fn payload(refs: &[&str], edges: Vec<GraphEdge>, inputs: GraphInputs) -> GraphPayload {
+    fn payload(refs: &[&str], edges: Vec<GraphEdge>, inputs: GraphArgs) -> GraphPayload {
         let mut map = BTreeMap::new();
         for r in refs {
             map.insert(r.to_string(), item());
@@ -131,7 +131,7 @@ mod tests {
         GraphPayload {
             items_by_ref: map,
             edges,
-            inputs,
+            args: inputs,
         }
     }
 
@@ -140,7 +140,7 @@ mod tests {
         let p = payload(
             &["a", "b", "c", "d"],
             vec![edge("a", "b"), edge("b", "c"), edge("c", "d")],
-            GraphInputs {
+            GraphArgs {
                 roots: vec!["a".into()],
                 depth: 2,
             },
@@ -156,7 +156,7 @@ mod tests {
         let p = payload(
             &["a", "b"],
             vec![edge("a", "b")],
-            GraphInputs {
+            GraphArgs {
                 roots: vec![],
                 depth: 5,
             },
@@ -171,7 +171,7 @@ mod tests {
         let p = payload(
             &["a"],
             vec![edge("a", "ghost")],
-            GraphInputs {
+            GraphArgs {
                 roots: vec!["a".into()],
                 depth: 3,
             },
@@ -194,7 +194,7 @@ mod tests {
         let p = payload(
             &["a"],
             vec![],
-            GraphInputs {
+            GraphArgs {
                 roots: vec!["nope".into()],
                 depth: 1,
             },

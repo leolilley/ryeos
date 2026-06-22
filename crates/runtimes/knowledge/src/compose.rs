@@ -3,14 +3,14 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, SingleRootPayload, VerifiedItem};
+use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, SingleRootPayload, VerifiedItem};
 
 use crate::budget::estimate_tokens;
 use crate::frontmatter::strip_frontmatter;
 use crate::ordering::{extends_first, OrderedItem};
 use crate::render::render_item;
 use crate::types::{
-    ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeInputs, ComposeItem, ComposeMeta,
+    ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeArgs, ComposeItem, ComposeMeta,
     ComposeOutput, ComposePayload, KnowledgeError, OmissionReason, OmittedItem, RenderedContexts,
     RenderedPosition,
 };
@@ -21,7 +21,7 @@ pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError
     let root_ref = &payload.root.root_ref;
     let items_by_ref = &payload.root.items_by_ref;
     let edges = &payload.root.edges;
-    let inputs = &payload.inputs;
+    let inputs = &payload.args;
     let budget = inputs.token_budget;
 
     // Build ordered item list
@@ -108,7 +108,7 @@ pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError
     })
 }
 
-/// Multi-root, multi-position compose. Used by the `compose_positions` op.
+/// Multi-root, multi-position compose. Used by the `compose_positions` method.
 ///
 /// Iterates `roots_by_position` in deterministic order (system → before → after,
 /// then remaining in BTreeMap order). Cross-position deduplication: refs already
@@ -183,7 +183,7 @@ pub fn compose_positions(
 
                 let compose_payload = ComposePayload {
                     root: single_root,
-                    inputs: ComposeInputs {
+                    args: ComposeArgs {
                         token_budget: budget_remaining,
                         exclude_refs: exclude,
                         position: Some(position.clone()),
@@ -276,8 +276,8 @@ fn build_ordered_items(root_ref: &str, edges: &[GraphEdge]) -> Vec<OrderedItem> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ComposeInputs, ComposePayload, ComposeRole};
-    use ryeos_runtime::op_wire::{EdgeKind, TrustClass};
+    use crate::types::{ComposeArgs, ComposePayload, ComposeRole};
+    use ryeos_runtime::method_wire::{EdgeKind, TrustClass};
 
     fn make_item(ref_id: &str, content: &str) -> (String, VerifiedItem) {
         (
@@ -320,7 +320,7 @@ mod tests {
                 items_by_ref: items,
                 edges: vec![],
             },
-            inputs: ComposeInputs {
+            args: ComposeArgs {
                 token_budget: 1000,
                 exclude_refs: vec![],
                 position: None,
@@ -348,7 +348,7 @@ mod tests {
                 items_by_ref: items,
                 edges: vec![make_extends_edge("root", "parent")],
             },
-            inputs: ComposeInputs {
+            args: ComposeArgs {
                 token_budget: 1000,
                 exclude_refs: vec![],
                 position: None,
@@ -376,7 +376,7 @@ mod tests {
                 items_by_ref: items,
                 edges: vec![make_refs_edge("root", "ref1")],
             },
-            inputs: ComposeInputs {
+            args: ComposeArgs {
                 token_budget: 1000,
                 exclude_refs: vec![],
                 position: None,
@@ -400,7 +400,7 @@ mod tests {
                 items_by_ref: items,
                 edges: vec![make_refs_edge("root", "ref1")],
             },
-            inputs: ComposeInputs {
+            args: ComposeArgs {
                 token_budget: 1000,
                 exclude_refs: vec!["ref1".to_string()],
                 position: None,
@@ -428,7 +428,7 @@ mod tests {
                 items_by_ref: items,
                 edges: vec![make_refs_edge("root", "big")],
             },
-            inputs: ComposeInputs {
+            args: ComposeArgs {
                 token_budget: 5, // very tight
                 exclude_refs: vec![],
                 position: None,
