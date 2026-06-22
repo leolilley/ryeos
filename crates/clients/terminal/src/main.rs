@@ -87,7 +87,7 @@ fn main() {
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!(
-                    "  --surface <REF>         Open a surface by canonical ref (default: surface:ryeos/studio/base)"
+                    "  --surface <REF>         Open a surface by canonical ref"
                 );
                 eprintln!(
                     "  --surface-file <PATH>   Load surface spec from a local file (untrusted preview)"
@@ -108,9 +108,13 @@ fn main() {
         i += 1;
     }
 
-    // The seat opens a surface; the studio path is the only path.
+    // No hardcoded default surface. The surface is supplied by the caller
+    // (`--surface` / `--surface-file`) or by the launching client's config.
+    // With neither, show an empty surface — never fabricate one or crash.
     if surface_name.is_none() && surface_file.is_none() {
-        surface_name = Some("surface:ryeos/studio/base".to_string());
+        eprintln!(
+            "info: no surface specified (--surface / --surface-file, or client config); showing an empty surface"
+        );
     }
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
