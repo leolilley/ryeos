@@ -391,6 +391,18 @@ pub fn write_authorized_key_signed_by(
     subject_sk: &SigningKey,
     signer_sk: &SigningKey,
 ) -> Result<()> {
+    write_authorized_key_with_scopes(state_path, subject_sk, signer_sk, &["*"])
+}
+
+/// Like [`write_authorized_key_signed_by`] but with explicit `scopes`, for
+/// tests that need a capability-restricted principal (e.g. asserting a
+/// runtime-cap rejection). `signer_sk` MUST be the node identity.
+pub fn write_authorized_key_with_scopes(
+    state_path: &Path,
+    subject_sk: &SigningKey,
+    signer_sk: &SigningKey,
+    scopes: &[&str],
+) -> Result<()> {
     let vk = subject_sk.verifying_key();
     let fp = lillux::signature::compute_fingerprint(&vk);
     let auth_dir = state_path
@@ -401,10 +413,15 @@ pub fn write_authorized_key_signed_by(
     fs::create_dir_all(&auth_dir)?;
 
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+    let scopes_toml = scopes
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     let toml_body = format!(
         r#"fingerprint = "{fp}"
 public_key = "ed25519:{key_b64}"
-scopes = ["*"]
+scopes = [{scopes_toml}]
 label = "fast-fixture-authorized-key"
 "#
     );

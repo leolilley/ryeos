@@ -927,7 +927,7 @@ pub async fn build_and_launch(
     // bundle manifest remains the final upper bound (checked inside the minter).
     let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
         resolution.composed.composed.get("requires"),
-        resolved,
+        &resolved.resolved_item,
         &engine.trust_store,
     )
     .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;

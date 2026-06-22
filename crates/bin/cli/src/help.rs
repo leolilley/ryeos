@@ -309,7 +309,7 @@ fn print_installed_command_help(
         writeln!(out, "CONTROL FLAGS:")?;
         writeln!(
             out,
-            "  --async              Accepted/background launch for tool refs; returns a thread_id"
+            "  --async              Accepted/background launch for root-executable refs; returns a thread_id"
         )?;
     }
 
@@ -525,7 +525,7 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
             writeln!(out, "CONTROL FLAGS:")?;
             writeln!(
                 out,
-                "  --async         Accepted/background launch for tool refs; returns a thread_id"
+                "  --async         Accepted/background launch for root-executable refs; returns a thread_id"
             )?;
             writeln!(out)?;
             writeln!(out, "PARAMETER INPUT:")?;
