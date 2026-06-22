@@ -383,7 +383,11 @@ fn function_stdout_noise_is_isolated_from_json_result() {
     let completion = run_tool(&project_dir, "tool:probe/noise", Value::Null);
     let _ = fs::remove_dir_all(&project_dir);
 
-    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "{completion:?}"
+    );
     let result = completion.result.expect("captured stdout");
     assert!(
         result.is_object(),
@@ -416,7 +420,11 @@ fn function_dependency_stdout_write_does_not_corrupt_result() {
     );
     let _ = fs::remove_dir_all(&project_dir);
 
-    assert_eq!(completion.status, ThreadTerminalStatus::Completed, "{completion:?}");
+    assert_eq!(
+        completion.status,
+        ThreadTerminalStatus::Completed,
+        "{completion:?}"
+    );
     let result = completion.result.expect("captured stdout");
     assert_eq!(result["ok"], true);
     assert_eq!(result["n"], 7);

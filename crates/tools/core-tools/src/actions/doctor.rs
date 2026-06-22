@@ -12,9 +12,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::contracts::{
-    EffectivePrincipal, PlanContext, Principal, ProjectContext,
-};
+use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_engine::engine::Engine;
 
 /// Status of a single doctor check.
@@ -89,10 +87,9 @@ fn check_manifest(source: &Path) -> CheckResult {
             json!({ "note": "no .ai/manifest.source.yaml — manifests are optional" }),
         );
     }
-    let source_manifest = match std::fs::read_to_string(&source_path)
-        .ok()
-        .and_then(|raw| serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(&raw).ok())
-    {
+    let source_manifest = match std::fs::read_to_string(&source_path).ok().and_then(|raw| {
+        serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(&raw).ok()
+    }) {
         Some(src) => src,
         None => {
             return CheckResult::new(
@@ -155,29 +152,21 @@ fn check_manifest(source: &Path) -> CheckResult {
 }
 
 /// Bundle verify — headers, parsers, and signatures of every item.
-fn check_verify(source: &Path, dependency_roots: &[PathBuf], operator_config_root: &Path) -> CheckResult {
+fn check_verify(
+    source: &Path,
+    dependency_roots: &[PathBuf],
+    operator_config_root: &Path,
+) -> CheckResult {
     match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
         source,
         dependency_roots,
         operator_config_root,
     ) {
         Ok(report) => {
-            let warnings: Vec<String> = report
-                .warnings
-                .iter()
-                .map(|w| format!("{w:?}"))
-                .collect();
-            CheckResult::new(
-                "verify",
-                OK,
-                json!({ "warnings": warnings }),
-            )
+            let warnings: Vec<String> = report.warnings.iter().map(|w| format!("{w:?}")).collect();
+            CheckResult::new("verify", OK, json!({ "warnings": warnings }))
         }
-        Err(e) => CheckResult::new(
-            "verify",
-            FAIL,
-            json!({ "error": format!("{e:#}") }),
-        ),
+        Err(e) => CheckResult::new("verify", FAIL, json!({ "error": format!("{e:#}") })),
     }
 }
 
@@ -251,7 +240,12 @@ fn import_one(engine: &Engine, plan_ctx: &PlanContext, item_ref: &str) -> Result
     let verified = engine
         .verify(plan_ctx, resolved)
         .map_err(|e| format!("verify: {e}"))?;
-    Ok(ryeos_app::env_probe::import_dry_run(engine, plan_ctx, &verified, &[]))
+    Ok(ryeos_app::env_probe::import_dry_run(
+        engine,
+        plan_ctx,
+        &verified,
+        &[],
+    ))
 }
 
 /// Refs of the python tools in `source/.ai/tools` (`tool:<bare-id>`), skipping
@@ -347,7 +341,10 @@ mod tests {
         );
         let r = check_manifest(tmp.path());
         assert_eq!(r.status, FAIL, "{:?}", r.detail);
-        assert!(r.detail["remedy"].as_str().unwrap().contains("manifest-sign"));
+        assert!(r.detail["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("manifest-sign"));
     }
 
     #[test]

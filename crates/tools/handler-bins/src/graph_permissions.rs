@@ -209,8 +209,9 @@ mod tests {
 
     #[test]
     fn malformed_declared_map_rejected() {
-        let err =
-            compose_err(json!({ "requires": { "capabilities": { "declared": { "execute": [] } } } }));
+        let err = compose_err(
+            json!({ "requires": { "capabilities": { "declared": { "execute": [] } } } }),
+        );
         assert!(err.contains("must be a list"), "got: {err}");
     }
 

@@ -44,9 +44,11 @@ struct GraphAccounting {
 
 impl GraphAccounting {
     fn record(&mut self, node: &str, step: u32, item_id: &str, cost: RuntimeCost) {
-        let total = self
-            .total
-            .get_or_insert(RuntimeCost { input_tokens: 0, output_tokens: 0, total_usd: 0.0 });
+        let total = self.total.get_or_insert(RuntimeCost {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_usd: 0.0,
+        });
         total.input_tokens += cost.input_tokens;
         total.output_tokens += cost.output_tokens;
         total.total_usd += cost.total_usd;
@@ -2593,12 +2595,18 @@ config:
     done:
       node_type: return
 "#;
-        let env = native_envelope(true, json!({"recommendations": ["a"]}), Some((50, 10, 0.0005)));
+        let env = native_envelope(
+            true,
+            json!({"recommendations": ["a"]}),
+            Some((50, 10, 0.0005)),
+        );
         let w = make_walker(make_graph(yaml), vec![env]);
         let result = w.execute(json!({}), None).await;
 
         assert!(!result.success, "assign failure should fail the run");
-        let cost = result.cost.expect("cost from successful child must survive assign failure");
+        let cost = result
+            .cost
+            .expect("cost from successful child must survive assign failure");
         assert_eq!(cost.input_tokens, 50);
     }
 
@@ -2624,7 +2632,13 @@ config:
 
         assert!(result.success, "continue policy keeps the run successful");
         assert_eq!(result.status, "completed_with_errors");
-        assert_eq!(result.cost.expect("cost recorded under continue").input_tokens, 30);
+        assert_eq!(
+            result
+                .cost
+                .expect("cost recorded under continue")
+                .input_tokens,
+            30
+        );
     }
 
     #[tokio::test]
@@ -2687,7 +2701,11 @@ config:
         assert!(result.success);
         let cost = result.cost.expect("foreach aggregate cost");
         assert_eq!(cost.input_tokens, 15);
-        assert_eq!(result.node_costs.len(), 1, "foreach aggregates to one record");
+        assert_eq!(
+            result.node_costs.len(),
+            1,
+            "foreach aggregates to one record"
+        );
         assert_eq!(result.node_costs[0].item_id, "directive:test/step");
     }
 
@@ -2814,7 +2832,11 @@ config:
       node_type: return
       output: "${state.got}"
 "#;
-        let env = native_envelope(true, json!({"recommendations": ["a", "b"]}), Some((100, 20, 0.001)));
+        let env = native_envelope(
+            true,
+            json!({"recommendations": ["a", "b"]}),
+            Some((100, 20, 0.001)),
+        );
         let w1 = make_walker(make_graph(yaml), vec![env]);
         let r1 = w1.execute(json!({}), None).await;
         assert!(r1.success, "got: {:?}", r1.error);

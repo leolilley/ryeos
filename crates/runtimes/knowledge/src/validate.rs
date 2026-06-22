@@ -26,13 +26,13 @@ pub fn validate(payload: &ValidatePayload) -> Result<ValidateOutput, KnowledgeEr
     // Edge endpoints must exist (dangling references are integrity errors).
     for e in &payload.edges {
         if !items.contains_key(&e.from) {
-            errors.push(format!("edge from-endpoint missing: {} -> {}", e.from, e.to));
-        }
-        if !items.contains_key(&e.to) {
             errors.push(format!(
-                "dangling edge to-endpoint: {} -> {}",
+                "edge from-endpoint missing: {} -> {}",
                 e.from, e.to
             ));
+        }
+        if !items.contains_key(&e.to) {
+            errors.push(format!("dangling edge to-endpoint: {} -> {}", e.from, e.to));
         }
     }
 
@@ -139,9 +139,8 @@ fn valid_ref_token(s: &str) -> bool {
     // characters cover those forms; notably whitespace is rejected, which
     // is the silent-drop case the corpus projector cannot canonicalize.
     !s.is_empty()
-        && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@')
-        })
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@'))
 }
 
 #[cfg(test)]
@@ -159,7 +158,11 @@ mod tests {
         }
     }
 
-    fn payload(items: &[(&str, &str)], edges: Vec<GraphEdge>, roots: Vec<String>) -> ValidatePayload {
+    fn payload(
+        items: &[(&str, &str)],
+        edges: Vec<GraphEdge>,
+        roots: Vec<String>,
+    ) -> ValidatePayload {
         let mut map = BTreeMap::new();
         for (r, b) in items {
             map.insert(r.to_string(), item(b));
@@ -174,7 +177,10 @@ mod tests {
     #[test]
     fn well_formed_corpus_is_valid() {
         let p = payload(
-            &[("k/a", "---\ntitle: A\ncategory: x\ntags: [t1]\n---\nbody text")],
+            &[(
+                "k/a",
+                "---\ntitle: A\ncategory: x\ntags: [t1]\n---\nbody text",
+            )],
             vec![],
             vec!["k/a".into()],
         );
@@ -290,7 +296,9 @@ mod tests {
         let out = validate(&p).unwrap();
         assert!(!out.valid);
         assert!(
-            out.errors.iter().any(|e| e.contains("invalid `references`")),
+            out.errors
+                .iter()
+                .any(|e| e.contains("invalid `references`")),
             "errors: {:?}",
             out.errors
         );
@@ -338,7 +346,10 @@ mod tests {
         let p = yaml_payload("k/a", "title: A\ncategory: c\ntags: [t]\nreferences: 123\n");
         let out = validate(&p).unwrap();
         assert!(!out.valid);
-        assert!(out.errors.iter().any(|e| e.contains("invalid `references`")));
+        assert!(out
+            .errors
+            .iter()
+            .any(|e| e.contains("invalid `references`")));
     }
 
     #[test]
@@ -364,7 +375,10 @@ mod tests {
 
     #[test]
     fn valid_yaml_item_is_valid() {
-        let p = yaml_payload("k/a", "title: A\ncategory: c\ntags: [t]\nreferences: [knowledge:k/b]\n");
+        let p = yaml_payload(
+            "k/a",
+            "title: A\ncategory: c\ntags: [t]\nreferences: [knowledge:k/b]\n",
+        );
         let out = validate(&p).unwrap();
         assert!(out.valid, "errors: {:?}", out.errors);
     }

@@ -194,10 +194,7 @@ pub struct RuntimeVaultRequirement {
 
 impl BundleEventRequirement {
     /// The exact caps this requirement requests for `bundle_id`.
-    pub fn requested_caps<'a>(
-        &'a self,
-        bundle_id: &'a str,
-    ) -> impl Iterator<Item = String> + 'a {
+    pub fn requested_caps<'a>(&'a self, bundle_id: &'a str) -> impl Iterator<Item = String> + 'a {
         self.operations
             .iter()
             .map(move |op| bundle_event_cap(op, bundle_id, &self.event_kind))
@@ -206,10 +203,7 @@ impl BundleEventRequirement {
 
 impl RuntimeVaultRequirement {
     /// The exact caps this requirement requests for `bundle_id`.
-    pub fn requested_caps<'a>(
-        &'a self,
-        bundle_id: &'a str,
-    ) -> impl Iterator<Item = String> + 'a {
+    pub fn requested_caps<'a>(&'a self, bundle_id: &'a str) -> impl Iterator<Item = String> + 'a {
         self.operations
             .iter()
             .map(move |op| runtime_vault_cap(op, bundle_id, &self.namespace))
@@ -385,7 +379,11 @@ mod tests {
     #[test]
     fn constructors_match_canonical_wire_form() {
         assert_eq!(
-            bundle_event_cap(&BundleEventOperation::Append, "example-bundle", "example_event"),
+            bundle_event_cap(
+                &BundleEventOperation::Append,
+                "example-bundle",
+                "example_event"
+            ),
             "ryeos.append.bundle-events.example-bundle/example_event"
         );
         assert_eq!(
@@ -481,7 +479,12 @@ mod tests {
 
     #[test]
     fn screens_out_wellformed_wildcard_intrusions_as_reserved() {
-        for grant in ["ryeos.scan.bundle-events.*", "ryeos.*.vault.*", "ryeos.put.*", "ryeos.*"] {
+        for grant in [
+            "ryeos.scan.bundle-events.*",
+            "ryeos.*.vault.*",
+            "ryeos.put.*",
+            "ryeos.*",
+        ] {
             let err = reject_disallowed_composed_grants(&[grant.into()]).unwrap_err();
             assert!(
                 matches!(err, ComposedGrantError::Reserved { .. }),
@@ -530,14 +533,14 @@ mod tests {
     #[test]
     fn unknown_keys_fail_static_validation() {
         for value in [
-            json!({ "capabilites": {} }),                       // capabilities typo
-            json!({ "capabilities": { "manfest": {} } }),       // manifest typo
-            json!({ "capabilities": { "callbacks": {} } }),     // dropped legacy key
+            json!({ "capabilites": {} }),                   // capabilities typo
+            json!({ "capabilities": { "manfest": {} } }),   // manifest typo
+            json!({ "capabilities": { "callbacks": {} } }), // dropped legacy key
             json!({ "capabilities": { "manifest": {
                 "bundle_events": [ { "event_kind": "e", "operations": ["append"], "extra": 1 } ]
-            } } }),                                              // unknown entry field
+            } } }), // unknown entry field
             json!({ "capabilities": { "declared": { "execute": [] } } }), // declared must be a list, not a map
-            json!({ "capabilities": { "declared": [1] } }),      // non-string cap
+            json!({ "capabilities": { "declared": [1] } }),               // non-string cap
         ] {
             assert!(
                 parse_runtime_requires(&value).is_err(),

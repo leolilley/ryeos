@@ -58,13 +58,7 @@ pub struct DirectiveHeader {
 /// dispatcher, augmentations) and is read directly off
 /// `KindComposedView` by the daemon, not by the runtime.
 pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
-    "name",
-    "extends",
-    "model",
-    "limits",
-    "outputs",
-    "context",
-    "hooks",
+    "name", "extends", "model", "limits", "outputs", "context", "hooks",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

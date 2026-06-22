@@ -59,8 +59,7 @@ pub fn manifest_sign(
             None => (None, false),
         };
 
-    let author_fingerprint =
-        lillux::signature::compute_fingerprint(&signing_key.verifying_key());
+    let author_fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
 
     Ok(ManifestSignReport {
         bundle_source: bundle_source.to_path_buf(),

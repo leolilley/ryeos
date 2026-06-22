@@ -116,7 +116,6 @@ fn frontmatter_block(content: &str) -> Option<&str> {
     }
 }
 
-
 /// Strict frontmatter parse for integrity validation:
 ///   - `Ok(None)`        — no frontmatter block present (not an error),
 ///   - `Ok(Some(obj))`   — a block parsed to a mapping (or was empty),

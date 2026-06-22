@@ -208,7 +208,10 @@ mod integration_tests {
             .get_thread_result("T-err-1")
             .expect("get_thread_result")
             .expect("thread result row should exist");
-        assert_eq!(result.outcome_code.as_deref(), Some("required_secret_missing"));
+        assert_eq!(
+            result.outcome_code.as_deref(),
+            Some("required_secret_missing")
+        );
         assert_eq!(result.error, Some(err));
     }
 

@@ -459,8 +459,13 @@ requires:
           operations: [get]
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
-        assert_eq!(def.declared_permissions, vec!["ryeos.execute.tool.echo".to_string()]);
-        let reqs = def.runtime_capability_requirements.expect("requirements parsed");
+        assert_eq!(
+            def.declared_permissions,
+            vec!["ryeos.execute.tool.echo".to_string()]
+        );
+        let reqs = def
+            .runtime_capability_requirements
+            .expect("requirements parsed");
         let caps = ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, "arc");
         assert_eq!(
             caps.into_iter().collect::<Vec<_>>(),

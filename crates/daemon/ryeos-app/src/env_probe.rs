@@ -193,9 +193,15 @@ fn shape_probe_result(interpreter: &str, result: lillux::SubprocessResult) -> Va
         });
     };
 
-    let import_ok = obj.get("import_ok").and_then(Value::as_bool).unwrap_or(false);
+    let import_ok = obj
+        .get("import_ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let in_venv = obj.get("in_venv").and_then(Value::as_bool).unwrap_or(false);
-    let package_count = obj.get("package_count").and_then(Value::as_u64).unwrap_or(0);
+    let package_count = obj
+        .get("package_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let resolved_interpreter = obj
         .get("interpreter")
         .and_then(Value::as_str)
@@ -229,7 +235,11 @@ mod tests {
             .map(|_| "python3".to_string())
     }
 
-    fn probe_args(tool: &std::path::Path, runtime_lib: &std::path::Path, project: &std::path::Path) -> Vec<String> {
+    fn probe_args(
+        tool: &std::path::Path,
+        runtime_lib: &std::path::Path,
+        project: &std::path::Path,
+    ) -> Vec<String> {
         vec![
             "-I".into(),
             "-u".into(),
@@ -270,7 +280,10 @@ mod tests {
     fn probe_succeeds_and_detects_execute() {
         let Some(py) = python3() else { return };
         let tmp = tempfile::tempdir().unwrap();
-        let (tool, lib) = plant(tmp.path(), "import os\ndef execute(p, pr):\n    return {}\n");
+        let (tool, lib) = plant(
+            tmp.path(),
+            "import os\ndef execute(p, pr):\n    return {}\n",
+        );
         let out = run_probe(&py, probe_args(&tool, &lib, tmp.path()), None, vec![]);
         assert_eq!(out["import_ok"], true, "{out}");
         assert_eq!(out["has_execute"], true, "{out}");

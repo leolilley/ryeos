@@ -303,9 +303,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             execution_hints: {
                 let mut hints = ryeos_engine::contracts::ExecutionHints::default();
                 if request.debug_raw {
-                    hints
-                        .values
-                        .insert("debug_raw".to_string(), json!(true));
+                    hints.values.insert("debug_raw".to_string(), json!(true));
                 }
                 hints
             },

@@ -112,11 +112,10 @@ mod tests {
         )
         .expect("validate must dispatch");
         assert_eq!(out["valid"], false);
-        assert!(out["errors"]
-            .as_array()
+        assert!(out["errors"].as_array().unwrap().iter().any(|e| e
+            .as_str()
             .unwrap()
-            .iter()
-            .any(|e| e.as_str().unwrap().contains("root not found in corpus: k/a")));
+            .contains("root not found in corpus: k/a")));
     }
 
     #[test]
@@ -179,7 +178,10 @@ mod tests {
         // implement — hits the single unknown arm.
         for op in ["bogus", "snapshot", "index"] {
             let err = dispatch(op, json!({})).expect_err("undeclared op must error");
-            assert!(matches!(err, KnowledgeError::InvalidInput { .. }), "{op}: {err:?}");
+            assert!(
+                matches!(err, KnowledgeError::InvalidInput { .. }),
+                "{op}: {err:?}"
+            );
         }
     }
 
@@ -200,13 +202,19 @@ mod tests {
         )
         .expect("must dispatch");
         // validate output shape (has `valid`), not query output (`matches`).
-        assert!(out.get("valid").is_some(), "should have run validate: {out}");
+        assert!(
+            out.get("valid").is_some(),
+            "should have run validate: {out}"
+        );
         assert!(out.get("matches").is_none(), "should NOT have run query");
     }
 
     #[test]
     fn non_object_payload_is_invalid_input() {
         let err = dispatch("query", json!("not an object")).expect_err("must error");
-        assert!(matches!(err, KnowledgeError::InvalidInput { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, KnowledgeError::InvalidInput { .. }),
+            "got: {err:?}"
+        );
     }
 }

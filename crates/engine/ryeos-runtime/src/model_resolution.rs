@@ -1345,7 +1345,10 @@ mod tests {
             .expect("strict load must succeed for a trusted signer")
             .expect("config file is present");
 
-        assert!(cfg.auth.env_var.is_none(), "offline provider requires no env var");
+        assert!(
+            cfg.auth.env_var.is_none(),
+            "offline provider requires no env var"
+        );
         assert!(matches!(cfg.family, ProtocolFamily::ChatCompletions));
         assert!(cfg.validate("local-openai").is_ok());
     }

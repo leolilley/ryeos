@@ -401,7 +401,10 @@ mod tests {
     #[test]
     fn debug_raw_attaches_debug_block_with_keys_not_values() {
         let mut env = HashMap::new();
-        env.insert("EXAMPLE_SECRET".to_string(), "super-secret-value".to_string());
+        env.insert(
+            "EXAMPLE_SECRET".to_string(),
+            "super-secret-value".to_string(),
+        );
         let mut plan = make_plan(vec![
             PlanNode::DispatchSubprocess {
                 id: PlanNodeId("entry:test".into()),

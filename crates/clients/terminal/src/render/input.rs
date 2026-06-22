@@ -166,7 +166,11 @@ mod tests {
         (0..w).map(|x| surface.get(x, y).rune).collect()
     }
 
-    fn cell_fg(surface: &TextSurface, x: usize, y: usize) -> ryeos_client_base::text_surface::Color {
+    fn cell_fg(
+        surface: &TextSurface,
+        x: usize,
+        y: usize,
+    ) -> ryeos_client_base::text_surface::Color {
         surface.get(x, y).fg
     }
 
@@ -195,7 +199,11 @@ mod tests {
 
         // The bracketed current argument is accented; the surrounding text muted.
         let bracket_x = hint_row.find('[').expect("bracket present");
-        assert_eq!(cell_fg(&surface, bracket_x, 2), ACCENT, "current arg accented");
+        assert_eq!(
+            cell_fg(&surface, bracket_x, 2),
+            ACCENT,
+            "current arg accented"
+        );
         let pre_x = hint_row.find('a').expect("the 'args:' label is present");
         assert_eq!(cell_fg(&surface, pre_x, 2), MUTED, "hint body muted");
     }

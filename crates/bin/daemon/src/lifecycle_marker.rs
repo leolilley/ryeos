@@ -154,7 +154,10 @@ mod tests {
     fn clean_exit_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         record_running(tmp.path());
-        assert!(matches!(read(tmp.path()), Some(LifecycleMarker::Running { .. })));
+        assert!(matches!(
+            read(tmp.path()),
+            Some(LifecycleMarker::Running { .. })
+        ));
         record_exit(tmp.path(), "signal");
         match read(tmp.path()) {
             Some(LifecycleMarker::Exited { reason, .. }) => assert_eq!(reason, "signal"),

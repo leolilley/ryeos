@@ -516,9 +516,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             no_trust_doc,
             cli.stdin_json,
         ),
-        Cmd::ManifestSign { bundle_source, name } => {
-            run_manifest_sign(bundle_source, name, cli.stdin_json)
-        }
+        Cmd::ManifestSign {
+            bundle_source,
+            name,
+        } => run_manifest_sign(bundle_source, name, cli.stdin_json),
         Cmd::Logs { app_root, lines } => run_logs(app_root, lines, cli.stdin_json),
         Cmd::Doctor {
             source,
@@ -746,35 +747,42 @@ fn run_build(
     use ryeos_engine::roots;
     use ryeos_tools::actions::publish::{run_publish, PublishOptions};
 
-    let (bundle_source, registry_roots, owner, name, skip_unsignable, allow_namespace_mismatch, no_trust_doc) =
-        if stdin_json {
-            if bundle_source.is_some() {
-                anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
-            }
-            let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
-            let registry_roots = params.registry_roots();
-            (
-                params.source,
-                registry_roots,
-                params.owner,
-                params.name,
-                params.skip_unsignable,
-                params.allow_namespace_mismatch,
-                params.no_trust_doc,
-            )
-        } else {
-            let source = bundle_source
-                .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
-            (
-                source,
-                registry_roots,
-                owner,
-                name,
-                skip_unsignable,
-                allow_namespace_mismatch,
-                no_trust_doc,
-            )
-        };
+    let (
+        bundle_source,
+        registry_roots,
+        owner,
+        name,
+        skip_unsignable,
+        allow_namespace_mismatch,
+        no_trust_doc,
+    ) = if stdin_json {
+        if bundle_source.is_some() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional BUNDLE_SOURCE");
+        }
+        let params: BundlePublishParams = serde_json::from_value(read_stdin_json()?)?;
+        let registry_roots = params.registry_roots();
+        (
+            params.source,
+            registry_roots,
+            params.owner,
+            params.name,
+            params.skip_unsignable,
+            params.allow_namespace_mismatch,
+            params.no_trust_doc,
+        )
+    } else {
+        let source = bundle_source
+            .ok_or_else(|| anyhow::anyhow!("BUNDLE_SOURCE required (or pass --stdin-json)"))?;
+        (
+            source,
+            registry_roots,
+            owner,
+            name,
+            skip_unsignable,
+            allow_namespace_mismatch,
+            no_trust_doc,
+        )
+    };
 
     let key_path = roots::runtime_root()
         .map_err(|e| anyhow::anyhow!("cannot resolve app root: {e}"))?

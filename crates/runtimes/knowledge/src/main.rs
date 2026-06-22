@@ -172,7 +172,10 @@ mod tests {
     #[test]
     fn error_mapping_preserves_taxonomy() {
         assert!(matches!(
-            knowledge_to_batch_error(KnowledgeError::InvalidInput { op: "query".into(), reason: "x".into() }),
+            knowledge_to_batch_error(KnowledgeError::InvalidInput {
+                op: "query".into(),
+                reason: "x".into()
+            }),
             BatchOpError::InvalidInput { field: None, .. }
         ));
         // Variants without a dedicated wire mapping collapse to OpFailed.
@@ -188,7 +191,10 @@ mod tests {
         // panic or a success — exercises BatchOpEnvelope -> BatchOpResult.
         let result = dispatch_op(&envelope("bogus", serde_json::json!({})));
         assert!(!result.success);
-        assert!(matches!(result.error, Some(BatchOpError::InvalidInput { .. })));
+        assert!(matches!(
+            result.error,
+            Some(BatchOpError::InvalidInput { .. })
+        ));
     }
 
     #[test]

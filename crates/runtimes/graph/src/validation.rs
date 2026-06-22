@@ -50,7 +50,9 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
         if let Err(err) = ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(
             std::slice::from_ref(grant),
         ) {
-            result.errors.push(format!("graph permission rejected: {err}"));
+            result
+                .errors
+                .push(format!("graph permission rejected: {err}"));
         }
     }
 

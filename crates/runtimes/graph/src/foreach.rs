@@ -150,7 +150,10 @@ pub async fn run_foreach_sequential(
                 errors.push(ErrorRecord {
                     step,
                     node: current_node.to_string(),
-                    error: format!("foreach sequential iteration failed: {}", failure.diagnostic),
+                    error: format!(
+                        "foreach sequential iteration failed: {}",
+                        failure.diagnostic
+                    ),
                 });
                 results.push(Value::Null);
             }
@@ -176,7 +179,8 @@ pub async fn run_foreach_sequential(
 /// Per-item result of a parallel foreach task: the leaf result, the
 /// (already interpolated) assign object for that item, and the iteration's
 /// reported cost — or a diagnostic.
-type ParallelItem = Result<(Value, Option<Value>, Option<RuntimeCost>), (String, Option<RuntimeCost>)>;
+type ParallelItem =
+    Result<(Value, Option<Value>, Option<RuntimeCost>), (String, Option<RuntimeCost>)>;
 
 pub async fn run_foreach_parallel(
     ctx: ForeachContext<'_>,
@@ -227,7 +231,9 @@ pub async fn run_foreach_parallel(
                 drop(permit);
                 let diagnostic = format!("interpolation error in foreach action: {e:#}");
                 // Interpolation failed before dispatch — no cost.
-                handles.push(tokio::spawn(async move { ParallelItem::Err((diagnostic, None)) }));
+                handles.push(tokio::spawn(async move {
+                    ParallelItem::Err((diagnostic, None))
+                }));
                 continue;
             }
         };

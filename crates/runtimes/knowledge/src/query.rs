@@ -71,10 +71,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
         }
         let body = strip_frontmatter(&item.raw_content, item_ref)
             .unwrap_or_else(|_| item.raw_content.clone());
-        let title = fm
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        let title = fm.get("title").and_then(|v| v.as_str()).map(str::to_string);
 
         // Searchable text: title + tags/category + body. Metadata terms
         // are folded in so a tag or title word contributes to relevance.
@@ -198,11 +195,7 @@ fn term_freq(text: &str) -> HashMap<String, usize> {
 }
 
 fn ref_prefix_ok(item_ref: &str, filters: &QueryFilters) -> bool {
-    filters.ref_prefixes.is_empty()
-        || filters
-            .ref_prefixes
-            .iter()
-            .any(|p| item_ref.starts_with(p))
+    filters.ref_prefixes.is_empty() || filters.ref_prefixes.iter().any(|p| item_ref.starts_with(p))
 }
 
 /// Tags/categories filters are intersection tests against the item's
@@ -269,7 +262,9 @@ fn make_excerpt(body: &str, terms: &[String]) -> String {
     }
 
     let chars: Vec<char> = body.chars().collect();
-    let start = earliest.map(|i| i.saturating_sub(EXCERPT_LEAD)).unwrap_or(0);
+    let start = earliest
+        .map(|i| i.saturating_sub(EXCERPT_LEAD))
+        .unwrap_or(0);
     let end = (start + EXCERPT_CHARS).min(chars.len());
     let core: String = chars[start..end].iter().collect();
     let core = core.trim();
@@ -327,8 +322,14 @@ mod tests {
     fn returns_relevant_item_first() {
         let p = payload(
             &[
-                ("k/cats", "---\ntitle: Cats\ntags: [animals]\n---\nCats purr and chase mice."),
-                ("k/cars", "---\ntitle: Cars\ntags: [vehicles]\n---\nCars have engines and wheels."),
+                (
+                    "k/cats",
+                    "---\ntitle: Cats\ntags: [animals]\n---\nCats purr and chase mice.",
+                ),
+                (
+                    "k/cars",
+                    "---\ntitle: Cars\ntags: [vehicles]\n---\nCars have engines and wheels.",
+                ),
             ],
             inputs("purring cats"),
         );
@@ -341,7 +342,10 @@ mod tests {
     #[test]
     fn excerpt_includes_matched_text() {
         let p = payload(
-            &[("k/doc", "---\ntitle: Doc\n---\nThe quick brown fox jumps over the lazy dog.")],
+            &[(
+                "k/doc",
+                "---\ntitle: Doc\n---\nThe quick brown fox jumps over the lazy dog.",
+            )],
             inputs("fox"),
         );
         let out = query(&p).unwrap();
@@ -389,10 +393,7 @@ mod tests {
     #[test]
     fn ref_prefix_filter_restricts_corpus() {
         let p = payload(
-            &[
-                ("memory/a", "needle"),
-                ("notes/b", "needle"),
-            ],
+            &[("memory/a", "needle"), ("notes/b", "needle")],
             QueryInputs {
                 query: "needle".into(),
                 limit: 10,
@@ -428,8 +429,14 @@ mod tests {
         assert_eq!(out.matches.len(), 1);
         let ex = &out.matches[0].excerpt;
         assert!(ex.to_lowercase().contains("whiskers"), "excerpt: {ex}");
-        assert!(!ex.contains("ryeos:signed"), "signature leaked into excerpt: {ex}");
-        assert!(!ex.contains("title:"), "frontmatter leaked into excerpt: {ex}");
+        assert!(
+            !ex.contains("ryeos:signed"),
+            "signature leaked into excerpt: {ex}"
+        );
+        assert!(
+            !ex.contains("title:"),
+            "frontmatter leaked into excerpt: {ex}"
+        );
         // Title still surfaced from frontmatter.
         assert_eq!(out.matches[0].title.as_deref(), Some("Felines"));
     }

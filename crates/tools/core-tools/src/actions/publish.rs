@@ -227,18 +227,17 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     }
 
     // ── Phase 4: generate + sign bundle manifest (idempotent) ──
-    let (manifest_generated, manifest_changed) =
-        match generate_and_sign_manifest(
-            &ai_dir,
-            &opts.bundle_source,
-            opts.name.as_deref(),
-            &opts.signing_key,
-        )
-        .context("manifest generation phase failed")?
-        {
-            Some((path, changed)) => (Some(path), changed),
-            None => (None, false),
-        };
+    let (manifest_generated, manifest_changed) = match generate_and_sign_manifest(
+        &ai_dir,
+        &opts.bundle_source,
+        opts.name.as_deref(),
+        &opts.signing_key,
+    )
+    .context("manifest generation phase failed")?
+    {
+        Some((path, changed)) => (Some(path), changed),
+        None => (None, false),
+    };
 
     // ── Phase 5: emit publisher trust doc (idempotent) ──
     // Suppressed on a partial publish: a trust doc is a clean-release artifact
@@ -723,7 +722,10 @@ mod tests {
             item_effective_bundle_id("tool:ryeos/core/bundle/publish"),
             Some("ryeos")
         );
-        assert_eq!(item_effective_bundle_id("service:bundle/sign"), Some("bundle"));
+        assert_eq!(
+            item_effective_bundle_id("service:bundle/sign"),
+            Some("bundle")
+        );
         assert_eq!(item_effective_bundle_id(""), None);
     }
 
@@ -756,7 +758,11 @@ mod runtime_authority_publish_tests {
         // No manifest source → false.
         assert!(!manifest_declares_runtime_authority(&ai).unwrap());
         // Plain manifest → false.
-        std::fs::write(ai.join("manifest.source.yaml"), "name: arc\nversion: \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            ai.join("manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\n",
+        )
+        .unwrap();
         assert!(!manifest_declares_runtime_authority(&ai).unwrap());
         // bundle_events declared → true.
         std::fs::write(

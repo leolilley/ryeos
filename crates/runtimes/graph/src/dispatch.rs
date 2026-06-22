@@ -738,7 +738,9 @@ mod tests {
             "outputs": null,
             "warnings": []
         });
-        assert!(expect_action_success(classify_envelope(envelope)).cost.is_none());
+        assert!(expect_action_success(classify_envelope(envelope))
+            .cost
+            .is_none());
     }
 
     #[test]
@@ -782,7 +784,9 @@ mod tests {
             "error": {"exit_code": 1, "stderr": "boom"},
             "artifacts": []
         });
-        assert!(expect_action_failure(classify_envelope(envelope)).cost.is_none());
+        assert!(expect_action_failure(classify_envelope(envelope))
+            .cost
+            .is_none());
     }
 
     #[test]

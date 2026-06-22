@@ -225,10 +225,8 @@ fn main() {
                             .await
                         {
                             Ok(binding) => {
-                                let composed = binding
-                                    .get("composed_value")
-                                    .cloned()
-                                    .unwrap_or(binding);
+                                let composed =
+                                    binding.get("composed_value").cloned().unwrap_or(binding);
                                 views.insert(view_ref, composed);
                             }
                             Err(e) => eprintln!("warn: failed to resolve {view_ref}: {e}"),

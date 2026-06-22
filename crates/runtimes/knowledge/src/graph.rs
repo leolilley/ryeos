@@ -182,7 +182,11 @@ mod tests {
         assert_eq!(out.nodes, vec!["a"]);
         assert!(!out.nodes.contains(&"ghost".to_string()));
         // ...nor as an emitted (internal) edge.
-        assert!(out.edges.is_empty(), "dangling edge must not be emitted: {:?}", out.edges);
+        assert!(
+            out.edges.is_empty(),
+            "dangling edge must not be emitted: {:?}",
+            out.edges
+        );
     }
 
     #[test]
@@ -197,6 +201,10 @@ mod tests {
         );
         let out = graph(&p).unwrap();
         assert!(out.warnings.iter().any(|w| w.contains("nope")));
-        assert!(out.nodes.is_empty(), "missing root must not be a node: {:?}", out.nodes);
+        assert!(
+            out.nodes.is_empty(),
+            "missing root must not be a node: {:?}",
+            out.nodes
+        );
     }
 }

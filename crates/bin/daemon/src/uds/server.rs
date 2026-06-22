@@ -260,7 +260,10 @@ fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contr
             .get("output_tokens")
             .and_then(|v| v.as_i64())
             .unwrap_or(0),
-        spend: cost.get("total_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        spend: cost
+            .get("total_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         provider: None,
         metadata: None,
     }

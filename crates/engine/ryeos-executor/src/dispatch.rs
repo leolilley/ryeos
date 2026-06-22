@@ -3128,7 +3128,8 @@ requires:
             );
             let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
             assert!(
-                err.to_string().contains("cannot self-declare action authority"),
+                err.to_string()
+                    .contains("cannot self-declare action authority"),
                 "declared={declared}: got {err}"
             );
         }

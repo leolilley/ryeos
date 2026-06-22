@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn sections_increment_at_separators() {
         let entries = vec![
-            block("pre"),         // section 0, no separator header
+            block("pre"),        // section 0, no separator header
             separator("turn 1"), // opens section 1
             block("a"),
             separator("turn 2"), // opens section 2
@@ -557,7 +557,11 @@ mod tests {
         collapsed.insert(0);
         let folded = fold_timeline(full, &collapsed);
         assert!(folded.collapsible.is_empty());
-        assert_eq!(folded.entries.len(), 2, "headerless content is never folded away");
+        assert_eq!(
+            folded.entries.len(),
+            2,
+            "headerless content is never folded away"
+        );
     }
 
     #[test]

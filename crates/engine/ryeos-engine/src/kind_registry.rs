@@ -3452,8 +3452,12 @@ metadata:
                 None,
             ),
         );
-        let metadata =
-            apply_extraction_rules(&parsed, &rules, Path::new("/proj/.ai/graphs/g.yaml"), "graphs");
+        let metadata = apply_extraction_rules(
+            &parsed,
+            &rules,
+            Path::new("/proj/.ai/graphs/g.yaml"),
+            "graphs",
+        );
         assert_eq!(
             metadata.extra.get("requires"),
             Some(&parsed["requires"]),
@@ -3475,8 +3479,12 @@ metadata:
                 None,
             ),
         );
-        let metadata =
-            apply_extraction_rules(&parsed, &rules, Path::new("/proj/.ai/graphs/g.yaml"), "graphs");
+        let metadata = apply_extraction_rules(
+            &parsed,
+            &rules,
+            Path::new("/proj/.ai/graphs/g.yaml"),
+            "graphs",
+        );
         assert!(!metadata.extra.contains_key("requires"));
     }
 
@@ -3901,7 +3909,10 @@ metadata:
             .map(|o| o.name.as_str())
             .collect();
         for expected in ["compose", "query", "graph", "validate"] {
-            assert!(ops.contains(&expected), "missing op `{expected}` in {ops:?}");
+            assert!(
+                ops.contains(&expected),
+                "missing op `{expected}` in {ops:?}"
+            );
         }
         assert!(
             !ops.contains(&"compose_positions"),
@@ -3923,7 +3934,11 @@ metadata:
         assert_eq!(query_op.side_effects, SideEffectClass::None);
         assert!(query_op.inputs.contains_key("query"));
         for name in ["query", "graph", "validate"] {
-            assert_eq!(op(name).scope, OpScope::Corpus, "{name} must be corpus-scoped");
+            assert_eq!(
+                op(name).scope,
+                OpScope::Corpus,
+                "{name} must be corpus-scoped"
+            );
         }
         assert_eq!(op("compose").scope, OpScope::SingleRoot);
     }

@@ -521,11 +521,8 @@ mod tests {
         // `|json` serializes, `|from_json` parses back to the original value.
         let ctx = json!({"state": {"stats": {"hp": 7, "items": ["a"]}}});
         let serialized = interpolate(&json!("${state.stats|json}"), &ctx).unwrap();
-        let reparsed = interpolate(
-            &json!("${blob|from_json}"),
-            &json!({"blob": serialized}),
-        )
-        .unwrap();
+        let reparsed =
+            interpolate(&json!("${blob|from_json}"), &json!({"blob": serialized})).unwrap();
         assert_eq!(reparsed, json!({"hp": 7, "items": ["a"]}));
     }
 

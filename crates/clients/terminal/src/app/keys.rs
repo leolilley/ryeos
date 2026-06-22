@@ -19,8 +19,10 @@ pub fn handle_key(core: &mut StudioCore, key: KeyEvent) -> Vec<StudioEffect> {
     // focused lens is a feed sitting on a foldable section. The state change
     // is the shared `SetFold` event; only this key binding is terminal-local
     // (the feed is a cell-grid lens), so web keeps ←/→ for tile focus.
-    let no_mods =
-        !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.meta && !event.modifiers.shift;
+    let no_mods = !event.modifiers.ctrl
+        && !event.modifiers.alt
+        && !event.modifiers.meta
+        && !event.modifiers.shift;
     if no_mods && matches!(event.key, StudioKey::ArrowLeft | StudioKey::ArrowRight) {
         if let Some((tile_id, section)) = focused_fold_section(core) {
             let collapsed = matches!(event.key, StudioKey::ArrowLeft);

@@ -531,7 +531,9 @@ fn narrow_requires_capabilities(
 /// Reject a legacy top-level `permissions:` block. It is removed from the
 /// schema, but `composed_value_contract` ignores extra top-level keys, so an
 /// old item would otherwise silently lose its authority — fail it instead.
-pub(crate) fn reject_legacy_permissions(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+pub(crate) fn reject_legacy_permissions(
+    parsed: &Value,
+) -> Result<(), (ResolutionStepNameWire, String)> {
     if parsed
         .get("permissions")
         .map(|v| !v.is_null())
@@ -549,7 +551,9 @@ pub(crate) fn reject_legacy_permissions(parsed: &Value) -> Result<(), (Resolutio
 
 /// Validate the `requires` tree's known keys so typos and dropped legacy keys
 /// (e.g. `callbacks`) fail loudly at compose time rather than minting nothing.
-pub(crate) fn validate_requires_shape(parsed: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+pub(crate) fn validate_requires_shape(
+    parsed: &Value,
+) -> Result<(), (ResolutionStepNameWire, String)> {
     let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
     let Some(requires) = parsed.get("requires").filter(|v| !v.is_null()) else {
         return Ok(());
@@ -632,7 +636,9 @@ fn compose_declared(
 /// Strict shape check for `declared`: a list of cap strings (the cap encodes
 /// its own verb). Fails (does not filter) so malformed authority is caught at
 /// compose rather than silently turned into deny-all / partial caps.
-pub(crate) fn validate_declared_shape(declared: &Value) -> Result<(), (ResolutionStepNameWire, String)> {
+pub(crate) fn validate_declared_shape(
+    declared: &Value,
+) -> Result<(), (ResolutionStepNameWire, String)> {
     let err = |m: &str| (ResolutionStepNameWire::PipelineInit, m.to_string());
     let arr = declared
         .as_array()
@@ -691,8 +697,18 @@ pub(crate) fn validate_manifest_shape(
             )));
         }
     }
-    validate_manifest_resources(map.get("bundle_events"), "event_kind", BUNDLE_EVENT_OPS, "bundle_events")?;
-    validate_manifest_resources(map.get("runtime_vault"), "namespace", RUNTIME_VAULT_OPS, "runtime_vault")?;
+    validate_manifest_resources(
+        map.get("bundle_events"),
+        "event_kind",
+        BUNDLE_EVENT_OPS,
+        "bundle_events",
+    )?;
+    validate_manifest_resources(
+        map.get("runtime_vault"),
+        "namespace",
+        RUNTIME_VAULT_OPS,
+        "runtime_vault",
+    )?;
     Ok(())
 }
 
@@ -706,9 +722,11 @@ fn validate_manifest_resources(
     let Some(value) = list else {
         return Ok(());
     };
-    let arr = value
-        .as_array()
-        .ok_or_else(|| err(format!("`requires.capabilities.manifest.{tag}` must be a list")))?;
+    let arr = value.as_array().ok_or_else(|| {
+        err(format!(
+            "`requires.capabilities.manifest.{tag}` must be a list"
+        ))
+    })?;
     for entry in arr {
         let obj = entry
             .as_object()
@@ -730,7 +748,11 @@ fn validate_manifest_resources(
         let ops = obj
             .get("operations")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| err(format!("`{tag}` entry `{id}` must list `operations` as an array")))?;
+            .ok_or_else(|| {
+                err(format!(
+                    "`{tag}` entry `{id}` must list `operations` as an array"
+                ))
+            })?;
         if ops.is_empty() {
             return Err(err(format!(
                 "`{tag}` entry `{id}` must list at least one operation"
@@ -1469,29 +1491,51 @@ mod tests {
     fn declared_child_narrowed_against_parent_silently_drops() {
         // `declared` is an allowance, not a hard requirement — a child that
         // names a cap the parent lacks is narrowed (dropped), NOT failed.
-        let parent = json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
+        let parent =
+            json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
         let child = json!({
             "extends": "parent",
             "requires": declared_block(json!(["ryeos.execute.tool.read", "ryeos.execute.tool.bash"])),
             "body": "b"
         });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            declared_execute(&view),
+            vec!["ryeos.execute.tool.read".to_string()]
+        );
     }
 
     #[test]
     fn declared_child_omits_inherits_parent() {
-        let parent = json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
+        let parent =
+            json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "" });
         let child = json!({ "extends": "parent", "body": "b" });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            declared_execute(&view),
+            vec!["ryeos.execute.tool.read".to_string()]
+        );
     }
 
     #[test]
     fn declared_root_level_kept_verbatim() {
-        let child = json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "b" });
+        let child =
+            json!({ "requires": declared_block(json!(["ryeos.execute.tool.read"])), "body": "b" });
         let view = run(requires_config(), child, vec![]).unwrap();
-        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        assert_eq!(
+            declared_execute(&view),
+            vec!["ryeos.execute.tool.read".to_string()]
+        );
     }
 
     // ── mixed-subtree inheritance (declared and manifest independent) ─
@@ -1511,8 +1555,16 @@ mod tests {
             "requires": declared_block(json!(["ryeos.execute.tool.read"])),
             "body": "b"
         });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            declared_execute(&view),
+            vec!["ryeos.execute.tool.read".to_string()]
+        );
         assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
     }
 
@@ -1534,8 +1586,16 @@ mod tests {
             ),
             "body": "b"
         });
-        let view = run(requires_config(), child, vec![ancestor_input("parent", parent)]).unwrap();
-        assert_eq!(declared_execute(&view), vec!["ryeos.execute.tool.read".to_string()]);
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            declared_execute(&view),
+            vec!["ryeos.execute.tool.read".to_string()]
+        );
         assert_eq!(requires_pairs(&view), vec!["be:e:append".to_string()]);
     }
 
@@ -1546,7 +1606,8 @@ mod tests {
         let child = json!({ "permissions": ["ryeos.execute.tool.read"], "body": "b" });
         let err = run(requires_config(), child, vec![]).unwrap_err();
         assert!(
-            err.1.contains("`permissions:` is removed") && err.1.contains("requires.capabilities.declared"),
+            err.1.contains("`permissions:` is removed")
+                && err.1.contains("requires.capabilities.declared"),
             "got: {}",
             err.1
         );
@@ -1562,7 +1623,8 @@ mod tests {
         });
         let err = run(requires_config(), child, vec![]).unwrap_err();
         assert!(
-            err.1.contains("unknown key `requires.capabilities.callbacks`"),
+            err.1
+                .contains("unknown key `requires.capabilities.callbacks`"),
             "got: {}",
             err.1
         );
