@@ -208,10 +208,9 @@ pub(crate) fn spawn_dispatch_launch(
                 // thread was never created or the runtime already drove it
                 // terminal.
                 if let Ok(Some(detail)) = state_clone.threads.get_thread(&pre_minted_thread_id) {
-                    if !matches!(
-                        detail.status.as_str(),
-                        "completed" | "failed" | "cancelled" | "killed" | "timed_out"
-                    ) {
+                    if !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+                        .is_some_and(|s| s.is_terminal())
+                    {
                         let _ = state_clone.threads.finalize_thread(
                             &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
                                 thread_id: pre_minted_thread_id.clone(),

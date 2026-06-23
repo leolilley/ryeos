@@ -1302,10 +1302,9 @@ pub(crate) fn finalize_method_thread_if_needed(
     result: Option<Value>,
 ) {
     if let Ok(Some(detail)) = state.threads.get_thread(thread_id) {
-        if matches!(
-            detail.status.as_str(),
-            "completed" | "failed" | "cancelled" | "killed" | "timed_out"
-        ) {
+        if ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+            .is_some_and(|s| s.is_terminal())
+        {
             return;
         }
     }

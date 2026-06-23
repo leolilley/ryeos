@@ -60,10 +60,9 @@ async fn wait_for_terminal_thread(h: &DaemonHarness, thread_id: &str) -> Value {
             .and_then(|t| t.get("status"))
             .and_then(Value::as_str)
         {
-            if matches!(
-                status,
-                "completed" | "failed" | "cancelled" | "killed" | "timed_out"
-            ) {
+            if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
+                .is_some_and(|s| s.is_terminal())
+            {
                 return result;
             }
         }
@@ -268,6 +267,44 @@ An accepted-launch knowledge fixture.
 "#
     );
     let signed = lillux::signature::sign_content(&content, signer, "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+/// Plant a signed wrapper tool that declares `requires.capabilities.manifest`
+/// with no signed bundle manifest backing it — so manifest-cap derivation
+/// fails. Resolves + trust-verifies (signed) and has an executor_id, so it
+/// reaches the manifest check in the terminal preflight.
+fn plant_wrapper_tool_bad_manifest(
+    project: &Path,
+    rel_path: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let path = project.join(format!(".ai/tools/{rel_path}.yaml"));
+    let dir_relative = Path::new(rel_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    std::fs::create_dir_all(path.parent().expect("tool parent dir"))?;
+    let body = format!(
+        r#"category: "{dir_relative}"
+version: "1.0.0"
+tool_type: "subprocess"
+executor_id: "@subprocess"
+description: "wrapper tool declaring manifest runtime caps with no manifest backing"
+config:
+  command: "/bin/true"
+  timeout_secs: 30
+requires:
+  capabilities:
+    manifest:
+      runtime_vault:
+        - namespace: "testns"
+          operations: ["get"]
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(&path, signed)?;
     Ok(())
 }
@@ -573,6 +610,40 @@ async fn execute_launch_terminal_tool_without_executor_id_is_rejected() {
     assert!(
         body.get("thread_id").is_none(),
         "terminal-tool rejection must not include thread_id: {body}"
+    );
+}
+
+/// A terminal tool whose `requires.capabilities.manifest` has no signed
+/// manifest backing must be rejected synchronously (the full manifest-cap
+/// derivation runs in preflight), before a thread_id is minted.
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_launch_terminal_tool_bad_manifest_requires_is_rejected() {
+    let (h, fixture) = DaemonHarness::start_fast().await.expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_wrapper_tool_bad_manifest(project.path(), "test/wrapper", &fixture.publisher)
+        .expect("plant wrapper tool");
+
+    let (status, body) = h
+        .post_json(
+            "/execute/launch",
+            json!({
+                "item_ref": "tool:test/wrapper",
+                "project_path": project.path().to_str().unwrap(),
+                "parameters": {},
+                "launch_mode": "accepted"
+            }),
+        )
+        .await
+        .expect("post /execute/launch wrapper tool bad manifest");
+
+    assert!(
+        status.is_client_error(),
+        "expected client error, got {status}; body={body}"
+    );
+    assert!(
+        body.get("thread_id").is_none(),
+        "bad-manifest rejection must not include thread_id: {body}"
     );
 }
 

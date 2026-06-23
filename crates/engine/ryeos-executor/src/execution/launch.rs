@@ -680,6 +680,30 @@ pub struct BuildAndLaunchParams<'a> {
     pub previous_thread_id: Option<&'a str>,
 }
 
+/// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
+/// returns before the thread reached a terminal status. This covers the
+/// post-create `?` paths (execution policy, limits, resolution pipeline,
+/// effective trust, capability mint) that would otherwise leave the row stuck
+/// at `created` — the sync `/execute` counterpart of the accepted-launch
+/// finalize-on-error net. It no-ops when the thread is already terminal —
+/// normal success (the runtime self-finalized), or a path that finalized
+/// explicitly — so it never overrides a real outcome.
+struct FinalizeFailedOnDrop<'a> {
+    state: &'a AppState,
+    thread_id: String,
+}
+
+impl Drop for FinalizeFailedOnDrop<'_> {
+    fn drop(&mut self) {
+        crate::dispatch::finalize_method_thread_if_needed(
+            self.state,
+            &self.thread_id,
+            "failed",
+            None,
+        );
+    }
+}
+
 pub async fn build_and_launch(
     params: BuildAndLaunchParams<'_>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
@@ -711,6 +735,14 @@ pub async fn build_and_launch(
         None => state.threads.create_root_thread(resolved)?,
     };
     let thread_id = thread.thread_id.clone();
+
+    // Arm the persistence-first guard: any post-create failure below finalizes
+    // the thread `failed` instead of leaving it stuck at `created` (no-op once
+    // the thread is terminal).
+    let _finalize_guard = FinalizeFailedOnDrop {
+        state,
+        thread_id: thread_id.clone(),
+    };
 
     let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
     let effective_parsers = engine
