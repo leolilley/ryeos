@@ -495,16 +495,6 @@ impl StudioCore {
                 .is_some_and(|project| !project.path.is_empty())
     }
 
-    pub fn studio_projects_service_available(&self) -> bool {
-        self.data.dimension.as_ref().is_some_and(|dimension| {
-            dimension
-                .local_node
-                .services
-                .iter()
-                .any(|service| service.service_ref == "service:ui/studio/projects/list")
-        })
-    }
-
     pub fn initial_effects(&mut self) -> Vec<StudioEffect> {
         let needs_atlas = self.surface_uses_atlas_ambient();
         let mut needs_atlas_items = needs_atlas && self.ui.atlas.active_projection.is_ai_space();
@@ -1007,33 +997,15 @@ mod tests {
     }
 
     #[test]
-    fn studio_dock_defaults_come_from_fallback_surface_slots() {
+    fn default_docks_are_empty_no_views_named_in_code() {
+        // The default slot set is empty: the engine never names product views.
+        // Slots come only from surface data (the bundle YAMLs); a no-surface
+        // default has no slots rather than fabricated input/threads/inspector.
         let docks = StudioDockState::default();
-        // The fallback surface declares no top slot at all.
         assert!(docks.top.is_none());
-        let bottom = docks.bottom.as_ref().expect("bottom slot");
-        assert!(bottom.visible);
-        assert_eq!(bottom.size, 7);
-        // The bottom input is now a view (`view:ryeos/input`), not a slot
-        // literal. Slot content is uniformly a bound view ref.
-        assert!(matches!(
-            &bottom.content,
-            StudioDockContent::View { view_ref } if view_ref == "view:ryeos/input"
-        ));
-        let left = docks.left.as_ref().expect("left slot");
-        assert!(!left.visible);
-        assert_eq!(left.size, 32);
-        assert!(matches!(
-            &left.content,
-            StudioDockContent::View { view_ref } if view_ref == "view:ryeos/threads/list"
-        ));
-        let right = docks.right.as_ref().expect("right slot");
-        assert!(!right.visible);
-        assert_eq!(right.size, 40);
-        assert!(matches!(
-            &right.content,
-            StudioDockContent::View { view_ref } if view_ref == "view:ryeos/item/inspector"
-        ));
+        assert!(docks.bottom.is_none());
+        assert!(docks.left.is_none());
+        assert!(docks.right.is_none());
     }
 
     /// Seed a `view:ryeos/input` binding (chat box: route-fold submit).
@@ -1046,6 +1018,16 @@ mod tests {
             }))
             .unwrap(),
         );
+        // The default slot set is empty (no views named in code), so give the
+        // core a bottom input slot the way a real surface's data would.
+        core.ui.docks = StudioDockState::from_slots(&SlotsSpec {
+            bottom: Some(SlotSpec {
+                content: SlotContentSpec::View("view:ryeos/input".to_string()),
+                open: true,
+                size: 7,
+            }),
+            ..SlotsSpec::default()
+        });
     }
 
     #[test]

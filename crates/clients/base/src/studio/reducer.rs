@@ -440,12 +440,15 @@ impl StudioCore {
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
             // Inspection IS selection: a facet write on the seat braid.
+            // Inspection IS selection: a facet write, peer to `input.route`.
+            // The engine never opens or names the inspector — it's a view that
+            // reads `@facet:selection.*` and refreshes `on_facet: selection`,
+            // shown as a slot or a lens like any other facet-bound view.
             StudioAction::InspectItem { canonical_ref } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "item": canonical_ref }),
                 );
-                self.ensure_inspector_tile();
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
@@ -455,7 +458,6 @@ impl StudioCore {
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "thread": thread_id }),
                 );
-                self.ensure_inspector_tile();
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
@@ -469,7 +471,6 @@ impl StudioCore {
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "summary": { "title": title, "detail": detail } }),
                 );
-                self.ensure_inspector_tile();
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
@@ -826,13 +827,58 @@ impl StudioCore {
     }
 
     fn cycle_workspace_tab(&mut self, direction: StudioStackMoveDirection) -> Vec<StudioEffect> {
-        let len = self.workspaces.len().max(1);
         let delta = match direction {
             StudioStackMoveDirection::Up => -1,
             StudioStackMoveDirection::Down => 1,
         };
+        // Single-lens has no workspace tabs to page — "cycle" swaps the one
+        // center lens through the surface library instead.
+        if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens {
+            return self.cycle_lens(delta);
+        }
+        let len = self.workspaces.len().max(1);
         let next = wrap_index(self.active_workspace, delta, len);
         self.switch_workspace_tab(next)
+    }
+
+    /// The surface's ordered library, filtered to refs that work as a center
+    /// lens: a real bound view that is neither a scene backdrop nor the foot
+    /// input. Single-lens `Ctrl+←/→` cycles this list.
+    fn lens_library(&self) -> Vec<String> {
+        self.data
+            .session
+            .as_ref()
+            .and_then(|session| session.effective_surface.as_ref())
+            .and_then(|surface| surface.get("library"))
+            .and_then(|library| library.as_array())
+            .map(|refs| {
+                refs.iter()
+                    .filter_map(|value| value.as_str())
+                    .filter(|view_ref| {
+                        self.views.get(*view_ref).is_some_and(|binding| {
+                            binding.widget != "scene" && binding.input.is_none()
+                        })
+                    })
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn cycle_lens(&mut self, delta: i32) -> Vec<StudioEffect> {
+        let lenses = self.lens_library();
+        if lenses.is_empty() {
+            return Vec::new();
+        }
+        let current = self.workspace.focused_view().map(|view| view.view_ref.clone());
+        let index = current
+            .as_ref()
+            .and_then(|cur| lenses.iter().position(|lens| lens == cur))
+            .unwrap_or(0);
+        let next = wrap_index(index, delta, lenses.len());
+        self.open_view(ViewSpec {
+            view_ref: lenses[next].clone(),
+        })
     }
 
     fn switch_workspace_tab(&mut self, index: usize) -> Vec<StudioEffect> {
@@ -858,25 +904,6 @@ impl StudioCore {
         self.initial_effects()
     }
 
-    fn ensure_inspector_tile(&mut self) {
-        if let Some(tile_id) = self.workspace.tile_ids().into_iter().find(|tile_id| {
-            self.workspace.tiles.get(tile_id).is_some_and(|tile| {
-                matches!(
-                    &tile.view,
-                    ViewSpec { view_ref } if view_ref == "view:ryeos/item/inspector"
-                )
-            })
-        }) {
-            self.workspace.focused_tile = tile_id;
-            self.push_motion(StudioMotionEventVm::FocusChanged {
-                tile_id: tile_id.0.to_string(),
-            });
-            return;
-        }
-        self.add_tile_motions(ViewSpec {
-            view_ref: "view:ryeos/item/inspector".to_string(),
-        });
-    }
 
     fn set_tile_cursor(&mut self, tile_id: TileId, index: usize) -> bool {
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
@@ -1803,7 +1830,24 @@ mod tests {
             session_id: "session-1".to_string(),
             surface_ref: "surface:ryeos/studio/base".to_string(),
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
-            effective_surface: None,
+            // A realistic session carries its surface as data: the engine's
+            // default slot set is now empty (it names no views), so the test
+            // session declares its slots here as fixture data — the input,
+            // threads, and inspector slots the suite was written against.
+            effective_surface: Some(serde_json::json!({
+                "name": "studio-base",
+                "slots": {
+                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 },
+                    "left": { "content": "view:ryeos/threads/list", "open": false, "size": 32 },
+                    "right": { "content": "view:ryeos/item/inspector", "open": false, "size": 40 }
+                },
+                "views": {
+                    "view:ryeos/input": {
+                        "widget": "text",
+                        "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+                    }
+                }
+            })),
             project_path: Some("/tmp/project".to_string()),
             read_only: true,
             granted_caps: Vec::new(),
@@ -3341,6 +3385,118 @@ mod tests {
             core.workspace.tile_ids().len(),
             1,
             "OpenNewView does not add a tile in single-lens"
+        );
+    }
+
+    #[test]
+    fn single_lens_cycle_tab_walks_the_library_skipping_scene_and_input() {
+        // In single-lens, Ctrl+←/→ (CycleTab) swaps the one center lens
+        // through the surface library — scene backdrops and the foot input
+        // are not lenses and are skipped.
+        let session = BrowserSession {
+            session_id: "s".to_string(),
+            surface_ref: "surface:ryeos/studio/lens".to_string(),
+            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
+            effective_surface: Some(serde_json::json!({
+                "name": "lens-test",
+                "library": ["view:a", "view:scene", "view:input", "view:b"],
+                "views": {
+                    "view:a": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } },
+                    "view:scene": { "widget": "scene" },
+                    "view:input": { "widget": "text", "input": { "id": "line" } },
+                    "view:b": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } }
+                }
+            })),
+            project_path: Some("/tmp/p".to_string()),
+            read_only: false,
+            granted_caps: Vec::new(),
+            events_url: None,
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+
+        // The lens-able library excludes the scene backdrop and the input.
+        assert_eq!(
+            core.lens_library(),
+            vec!["view:a".to_string(), "view:b".to_string()]
+        );
+
+        let open = |core: &mut StudioCore, view_ref: &str| {
+            core.dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::Activate {
+                    action: StudioAction::OpenView {
+                        view: ViewSpec {
+                            view_ref: view_ref.to_string(),
+                        },
+                    },
+                },
+            });
+        };
+        let cycle = |core: &mut StudioCore| {
+            core.dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::Activate {
+                    action: StudioAction::CycleTab {
+                        direction: StudioStackMoveDirection::Down,
+                    },
+                },
+            });
+        };
+
+        open(&mut core, "view:a");
+        cycle(&mut core);
+        assert!(
+            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:b"),
+            "cycle forward moves to the next lens"
+        );
+        assert_eq!(core.workspace.tile_ids().len(), 1, "cycling stays single-lens");
+
+        cycle(&mut core);
+        assert!(
+            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:a"),
+            "cycle wraps back to the first lens"
+        );
+    }
+
+    #[test]
+    fn inspect_is_a_plain_selection_facet_write() {
+        // Inspection is a facet write, peer to input.route — the engine never
+        // opens, names, or swaps to the inspector. The center lens is
+        // unchanged and no tile is added; the inspector is a facet-bound view
+        // (slot or lens) reached by ordinary navigation, live via on_facet.
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        seed_view(&mut core, "view:ryeos/items/space");
+
+        // Start on a list lens.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec {
+                        view_ref: "view:ryeos/items/space".to_string(),
+                    },
+                },
+            },
+        });
+        assert_eq!(core.workspace.tile_ids().len(), 1);
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectItem {
+                    canonical_ref: "tool:ryeos/x".to_string(),
+                },
+            },
+        });
+
+        // The selection facet is set …
+        assert_eq!(
+            core.seat.fold().get(crate::studio::seat::KEY_SELECTION),
+            Some(&serde_json::json!({ "item": "tool:ryeos/x" })),
+        );
+        // … and nothing was opened or swapped: same single tile, same lens.
+        assert_eq!(core.workspace.tile_ids().len(), 1);
+        assert!(
+            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"),
+            "inspect does not open or swap to the inspector — it only writes the facet"
         );
     }
 

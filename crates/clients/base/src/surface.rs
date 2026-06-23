@@ -261,23 +261,14 @@ pub struct SlotsSpec {
 
 impl Default for SlotsSpec {
     fn default() -> Self {
+        // No default slots: the engine never names product views. Surfaces
+        // declare their own slots; a slots-less surface simply has none. The
+        // builtin fallback surface declares its own minimal slot explicitly.
         Self {
             top: None,
-            bottom: Some(SlotSpec {
-                content: SlotContentSpec::View("view:ryeos/input".to_string()),
-                open: true,
-                size: 7,
-            }),
-            left: Some(SlotSpec {
-                content: SlotContentSpec::View("view:ryeos/threads/list".to_string()),
-                open: false,
-                size: 32,
-            }),
-            right: Some(SlotSpec {
-                content: SlotContentSpec::View("view:ryeos/item/inspector".to_string()),
-                open: false,
-                size: 40,
-            }),
+            bottom: None,
+            left: None,
+            right: None,
         }
     }
 }
@@ -950,21 +941,21 @@ mod tests {
     }
 
     #[test]
-    fn builtin_default_is_empty_center_with_default_slots() {
+    fn builtin_default_names_no_views() {
+        // The builtin fallback is an empty shell: it names zero product views
+        // (no fire-sword). Real content comes from surface data; with nothing
+        // resolved, the fallback is simply empty.
         let spec = builtin_default();
         assert_eq!(spec.name, "studio-base");
         assert!(spec.tiles.is_empty());
         assert_eq!(spec.tiling, TilingSpec::default());
-        assert!(matches!(
-            &spec.slots.bottom,
-            Some(SlotSpec {
-                content: SlotContentSpec::View(view_ref),
-                open: true,
-                size: 7,
-            }) if view_ref == "view:ryeos/input"
-        ));
+        assert!(spec.slots.bottom.is_none());
         assert!(spec.slots.top.is_none());
-        assert_eq!(spec.style.border, BorderStyleSpec::Thin);
+        assert!(spec.slots.left.is_none());
+        assert!(spec.slots.right.is_none());
+        assert!(spec.views.is_none());
+        assert!(spec.backdrop.is_none());
+        assert!(spec.library.is_empty());
     }
 
     #[test]
