@@ -15,7 +15,7 @@ use super::limits::{
     load_limits_config,
 };
 use super::thread_meta::ThreadMeta;
-use ryeos_app::callback_token::{compute_ttl, effective_bundle_id_for_request};
+use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
@@ -729,10 +729,26 @@ pub async fn build_and_launch(
         required_secret_count = metadata_required_secrets.len(),
         "launching native runtime"
     );
-    // 1. Create DB thread (status = created)
-    let thread = match pre_minted_thread_id {
-        Some(id) => state.threads.create_root_thread_with_id(id, resolved)?,
-        None => state.threads.create_root_thread(resolved)?,
+    // 1. Create DB thread (status = created). A chained-resume turn
+    //    (`previous_thread_id` present) braids a successor onto the source's
+    //    chain — lineage persisted at spawn — instead of a fresh root.
+    let thread = match (pre_minted_thread_id, previous_thread_id) {
+        (Some(id), Some(source)) => {
+            state
+                .threads
+                .create_continuation_with_id(id, source, resolved, Some("chained_resume"))?
+        }
+        (Some(id), None) => state.threads.create_root_thread_with_id(id, resolved)?,
+        (None, Some(source)) => {
+            let id = ryeos_app::thread_lifecycle::new_thread_id();
+            state.threads.create_continuation_with_id(
+                &id,
+                source,
+                resolved,
+                Some("chained_resume"),
+            )?
+        }
+        (None, None) => state.threads.create_root_thread(resolved)?,
     };
     let thread_id = thread.thread_id.clone();
 
@@ -1027,7 +1043,9 @@ pub async fn build_and_launch(
     // derived so the daemon-side dispatcher can enforce the same set
     // the runtime sees. This closes the trust gap where the runtime
     // was the only entity gating its own callback dispatches.
-    let ttl = compute_ttl(Some(hard_limits.duration_seconds));
+    // Run-scoped token: must outlive the run's hard timeout + finalization, so
+    // a `duration > 3600s` run does not lose callback authority mid-run.
+    let ttl = launch_token_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,

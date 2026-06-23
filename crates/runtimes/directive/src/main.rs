@@ -19,6 +19,46 @@ mod runner;
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult};
 use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 
+/// Render the stimulus that opens a run: interpolate the directive body with the
+/// envelope inputs, then append any inputs the body did not itself reference.
+/// Shared by the fresh-launch and chained-resume paths so both produce the same
+/// stimulus.
+fn render_stimulus(prompt_template: &str, inputs: &serde_json::Value) -> Result<String> {
+    let interpolated_prompt = if inputs.is_null() {
+        prompt_template.to_string()
+    } else {
+        let context = serde_json::json!({ "inputs": inputs });
+        match ryeos_runtime::interpolate(&serde_json::json!(prompt_template), &context)? {
+            serde_json::Value::String(rendered) => rendered,
+            other => anyhow::bail!("directive body interpolated to a non-string value: {other}"),
+        }
+    };
+
+    // Surface only the inputs the template did NOT already place via a
+    // `{input:KEY}` / `${inputs.KEY}` reference.
+    let prompt = match inputs.as_object() {
+        Some(obj) if !obj.is_empty() => {
+            let referenced = ryeos_runtime::referenced_input_keys(prompt_template);
+            let leftover: serde_json::Map<String, serde_json::Value> = obj
+                .iter()
+                .filter(|(key, _)| !referenced.contains(key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            if leftover.is_empty() {
+                interpolated_prompt
+            } else {
+                format!(
+                    "{}\n\nInputs:\n{}",
+                    interpolated_prompt,
+                    serde_json::to_string_pretty(&serde_json::Value::Object(leftover))?
+                )
+            }
+        }
+        _ => interpolated_prompt,
+    };
+    Ok(prompt)
+}
+
 fn main() {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_directive_runtime());
 
@@ -156,8 +196,14 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     let hooks = bootstrap_output.config.hooks.clone();
 
+    // The stimulus that opens this run, shared by both paths.
+    let rendered_prompt = render_stimulus(
+        &bootstrap_output.config.user_prompt,
+        &envelope.request.inputs,
+    )?;
+
     let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
-        let resume_state = resume::load_resume_state(&callback, resume_id).await?;
+        let mut resume_state = resume::load_resume_state(&callback, resume_id).await?;
 
         // R5: Resume gate — refuse resume if the prior thread has no
         // settled `thread_usage` event in the replay stream. Without
@@ -187,6 +233,20 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 "callback append_event(thread_continued) failed"
             );
         }
+
+        // Emit the new stimulus as a `cognition_in` AFTER folding the chain (so
+        // the replay does not double-count it), then seed it as the live
+        // provider message this run answers. `role` here is the provider-wire
+        // mapping, not a substrate concept.
+        callback.emit_stimulus(&rendered_prompt).await?;
+        resume_state.messages.push(directive::ProviderMessage {
+            role: "user".to_string(),
+            content: Some(json!(rendered_prompt)),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        });
+
         runner::Runner::from_resume(
             resume_state,
             runner::RunnerConfig {
@@ -210,51 +270,9 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             },
         )
     } else {
-        let user_prompt = bootstrap_output.config.user_prompt.clone();
-        let inputs = envelope.request.inputs.clone();
-
-        // Interpolation context: inputs are nested under `inputs` so the body's
-        // `{input:KEY}` and `${inputs.KEY}` references resolve — the same
-        // context shape graph actions use. Failures propagate: a body that
-        // references a missing input is an authoring error, not something to
-        // mask by silently shipping the raw template.
-        let interpolated_prompt = if inputs.is_null() {
-            user_prompt.clone()
-        } else {
-            let context = serde_json::json!({ "inputs": inputs });
-            match ryeos_runtime::interpolate(&serde_json::json!(user_prompt), &context)? {
-                serde_json::Value::String(rendered) => rendered,
-                other => {
-                    anyhow::bail!("directive body interpolated to a non-string value: {other}")
-                }
-            }
-        };
-
-        // Surface only the inputs the template did NOT already place via a
-        // `{input:KEY}` / `${inputs.KEY}` reference. A directive that references
-        // its inputs (e.g. a conversational `{input:input}`) renders one clean
-        // message; one that declares inputs without referencing them still gets
-        // them appended for the model.
-        let prompt = match inputs.as_object() {
-            Some(obj) if !obj.is_empty() => {
-                let referenced = ryeos_runtime::referenced_input_keys(&user_prompt);
-                let leftover: serde_json::Map<String, serde_json::Value> = obj
-                    .iter()
-                    .filter(|(key, _)| !referenced.contains(key.as_str()))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect();
-                if leftover.is_empty() {
-                    interpolated_prompt
-                } else {
-                    format!(
-                        "{}\n\nInputs:\n{}",
-                        interpolated_prompt,
-                        serde_json::to_string_pretty(&serde_json::Value::Object(leftover))?
-                    )
-                }
-            }
-            _ => interpolated_prompt,
-        };
+        // Emit the stimulus (rendered above) as a `cognition_in` so a later turn
+        // can fold it from the chain.
+        callback.emit_stimulus(&rendered_prompt).await?;
 
         let mut messages = Vec::new();
 
@@ -278,7 +296,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
         messages.push(directive::ProviderMessage {
             role: "user".to_string(),
-            content: Some(json!(prompt)),
+            content: Some(json!(rendered_prompt)),
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,

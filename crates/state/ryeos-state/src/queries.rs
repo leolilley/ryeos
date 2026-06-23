@@ -540,6 +540,38 @@ pub fn chain_head_thread(db: &ProjectionDb, chain_root_id: &str) -> anyhow::Resu
         .context("query chain_head_thread")
 }
 
+/// The continuation successor of `thread_id`, if one exists. Reads the
+/// `thread_continued` event payload (`{ successor_thread_id, reason }`) written
+/// in the same transaction that creates the successor. Authoritative — unlike
+/// `thread_edges`, whose `upstream_thread_id`-derived edges do not distinguish a
+/// continuation successor from a compose-context child. Returns `None` for a
+/// thread that has not been continued.
+pub fn continuation_successor(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let payload: Option<Vec<u8>> = db
+        .connection()
+        .query_row(
+            "SELECT payload FROM events \
+             WHERE thread_id = ? AND event_type = 'thread_continued' \
+             ORDER BY chain_seq DESC LIMIT 1",
+            [thread_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .context("query continuation_successor")?;
+    let Some(bytes) = payload else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
+    Ok(value
+        .get("successor_thread_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
+}
+
 pub fn latest_thread_events(
     db: &ProjectionDb,
     thread_id: &str,
@@ -594,7 +626,11 @@ const EFFECTIVE_USAGE_CTE: &str = r#"
         JOIN threads src
           ON src.thread_id = e.thread_id
          AND src.chain_root_id = e.chain_root_id
-         AND src.status = 'continued'
+        -- NB: do NOT gate on src.status = 'continued'. An operator follow-up
+        -- preserves a completed/failed predecessor's status, yet its successor's
+        -- usage is cumulative; gating on `continued` would drop that edge and
+        -- double-count the predecessor. The `thread_continued` event plus the
+        -- successor's `upstream_thread_id` linkage below already prove the edge.
         JOIN threads succ
           ON succ.thread_id = json_extract(CAST(e.payload AS TEXT), '$.successor_thread_id')
          AND succ.chain_root_id = e.chain_root_id
@@ -1109,6 +1145,33 @@ mod tests {
 
         let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
         assert_eq!(totals.thread_count, 1);
+        assert_eq!(totals.input_tokens, 150);
+        assert_eq!(totals.output_tokens, 15);
+    }
+
+    #[test]
+    fn usage_totals_exclude_completed_operator_source_threads() {
+        // Operator follow-up: the predecessor stays `completed` (its terminal
+        // snapshot is preserved), but its successor's usage is cumulative. The
+        // predecessor must still be superseded — not double-counted — even
+        // though its status is not `continued`.
+        let db = test_db();
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Running);
+        project_usage_event(&db, "chain-A", "T-source", 1, 100, 10);
+        insert_thread(&db, "T-source", "chain-A", ThreadStatus::Completed);
+
+        insert_thread_with_upstream(
+            &db,
+            "T-successor",
+            "chain-A",
+            ThreadStatus::Completed,
+            Some("T-source"),
+        );
+        project_continuation_event(&db, "chain-A", "T-source", "T-successor", 2);
+        project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
+
+        let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
+        assert_eq!(totals.thread_count, 1, "completed predecessor must be superseded");
         assert_eq!(totals.input_tokens, 150);
         assert_eq!(totals.output_tokens, 15);
     }

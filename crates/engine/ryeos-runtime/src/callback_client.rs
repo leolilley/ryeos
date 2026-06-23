@@ -152,10 +152,8 @@ impl CallbackClient {
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn append_event(&self, event_type: &str, payload: Value) -> Result<()> {
         let storage_class = storage_class_for_payload(event_type, &payload);
-        let is_transcript = matches!(
-            event_type,
-            "cognition_in" | "cognition_out" | "tool_call_start" | "tool_call_result"
-        );
+        let is_transcript =
+            RuntimeEventType::parse(event_type).is_ok_and(RuntimeEventType::is_transcript);
         match &self.inner {
             Some(client) => {
                 client
@@ -373,11 +371,68 @@ impl CallbackClient {
             )
         })?;
         let raw: Value = client
-            .replay_events(thread_id)
+            .replay_events(serde_json::json!({ "thread_id": thread_id }))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         serde_json::from_value::<ReplayResponse>(raw)
             .map_err(|e| anyhow::anyhow!("invalid ReplayResponse from daemon: {e}"))
+    }
+
+    /// Resume-critical: fold an entire chain (every thread sharing the
+    /// `chain_root_id`) into one ordered event list. Hard-fails on disconnect.
+    /// NB: a chain namespace can include non-continuation child threads
+    /// (compose-context, sub-dispatch); prefer [`Self::replay_thread`] over the
+    /// continuation path for rehydration so sibling-branch events don't pollute
+    /// the transcript.
+    pub async fn replay_chain(&self, chain_root_id: &str) -> Result<ReplayResponse> {
+        self.replay_paged("chain_root_id", chain_root_id).await
+    }
+
+    /// Resume-critical: fold ONE thread's own events (thread-scoped), paginated.
+    /// Used to fold the linear continuation path turn-by-turn — thread scoping
+    /// structurally excludes child/sibling threads that share the chain root.
+    pub async fn replay_thread(&self, thread_id: &str) -> Result<ReplayResponse> {
+        self.replay_paged("thread_id", thread_id).await
+    }
+
+    /// Page through `after_chain_seq` cursors for a single replay scope
+    /// (`chain_root_id` or `thread_id`) until exhausted, so long histories don't
+    /// silently lose events. Hard-fails on disconnect.
+    async fn replay_paged(&self, scope_key: &str, scope_value: &str) -> Result<ReplayResponse> {
+        const REPLAY_PAGE_LIMIT: usize = 200;
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback replay_paged called without an inner UDS client \
+                 (socket missing); runtime cannot replay for resume"
+            )
+        })?;
+
+        let mut all_events = Vec::new();
+        let mut after_chain_seq: Option<i64> = None;
+        loop {
+            let mut params = serde_json::Map::new();
+            params.insert(scope_key.to_string(), Value::String(scope_value.to_string()));
+            params.insert("limit".to_string(), serde_json::json!(REPLAY_PAGE_LIMIT));
+            if let Some(cursor) = after_chain_seq {
+                params.insert("after_chain_seq".to_string(), serde_json::json!(cursor));
+            }
+            let raw: Value = client
+                .replay_events(Value::Object(params))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let page: ReplayResponse = serde_json::from_value(raw)
+                .map_err(|e| anyhow::anyhow!("invalid ReplayResponse from daemon: {e}"))?;
+            all_events.extend(page.events);
+            match page.next_cursor {
+                Some(cursor) => after_chain_seq = Some(cursor),
+                None => break,
+            }
+        }
+
+        Ok(ReplayResponse {
+            events: all_events,
+            next_cursor: None,
+        })
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -395,6 +450,17 @@ impl CallbackClient {
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
     /// Maps to the validator-accepted `cognition_in` event.
+    /// Resume-critical: transcript-bearing; hard-fails on disconnect.
+    /// Emits the stimulus that opens a run as a `cognition_in` event — the
+    /// input to cognition, not a "user" turn. A chained successor folds these
+    /// from the chain to rebuild the prior context (the stimulus is rendered
+    /// from the directive body + inputs at launch, so it is not otherwise
+    /// recoverable from events).
+    pub async fn emit_stimulus(&self, content: &str) -> Result<()> {
+        self.append_event("cognition_in", serde_json::json!({ "content": content }))
+            .await
+    }
+
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
         self.append_event("cognition_in", serde_json::json!({"turn": turn}))
             .await
@@ -667,7 +733,7 @@ mod tests {
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn replay_events(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+        async fn replay_events(&self, _params: Value) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
         async fn bundle_events_append(
@@ -1114,5 +1180,60 @@ mod tests {
         assert_eq!(evt["input_tokens"], 10);
         assert_eq!(evt["output_tokens"], 5);
         assert!(evt.get("delta").is_none());
+    }
+
+    // ── replay_chain pagination ──────────────────────────────────────
+
+    /// A daemon stand-in that serves the chain in two pages: the first call
+    /// (no cursor) returns events `a,b` with `next_cursor=2`; the follow-up
+    /// (cursor=2) returns `c` with no cursor. Exercises `replay_chain`'s paging
+    /// loop and ordering.
+    struct PagingReplay;
+
+    #[async_trait::async_trait]
+    impl crate::callback::RuntimeCallbackAPI for PagingReplay {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn finalize_thread(&self, _: &str, _: TerminalCompletion) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
+        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
+            use crate::callback::{ReplayResponse, ReplayedEventRecord};
+            let ev = |t: &str| ReplayedEventRecord { event_type: t.to_string(), payload: json!({}) };
+            let page = match params.get("after_chain_seq").and_then(|v| v.as_i64()) {
+                None => ReplayResponse { events: vec![ev("a"), ev("b")], next_cursor: Some(2) },
+                Some(2) => ReplayResponse { events: vec![ev("c")], next_cursor: None },
+                _ => ReplayResponse { events: vec![], next_cursor: None },
+            };
+            Ok(serde_json::to_value(page).unwrap())
+        }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
+        async fn bundle_events_read_chain(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
+    }
+
+    #[tokio::test]
+    async fn replay_chain_folds_multiple_pages_in_order() {
+        let client = CallbackClient::from_inner(
+            Arc::new(PagingReplay) as Arc<dyn crate::callback::RuntimeCallbackAPI>,
+            "T-test",
+            "/project",
+            "tat-test",
+        );
+        let resp = client.replay_chain("C-1").await.unwrap();
+        let types: Vec<&str> = resp.events.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(types, vec!["a", "b", "c"], "all pages must fold in chain order");
+        assert!(resp.next_cursor.is_none());
     }
 }

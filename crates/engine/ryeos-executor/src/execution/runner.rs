@@ -27,7 +27,7 @@ use ryeos_engine::contracts::{ExecutionCompletion, PlanContext, ProjectContext};
 use ryeos_engine::protocol_vocabulary::{produce_env_value, EnvInjectionSource};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
-use ryeos_app::callback_token::compute_ttl;
+use ryeos_app::callback_token::launch_token_ttl;
 use ryeos_app::callback_token::effective_bundle_id_for_request;
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
@@ -591,7 +591,8 @@ fn mint_callback_env(
     // for provenance/display.
     effective_bundle_id: Option<String>,
 ) -> Result<(HashMap<String, String>, String, String)> {
-    let ttl = compute_ttl(duration_seconds);
+    // Run-scoped token: cover the run's full duration + finalization window.
+    let ttl = launch_token_ttl(duration_seconds);
     let cap = state.callback_tokens.generate_with_context(
         thread_id,
         project_path.map(|p| p.to_path_buf()).unwrap_or_default(),
