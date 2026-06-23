@@ -42,4 +42,13 @@ ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 EXPOSE 8000
 
+# Image-level provenance only. The binary's own revision is baked in by the
+# host build (ryeos-app/build.rs reads the local git SHA), since this image
+# copies host-built binaries rather than compiling.
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

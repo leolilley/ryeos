@@ -47,6 +47,17 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
                 )
                     .into_response();
             }
+            // True dispatcher-level 404: no route matched this path for any
+            // method. The body is identical to the json-mode null/404 and the
+            // typed NotFound, so log here to disambiguate "route not loaded /
+            // wrong host" from "handler said not-found" in operator triage.
+            // debug!, not warn!: internet-facing nodes are scanned constantly,
+            // so unmatched paths are routine background noise, not incidents.
+            tracing::debug!(
+                method = %method,
+                path = %path,
+                "no route matched request path; returning HTTP 404"
+            );
             return (
                 StatusCode::NOT_FOUND,
                 axum::Json(serde_json::json!({

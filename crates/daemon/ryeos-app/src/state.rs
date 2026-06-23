@@ -107,6 +107,14 @@ pub struct AppState {
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub version: String,
+    /// Git revision the binary was built from. Injected at build time
+    /// (`RYEOS_VCS_REF`) or derived from the local git short SHA; `"unknown"`
+    /// when neither is available. Lets an operator answer "which code is
+    /// actually running?" — the version string alone can be stale/cosmetic.
+    pub revision: String,
+    /// Build timestamp injected at build time (`RYEOS_BUILD_DATE`), or
+    /// `"unknown"` for local dev builds.
+    pub build_date: String,
     pub started_at: String,
     pub uptime_seconds: u64,
     pub bind: String,
@@ -134,6 +142,8 @@ impl AppState {
     pub fn status(&self) -> StatusResponse {
         StatusResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            revision: env!("RYEOS_VCS_REF").to_string(),
+            build_date: env!("RYEOS_BUILD_DATE").to_string(),
             started_at: self.started_at_iso.clone(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             bind: self.config.bind.to_string(),
