@@ -93,7 +93,7 @@ mod tests {
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+        async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
             Ok(json!({"events": []}))
         }
         async fn bundle_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {

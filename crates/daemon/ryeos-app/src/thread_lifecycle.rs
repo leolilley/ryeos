@@ -288,6 +288,71 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
     }
 
+    /// Create a chain successor for `source_thread_id` with a pre-minted id and
+    /// a launch-ready `request`, then return it. Mirrors
+    /// `create_root_thread_with_id` but braids onto the source's chain: the
+    /// successor inherits `chain_root_id` and links via `upstream_thread_id`,
+    /// and the source records the handoff transactionally (a `thread_continued`
+    /// event; the source is settled to `continued` only when it was still
+    /// running). The operator follow-up path runs this so lineage is
+    /// daemon-persisted at spawn, independent of whether the runtime rehydrates.
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:create_continuation",
+        skip(self, request),
+        fields(
+            thread_id = %successor_thread_id,
+            source_thread_id = %source_thread_id,
+            item_ref = %request.item_ref,
+        )
+    )]
+    pub fn create_continuation_with_id(
+        &self,
+        successor_thread_id: &str,
+        source_thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        reason: Option<&str>,
+    ) -> Result<ThreadDetail> {
+        validate_kind(&request.kind, self.kind_profiles())?;
+        validate_thread_id_format(successor_thread_id)?;
+
+        let source = self
+            .get_thread(source_thread_id)?
+            .ok_or_else(|| anyhow!("continuation source thread not found: {source_thread_id}"))?;
+
+        let profile = self.kind_profiles().get(&source.kind);
+        if !profile.is_some_and(|p| p.supports_continuation) {
+            bail!("continuation is not supported for kind '{}'", source.kind);
+        }
+
+        let successor_record = NewThreadRecord {
+            thread_id: successor_thread_id.to_string(),
+            chain_root_id: source.chain_root_id.clone(),
+            kind: request.kind.clone(),
+            item_ref: request.item_ref.clone(),
+            executor_ref: request.executor_ref.clone(),
+            launch_mode: request.launch_mode.clone(),
+            current_site_id: request.current_site_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            upstream_thread_id: Some(source.thread_id.clone()),
+            requested_by: request.requested_by.clone(),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+        };
+
+        let persisted = self.state_store.create_continuation(
+            &successor_record,
+            &source.thread_id,
+            &source.chain_root_id,
+            reason,
+        )?;
+        self.publish_records(&persisted);
+
+        self.get_thread(successor_thread_id)?.ok_or_else(|| {
+            anyhow!("created continuation successor missing from database: {successor_thread_id}")
+        })
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "thread:create",
@@ -627,7 +692,10 @@ impl ThreadLifecycleService {
             usage_subject_asserted_by: None,
         };
 
-        // Create successor, write continued edge, finalize source — all in one transaction
+        // Create successor, write the continuation marker, and (for a running
+        // source) finalize it — serialized under the state store's write permit
+        // + lock and the single-successor guard. NB: not a single all-or-nothing
+        // CAS transaction across every row/event write.
         let persisted = self.state_store.create_continuation(
             &successor_record,
             &source.thread_id,

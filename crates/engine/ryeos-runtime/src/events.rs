@@ -207,6 +207,18 @@ impl RuntimeEventType {
         }
     }
 
+    /// Whether this event carries part of the cognition transcript — the
+    /// stimulus/response/tool exchange a chained successor folds to rebuild
+    /// context. Transcript events must hard-fail on a missing callback channel
+    /// rather than be silently dropped. Lifecycle, usage, streaming-delta and
+    /// graph milestones are observability, not transcript.
+    pub fn is_transcript(self) -> bool {
+        matches!(
+            self,
+            Self::CognitionIn | Self::CognitionOut | Self::ToolCallStart | Self::ToolCallResult
+        )
+    }
+
     /// Canonical storage class for this event type.
     ///
     /// High-frequency progressive events (token deltas, reasoning

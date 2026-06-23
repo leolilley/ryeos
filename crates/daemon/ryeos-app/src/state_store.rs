@@ -159,6 +159,13 @@ pub struct ThreadDetail {
     pub current_site_id: String,
     pub origin_site_id: String,
     pub upstream_thread_id: Option<String>,
+    /// The continuation successor this thread handed off to, if any. Exposed for
+    /// every settled status, not only `continued`: an operator follow-up
+    /// preserves a `completed`/`failed` predecessor's status, so those expose a
+    /// successor too. Derived from the `thread_continued` event; lets a graph
+    /// reconciler / client follow a continuation without scraping event
+    /// payloads. `None` for a thread that has not been continued.
+    pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -737,41 +744,65 @@ impl StateStore {
             );
         }
 
-        let now = lillux::time::iso8601_now();
-        let source_snapshot = ThreadSnapshot {
-            schema: ryeos_state::objects::SCHEMA_VERSION,
-            kind: "thread_snapshot".to_string(),
-            thread_id: source_row.thread_id.clone(),
-            chain_root_id: source_row.chain_root_id.clone(),
-            status: ThreadStatus::Continued,
-            kind_name: source_row.kind.clone(),
-            item_ref: source_row.item_ref.clone(),
-            executor_ref: source_row.executor_ref.clone(),
-            launch_mode: source_row.launch_mode.clone(),
-            current_site_id: source_row.current_site_id.clone(),
-            origin_site_id: source_row.origin_site_id.clone(),
-            upstream_thread_id: source_row.upstream_thread_id.clone(),
-            requested_by: source_row.requested_by.clone(),
-            base_project_snapshot_hash: None,
-            result_project_snapshot_hash: None,
-            created_at: source_row.created_at.clone(),
-            updated_at: now.clone(),
-            started_at: source_row.started_at.clone(),
-            finished_at: Some(now),
-            result: None,
-            outcome_code: Some("continued".to_string()),
-            error: None,
-            budget: None,
-            artifacts: vec![],
-            facets: Default::default(),
-            last_event_hash: None,
-            last_chain_seq: 0,
-            last_thread_seq: 0,
-        };
+        // Single-successor invariant: a thread is continued at most once. The
+        // write permit + lock held here serialize `create_continuation`, so this
+        // check-then-create is atomic — a double-submit or race cannot mint
+        // sibling successors (which would make `successor_thread_id` ambiguous).
+        if let Some(existing) = queries::continuation_successor(g.state_db.projection(), source_thread_id)?
+        {
+            bail!("thread {source_thread_id} already continued as {existing}");
+        }
 
-        let source_snapshot_update = SnapshotUpdate {
-            thread_id: source_thread_id.to_string(),
-            new_snapshot: source_snapshot,
+        // Predecessor-immutability contract: an already-terminal source's
+        // terminal SNAPSHOT (status + result + outcome) is never rewritten — an
+        // operator follow-up onto a completed/failed turn preserves it. The
+        // chain still records the handoff as a single append-only
+        // `thread_continued` event on the source (the chain log is append-only by
+        // nature; the single-successor guard above keeps it to exactly one), plus
+        // the successor's `upstream_thread_id` link. "Immutable" therefore means
+        // the terminal snapshot/result, not "no further chain events."
+        //
+        // Settle the source to `continued` only when it is still running — a
+        // machine handoff (limit-exhausted) ends the run there. A terminal source
+        // is left as-is (rewriting it would erase its result).
+        let source_snapshot_updates = if is_terminal_status(&source_row.status) {
+            Vec::new()
+        } else {
+            let now = lillux::time::iso8601_now();
+            let source_snapshot = ThreadSnapshot {
+                schema: ryeos_state::objects::SCHEMA_VERSION,
+                kind: "thread_snapshot".to_string(),
+                thread_id: source_row.thread_id.clone(),
+                chain_root_id: source_row.chain_root_id.clone(),
+                status: ThreadStatus::Continued,
+                kind_name: source_row.kind.clone(),
+                item_ref: source_row.item_ref.clone(),
+                executor_ref: source_row.executor_ref.clone(),
+                launch_mode: source_row.launch_mode.clone(),
+                current_site_id: source_row.current_site_id.clone(),
+                origin_site_id: source_row.origin_site_id.clone(),
+                upstream_thread_id: source_row.upstream_thread_id.clone(),
+                requested_by: source_row.requested_by.clone(),
+                base_project_snapshot_hash: None,
+                result_project_snapshot_hash: None,
+                created_at: source_row.created_at.clone(),
+                updated_at: now.clone(),
+                started_at: source_row.started_at.clone(),
+                finished_at: Some(now),
+                result: None,
+                outcome_code: Some("continued".to_string()),
+                error: None,
+                budget: None,
+                artifacts: vec![],
+                facets: Default::default(),
+                last_event_hash: None,
+                last_chain_seq: 0,
+                last_thread_seq: 0,
+            };
+            vec![SnapshotUpdate {
+                thread_id: source_thread_id.to_string(),
+                new_snapshot: source_snapshot,
+            }]
         };
 
         // Ensure successor has upstream_thread_id set to source for edge derivation
@@ -807,7 +838,7 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
             ste,
-            vec![source_snapshot_update],
+            source_snapshot_updates,
             g.signer.as_ref(),
         )?;
 
@@ -851,6 +882,12 @@ impl StateStore {
             .get_runtime_info(thread_id)?
             .unwrap_or_default();
 
+        let successor_thread_id = if is_terminal_status(&thread_row.status) {
+            queries::continuation_successor(g.state_db.projection(), thread_id)?
+        } else {
+            None
+        };
+
         Ok(Some(ThreadDetail {
             thread_id: thread_row.thread_id,
             chain_root_id: thread_row.chain_root_id,
@@ -862,6 +899,7 @@ impl StateStore {
             current_site_id: thread_row.current_site_id,
             origin_site_id: thread_row.origin_site_id,
             upstream_thread_id: thread_row.upstream_thread_id,
+            successor_thread_id,
             requested_by: thread_row.requested_by,
             created_at: thread_row.created_at,
             updated_at: thread_row.updated_at,
@@ -1061,6 +1099,11 @@ impl StateStore {
                 .runtime_db
                 .get_runtime_info(&row.thread_id)?
                 .unwrap_or_default();
+            let successor_thread_id = if is_terminal_status(&row.status) {
+                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
+            } else {
+                None
+            };
             children.push(ThreadDetail {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -1072,6 +1115,7 @@ impl StateStore {
                 current_site_id: row.current_site_id,
                 origin_site_id: row.origin_site_id,
                 upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id,
                 requested_by: row.requested_by,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -1093,6 +1137,11 @@ impl StateStore {
                 .runtime_db
                 .get_runtime_info(&row.thread_id)?
                 .unwrap_or_default();
+            let successor_thread_id = if is_terminal_status(&row.status) {
+                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
+            } else {
+                None
+            };
             threads.push(ThreadDetail {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -1104,6 +1153,7 @@ impl StateStore {
                 current_site_id: row.current_site_id,
                 origin_site_id: row.origin_site_id,
                 upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id,
                 requested_by: row.requested_by,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -1143,6 +1193,11 @@ impl StateStore {
                 .runtime_db
                 .get_runtime_info(&row.thread_id)?
                 .unwrap_or_default();
+            let successor_thread_id = if is_terminal_status(&row.status) {
+                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
+            } else {
+                None
+            };
             details.push(ThreadDetail {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
@@ -1154,6 +1209,7 @@ impl StateStore {
                 current_site_id: row.current_site_id,
                 origin_site_id: row.origin_site_id,
                 upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id,
                 requested_by: row.requested_by,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
