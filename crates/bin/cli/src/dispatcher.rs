@@ -153,6 +153,18 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     if resolved.debug_raw {
         body["debug_raw"] = Value::Bool(true);
     }
+    // Method dispatch: a `--method`/`--args` selector lands in `call`, the
+    // control-plane block distinct from data-plane `parameters`.
+    if resolved.call_method.is_some() || resolved.call_args.is_some() {
+        let mut call = serde_json::Map::new();
+        if let Some(method) = &resolved.call_method {
+            call.insert("method".to_string(), Value::String(method.clone()));
+        }
+        if let Some(args) = &resolved.call_args {
+            call.insert("args".to_string(), args.clone());
+        }
+        body["call"] = Value::Object(call);
+    }
 
     // Stream a live execution log for `execute` runs on a terminal, unless the
     // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
@@ -195,17 +207,22 @@ struct CliResolvedExecute {
     stream: Option<bool>,
     /// `--debug-raw`: request the debug block on the execution result.
     debug_raw: bool,
+    /// Method selector for method-dispatch kinds → request `call.method`.
+    call_method: Option<String>,
+    /// Method args (parsed JSON) → request `call.args`.
+    call_args: Option<Value>,
 }
 
-/// Control flags stripped from an `execute` command tail before parameter bind.
+/// Outcome of stripping a command's declared control flags from its tail.
+/// Each field is a routing destination from the generic `ControlFlagBinding`
+/// vocabulary; the dispatcher applies these to the request body / display.
 #[derive(Default)]
-struct ExecuteControlFlags {
+struct ResolvedControlFlags {
     async_launch: bool,
-    /// See `CliResolvedExecute::stream`.
     stream: Option<bool>,
-    /// `--debug-raw`: attach a debug block (cmd/args/cwd/env keys + exit code
-    /// and size-limited raw stdout/stderr) to the result.
     debug_raw: bool,
+    call_method: Option<String>,
+    call_args: Option<Value>,
 }
 
 fn resolve_command_for_daemon(
@@ -255,11 +272,10 @@ fn resolve_command_for_daemon_with_commands(
         matched.command.dispatch,
         CommandDispatch::DirectExecuteItemRef { .. }
     );
-    let control = if direct_execute {
-        strip_execute_control_flags(&mut tail)?
-    } else {
-        ExecuteControlFlags::default()
-    };
+    // Strip the command's DECLARED control flags (from data) and route them.
+    // Commands that declare none get a no-op, so non-execute commands are
+    // unaffected; the execute command declares --async/--method/--args/etc.
+    let control = strip_declared_control_flags(&mut tail, &matched.command.control_flags)?;
     let item_ref = match &matched.command.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => execute.clone(),
         CommandDispatch::DirectExecuteItemRef { item_ref_arg, .. } => tail
@@ -295,52 +311,97 @@ fn resolve_command_for_daemon_with_commands(
         direct_execute,
         stream: control.stream,
         debug_raw: control.debug_raw,
+        call_method: control.call_method,
+        call_args: control.call_args,
     })
 }
 
-fn strip_execute_control_flags(tail: &mut Vec<String>) -> Result<ExecuteControlFlags, CliError> {
-    let mut flags = ExecuteControlFlags::default();
-    let mut out = Vec::with_capacity(tail.len());
-    for token in tail.drain(..) {
-        match token.as_str() {
-            "--async" | "--async=true" => {
-                flags.async_launch = true;
-            }
-            "--async=false" => {}
-            token if token.starts_with("--async=") => {
-                return Err(CliError::Local {
-                    detail: format!("invalid execute control flag value: {token}"),
-                });
-            }
-            // Force the live stream on (useful when piping to a pager).
-            "--stream" => {
-                if flags.stream == Some(false) {
-                    return Err(CliError::Local {
-                        detail: "conflicting flags: --stream and --no-stream/--json".into(),
-                    });
+/// Strip a command's DECLARED control flags (`command.control_flags`) from the
+/// tail and route each into [`ResolvedControlFlags`] per its generic
+/// `ControlFlagBinding`. No flag spellings or destinations are hardcoded — the
+/// command data names the flags and the runtime knows only the binding
+/// vocabulary. Presence flags accept `--flag`, `--flag=true`, `--flag=false`;
+/// value flags (`call_method`/`call_args`) take `--flag value` or `--flag=v`.
+fn strip_declared_control_flags(
+    tail: &mut Vec<String>,
+    declared: &[ryeos_runtime::CommandControlFlag],
+) -> Result<ResolvedControlFlags, CliError> {
+    use ryeos_runtime::ControlFlagBinding as Bind;
+    let mut routes: std::collections::HashMap<&str, Bind> = std::collections::HashMap::new();
+    for cf in declared {
+        routes.insert(cf.flag.as_str(), cf.binding);
+        for alias in &cf.aliases {
+            routes.insert(alias.as_str(), cf.binding);
+        }
+    }
+
+    let mut flags = ResolvedControlFlags::default();
+    let mut out: Vec<String> = Vec::with_capacity(tail.len());
+    let mut iter = std::mem::take(tail).into_iter();
+    while let Some(token) = iter.next() {
+        let Some(rest) = token.strip_prefix("--") else {
+            out.push(token);
+            continue;
+        };
+        let (name, inline) = match rest.split_once('=') {
+            Some((name, value)) => (name, Some(value.to_string())),
+            None => (rest, None),
+        };
+        let Some(&binding) = routes.get(name) else {
+            out.push(token);
+            continue;
+        };
+        if binding.takes_value() {
+            let value = match inline {
+                Some(value) => value,
+                None => iter.next().ok_or_else(|| CliError::Local {
+                    detail: format!("flag --{name} requires a value"),
+                })?,
+            };
+            match binding {
+                Bind::CallMethod => flags.call_method = Some(value),
+                Bind::CallArgs => {
+                    flags.call_args =
+                        Some(serde_json::from_str(&value).map_err(|e| CliError::Local {
+                            detail: format!("--{name} must be a JSON value: {e}"),
+                        })?);
                 }
-                flags.stream = Some(true);
+                _ => {}
             }
-            // Both opt out of the live stream and print the final JSON result.
-            "--no-stream" | "--json" => {
-                if flags.stream == Some(true) {
+        } else {
+            let on = match inline.as_deref() {
+                None | Some("true") => true,
+                Some("false") => false,
+                Some(other) => {
                     return Err(CliError::Local {
-                        detail: "conflicting flags: --stream and --no-stream/--json".into(),
-                    });
+                        detail: format!("invalid value for --{name}: {other}"),
+                    })
                 }
-                flags.stream = Some(false);
+            };
+            if !on {
+                continue;
             }
-            // Attach the resolved subprocess + raw stdio to the result.
-            "--debug-raw" | "--debug-raw=true" => {
-                flags.debug_raw = true;
+            match binding {
+                Bind::LaunchModeAccepted => flags.async_launch = true,
+                Bind::DebugRaw => flags.debug_raw = true,
+                Bind::StreamOn => {
+                    if flags.stream == Some(false) {
+                        return Err(CliError::Local {
+                            detail: "conflicting flags: stream on and off".into(),
+                        });
+                    }
+                    flags.stream = Some(true);
+                }
+                Bind::StreamOff => {
+                    if flags.stream == Some(true) {
+                        return Err(CliError::Local {
+                            detail: "conflicting flags: stream on and off".into(),
+                        });
+                    }
+                    flags.stream = Some(false);
+                }
+                _ => {}
             }
-            "--debug-raw=false" => {}
-            token if token.starts_with("--debug-raw=") => {
-                return Err(CliError::Local {
-                    detail: format!("invalid execute control flag value: {token}"),
-                });
-            }
-            _ => out.push(token),
         }
     }
     *tail = out;
@@ -808,13 +869,14 @@ mod tests {
 
     #[test]
     fn strip_execute_control_flags_parses_stream_prefs() {
+        let cf = execute_control_flags();
         let mut tail = vec![
             "item:x".to_string(),
             "--async".to_string(),
             "--no-stream".to_string(),
             "--keep".to_string(),
         ];
-        let flags = strip_execute_control_flags(&mut tail).unwrap();
+        let flags = strip_declared_control_flags(&mut tail, &cf).unwrap();
         assert!(flags.async_launch);
         assert_eq!(flags.stream, Some(false));
         // Non-control tokens survive untouched.
@@ -823,29 +885,56 @@ mod tests {
         // --json is an alias for force-off.
         let mut json_tail = vec!["--json".to_string()];
         assert_eq!(
-            strip_execute_control_flags(&mut json_tail).unwrap().stream,
+            strip_declared_control_flags(&mut json_tail, &cf)
+                .unwrap()
+                .stream,
             Some(false)
         );
 
         // --stream forces on.
         let mut stream_tail = vec!["--stream".to_string()];
         assert_eq!(
-            strip_execute_control_flags(&mut stream_tail)
+            strip_declared_control_flags(&mut stream_tail, &cf)
                 .unwrap()
                 .stream,
             Some(true)
         );
 
-        // Default: auto (None), nothing set.
+        // Undeclared flags pass through untouched; nothing set.
         let mut plain = vec!["--other".to_string()];
-        let flags = strip_execute_control_flags(&mut plain).unwrap();
+        let flags = strip_declared_control_flags(&mut plain, &cf).unwrap();
         assert_eq!(flags.stream, None);
         assert!(!flags.async_launch);
         assert_eq!(plain, vec!["--other".to_string()]);
 
         // Conflicting flags error.
         let mut conflict = vec!["--stream".to_string(), "--no-stream".to_string()];
-        assert!(strip_execute_control_flags(&mut conflict).is_err());
+        assert!(strip_declared_control_flags(&mut conflict, &cf).is_err());
+
+        // Value flags route to call.method / call.args (both `--flag value`
+        // and `--flag=value` forms).
+        let mut method_tail = vec![
+            "knowledge:notes".to_string(),
+            "--method".to_string(),
+            "query".to_string(),
+            "--args".to_string(),
+            r#"{"query":"needle"}"#.to_string(),
+        ];
+        let flags = strip_declared_control_flags(&mut method_tail, &cf).unwrap();
+        assert_eq!(flags.call_method.as_deref(), Some("query"));
+        assert_eq!(
+            flags.call_args,
+            Some(serde_json::json!({"query": "needle"}))
+        );
+        assert_eq!(method_tail, vec!["knowledge:notes".to_string()]);
+
+        // A value flag with no value is an error.
+        let mut dangling = vec!["--method".to_string()];
+        assert!(strip_declared_control_flags(&mut dangling, &cf).is_err());
+
+        // Malformed JSON for --args is an error.
+        let mut bad_args = vec!["--args".to_string(), "not-json".to_string()];
+        assert!(strip_declared_control_flags(&mut bad_args, &cf).is_err());
     }
 
     #[test]
@@ -921,6 +1010,7 @@ mod tests {
                 .collect(),
             defaults: Default::default(),
             parameter_binding: None,
+            control_flags: Vec::new(),
             project: Some(ryeos_runtime::CommandProjectPolicy {
                 resolution: project_resolution,
                 default: ryeos_runtime::CommandProjectDefault::None,
@@ -992,6 +1082,51 @@ mod tests {
         assert_eq!(out, s(&["scheduler", "list"]));
     }
 
+    /// The execute command's control flags, mirroring
+    /// `bundles/core/.ai/node/commands/execute.yaml`. Kept in sync with that
+    /// data file; both declare the same flag→binding routing.
+    fn execute_control_flags() -> Vec<ryeos_runtime::CommandControlFlag> {
+        use ryeos_runtime::{CommandControlFlag as F, ControlFlagBinding as B};
+        vec![
+            F {
+                flag: "async".into(),
+                help: "Accepted/background launch; returns a thread_id".into(),
+                binding: B::LaunchModeAccepted,
+                aliases: vec![],
+            },
+            F {
+                flag: "stream".into(),
+                help: "Force the live execution stream on".into(),
+                binding: B::StreamOn,
+                aliases: vec![],
+            },
+            F {
+                flag: "no-stream".into(),
+                help: "Print the buffered JSON result instead of streaming".into(),
+                binding: B::StreamOff,
+                aliases: vec!["json".into()],
+            },
+            F {
+                flag: "debug-raw".into(),
+                help: "Attach a debug block to the result".into(),
+                binding: B::DebugRaw,
+                aliases: vec![],
+            },
+            F {
+                flag: "method".into(),
+                help: "Method selector for method-dispatch kinds (call.method)".into(),
+                binding: B::CallMethod,
+                aliases: vec![],
+            },
+            F {
+                flag: "args".into(),
+                help: "Method args as a JSON object (call.args)".into(),
+                binding: B::CallArgs,
+                aliases: vec![],
+            },
+        ]
+    }
+
     fn direct_execute_command() -> CommandDef {
         CommandDef {
             name: "execute".into(),
@@ -1013,6 +1148,7 @@ mod tests {
                 single_json_object_arg: true,
                 flag_key_normalization: ryeos_runtime::FlagKeyNormalization::HyphenToUnderscore,
             }),
+            control_flags: execute_control_flags(),
             project: Some(ryeos_runtime::CommandProjectPolicy {
                 resolution: ryeos_runtime::CommandProjectResolution::Optional,
                 default: ryeos_runtime::CommandProjectDefault::DiscoverUpwardAi,
@@ -1277,7 +1413,7 @@ mod tests {
         match result {
             Ok(_) => panic!("invalid --async value unexpectedly succeeded"),
             Err(err) => {
-                assert!(format!("{err}").contains("invalid execute control flag value"));
+                assert!(format!("{err}").contains("invalid value for --async"));
             }
         }
     }

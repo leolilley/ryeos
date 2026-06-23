@@ -764,7 +764,26 @@ struct PreflightCommandRecord {
     #[allow(dead_code)]
     #[serde(default)]
     project: Option<PreflightCommandProject>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    control_flags: Vec<PreflightCommandControlFlag>,
     dispatch: PreflightCommandDispatch,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandControlFlag {
+    #[allow(dead_code)]
+    flag: String,
+    #[allow(dead_code)]
+    help: String,
+    // Routing destination — validated against the real `ControlFlagBinding`
+    // enum by the command model at load; preflight only checks structure.
+    #[allow(dead_code)]
+    binding: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1419,6 +1438,28 @@ mod tests {
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Regression: the shipped execute command declares `control_flags`; the
+    /// preflight command-record schema must accept it (it previously rejected
+    /// the unknown field, breaking `ryeos init`).
+    #[test]
+    fn preflight_accepts_execute_control_flags() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles/core/.ai/node/commands/execute.yaml").is_file())
+            .expect("workspace root")
+            .join("bundles/core/.ai/node/commands/execute.yaml");
+        let raw = std::fs::read_to_string(&path).expect("read execute.yaml");
+        let body: String = raw
+            .lines()
+            .filter(|l| !l.starts_with("# ryeos:signed:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
+        let record: PreflightCommandRecord =
+            serde_json::from_value(value).expect("preflight command record parse");
+        assert_eq!(record.control_flags.len(), 6, "expected 6 control flags");
+    }
 
     struct BundleLayout {
         _tmp: tempfile::TempDir,
