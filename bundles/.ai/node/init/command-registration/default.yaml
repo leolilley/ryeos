@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-21T08:00:09Z:a70e485d726978aa62be6f97d40c60ac0cca3fff9c4ae71a9b5925db72cb818d:tigkKJ19IQ/ZZ065fNflo6yh8I3iTHVOpax6zFALOZOllEYa6HGf6HUgAKlVAqm8zzkTpqWRC4m0kKWd2AhyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-23T05:17:17Z:a70e485d726978aa62be6f97d40c60ac0cca3fff9c4ae71a9b5925db72cb818d:tigkKJ19IQ/ZZ065fNflo6yh8I3iTHVOpax6zFALOZOllEYa6HGf6HUgAKlVAqm8zzkTpqWRC4m0kKWd2AhyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 claim_rules:
   - claim:
       kind: command.root
