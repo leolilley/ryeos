@@ -834,6 +834,15 @@ fn bound_view_vm_keyed(
     let response = core.data.sources.get(source_key);
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
     match (binding.widget.as_str(), response) {
+        // A feed with no target thread is empty, not loading — it would spin
+        // forever on a fetch that never resolves (no chain root to replay).
+        // Show an honest start-a-conversation state instead.
+        ("timeline", None) if core.seat.fold().input_route().thread.is_none() => {
+            StudioViewVm::Placeholder {
+                title,
+                message: "No conversation yet — type below to start one.".to_string(),
+            }
+        }
         (_, None) => StudioViewVm::Placeholder {
             title,
             message: format!(
