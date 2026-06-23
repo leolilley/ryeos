@@ -1286,6 +1286,15 @@ impl StudioCore {
                         let fold = self.seat.fold();
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
+                            // First turn of a conversation: the launched thread
+                            // IS the chain root (root == head). Continuations
+                            // (route already had a head) keep the root and only
+                            // advance the head — so the feed keeps showing the
+                            // whole braid while the next submit braids onto the
+                            // newest turn.
+                            if route.thread.is_none() {
+                                route.chain_root = Some(thread_id.clone());
+                            }
                             route.thread = Some(thread_id.clone());
                             if let Ok(value) = serde_json::to_value(&route) {
                                 self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
@@ -2658,8 +2667,61 @@ mod tests {
         assert!(focused_input_text(&core).is_empty());
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread.as_deref(), Some("T-9"));
+        // First turn of a conversation: the launched thread is the chain root
+        // (root == head), so the feed (which follows chain_root) shows it.
+        assert_eq!(route.chain_root.as_deref(), Some("T-9"));
         // Pinned invocation survives the ratchet.
         assert!(route.has_target());
+    }
+
+    #[test]
+    fn continuation_advances_head_but_preserves_chain_root() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+
+        // Turn 1: starts the conversation. root == head == T-1.
+        set_focused_input(&mut core, "hello");
+        let e1 = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: e1.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-1", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread.as_deref(), Some("T-1"));
+        assert_eq!(route.chain_root.as_deref(), Some("T-1"));
+
+        // Turn 2: a follow-up braids onto T-1 → new head T-2, same root.
+        set_focused_input(&mut core, "and again");
+        let e2 = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: e2.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-2", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        // Head advanced to the new turn; the next submit braids onto it.
+        assert_eq!(route.thread.as_deref(), Some("T-2"));
+        // Root unchanged — the feed keeps showing the whole conversation.
+        assert_eq!(route.chain_root.as_deref(), Some("T-1"));
     }
 
     #[test]

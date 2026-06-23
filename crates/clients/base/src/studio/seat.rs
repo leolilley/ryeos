@@ -127,8 +127,17 @@ pub struct InputRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invoke: Option<InvokeTemplate>,
     /// Conversation ratchet: the chain head a follow-up continues from.
+    /// Moves with each turn (the latest successor) so a submit braids onto
+    /// the newest turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
+    /// The conversation's chain root — constant for the life of the chain.
+    /// The feed follows THIS (the whole braid), not `thread` (the moving
+    /// head): a follow-up retargets the head but keeps showing the
+    /// conversation from its root. Set on the first turn (root == head),
+    /// preserved across continuations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_root: Option<String>,
     /// Which node (reserved for the multi-node phase).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
