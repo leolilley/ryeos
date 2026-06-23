@@ -76,6 +76,10 @@ pub enum RouteDispatchError {
     Forbidden(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// State conflict — collides with existing state the caller cannot
+    /// override but is entitled to be told about. Maps to 409.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("internal: {0}")]
     Internal(String),
     /// Structured error with a pre-built JSON body.
@@ -124,6 +128,11 @@ impl axum::response::IntoResponse for RouteDispatchError {
                 axum::Json(serde_json::json!({ "error": msg })),
             )
                 .into_response(),
+            Self::Conflict(msg) => (
+                StatusCode::CONFLICT,
+                axum::Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
             Self::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": msg })),
@@ -168,5 +177,17 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(actual, body);
+    }
+
+    #[tokio::test]
+    async fn conflict_maps_to_409_with_error_body() {
+        let msg = "schedule 'snap-track-feed' in this project is registered by a \
+                   different principal; deregister it on the remote or run the sync as \
+                   its owner";
+        let response = RouteDispatchError::Conflict(msg.to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(actual, json!({ "error": msg }));
     }
 }

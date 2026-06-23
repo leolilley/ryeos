@@ -110,6 +110,9 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                     crate::handler_error::HandlerError::BadRequest(msg) => {
                         RouteDispatchError::BadRequest(msg)
                     }
+                    crate::handler_error::HandlerError::Conflict(msg) => {
+                        RouteDispatchError::Conflict(msg)
+                    }
                     crate::handler_error::HandlerError::Internal(msg) => {
                         RouteDispatchError::Internal(msg)
                     }

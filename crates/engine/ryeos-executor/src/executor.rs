@@ -352,28 +352,33 @@ pub async fn execute_service_verified(
         // Extract typed HandlerError to preserve HTTP semantics.
         // Without this, HandlerError::NotFound surfaces as 500 via
         // the generic Internal(#[from] anyhow::Error) path.
-        if let Some(he) = e.downcast_ref::<ryeos_app::handler_error::HandlerError>() {
-            match he {
-                ryeos_app::handler_error::HandlerError::NotFound => {
-                    crate::dispatch_error::DispatchError::NotFound
-                }
-                ryeos_app::handler_error::HandlerError::Forbidden(msg) => {
-                    crate::dispatch_error::DispatchError::ServiceCapDenied {
-                        service_ref: service_ref.to_string(),
-                        required: msg.clone(),
-                        caller_scopes: ctx.caller_scopes.clone(),
-                    }
-                }
-                ryeos_app::handler_error::HandlerError::BadRequest(msg) => {
-                    crate::dispatch_error::DispatchError::MethodInvalidArg {
-                        method: endpoint.clone(),
-                        reason: msg.clone(),
-                    }
-                }
-                _ => crate::dispatch_error::DispatchError::Internal(e),
+        //
+        // Walk the whole error chain (not just the root) so a HandlerError
+        // wrapped in `.context(...)` still maps to the right status — this
+        // matches the route path's `extract_handler_error`. A root-only
+        // `downcast_ref` here silently degraded wrapped NotFound/Conflict to
+        // 500, diverging from the route (which returned 404/409 for the same
+        // handler error).
+        use ryeos_app::handler_error::HandlerError;
+        match ryeos_app::handler_error::extract_handler_error(&e) {
+            Some(HandlerError::NotFound) => crate::dispatch_error::DispatchError::NotFound,
+            Some(HandlerError::Conflict(msg)) => {
+                crate::dispatch_error::DispatchError::Conflict(msg)
             }
-        } else {
-            crate::dispatch_error::DispatchError::Internal(e)
+            Some(HandlerError::Forbidden(msg)) => {
+                crate::dispatch_error::DispatchError::ServiceCapDenied {
+                    service_ref: service_ref.to_string(),
+                    required: msg,
+                    caller_scopes: ctx.caller_scopes.clone(),
+                }
+            }
+            Some(HandlerError::BadRequest(msg)) => {
+                crate::dispatch_error::DispatchError::MethodInvalidArg {
+                    method: endpoint.clone(),
+                    reason: msg,
+                }
+            }
+            _ => crate::dispatch_error::DispatchError::Internal(e),
         }
     })?;
 
