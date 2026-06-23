@@ -697,9 +697,8 @@ mod tests {
     #[tokio::test]
     async fn forwards_call_block_to_callback() {
         let last = Arc::new(Mutex::new(None));
-        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(CapturingClient {
-            last: last.clone(),
-        });
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(CapturingClient { last: last.clone() });
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
         let action = json!({
@@ -720,9 +719,8 @@ mod tests {
     #[tokio::test]
     async fn omits_call_block_when_absent() {
         let last = Arc::new(Mutex::new(None));
-        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(CapturingClient {
-            last: last.clone(),
-        });
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(CapturingClient { last: last.clone() });
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
         let action = json!({ "item_id": "tool:t/echo", "params": {} });
@@ -737,9 +735,8 @@ mod tests {
     #[tokio::test]
     async fn null_call_block_treated_as_absent() {
         let last = Arc::new(Mutex::new(None));
-        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(CapturingClient {
-            last: last.clone(),
-        });
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(CapturingClient { last: last.clone() });
         let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
 
         // Parity with `/execute`'s `Option<MethodCall>`: explicit null == absent.

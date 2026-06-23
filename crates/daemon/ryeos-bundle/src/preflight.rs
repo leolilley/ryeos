@@ -1446,7 +1446,10 @@ mod tests {
     fn preflight_accepts_execute_control_flags() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
-            .find(|p| p.join("bundles/core/.ai/node/commands/execute.yaml").is_file())
+            .find(|p| {
+                p.join("bundles/core/.ai/node/commands/execute.yaml")
+                    .is_file()
+            })
             .expect("workspace root")
             .join("bundles/core/.ai/node/commands/execute.yaml");
         let raw = std::fs::read_to_string(&path).expect("read execute.yaml");

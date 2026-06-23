@@ -1859,11 +1859,10 @@ fn parse_execution_schema(
                     reason: format!("{display}: method name must be a string"),
                 })?
                 .to_owned();
-            let decl: MethodDecl = serde_yaml::from_value(v.clone()).map_err(|e| {
-                EngineError::SchemaLoaderError {
+            let decl: MethodDecl =
+                serde_yaml::from_value(v.clone()).map_err(|e| EngineError::SchemaLoaderError {
                     reason: format!("{display}: invalid method declaration `{name}`: {e}"),
-                }
-            })?;
+                })?;
             methods.insert(name, decl);
         }
     }
@@ -1881,9 +1880,7 @@ fn parse_execution_schema(
         }
         (Some(_), true) => {
             return Err(EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{display}: kind declares `method_dispatch` but no `methods`"
-                ),
+                reason: format!("{display}: kind declares `method_dispatch` but no `methods`"),
             });
         }
         _ => {}
@@ -3055,7 +3052,10 @@ execution:
         assert!(exec.methods.contains_key("compose"));
         assert!(exec.methods.contains_key("query"));
         assert_eq!(exec.methods["query"].scope, MethodScope::Corpus);
-        let md = exec.method_dispatch.as_ref().expect("method_dispatch present");
+        let md = exec
+            .method_dispatch
+            .as_ref()
+            .expect("method_dispatch present");
         assert_eq!(md.default.as_deref(), Some("compose"));
         assert!(exec.terminator.is_none());
         assert!(exec.delegate.is_none());

@@ -195,7 +195,11 @@ pub enum DispatchError {
     },
     /// The method returned NotImplemented (phase gate).
     #[error("method '{method}' on kind '{kind}' is not implemented (phase {phase})")]
-    MethodNotImplemented { kind: String, method: String, phase: u8 },
+    MethodNotImplemented {
+        kind: String,
+        method: String,
+        phase: u8,
+    },
     /// Projection invariant violated during slim-payload construction.
     #[error("projection invariant violated: {reason}")]
     ProjectionInvariant { reason: String },

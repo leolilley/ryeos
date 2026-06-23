@@ -24,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve version
         id: ver
@@ -36,6 +38,24 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
+
+      - name: Resolve and verify source revision
+        id: source
+        run: |
+          git fetch --force --tags
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          VERSION="${{ steps.ver.outputs.version }}"
+          TAG="v${VERSION}"
+          TAG_COMMIT="$(git rev-list -n 1 "$TAG")"
+
+          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "Source SHA: $SOURCE_SHA"
+          echo "Tag commit: $TAG_COMMIT"
+
+          if [ "$SOURCE_SHA" != "$TAG_COMMIT" ]; then
+            echo "::error::Release image source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
+            exit 1
+          fi
 
       - name: Assert publisher key secret exists
         run: |
@@ -84,9 +104,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push standard image
+      - name: Build standard image for verification
         uses: docker/build-push-action@v6
-        id: build-standard
         with:
           context: .
           file: ./Dockerfile.standard
@@ -94,24 +113,53 @@ jobs:
           # x86_64-unknown-linux-gnu binaries. Add arm64 once we ship arm64
           # binaries in the bundles.
           platforms: linux/amd64
-          push: true
+          load: true
+          push: false
+          pull: true
+          no-cache: true
           # Injected into the binary at compile time (.git is dockerignored, so
           # the in-container git fallback can't resolve the SHA) and onto the
           # image as OCI labels via the Dockerfile ARGs.
           build-args: |
-            VCS_REF=${{ github.sha }}
+            VCS_REF=${{ steps.source.outputs.sha }}
             BUILD_DATE=${{ steps.ver.outputs.build_date }}
+            RELEASE_BUILD=1
           tags: |
-            ghcr.io/leolilley/ryeos-standard:${{ steps.ver.outputs.version }}
-            ghcr.io/leolilley/ryeos-standard:latest
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+
+      - name: Verify standard image provenance
+        run: |
+          IMG="ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}"
+          EXPECTED="${{ steps.source.outputs.sha }}"
+
+          ACTUAL="$(docker run --rm --entrypoint /usr/local/bin/ryeosd "$IMG" build-info --revision)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::stale ryeosd binary: binary=$ACTUAL expected=$EXPECTED"
+            exit 1
+          fi
+
+          LABEL_REV="$(docker image inspect "$IMG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          if [ "$LABEL_REV" != "$EXPECTED" ]; then
+            echo "::error::image revision label mismatch: label=$LABEL_REV expected=$EXPECTED"
+            exit 1
+          fi
+
+      - name: Tag and push verified standard image
+        id: push-standard
+        run: |
+          SRC="ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}"
+          VERSION_TAG="ghcr.io/leolilley/ryeos-standard:${{ steps.ver.outputs.version }}"
+          LATEST_TAG="ghcr.io/leolilley/ryeos-standard:latest"
+
+          docker tag "$SRC" "$VERSION_TAG"
+          docker tag "$SRC" "$LATEST_TAG"
+          docker push "$VERSION_TAG"
+          docker push "$LATEST_TAG"
+
+          DIGEST="$(docker buildx imagetools inspect "$VERSION_TAG" --format '{{ json .Manifest.Digest }}' | tr -d '"')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -121,4 +169,4 @@ jobs:
           COSIGN_EXPERIMENTAL: "true"
         run: |
           cosign sign --yes \
-            ghcr.io/leolilley/ryeos-standard@${{ steps.build-standard.outputs.digest }}
+            ghcr.io/leolilley/ryeos-standard@${{ steps.push-standard.outputs.digest }}

@@ -10,6 +10,7 @@ use ryeos_runtime::CommandRegistry;
 use ryeos_scheduler::db::SchedulerDb;
 use ryeos_scheduler::ReloadSignal;
 
+use crate::build_info;
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
 use crate::config::Config;
@@ -140,10 +141,11 @@ impl AppState {
     }
 
     pub fn status(&self) -> StatusResponse {
+        let build = build_info::get();
         StatusResponse {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            revision: env!("RYEOS_VCS_REF").to_string(),
-            build_date: env!("RYEOS_BUILD_DATE").to_string(),
+            version: build.version.to_string(),
+            revision: build.revision.to_string(),
+            build_date: build.build_date.to_string(),
             started_at: self.started_at_iso.clone(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             bind: self.config.bind.to_string(),

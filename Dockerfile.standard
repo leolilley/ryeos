@@ -22,8 +22,11 @@ COPY . .
 # `--build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`.
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
+ARG RELEASE_BUILD=0
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
+
+RUN if [ "$RELEASE_BUILD" = "1" ]; then rm -rf /build/target; fi
 
 RUN --mount=type=secret,id=publisher-key \
     test -s /run/secrets/publisher-key && \
@@ -62,6 +65,7 @@ EXPOSE 8000
 # Re-declared here: build-stage ARGs do not carry across FROM boundaries.
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
 LABEL org.opencontainers.image.revision="$VCS_REF"
 LABEL org.opencontainers.image.created="$BUILD_DATE"
