@@ -62,6 +62,7 @@ fn extract_rule_value(
         ExtractionRule::PathStringSeq { key } => {
             RuleResult::StringSeq(extract_string_seq_from_value(parsed, key))
         }
+        ExtractionRule::PathValue { key } => RuleResult::Value(parsed.get(key).cloned()),
         ExtractionRule::RelativeDir => {
             // Derive from file's parent dir relative to the kind directory.
             // kind_directory is the kind's `directory` field (e.g. "knowledge").
@@ -100,6 +101,10 @@ fn extract_rule_value(
 enum RuleResult {
     String(Option<String>),
     StringSeq(Vec<String>),
+    /// A raw JSON value extracted verbatim from the parsed document — used for
+    /// structured metadata (e.g. a nested `requires:` mapping) that the
+    /// scalar/string-seq extractors cannot represent. Always routed to `extra`.
+    Value(Option<Value>),
 }
 
 /// Route an extracted value into the typed `ItemMetadata` slot named
@@ -133,7 +138,12 @@ fn assign_extracted_field(metadata: &mut ItemMetadata, field: &str, result: Rule
                 Value::Array(seq.into_iter().map(Value::String).collect()),
             );
         }
-        (_, RuleResult::String(None)) => {}
+        // Structured values always land in `extra` — no typed slot consumes a
+        // raw `Value` today. Absent values are dropped like the scalar case.
+        (other, RuleResult::Value(Some(v))) => {
+            metadata.extra.insert(other.to_string(), v);
+        }
+        (_, RuleResult::String(None)) | (_, RuleResult::Value(None)) => {}
     }
 }
 
@@ -193,6 +203,12 @@ pub enum ExtractionRule {
     Path { key: String },
     /// Extract a `Vec<String>` from a key path in the parsed document.
     PathStringSeq { key: String },
+    /// Extract a raw JSON value verbatim from a key path in the parsed
+    /// document. Unlike `Path`/`PathStringSeq`, the value keeps its full
+    /// structure (mappings, nested sequences) and is routed into
+    /// `metadata.extra`. Used for structured item metadata such as the
+    /// `requires:` runtime-capability requirements block.
+    PathValue { key: String },
     /// Derive the value from the file's parent directory path relative
     /// to the kind directory. For a file at
     /// `.ai/knowledge/ryeos/standard/scheduler/scheduler.md` with
@@ -335,6 +351,7 @@ pub fn validate_metadata_anchoring(
             let present = match &result {
                 RuleResult::String(s) => s.is_some(),
                 RuleResult::StringSeq(seq) => !seq.is_empty(),
+                RuleResult::Value(v) => v.is_some(),
             };
             if !present {
                 return Err(MetadataAnchoringError::MissingRequired {
@@ -360,6 +377,10 @@ pub fn validate_metadata_anchoring(
                 }
                 RuleResult::StringSeq(_) => {
                     // Schema parser rejects seq+match — defensive skip.
+                    continue;
+                }
+                RuleResult::Value(_) => {
+                    // Schema parser rejects value+match — defensive skip.
                     continue;
                 }
             };
@@ -500,35 +521,44 @@ pub struct DelegationSpec {
     pub via: DelegationVia,
 }
 
-// ── Op surface types ─────────────────────────────────────────────────
+// ── Method surface types ─────────────────────────────────────────────
 
-/// Classification of side effects an op may have. Used by the daemon
-/// to route op results to the right state primitive (none, chain,
-/// projection, workspace).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The dispatch route shared by every method on a kind. Closed enum —
+/// today the only route is the runtime registry (spawn the kind's
+/// runtime via lillux::run). Lives at `execution.method_dispatch.via`
+/// rather than per-method, since all methods of a kind share one route.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum SideEffectClass {
-    None,
-    WritesChain,
-    WritesProjection,
-    WritesWorkspace,
-}
-
-/// How an op is dispatched. Phase 2 has exactly one variant; future
-/// phases may add `WarmService`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "via", rename_all = "snake_case")]
-pub enum OperationDispatch {
-    /// Op is dispatched by spawning the kind's runtime via lillux::run.
+pub enum MethodDispatchVia {
+    /// Methods are dispatched by spawning the kind's runtime via lillux::run.
+    /// Deserializes from the bare string `runtime_registry` at
+    /// `execution.method_dispatch.via` (a named field holding this unit enum,
+    /// so it must be a plain string-valued enum, not internally tagged).
     RuntimeRegistry,
 }
 
-/// Type declaration for a single op input parameter.
+/// Kind-level method dispatch declaration: the route shared by all
+/// methods plus the default method invoked when a request omits one.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MethodDispatchDecl {
+    pub via: MethodDispatchVia,
+    /// Method invoked when a request carries no explicit `call.method`.
+    ///
+    /// Optional by design: a schema may omit it, in which case every
+    /// request to the kind MUST name a method and a request without one is
+    /// rejected at dispatch (`SchemaMisconfigured`). When present it is
+    /// validated at load time to name a declared method.
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+/// Type declaration for a single method argument.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InputDecl {
+pub struct ArgDecl {
     #[serde(rename = "type")]
-    pub ty: InputType,
+    pub ty: ArgType,
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
@@ -538,13 +568,13 @@ pub struct InputDecl {
     #[serde(default)]
     pub min: Option<i64>,
     #[serde(default)]
-    pub items: Option<Box<InputDecl>>,
+    pub items: Option<Box<ArgDecl>>,
 }
 
-/// Scalar types accepted in op input declarations.
+/// Scalar types accepted in method argument declarations.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InputType {
+pub enum ArgType {
     String,
     Integer,
     Boolean,
@@ -552,22 +582,39 @@ pub enum InputType {
     Object,
 }
 
-impl PartialEq for InputType {
+impl PartialEq for ArgType {
     fn eq(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
     }
 }
-impl Eq for InputType {}
+impl Eq for ArgType {}
 
-/// A single operation declared on a kind's execution schema.
+/// What item set a method operates over. The daemon uses this to decide
+/// whether to project a single resolved item (extends chain + references)
+/// or the whole verified corpus of the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MethodScope {
+    /// Operate on the single resolved item (the requested ref's extends
+    /// chain + references). The default — most methods are single-root.
+    #[default]
+    SingleRoot,
+    /// Operate over every verified item of the kind across resolution
+    /// roots (e.g. knowledge `query`/`graph`/`validate`). The requested
+    /// ref authorizes/routes the call but does not bound the corpus.
+    Corpus,
+}
+
+/// A single method declared on a kind's execution schema. Methods are
+/// keyed by name in `execution.methods`, so the name lives on the map
+/// key, not here.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OperationDecl {
-    pub name: String,
-    pub side_effects: SideEffectClass,
-    pub dispatch: OperationDispatch,
+pub struct MethodDecl {
     #[serde(default)]
-    pub inputs: BTreeMap<String, InputDecl>,
+    pub scope: MethodScope,
+    #[serde(default)]
+    pub args: BTreeMap<String, ArgDecl>,
 }
 
 // ── Launch augmentation types ────────────────────────────────────────
@@ -579,15 +626,18 @@ pub struct OperationDecl {
 #[serde(tag = "step", rename_all = "snake_case")]
 pub enum LaunchAugmentationDecl {
     /// Compose context positions by dispatching a multi-root compose
-    /// op on `target_kind`'s runtime as a child thread of the parent
-    /// launch. Daemon owns interpretation entirely.
+    /// handler on `target_kind`'s runtime as a child thread of the parent
+    /// launch. Daemon owns interpretation entirely; this target need not be
+    /// listed among the kind's generically dispatchable schema methods.
     ComposeContextPositions {
         /// Which kind handles composition. Daemon's interpreter uses
         /// this for prefix validation and runtime lookup.
         target_kind: String,
-        /// Op name on `target_kind`'s schema to dispatch.
-        #[serde(default = "default_target_op")]
-        target_op: String,
+        /// Runtime handler method name to dispatch. For knowledge this
+        /// defaults to augmentation-private `compose_positions`, which is
+        /// intentionally not a generic schema method.
+        #[serde(default = "default_target_method")]
+        target_method: String,
         /// Derived field on the consumer kind's KindComposedView
         /// holding the position → refs map.
         #[serde(default = "default_source_derived")]
@@ -606,7 +656,7 @@ pub enum LaunchAugmentationDecl {
     },
 }
 
-fn default_target_op() -> String {
+fn default_target_method() -> String {
     "compose_positions".to_string()
 }
 fn default_source_derived() -> String {
@@ -687,16 +737,17 @@ pub struct ExecutionSchema {
     /// at boot — no hardcoded Rust profile map needed.
     #[serde(default)]
     pub thread_profile: Option<ThreadProfileDecl>,
-    /// Default operation for this kind. When a client sends
-    /// `/execute` without `operation`, the daemon resolves to this.
+    /// Kind-level method dispatch: the route shared by all methods plus
+    /// the default method invoked when `/execute` omits `call.method`.
+    /// Present iff `methods` is non-empty (enforced at load time).
     #[serde(default)]
-    pub default_operation: Option<String>,
-    /// Schema-declared operations for this kind. Non-empty `operations`
-    /// also serves as an executable signal (relaxed executable
-    /// invariant), so a kind with ops but no terminator/delegate/aliases
-    /// is still executable.
+    pub method_dispatch: Option<MethodDispatchDecl>,
+    /// Schema-declared methods for this kind, keyed by method name.
+    /// A non-empty `methods` map also serves as an executable signal
+    /// (relaxed executable invariant), so a kind with methods but no
+    /// terminator/delegate/aliases is still executable.
     #[serde(default)]
-    pub operations: Vec<OperationDecl>,
+    pub methods: BTreeMap<String, MethodDecl>,
     /// Schema-declared launch augmentations. Engine parses these as
     /// opaque data; daemon interprets them between resolution and
     /// parent runtime spawn.
@@ -749,7 +800,7 @@ pub struct KindSchema {
     /// graph. This keeps inheritance trust and reference trust
     /// semantics schema-owned rather than hardcoded in consumers.
     pub effective_trust: EffectiveTrustPolicy,
-    /// Execution configuration (dispatch, operations, aliases).
+    /// Execution configuration (dispatch, methods, aliases).
     /// `None` if this kind is not executable (e.g., config kind).
     pub execution: Option<ExecutionSchema>,
     /// Declared shape contract on the final composed `Value` for this
@@ -819,7 +870,7 @@ impl KindSchema {
         })
     }
 
-    /// Get the execution schema (dispatch, operations, aliases).
+    /// Get the execution schema (dispatch, methods, aliases).
     /// Returns `None` if this kind is not executable.
     pub fn execution(&self) -> Option<&ExecutionSchema> {
         self.execution.as_ref()
@@ -1567,6 +1618,23 @@ fn parse_extraction_rules(
                     })?;
                 ExtractionRule::PathStringSeq { key }
             }
+            "path_value" => {
+                let key = rule_map
+                    .iter()
+                    .find_map(|(rk, rv)| {
+                        if rk.as_str() == Some("key") {
+                            rv.as_str().map(|s| s.to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} from=path_value requires `key`"
+                        ),
+                    })?;
+                ExtractionRule::PathValue { key }
+            }
             "relative_dir" => {
                 // Incompatible with `key:` and `match:`.
                 if rule_map.iter().any(|(rk, _)| rk.as_str() == Some("key")) {
@@ -1643,6 +1711,15 @@ fn parse_extraction_rules(
                         ),
                     });
                 }
+                if matches!(extractor, ExtractionRule::PathValue { .. }) {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "{display}: metadata.rules.{field} cannot declare \
+                             `match` on a `path_value` extractor — anchors \
+                             require a scalar value"
+                        ),
+                    });
+                }
                 // RelativeDir derives from the path directly — matching
                 // against the same path would be tautological.
                 if matches!(extractor, ExtractionRule::RelativeDir) {
@@ -1701,6 +1778,26 @@ fn parse_execution_schema(
         });
     }
 
+    // The execution block is parsed key-by-key (not through a single
+    // `deny_unknown_fields` struct), so an unrecognized key would be
+    // silently ignored. Reject the keys that look like a method selector
+    // but are not part of the schema, so an author who reaches for the
+    // wrong spelling gets a pointer to the right one instead of a field
+    // that does nothing.
+    for (unsupported_key, replacement) in [
+        ("operations", "methods"),
+        ("default_operation", "method_dispatch.default"),
+    ] {
+        if execution_value.get(unsupported_key).is_some() {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: `execution.{unsupported_key}` is not a recognized key; \
+                     use `execution.{replacement}` instead"
+                ),
+            });
+        }
+    }
+
     let mut aliases = HashMap::new();
     if let Some(aliases_value) = execution_value.get("aliases") {
         if let Some(aliases_mapping) = aliases_value.as_mapping() {
@@ -1732,50 +1829,76 @@ fn parse_execution_schema(
 
     let thread_profile = parse_thread_profile(execution_value, display)?;
 
-    // Parse default_operation
-    let default_operation = execution_value
-        .get("default_operation")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+    // Parse method_dispatch (route + default method).
+    let method_dispatch = if let Some(md_value) = execution_value.get("method_dispatch") {
+        Some(
+            serde_yaml::from_value::<MethodDispatchDecl>(md_value.clone()).map_err(|e| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid method_dispatch declaration: {e}"),
+                }
+            })?,
+        )
+    } else {
+        None
+    };
 
-    // Parse operations
-    let mut operations = Vec::new();
-    if let Some(ops_value) = execution_value.get("operations") {
-        if let Some(ops_seq) = ops_value.as_sequence() {
-            for item in ops_seq {
-                let op: OperationDecl = serde_yaml::from_value(item.clone()).map_err(|e| {
-                    EngineError::SchemaLoaderError {
-                        reason: format!("{display}: invalid operation declaration: {e}"),
-                    }
+    // Parse methods (mapping keyed by method name; names are inherently
+    // unique because YAML mappings reject duplicate keys).
+    let mut methods = BTreeMap::new();
+    if let Some(methods_value) = execution_value.get("methods") {
+        let methods_map =
+            methods_value
+                .as_mapping()
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: `execution.methods` must be a mapping"),
                 })?;
-                operations.push(op);
-            }
+        for (k, v) in methods_map {
+            let name = k
+                .as_str()
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: method name must be a string"),
+                })?
+                .to_owned();
+            let decl: MethodDecl = serde_yaml::from_value(v.clone()).map_err(|e| {
+                EngineError::SchemaLoaderError {
+                    reason: format!("{display}: invalid method declaration `{name}`: {e}"),
+                }
+            })?;
+            methods.insert(name, decl);
         }
     }
 
-    // Validate: op names unique within the kind
-    {
-        let mut seen = std::collections::HashSet::new();
-        for op in &operations {
-            if !seen.insert(&op.name) {
+    // Validate: a method-bearing schema MUST declare method_dispatch,
+    // and a method_dispatch only makes sense alongside methods.
+    match (&method_dispatch, methods.is_empty()) {
+        (None, false) => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: kind declares `methods` but no `method_dispatch` \
+                     (declare `method_dispatch: {{ via: runtime_registry, default: <method> }}`)"
+                ),
+            });
+        }
+        (Some(_), true) => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: kind declares `method_dispatch` but no `methods`"
+                ),
+            });
+        }
+        _ => {}
+    }
+
+    // Validate: the default method, when declared, must name a method.
+    if let Some(md) = &method_dispatch {
+        if let Some(default) = &md.default {
+            if !methods.contains_key(default) {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
-                        "{display}: duplicate operation name `{}` in kind schema",
-                        op.name
+                        "{display}: method_dispatch.default `{default}` does not match any declared method"
                     ),
                 });
             }
-        }
-    }
-
-    // Validate: default_operation must match a declared op
-    if let Some(ref default_op) = default_operation {
-        if !operations.iter().any(|op| op.name == *default_op) {
-            return Err(EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{display}: default_operation `{default_op}` does not match any declared operation"
-                ),
-            });
         }
     }
 
@@ -1795,8 +1918,8 @@ fn parse_execution_schema(
         }
     }
 
-    // Mixed-dispatch reject: operations + terminator or operations + delegate
-    if !operations.is_empty() && (terminator.is_some() || delegate.is_some()) {
+    // Mixed-dispatch reject: methods + terminator or methods + delegate
+    if !methods.is_empty() && (terminator.is_some() || delegate.is_some()) {
         let conflict = if terminator.is_some() {
             "terminator"
         } else {
@@ -1804,7 +1927,7 @@ fn parse_execution_schema(
         };
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
-                "{display}: kind declares operations and {conflict}; mixed dispatch is forbidden"
+                "{display}: kind declares methods and {conflict}; mixed dispatch is forbidden"
             ),
         });
     }
@@ -1819,8 +1942,8 @@ fn parse_execution_schema(
     //     `executor_id` resolution — both are legitimate uses of the
     //     same field)
     //   * a `delegate` block (explicit registry/etc. routing)
-    //   * non-empty `operations` (schema-declared op surface —
-    //     relaxed executable invariant: operations alone qualifies)
+    //   * non-empty `methods` (schema-declared method surface —
+    //     relaxed executable invariant: methods alone qualifies)
     //
     // Pre-V5.4 the dispatcher silently consulted
     // `RuntimeRegistry::lookup_for` when a schema had a
@@ -1837,14 +1960,14 @@ fn parse_execution_schema(
     // declaring more than one is exercising different mechanisms,
     // not creating dispatcher ambiguity.
     let has_routing_primitive =
-        terminator.is_some() || !aliases.is_empty() || delegate.is_some() || !operations.is_empty();
+        terminator.is_some() || !aliases.is_empty() || delegate.is_some() || !methods.is_empty();
     if !has_routing_primitive {
         return Err(EngineError::SchemaLoaderError {
             reason: format!(
                 "{display}: kind declares `execution:` block but none of \
-                 `terminator`, `aliases`, `delegate`, or `operations` — schema cannot be \
+                 `terminator`, `aliases`, `delegate`, or `methods` — schema cannot be \
                  dispatched. Add a terminator, an `@<kind>` alias chain, \
-                 `delegate: {{ via: runtime_registry }}`, or an `operations:` block."
+                 `delegate: {{ via: runtime_registry }}`, or a `methods:` block."
             ),
         });
     }
@@ -1855,8 +1978,8 @@ fn parse_execution_schema(
         terminator,
         delegate,
         thread_profile,
-        default_operation,
-        operations,
+        method_dispatch,
+        methods,
         launch_augmentations,
     }))
 }
@@ -2765,9 +2888,9 @@ execution:
         let err = parse_exec(yaml).expect_err("non-actionable schema must reject");
         let msg = err.to_string();
         assert!(
-            msg.contains("none of") && msg.contains("delegate") && msg.contains("operations"),
+            msg.contains("none of") && msg.contains("delegate") && msg.contains("methods"),
             "error must enumerate the missing routing primitives \
-             (terminator/aliases/delegate/operations), got: {msg}"
+             (terminator/aliases/delegate/methods), got: {msg}"
         );
     }
 
@@ -2903,10 +3026,10 @@ execution:
         assert_eq!(infer_node_id(path), "engine/kinds/tool/tool");
     }
 
-    // ── Op surface tests ────────────────────────────────────────────────
+    // ── Method surface tests ────────────────────────────────────────────
 
     #[test]
-    fn operations_parsed_from_schema() {
+    fn methods_parsed_from_schema() {
         let yaml = "\
 execution:
   thread_profile:
@@ -2914,39 +3037,41 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
-  default_operation: compose
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
-      inputs:
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose:
+      args:
         token_budget:
           type: integer
           required: true
           min: 1
-    - name: query
-      side_effects: none
-      dispatch: { via: runtime_registry }
+    query:
+      scope: corpus
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
-        assert_eq!(exec.operations.len(), 2);
-        assert_eq!(exec.operations[0].name, "compose");
-        assert_eq!(exec.operations[1].name, "query");
-        assert_eq!(exec.default_operation.as_deref(), Some("compose"));
+        assert_eq!(exec.methods.len(), 2);
+        assert!(exec.methods.contains_key("compose"));
+        assert!(exec.methods.contains_key("query"));
+        assert_eq!(exec.methods["query"].scope, MethodScope::Corpus);
+        let md = exec.method_dispatch.as_ref().expect("method_dispatch present");
+        assert_eq!(md.default.as_deref(), Some("compose"));
         assert!(exec.terminator.is_none());
         assert!(exec.delegate.is_none());
         assert!(exec.launch_augmentations.is_empty());
     }
 
     #[test]
-    fn operations_with_inputs_types() {
+    fn methods_with_arg_types() {
         let yaml = "\
 execution:
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
-      inputs:
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose:
+      args:
         token_budget:
           type: integer
           required: true
@@ -2963,72 +3088,68 @@ execution:
           enum: [system, before, after]
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
-        let compose = &exec.operations[0];
-        let tb = compose.inputs.get("token_budget").unwrap();
-        assert_eq!(tb.ty, InputType::Integer);
+        let compose = &exec.methods["compose"];
+        let tb = compose.args.get("token_budget").unwrap();
+        assert_eq!(tb.ty, ArgType::Integer);
         assert!(tb.required);
         assert_eq!(tb.min, Some(1));
 
-        let er = compose.inputs.get("exclude_refs").unwrap();
-        assert_eq!(er.ty, InputType::Array);
+        let er = compose.args.get("exclude_refs").unwrap();
+        assert_eq!(er.ty, ArgType::Array);
         assert!(!er.required);
         assert!(er.items.is_some());
 
-        let pos = compose.inputs.get("position").unwrap();
-        assert_eq!(pos.ty, InputType::String);
+        let pos = compose.args.get("position").unwrap();
+        assert_eq!(pos.ty, ArgType::String);
         let expected_enum: Vec<String> = vec!["system".into(), "before".into(), "after".into()];
         assert_eq!(pos.enum_values.as_deref(), Some(expected_enum.as_slice()));
     }
 
     #[test]
-    fn reject_duplicate_op_names() {
+    fn reject_default_method_not_matching_any_method() {
         let yaml = "\
 execution:
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
+  method_dispatch:
+    via: runtime_registry
+    default: query
+  methods:
+    compose: {}
 ";
         let err = parse_exec(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("duplicate operation name") && msg.contains("compose"),
-            "expected duplicate op error, got: {msg}"
+            msg.contains("method_dispatch.default") && msg.contains("query"),
+            "expected default method mismatch error, got: {msg}"
         );
     }
 
     #[test]
-    fn reject_default_operation_not_matching_any_op() {
+    fn reject_methods_without_method_dispatch() {
         let yaml = "\
 execution:
-  default_operation: query
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
+  methods:
+    compose: {}
 ";
         let err = parse_exec(yaml).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("default_operation") && msg.contains("query"),
-            "expected default_operation mismatch error, got: {msg}"
+            msg.contains("method_dispatch"),
+            "expected missing method_dispatch error, got: {msg}"
         );
     }
 
     #[test]
-    fn reject_mixed_dispatch_operations_and_terminator() {
+    fn reject_mixed_dispatch_methods_and_terminator() {
         let yaml = "\
 execution:
   terminator:
     kind: subprocess
     protocol: protocol:ryeos/core/runtime_v1
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose: {}
 ";
         let err = parse_exec(yaml).unwrap_err();
         let msg = err.to_string();
@@ -3039,15 +3160,16 @@ execution:
     }
 
     #[test]
-    fn reject_mixed_dispatch_operations_and_delegate() {
+    fn reject_mixed_dispatch_methods_and_delegate() {
         let yaml = "\
 execution:
   delegate:
     via: runtime_registry
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose: {}
 ";
         let err = parse_exec(yaml).unwrap_err();
         let msg = err.to_string();
@@ -3058,8 +3180,8 @@ execution:
     }
 
     #[test]
-    fn relaxed_executable_invariant_operations_only() {
-        // A kind with non-empty operations but no terminator/delegate/aliases
+    fn relaxed_executable_invariant_methods_only() {
+        // A kind with non-empty methods but no terminator/delegate/aliases
         // is executable.
         let yaml = "\
 execution:
@@ -3068,21 +3190,21 @@ execution:
     root_executable: true
     supports_interrupt: false
     supports_continuation: false
-  default_operation: compose
-  operations:
-    - name: compose
-      side_effects: none
-      dispatch: { via: runtime_registry }
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose: {}
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
-        assert_eq!(exec.operations.len(), 1);
+        assert_eq!(exec.methods.len(), 1);
         assert!(exec.terminator.is_none());
         assert!(exec.delegate.is_none());
         assert!(exec.aliases.is_empty());
     }
 
     #[test]
-    fn operations_default_to_empty() {
+    fn methods_default_to_empty() {
         let yaml = "\
 execution:
   terminator:
@@ -3090,8 +3212,8 @@ execution:
     protocol: protocol:ryeos/core/runtime_v1
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
-        assert!(exec.operations.is_empty());
-        assert!(exec.default_operation.is_none());
+        assert!(exec.methods.is_empty());
+        assert!(exec.method_dispatch.is_none());
         assert!(exec.launch_augmentations.is_empty());
     }
 
@@ -3106,7 +3228,7 @@ execution:
   launch_augmentations:
     - step: compose_context_positions
       target_kind: knowledge
-      target_op: compose_positions
+      target_method: compose_positions
       source_derived: composed_context
       output_derived: rendered_contexts
       meta_output_derived: rendered_contexts_meta
@@ -3119,14 +3241,14 @@ execution:
         match &exec.launch_augmentations[0] {
             LaunchAugmentationDecl::ComposeContextPositions {
                 target_kind,
-                target_op,
+                target_method,
                 source_derived,
                 output_derived,
                 meta_output_derived,
                 per_position_budget,
             } => {
                 assert_eq!(target_kind, "knowledge");
-                assert_eq!(target_op, "compose_positions");
+                assert_eq!(target_method, "compose_positions");
                 assert_eq!(source_derived, "composed_context");
                 assert_eq!(output_derived, "rendered_contexts");
                 assert_eq!(meta_output_derived, "rendered_contexts_meta");
@@ -3150,14 +3272,14 @@ execution:
         match &exec.launch_augmentations[0] {
             LaunchAugmentationDecl::ComposeContextPositions {
                 target_kind,
-                target_op,
+                target_method,
                 source_derived,
                 output_derived,
                 meta_output_derived,
                 per_position_budget,
             } => {
                 assert_eq!(target_kind, "knowledge");
-                assert_eq!(target_op, "compose_positions");
+                assert_eq!(target_method, "compose_positions");
                 assert_eq!(source_derived, "composed_context");
                 assert_eq!(output_derived, "rendered_contexts");
                 assert_eq!(meta_output_derived, "rendered_contexts_meta");
@@ -3354,6 +3476,98 @@ metadata:
         assert!(
             matches!(err, EngineError::SchemaLoaderError { ref reason }
                 if reason.contains("path_string_seq") && reason.contains("scalar")),
+            "expected scalar-anchor error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn path_value_extracts_structured_mapping_into_extra() {
+        // A nested mapping (e.g. a `requires:` block) is carried verbatim into
+        // `metadata.extra`, unlike the scalar/string-seq extractors.
+        let parsed = serde_json::json!({
+            "requires": {
+                "capabilities": {
+                    "callbacks": {
+                        "bundle_events": [
+                            { "event_kind": "arc_pattern_event", "operations": ["append"] }
+                        ]
+                    }
+                }
+            }
+        });
+        let mut rules = HashMap::new();
+        rules.insert(
+            "requires".to_string(),
+            anchor_rule(
+                ExtractionRule::PathValue {
+                    key: "requires".into(),
+                },
+                false,
+                None,
+            ),
+        );
+        let metadata = apply_extraction_rules(
+            &parsed,
+            &rules,
+            Path::new("/proj/.ai/graphs/g.yaml"),
+            "graphs",
+        );
+        assert_eq!(
+            metadata.extra.get("requires"),
+            Some(&parsed["requires"]),
+            "structured value must be carried verbatim into extra"
+        );
+    }
+
+    #[test]
+    fn path_value_absent_key_inserts_nothing() {
+        let parsed = serde_json::json!({ "other": 1 });
+        let mut rules = HashMap::new();
+        rules.insert(
+            "requires".to_string(),
+            anchor_rule(
+                ExtractionRule::PathValue {
+                    key: "requires".into(),
+                },
+                false,
+                None,
+            ),
+        );
+        let metadata = apply_extraction_rules(
+            &parsed,
+            &rules,
+            Path::new("/proj/.ai/graphs/g.yaml"),
+            "graphs",
+        );
+        assert!(!metadata.extra.contains_key("requires"));
+    }
+
+    #[test]
+    fn schema_rejects_match_on_path_value() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let yaml = "\
+location:
+  directory: tools
+formats:
+  - extensions: [\".py\"]
+    parser: parser:ryeos/core/python/tool-header
+    signature:
+      prefix: \"#\"
+metadata:
+  rules:
+    requires:
+      from: path_value
+      key: requires
+      match: path
+";
+        sign_and_write_schema(&tmp, "tool", yaml, &sk);
+
+        let err = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            matches!(err, EngineError::SchemaLoaderError { ref reason }
+                if reason.contains("path_value") && reason.contains("scalar")),
             "expected scalar-anchor error, got: {err:?}"
         );
     }
@@ -3723,5 +3937,53 @@ metadata:
         // Each kind retains its own directory
         assert_eq!(surf.directory, "surfaces");
         assert_eq!(cli.directory, "clients");
+    }
+
+    #[test]
+    fn shipped_knowledge_schema_declares_read_methods() {
+        // The shipped standard knowledge kind schema must parse and declare
+        // exactly the GENERICALLY-DISPATCHABLE methods: compose (single-root)
+        // + the read side (query/graph/validate, corpus-scoped). It must NOT
+        // declare `compose_positions` — that method is handled by the runtime
+        // but driven only by the compose_context_positions launch
+        // augmentation, with a bespoke payload, so it is intentionally not
+        // generically dispatchable.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../bundles/standard/.ai/node/engine/kinds/knowledge/knowledge.kind-schema.yaml",
+        );
+        let content = std::fs::read_to_string(&path).expect("read knowledge kind schema");
+        let schema = parse_kind_schema_content("knowledge.kind-schema.yaml", &content)
+            .expect("knowledge kind schema must parse");
+
+        let exec = schema
+            .execution()
+            .expect("knowledge has an execution block");
+        for expected in ["compose", "query", "graph", "validate"] {
+            assert!(
+                exec.methods.contains_key(expected),
+                "missing method `{expected}` in {:?}",
+                exec.methods.keys().collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            !exec.methods.contains_key("compose_positions"),
+            "compose_positions is augmentation-driven and must NOT be a generic method"
+        );
+
+        // Read methods are corpus-scoped; compose is single-root.
+        let method = |name: &str| -> &MethodDecl {
+            exec.methods
+                .get(name)
+                .unwrap_or_else(|| panic!("method {name} missing"))
+        };
+        assert!(method("query").args.contains_key("query"));
+        for name in ["query", "graph", "validate"] {
+            assert_eq!(
+                method(name).scope,
+                MethodScope::Corpus,
+                "{name} must be corpus-scoped"
+            );
+        }
+        assert_eq!(method("compose").scope, MethodScope::SingleRoot);
     }
 }

@@ -14,8 +14,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandDef {
-    pub category: String,
-    pub section: String,
+    #[serde(skip)]
     pub name: String,
     pub tokens: Vec<String>,
     pub description: String,
@@ -31,6 +30,12 @@ pub struct CommandDef {
     pub defaults: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_binding: Option<CommandParameterBinding>,
+    /// Declared control flags (e.g. `--async`, `--method`, `--args`). Stripped
+    /// from the CLI tail before parameter binding and routed per their
+    /// `binding`. Data-driven so the dispatcher and help never hardcode flag
+    /// spellings or destinations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_flags: Vec<CommandControlFlag>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<CommandProjectPolicy>,
     pub dispatch: CommandDispatch,
@@ -185,6 +190,52 @@ pub enum FlagKeyNormalization {
     Preserve,
 }
 
+/// A control flag on a command: stripped from the CLI tail before parameter
+/// binding and routed into the outgoing request (or CLI display state) per its
+/// `binding`. Declared in command data so the dispatcher and help never
+/// hardcode flag spellings or their destinations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandControlFlag {
+    /// Flag spelling without leading dashes, e.g. `async`, `method`.
+    pub flag: String,
+    /// One-line help shown in the command's flag list.
+    pub help: String,
+    /// Where the flag's value lands.
+    pub binding: ControlFlagBinding,
+    /// Additional spellings that bind identically, e.g. `json` for `no_stream`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+/// Generic vocabulary for where a control flag routes — a request field or CLI
+/// display state. A closed set the dispatcher knows how to apply; command data
+/// chooses which flag maps to which, but never invents new destinations (the
+/// runtime knows the request/display vocabulary, never a specific command).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlFlagBinding {
+    /// Presence → request `launch_mode = "accepted"`.
+    LaunchModeAccepted,
+    /// Presence → force the live stream on.
+    StreamOn,
+    /// Presence → force the live stream off (buffered JSON result).
+    StreamOff,
+    /// Presence → request the debug block on the result.
+    DebugRaw,
+    /// Takes a value → request `call.method` (string).
+    CallMethod,
+    /// Takes a value → request `call.args` (parsed JSON object).
+    CallArgs,
+}
+
+impl ControlFlagBinding {
+    /// Whether the flag consumes a following value (vs a presence boolean).
+    pub fn takes_value(self) -> bool {
+        matches!(self, Self::CallMethod | Self::CallArgs)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandProjectPolicy {
@@ -250,12 +301,6 @@ pub enum CommandAvailability {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandRegistryError {
-    #[error("command '{name}' has invalid category/section: expected commands/commands, got {category}/{section}")]
-    InvalidSection {
-        name: String,
-        category: String,
-        section: String,
-    },
     #[error("command '{name}' has empty tokens")]
     EmptyTokens { name: String },
     #[error("command '{name}' token '{token}' is invalid")]
@@ -369,13 +414,6 @@ fn validate_command(
     record: &CommandDef,
     policy: &CommandRegistrationPolicy,
 ) -> Result<(), CommandRegistryError> {
-    if record.category != "commands" || record.section != "commands" {
-        return Err(CommandRegistryError::InvalidSection {
-            name: record.name.clone(),
-            category: record.category.clone(),
-            section: record.section.clone(),
-        });
-    }
     validate_tokens(&record.name, &record.tokens)?;
     match &record.dispatch {
         CommandDispatch::ExecuteRef { execute, .. } => {
@@ -515,8 +553,6 @@ mod tests {
 
     fn command(name: &str, tokens: &[&str]) -> CommandDef {
         CommandDef {
-            category: "commands".into(),
-            section: "commands".into(),
             name: name.into(),
             tokens: tokens.iter().map(|token| token.to_string()).collect(),
             description: name.into(),
@@ -526,6 +562,7 @@ mod tests {
             forms: Vec::new(),
             defaults: Default::default(),
             parameter_binding: None,
+            control_flags: Vec::new(),
             project: None,
             dispatch: CommandDispatch::ExecuteRef {
                 execute: format!("tool:test/{name}"),

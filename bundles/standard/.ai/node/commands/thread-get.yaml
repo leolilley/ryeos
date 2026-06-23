@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:8b04d2dfb45fe3ce1a9c91cd4d05335355fc746754aabb7787616796511060cd:OOAMRJOMGe21fKntjtgIpeGZq7n3i3dVNj0JXyTkemVu+g34/3FhvS2x3uGunvMhWJvcW3rdkiBmi6+r32yKCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: thread-get
+# ryeos:signed:2026-06-19T05:40:59Z:666c29cb7041f15040f9cf756a20c9738e288400f2f149c5a9d75047d92f348c:DZYBTyjycuyN+8KOzBtYNPxuQSKetm66goWDyOq9G6+t0lA4hpHphDE9eZ1OmlaycifJBli31gJvPfV7RvjiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - get

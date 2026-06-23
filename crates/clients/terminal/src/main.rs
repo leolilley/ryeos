@@ -87,7 +87,7 @@ fn main() {
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!(
-                    "  --surface <REF>         Open a surface by canonical ref (default: surface:ryeos/studio/base)"
+                    "  --surface <REF>         Open a surface by canonical ref"
                 );
                 eprintln!(
                     "  --surface-file <PATH>   Load surface spec from a local file (untrusted preview)"
@@ -108,9 +108,13 @@ fn main() {
         i += 1;
     }
 
-    // The seat opens a surface; the studio path is the only path.
+    // No hardcoded default surface. The surface is supplied by the caller
+    // (`--surface` / `--surface-file`) or by the launching client's config.
+    // With neither, show an empty surface — never fabricate one or crash.
     if surface_name.is_none() && surface_file.is_none() {
-        surface_name = Some("surface:ryeos/studio/base".to_string());
+        eprintln!(
+            "info: no surface specified (--surface / --surface-file, or client config); showing an empty surface"
+        );
     }
 
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
@@ -204,7 +208,43 @@ fn main() {
                 }
             }
         } else {
-            ryeos_client_base::surface::load_surface(&surface_opts)
+            // `--surface-file`: the SURFACE is an untrusted local file, but its
+            // views still come from the trusted daemon — resolve and embed them
+            // so a layout previews with real content (no populate/install just
+            // to look at it). Without a daemon, the layout still renders; its
+            // panes show the missing-binding placeholder.
+            let mut loaded = ryeos_client_base::surface::load_surface(&surface_opts);
+            match transport::daemon::DaemonClient::try_connect().await {
+                Ok(client) => {
+                    let spec_value =
+                        serde_json::to_value(loaded.spec()).unwrap_or(serde_json::Value::Null);
+                    let mut view_refs: Vec<String> = Vec::new();
+                    collect_view_refs(&spec_value, &mut view_refs);
+                    view_refs.sort();
+                    view_refs.dedup();
+                    let mut views = serde_json::Map::new();
+                    for view_ref in view_refs {
+                        match client
+                            .resolve_effective_item(&view_ref, "view", Some(&project_path))
+                            .await
+                        {
+                            Ok(binding) => {
+                                let composed =
+                                    binding.get("composed_value").cloned().unwrap_or(binding);
+                                views.insert(view_ref, composed);
+                            }
+                            Err(e) => eprintln!("warn: failed to resolve {view_ref}: {e}"),
+                        }
+                    }
+                    loaded.set_views(serde_json::Value::Object(views));
+                }
+                Err(_) => {
+                    eprintln!(
+                        "warn: no daemon — local preview shows layout only (views unresolved)"
+                    );
+                }
+            }
+            loaded
         };
 
         // Surface diagnostics

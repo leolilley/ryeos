@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:8c144c4dce6f9801bc83ce049c34f27e97405ac7a780b7fb9be9846239b86496:6BdXAYxb+0/2rW6VMeEM1liBarscjLF3Vt6G8FqeJ4Xvh9dYocIG9Vy3XTd8SRUBlbgK2xHHHDY6Uvmw9VFiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-execute
+# ryeos:signed:2026-06-19T05:40:59Z:827145fd5d997fe3f003452360aec7df12b9709702146a9bf00074d97949dc55:z2rQxZDGUOLT1eBQ7LaB7NWIWn8emnwfyykDTLZWdF3+DpumV0YJCfuahtLnpluWIbqQaq+8fddMmPRzf3+XCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - execute

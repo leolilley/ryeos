@@ -346,8 +346,6 @@ mod tests {
         body_b64: Option<&str>,
     ) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".to_string(),
-            category: None,
             id: "test-route".to_string(),
             path: "/test".to_string(),
             methods: ["GET".to_string()].into_iter().collect(),
@@ -376,8 +374,6 @@ mod tests {
         content_type: Option<&str>,
     ) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".to_string(),
-            category: None,
             id: "test-embedded".to_string(),
             path: "/test".to_string(),
             methods: ["GET".to_string()].into_iter().collect(),

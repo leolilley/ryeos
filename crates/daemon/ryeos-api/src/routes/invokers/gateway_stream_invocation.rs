@@ -47,12 +47,10 @@ pub(crate) struct LaunchRequest {
     /// Whether to validate descriptor composition only, without execution.
     #[serde(default)]
     pub(crate) validate_only: bool,
-    /// Optional operation name for multi-op items.
+    /// Method call: `{ method, args }`. The method selects daemon-owned
+    /// behavior; the args are data. Absent for terminator/delegate kinds.
     #[serde(default)]
-    pub(crate) operation: Option<String>,
-    /// Optional op-specific inputs.
-    #[serde(default)]
-    pub(crate) inputs: Option<Value>,
+    pub(crate) call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
 }
@@ -330,16 +328,18 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         );
 
         let hub = ctx.state.event_streams.clone();
-        let mut rx = hub.subscribe(&thread_id);
+        // Subscribe before launch so no live event is missed; the guard
+        // (moved into the stream below) reclaims the sender at stream end.
+        let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
+        // Build launch options before moving `req` fields.
         let options = crate::routes::launch::DispatchLaunchOptions {
             launch_mode: req.launch_mode,
             target_site_id: req.target_site_id,
             validate_only: req.validate_only,
             usage_subject,
             usage_subject_asserted_by,
-            operation: req.operation,
-            inputs: req.inputs,
+            call: req.call,
             previous_thread_id: None,
         };
 
@@ -361,6 +361,9 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
         let stream = async_stream::stream! {
             let _guard = span.enter();
+            // Move the subscription guard (which owns the receiver) into the
+            // stream so the sender is reclaimed when the stream ends.
+            let mut sub = sub;
             yield Ok(
                 RouteStreamEnvelope::new(
                     "stream_started",
@@ -373,7 +376,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
             loop {
                 tokio::select! {
-                    recv_result = rx.recv() => {
+                    recv_result = sub.recv() => {
                         match recv_result {
                             Ok(ev) => {
                                 let event_type = ev.event_type.clone();
@@ -455,7 +458,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                         match join_result {
                             Ok(Ok(())) => {
                                 loop {
-                                    match rx.try_recv() {
+                                    match sub.try_recv() {
                                         Ok(ev) => {
                                             if is_ephemeral(&ev) {
                                                 yield Ok(envelope_for_persisted(&ev));
@@ -580,8 +583,7 @@ mod tests {
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
         assert_eq!(req.validate_only, false);
-        assert_eq!(req.operation, None);
-        assert_eq!(req.inputs, None);
+        assert!(req.call.is_none());
     }
 
     #[test]
@@ -593,16 +595,16 @@ mod tests {
             "launch_mode": "detached",
             "target_site_id": "site:remote",
             "validate_only": true,
-            "operation": "run",
-            "inputs": {"arg": 42}
+            "call": {"method": "run", "args": {"arg": 42}}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "tool:x/y");
         assert_eq!(req.launch_mode, "detached");
         assert_eq!(req.target_site_id.as_deref(), Some("site:remote"));
         assert!(req.validate_only);
-        assert_eq!(req.operation.as_deref(), Some("run"));
-        assert_eq!(req.inputs.as_ref().unwrap()["arg"], 42);
+        let call = req.call.as_ref().expect("call present");
+        assert_eq!(call.method(), Some("run"));
+        assert_eq!(call.args().unwrap()["arg"], 42);
     }
 
     #[test]
@@ -626,18 +628,16 @@ mod tests {
     }
 
     #[test]
-    fn launch_request_defaults_match_previous_hardcoded_behavior() {
+    fn launch_request_defaults_are_inline_local() {
         let json = serde_json::json!({
             "item_ref": "directive:x",
             "project_path": "/tmp/p",
             "parameters": {}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
-        // Verify defaults match what was previously hard-coded in launch.rs
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
-        assert_eq!(req.operation, None);
-        assert_eq!(req.inputs, None);
+        assert!(req.call.is_none());
     }
 }

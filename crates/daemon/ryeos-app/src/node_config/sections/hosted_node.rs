@@ -8,13 +8,11 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::node_config::{NodeConfigSection, SectionRecord, SectionSourcePolicy};
+use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostedNodePolicyRecord {
-    pub category: String,
-    pub section: String,
     pub version: String,
     pub schema_version: String,
     pub description: String,
@@ -75,26 +73,14 @@ impl NodeConfigSection for HostedNodePolicySection {
         SectionSourcePolicy::EffectiveBundleRootsAndState
     }
 
-    fn parse(&self, name: &str, body: &Value) -> Result<Box<dyn SectionRecord>> {
+    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> Result<Box<dyn SectionRecord>> {
         let record: HostedNodePolicyRecord = serde_json::from_value(body.clone())
             .context("failed to parse hosted-node policy record")?;
 
-        if name != "policy" {
+        if ctx.id != "policy" {
             bail!(
                 "hosted-node policy filename must be 'policy', got '{}'",
-                name
-            );
-        }
-        if record.category != "hosted" {
-            bail!(
-                "hosted policy declares category '{}' but must be 'hosted'",
-                record.category
-            );
-        }
-        if record.section != "hosted" {
-            bail!(
-                "hosted policy declares section '{}' but must be 'hosted'",
-                record.section
+                ctx.id
             );
         }
         if record.schema_version != "1.0.0" {
@@ -156,11 +142,21 @@ impl SectionRecord for HostedNodePolicyRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_config::NodeItemContext;
+
+    fn ctx(id: &str) -> NodeItemContext {
+        NodeItemContext {
+            section: "hosted".into(),
+            id: id.into(),
+            stem: id.into(),
+            rel_path: format!("{id}.yaml").into(),
+            source_file: format!("/tmp/{id}.yaml").into(),
+            signer_fingerprint: "test".into(),
+        }
+    }
 
     fn valid_body() -> Value {
         serde_json::json!({
-            "category": "hosted",
-            "section": "hosted",
             "version": "0.1.0",
             "schema_version": "1.0.0",
             "description": "Default hosted-node operator policy for decentralized remote admission.",
@@ -195,7 +191,7 @@ mod tests {
     #[test]
     fn valid_policy_parses() {
         let section = HostedNodePolicySection;
-        assert!(section.parse("policy", &valid_body()).is_ok());
+        assert!(section.parse(&ctx("policy"), &valid_body()).is_ok());
     }
 
     #[test]
@@ -203,7 +199,10 @@ mod tests {
         let section = HostedNodePolicySection;
         let mut body = valid_body();
         body["authorization"]["central_bearer_tokens_allowed"] = serde_json::json!(true);
-        let err = section.parse("policy", &body).unwrap_err().to_string();
+        let err = section
+            .parse(&ctx("policy"), &body)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("central bearer tokens"), "got: {err}");
     }
 
@@ -213,22 +212,34 @@ mod tests {
 
         let mut body = valid_body();
         body["transport"]["public_https_required"] = serde_json::json!(false);
-        let err = section.parse("policy", &body).unwrap_err().to_string();
+        let err = section
+            .parse(&ctx("policy"), &body)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("public HTTPS"), "got: {err}");
 
         let mut body = valid_body();
         body["admission"]["reject_wildcard_scopes"] = serde_json::json!(false);
-        let err = section.parse("policy", &body).unwrap_err().to_string();
+        let err = section
+            .parse(&ctx("policy"), &body)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("wildcard"), "got: {err}");
 
         let mut body = valid_body();
         body["admission"]["token_delivery"] = serde_json::json!("provider_session");
-        let err = section.parse("policy", &body).unwrap_err().to_string();
+        let err = section
+            .parse(&ctx("policy"), &body)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("token_delivery"), "got: {err}");
 
         let mut body = valid_body();
         body["descriptor"]["require_live_identity_match"] = serde_json::json!(false);
-        let err = section.parse("policy", &body).unwrap_err().to_string();
+        let err = section
+            .parse(&ctx("policy"), &body)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("descriptor identity"), "got: {err}");
     }
 }

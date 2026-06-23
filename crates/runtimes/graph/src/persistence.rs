@@ -20,6 +20,7 @@ pub async fn write_node_receipt(
         "elapsed_ms": receipt.elapsed_ms,
         "timestamp": lillux::time::iso8601_now(),
         "error": receipt.error,
+        "cost": receipt.cost,
     });
 
     callback
@@ -67,7 +68,11 @@ mod tests {
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn finalize_thread(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: ryeos_runtime::TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
@@ -154,6 +159,7 @@ mod tests {
             cache_hit: false,
             elapsed_ms: 142,
             error: None,
+            cost: None,
         };
         let (callback, mock) = make_callback();
         let output = write_node_receipt(&callback, "gr-1", &receipt)
@@ -184,6 +190,7 @@ mod tests {
             cache_hit: false,
             elapsed_ms: 5,
             error: Some("boom".to_string()),
+            cost: None,
         };
 
         let (callback, _mock) = make_callback();
@@ -202,5 +209,35 @@ mod tests {
         assert_eq!(artifacts[0]["artifact_type"], "graph_node_receipt");
         assert_eq!(artifacts[0]["uri"], "graph://runs/gr-err/node-receipts/0");
         assert_eq!(artifacts[0]["metadata"], output);
+    }
+
+    #[tokio::test]
+    async fn write_node_receipt_includes_cost_in_metadata() {
+        // A cost-bearing node's receipt must persist `cost` into the
+        // published artifact metadata, not just the in-memory model.
+        let receipt = NodeReceipt {
+            node: "reason".to_string(),
+            step: 1,
+            definition_ref: "graph:test".to_string(),
+            definition_hash: "def123".to_string(),
+            result_hash: Some("h".to_string()),
+            cache_hit: false,
+            elapsed_ms: 12,
+            error: None,
+            cost: Some(ryeos_runtime::envelope::RuntimeCost {
+                input_tokens: 100,
+                output_tokens: 20,
+                total_usd: 0.001,
+            }),
+        };
+        let (callback, mock) = make_callback();
+        let output = write_node_receipt(&callback, "gr-cost", &receipt)
+            .await
+            .unwrap();
+
+        assert_eq!(output["cost"]["input_tokens"], 100);
+        assert_eq!(output["cost"]["output_tokens"], 20);
+        let artifacts = mock.artifacts.lock().unwrap();
+        assert_eq!(artifacts[0]["metadata"]["cost"]["input_tokens"], 100);
     }
 }

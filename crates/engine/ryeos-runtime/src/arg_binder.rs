@@ -745,8 +745,6 @@ mod tests {
         forms: Vec<crate::CommandArgumentForm>,
     ) -> crate::CommandDef {
         crate::CommandDef {
-            category: "commands".into(),
-            section: "commands".into(),
             name: tokens.join("-"),
             tokens,
             description: String::new(),
@@ -756,6 +754,7 @@ mod tests {
             forms,
             defaults: Default::default(),
             parameter_binding: None,
+            control_flags: Vec::new(),
             project: None,
             dispatch: crate::CommandDispatch::Group,
             source_file: std::path::PathBuf::new(),

@@ -14,16 +14,10 @@ struct DispatchActionParams {
     thread_id: String,
     project_path: String,
     thread_auth_token: String,
-    action: ActionPayload,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ActionPayload {
-    item_id: String,
-    #[serde(default)]
-    params: Value,
-    pub thread: String,
+    // Use the shared callback wire type directly — no local duplicate — so the
+    // action payload (incl. its `call` block) can't drift from the runtime
+    // side of the wire.
+    action: ryeos_runtime::callback::ActionPayload,
 }
 
 pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
@@ -165,8 +159,10 @@ async fn handle_execute(
         // Use the parent's per-request engine — never the daemon engine.
         engine: child_provenance.request_engine().clone(),
         plan_ctx,
-        requested_op: None,
-        requested_inputs: None,
+        // Method selector from the graph node's action `call` block — the
+        // single source of truth for method dispatch (resolver + arg
+        // validation both read it). `None` → the kind's default method.
+        requested_call: params.action.call.clone(),
     };
 
     let project_path = child_provenance.effective_path().to_path_buf();
@@ -182,8 +178,6 @@ async fn handle_execute(
         pre_minted_thread_id: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
-        operation: None,
-        inputs: None,
         previous_thread_id: None,
     };
 

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use super::content::{ProjectedRecord, TimelineRole};
 use super::event::StudioAction;
 use super::model::{StudioCore, StudioDockContent, StudioDockEdge, StudioDockSlotState};
 use super::scene_model::{build_scene_model, StudioSceneModel};
@@ -307,6 +306,16 @@ pub enum StudioViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<StudioTimelineEntryVm>,
+        /// The entry under the point (absolute index into `entries`), for
+        /// highlight + scroll. Derived from the tile cursor, which the feed
+        /// reads as distance-from-bottom (0 = newest), so the point sits at
+        /// the tail by default and arrow-up walks back into history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected: Option<usize>,
+        /// The foldable turn-section the point sits in, if any — what a fold
+        /// key toggles. `None` when the point is in unfoldable content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fold_section: Option<usize>,
     },
     Map {
         scene: StudioSceneModel,
@@ -320,30 +329,9 @@ pub enum StudioViewVm {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StudioTimelineEntryVm {
-    Block {
-        text: String,
-        tone: StudioTone,
-    },
-    Line {
-        primary: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        meta: Option<String>,
-        tone: StudioTone,
-    },
-    Pair {
-        summary: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        meta: Option<String>,
-        tone: StudioTone,
-        pending: bool,
-    },
-    Separator {
-        label: String,
-    },
-}
+// The timeline entry shapes live in `super::timeline`; re-exported here so
+// the established `studio::view_model::StudioTimelineEntryVm` path is stable.
+pub use super::timeline::StudioTimelineEntryVm;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioLauncherItemVm {
@@ -487,8 +475,21 @@ fn focused_tile_title(core: &StudioCore) -> String {
     core.workspace
         .tiles
         .get(&core.workspace.focused_tile)
-        .map(|tile| tile.view.title())
+        .map(|tile| tile_title(core, &tile.view))
         .unwrap_or_else(|| "home".to_string())
+}
+
+/// Tile/launcher title for a bound view: prefer the view item's authored
+/// `name:` (content), fall back to the ref tail when none is declared. The
+/// authored label is content too — "views are content" extends to the title.
+fn tile_title(core: &StudioCore, view: &crate::workspace::ViewSpec) -> String {
+    core.views
+        .get(&view.view_ref)
+        .and_then(|binding| binding.name.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| view.title())
 }
 
 fn layout_symbol(core: &StudioCore) -> String {
@@ -544,7 +545,9 @@ fn presentation_metrics_vm(
         .as_ref()
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
-    let scene_object_count = build_scene_model(core).objects.len();
+    let scene_object_count = build_scene_model(core, &core.ui.atlas, None, None)
+        .objects
+        .len();
     let activity_level = presentation_activity_level(
         workspace.tile_count,
         core.ui.motion.len(),
@@ -751,7 +754,7 @@ fn dock_tile_vm(
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
-        view: bound_view_vm_keyed(core, &source_key, None, view_ref),
+        view: bound_view_vm_keyed(core, &source_key, None, None, view_ref, &core.ui.atlas),
         input: instance_input_vm(core, &source_key, view_ref),
     })
 }
@@ -776,7 +779,9 @@ fn bound_view_vm(core: &StudioCore, tile_id: TileId, view_ref: &str) -> StudioVi
         core,
         &tile_id.0.to_string(),
         selected_cursor(core, tile_id),
+        selected_collapsed(core, tile_id),
         view_ref,
+        core.tile_atlas_state(tile_id),
     )
 }
 
@@ -784,7 +789,9 @@ fn bound_view_vm_keyed(
     core: &StudioCore,
     source_key: &str,
     cursor: Option<usize>,
+    collapsed: Option<&std::collections::BTreeSet<usize>>,
     view_ref: &str,
+    atlas: &crate::atlas::AtlasUiStateVm,
 ) -> StudioViewVm {
     let Some(binding) = core.views.get(view_ref) else {
         return StudioViewVm::Placeholder {
@@ -799,6 +806,30 @@ fn bound_view_vm_keyed(
             title: view_ref.to_string(),
             message: reason.clone(),
         };
+    }
+    // Engine scene widgets render from shared topology/item data + this
+    // tile's atlas arrangement, not from a per-tile source response — so
+    // they dispatch before the source-required arms below.
+    match binding.widget.as_str() {
+        "atlas" => {
+            // This tile's own scoped dataset when it has one (keyed by tile
+            // id == source_key); otherwise None falls back to the shared data.
+            return StudioViewVm::Atlas {
+                scene: build_scene_model(
+                    core,
+                    atlas,
+                    core.data.tile_items.get(source_key),
+                    core.data.tile_file_space.get(source_key),
+                ),
+            };
+        }
+        "graph" => {
+            // Graph renders shared topology; no per-tile content scope yet.
+            return StudioViewVm::Map {
+                scene: build_scene_model(core, atlas, None, None),
+            };
+        }
+        _ => {}
     }
     let response = core.data.sources.get(source_key);
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
@@ -864,12 +895,34 @@ fn bound_view_vm_keyed(
                 rows,
             }
         }
-        ("timeline", Some(response)) => StudioViewVm::Timeline {
-            title,
-            provenance: Some(view_ref.to_string()),
-            affordance_hints: affordance_hints(binding),
-            entries: timeline_entries(super::content::project_records(binding, response)),
-        },
+        ("timeline", Some(response)) => {
+            let mut full = timeline_entries(super::content::project_records(binding, response));
+            append_live_delta(core, &mut full);
+            // Apply the operator's folds, then project over the VISIBLE list so
+            // the cursor, scroll, and point all address what's actually shown.
+            let empty = std::collections::BTreeSet::new();
+            let folded = super::timeline::fold_timeline(full, collapsed.unwrap_or(&empty));
+            // The feed reads the tile cursor as distance-from-bottom: 0 keeps
+            // the point on the newest entry (so it follows the live tail),
+            // larger values walk back into history. Empty feed → no point.
+            let selected = folded.entries.len().checked_sub(1).map(|last| {
+                let distance = cursor.unwrap_or(0).min(last);
+                last - distance
+            });
+            // The foldable section under the point — what a fold key toggles.
+            let fold_section = selected.and_then(|i| {
+                let section = folded.sections.get(i).copied()?;
+                folded.collapsible.contains(&section).then_some(section)
+            });
+            StudioViewVm::Timeline {
+                title,
+                provenance: Some(view_ref.to_string()),
+                affordance_hints: affordance_hints(binding),
+                entries: folded.entries,
+                selected,
+                fold_section,
+            }
+        }
         ("key_value" | "text", Some(response)) => {
             let rows = super::content::project_detail(binding, response)
                 .into_iter()
@@ -914,95 +967,12 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
         .collect()
 }
 
-fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimelineEntryVm> {
-    let mut entries = Vec::new();
-    let mut pending_flow: Option<(String, StudioTone)> = None;
-    let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
+// Timeline entry building + the live cognition buffer render live in
+// `super::timeline`; re-exported crate-wide so the timeline arm above and the
+// tests below call them unqualified (via `use super::*`).
+pub(crate) use super::timeline::{append_live_delta, timeline_entries};
 
-    for record in records {
-        match record.role {
-            TimelineRole::Flow => {
-                if record.primary.is_empty() {
-                    continue;
-                }
-                let tone = tone_from_name(record.tone.as_deref());
-                if let Some((text, existing_tone)) = pending_flow.as_mut() {
-                    text.push_str(&record.primary);
-                    if *existing_tone == StudioTone::Neutral {
-                        *existing_tone = tone;
-                    }
-                } else {
-                    pending_flow = Some((record.primary, tone));
-                }
-            }
-            TimelineRole::Boundary => {
-                flush_flow(&mut pending_flow, &mut entries);
-                entries.push(StudioTimelineEntryVm::Separator {
-                    label: record.primary,
-                });
-            }
-            TimelineRole::PairOpen => {
-                flush_flow(&mut pending_flow, &mut entries);
-                let key = record.pair_key.unwrap_or_default();
-                let index = entries.len();
-                entries.push(StudioTimelineEntryVm::Pair {
-                    summary: record.primary,
-                    meta: record.meta,
-                    tone: tone_from_name(record.tone.as_deref()),
-                    pending: true,
-                });
-                pending_pairs.insert(key, index);
-            }
-            TimelineRole::PairClose => {
-                flush_flow(&mut pending_flow, &mut entries);
-                let Some(key) = record.pair_key.as_deref() else {
-                    entries.push(line_entry(record));
-                    continue;
-                };
-                if let Some(index) = pending_pairs.remove(key) {
-                    if let Some(StudioTimelineEntryVm::Pair {
-                        meta,
-                        tone,
-                        pending,
-                        ..
-                    }) = entries.get_mut(index)
-                    {
-                        *meta = record.meta;
-                        *tone = tone_from_name(record.tone.as_deref());
-                        *pending = false;
-                    }
-                } else {
-                    entries.push(line_entry(record));
-                }
-            }
-            TimelineRole::Line => {
-                flush_flow(&mut pending_flow, &mut entries);
-                entries.push(line_entry(record));
-            }
-        }
-    }
-    flush_flow(&mut pending_flow, &mut entries);
-    entries
-}
-
-fn flush_flow(
-    pending_flow: &mut Option<(String, StudioTone)>,
-    entries: &mut Vec<StudioTimelineEntryVm>,
-) {
-    if let Some((text, tone)) = pending_flow.take() {
-        entries.push(StudioTimelineEntryVm::Block { text, tone });
-    }
-}
-
-fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
-    StudioTimelineEntryVm::Line {
-        primary: record.primary,
-        meta: record.meta,
-        tone: tone_from_name(record.tone.as_deref()),
-    }
-}
-
-fn tone_from_name(name: Option<&str>) -> StudioTone {
+pub(crate) fn tone_from_name(name: Option<&str>) -> StudioTone {
     match name {
         Some("accent") => StudioTone::Accent,
         Some("good") => StudioTone::Good,
@@ -1169,18 +1139,11 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
                 .workspace
                 .tiles
                 .get(tile_id)
-                .map(|tile| tile.view.title())
+                .map(|tile| tile_title(core, &tile.view))
                 .unwrap_or_else(|| "Missing".to_string());
-            let input = core
-                .workspace
-                .tiles
-                .get(tile_id)
-                .and_then(|tile| match &tile.view {
-                    ViewSpec::Bound { view_ref } => {
-                        instance_input_vm(core, &tile_id.0.to_string(), view_ref)
-                    }
-                    _ => None,
-                });
+            let input = core.workspace.tiles.get(tile_id).and_then(|tile| {
+                instance_input_vm(core, &tile_id.0.to_string(), &tile.view.view_ref)
+            });
             StudioLayoutNodeVm::Tile {
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
@@ -1208,15 +1171,9 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
 }
 
 fn view_vm(core: &StudioCore, tile_id: TileId, tile: &TileState) -> StudioViewVm {
-    match &tile.view {
-        ViewSpec::Bound { view_ref } => bound_view_vm(core, tile_id, view_ref),
-        ViewSpec::Atlas => StudioViewVm::Atlas {
-            scene: build_scene_model(core),
-        },
-        ViewSpec::Graph { .. } => StudioViewVm::Map {
-            scene: build_scene_model(core),
-        },
-    }
+    // Every tile is a bound view; the scene widgets (graph/atlas) dispatch
+    // by `widget` inside `bound_view_vm`.
+    bound_view_vm(core, tile_id, &tile.view.view_ref)
 }
 
 fn session_vm(core: &StudioCore) -> StudioSessionVm {
@@ -1290,36 +1247,30 @@ fn ambient_vm(core: &StudioCore) -> StudioAmbientVm {
     }
 }
 
-/// Launchable views: the surface's embedded content library plus the
-/// two engine ambient views (graph topology, atlas). Nothing here names
-/// a product concept — labels and hints come from the view items.
+/// Launchable views: every view embedded in the effective surface,
+/// graph/atlas included (they are ordinary `view:` items now). Nothing
+/// here names a product concept — labels and hints come from the items.
 pub(crate) fn launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
-    let mut items: Vec<StudioLauncherItemVm> = [
-        (
-            "Graph",
-            "RyeOS topology",
-            ViewSpec::Graph { graph_id: None },
-        ),
-        ("Atlas", "2D namespace map", ViewSpec::Atlas),
-    ]
-    .into_iter()
-    .map(|(label, hint, view)| StudioLauncherItemVm {
-        label: label.to_string(),
-        hint: hint.to_string(),
-        action: StudioAction::OpenView { view: view.clone() },
-        secondary_action: Some(StudioAction::OpenNewView { view }),
-        enabled: true,
-    })
-    .collect();
+    let mut items: Vec<StudioLauncherItemVm> = Vec::new();
     for (view_ref, binding) in &core.views {
-        let view = ViewSpec::Bound {
+        let view = ViewSpec {
             view_ref: view_ref.clone(),
         };
         items.push(StudioLauncherItemVm {
-            label: view_ref
-                .strip_prefix("view:")
-                .unwrap_or(view_ref)
-                .to_string(),
+            // Prefer the view item's authored name; fall back to the ref
+            // (sans `view:` prefix) so unnamed views still identify.
+            label: binding
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    view_ref
+                        .strip_prefix("view:")
+                        .unwrap_or(view_ref)
+                        .to_string()
+                }),
             hint: binding
                 .description
                 .clone()
@@ -1375,6 +1326,26 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
             secondary_action: None,
             enabled: true,
         });
+    }
+
+    // Steering the active execution: offered only when the route has a head
+    // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
+    if core.seat.fold().input_route().thread.is_some() {
+        for (label, command) in [
+            ("Interrupt thread", "interrupt"),
+            ("Continue thread", "continue"),
+            ("Cancel thread", "cancel"),
+        ] {
+            items.push(StudioLauncherItemVm {
+                label: label.to_string(),
+                hint: "active thread".to_string(),
+                action: StudioAction::SubmitThreadCommand {
+                    command: command.to_string(),
+                },
+                secondary_action: None,
+                enabled: true,
+            });
+        }
     }
 
     items
@@ -1463,6 +1434,19 @@ fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
 pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
+    // Feed lens: activation acts on the entry under the point (e.g. enter a
+    // forked subthread), not a row.
+    if let StudioViewVm::Timeline {
+        entries, selected, ..
+    } = bound_view_vm(core, tile_id, &view.view_ref)
+    {
+        return selected
+            .and_then(|i| entries.into_iter().nth(i))
+            .and_then(|entry| match entry {
+                StudioTimelineEntryVm::Line { action, .. } => action,
+                _ => None,
+            });
+    }
     let cursor = selected_cursor(core, tile_id).unwrap_or(0);
     let rows = focused_rows(core, view, tile_id);
     rows.get(cursor).and_then(|row| row.action.clone())
@@ -1472,12 +1456,11 @@ pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> 
 /// project their fetched source; the thread view projects the threads
 /// DTO; ambient views have no rows.
 fn focused_rows(core: &StudioCore, view: &ViewSpec, tile_id: TileId) -> Vec<StudioRowVm> {
-    match view {
-        ViewSpec::Bound { view_ref } => match bound_view_vm(core, tile_id, view_ref) {
-            StudioViewVm::Rows { rows, .. } => rows,
-            _ => Vec::new(),
-        },
-        ViewSpec::Atlas | ViewSpec::Graph { .. } => Vec::new(),
+    // Scene widgets (graph/atlas) render an Atlas/Map VM, not Rows, so the
+    // non-Rows fallback already yields no rows for them.
+    match bound_view_vm(core, tile_id, &view.view_ref) {
+        StudioViewVm::Rows { rows, .. } => rows,
+        _ => Vec::new(),
     }
 }
 
@@ -1485,6 +1468,16 @@ fn selected_cursor(core: &StudioCore, tile_id: TileId) -> Option<usize> {
     let tile = core.workspace.tiles.get(&tile_id)?;
     match &tile.local {
         ViewLocalState::GenericList { cursor, .. } => Some(*cursor),
+        ViewLocalState::None => None,
+    }
+}
+
+fn selected_collapsed(
+    core: &StudioCore,
+    tile_id: TileId,
+) -> Option<&std::collections::BTreeSet<usize>> {
+    match &core.workspace.tiles.get(&tile_id)?.local {
+        ViewLocalState::GenericList { collapsed, .. } => Some(collapsed),
         ViewLocalState::None => None,
     }
 }
@@ -1543,6 +1536,7 @@ fn tile_id_text(id: TileId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::studio::content::{ProjectedRecord, TimelineRole};
     use serde_json::json;
 
     fn record(
@@ -1631,6 +1625,66 @@ mod tests {
         assert!(vm.workspace.backdrop.is_none());
     }
 
+    fn session_with_views(views: serde_json::Value, tiles: serde_json::Value) -> StudioCore {
+        let session = crate::studio::model::BrowserSession {
+            session_id: "S-title".to_string(),
+            surface_ref: "surface:ryeos/studio/base".to_string(),
+            effective_surface: Some(json!({
+                "name": "studio-base",
+                "tiles": tiles,
+                "views": views,
+            })),
+            ..Default::default()
+        };
+        StudioCore::new(session, crate::studio::model::BrowserViewport::default(), 0)
+    }
+
+    #[test]
+    fn tile_title_prefers_authored_name_over_ref_tail() {
+        let core = session_with_views(
+            json!({ "view:ryeos/graph/topology": { "widget": "graph", "name": "Topology" } }),
+            json!(["view:ryeos/graph/topology"]),
+        );
+        // Authored name wins over the ref tail ("topology").
+        assert_eq!(focused_tile_title(&core), "Topology");
+    }
+
+    #[test]
+    fn tile_title_falls_back_to_ref_tail_when_name_absent_or_blank() {
+        let absent = session_with_views(
+            json!({ "view:ryeos/graph/topology": { "widget": "graph" } }),
+            json!(["view:ryeos/graph/topology"]),
+        );
+        assert_eq!(focused_tile_title(&absent), "topology");
+
+        let blank = session_with_views(
+            json!({ "view:ryeos/graph/topology": { "widget": "graph", "name": "  " } }),
+            json!(["view:ryeos/graph/topology"]),
+        );
+        assert_eq!(focused_tile_title(&blank), "topology");
+    }
+
+    #[test]
+    fn launcher_label_prefers_authored_name_else_stripped_ref() {
+        let core = session_with_views(
+            json!({
+                "view:ryeos/atlas": { "widget": "atlas", "name": "Atlas", "description": "the namespace atlas" },
+                "view:ryeos/x/raw": { "widget": "rows" },
+            }),
+            json!([]),
+        );
+        let items = launcher_items(&core);
+        let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
+        assert!(
+            labels.contains(&"Atlas"),
+            "named view uses its name: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"ryeos/x/raw"),
+            "unnamed view falls back to stripped ref: {labels:?}"
+        );
+    }
+
     #[test]
     fn surface_style_border_flows_into_presentation_chrome() {
         let session = crate::studio::model::BrowserSession {
@@ -1684,6 +1738,7 @@ mod tests {
                     primary: "thinking".to_string(),
                     meta: None,
                     tone: StudioTone::Neutral,
+                    action: None,
                 },
             ]
         );
@@ -1705,6 +1760,7 @@ mod tests {
                 primary: "orphan close".to_string(),
                 meta: Some("done".to_string()),
                 tone: StudioTone::Good,
+                action: None,
             }]
         );
     }
@@ -1767,6 +1823,7 @@ mod tests {
                 primary: "message".to_string(),
                 meta: None,
                 tone: StudioTone::Neutral,
+                action: None,
             }]
         );
     }
@@ -1820,6 +1877,47 @@ mod tests {
             entry,
             StudioTimelineEntryVm::Line { primary, .. } if primary.contains("live-only")
         )));
+    }
+
+    #[test]
+    fn append_live_delta_adds_trailing_cursor_block_for_head_thread() {
+        let mut core = StudioCore::default();
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            json!({ "thread": "T-1" }),
+        );
+        core.data.live_delta = Some(crate::studio::model::StudioLiveDelta {
+            thread: "T-1".to_string(),
+            text: "Hel".to_string(),
+        });
+
+        let mut entries = Vec::new();
+        append_live_delta(&core, &mut entries);
+
+        // Accent-toned trailing block with a cursor — the in-progress turn.
+        assert!(matches!(
+            entries.as_slice(),
+            [StudioTimelineEntryVm::Block { text, tone: StudioTone::Accent }]
+                if text == "Hel\u{258d}"
+        ));
+    }
+
+    #[test]
+    fn append_live_delta_ignores_buffer_for_non_head_thread() {
+        let mut core = StudioCore::default();
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            json!({ "thread": "T-1" }),
+        );
+        // A buffer left over from a different head must not render.
+        core.data.live_delta = Some(crate::studio::model::StudioLiveDelta {
+            thread: "T-OTHER".to_string(),
+            text: "stale".to_string(),
+        });
+
+        let mut entries = Vec::new();
+        append_live_delta(&core, &mut entries);
+        assert!(entries.is_empty());
     }
 
     #[test]

@@ -18,7 +18,7 @@ use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
 use ryeos_executor::executor as service_executor;
 use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
-use ryeosd::{bootstrap, reconcile, scheduler, uds};
+use ryeosd::{bootstrap, lifecycle_marker, reconcile, scheduler, uds};
 
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
@@ -105,6 +105,13 @@ async fn main() -> Result<()> {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_daemon_with_file_sink(
         &config.app_root,
     ));
+
+    // Surface how the previous run ended (clean, or an inferred crash from a
+    // stale `running` marker), warn on low disk, then mark this run as running.
+    let state_dir = config.runtime_state_dir();
+    lifecycle_marker::report_previous_exit(&state_dir);
+    lifecycle_marker::check_disk_space(&state_dir);
+    lifecycle_marker::record_running(&state_dir);
 
     // Repair only daemon-local artifacts. Missing operator artifacts
     // (user signing key, trust docs) fail with guidance to run
@@ -306,10 +313,15 @@ async fn main() -> Result<()> {
     tracing::info!(path = %scheduler_db_path.display(), "SchedulerDb initialized");
 
     let events = Arc::new(EventStoreService::new(state_store.clone()));
+    // The hub is shared with the lifecycle service so its create/start/
+    // finalize/continuation writes publish live (persist-then-publish),
+    // and stored as `event_streams` for the SSE endpoints + events.append.
+    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
     let threads = Arc::new(ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
+        event_streams.clone(),
     )?);
     threads.set_scheduler_db(scheduler_db.clone(), config.app_root.clone());
     let commands = Arc::new(CommandService::new(
@@ -366,7 +378,7 @@ async fn main() -> Result<()> {
         identity: Arc::new(identity),
         threads,
         events,
-        event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+        event_streams,
         commands,
         callback_tokens,
         thread_auth,
@@ -420,12 +432,9 @@ async fn main() -> Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        let lifecycle = event.event_type == "thread_created"
-                            || event.event_type == "thread_running"
-                            || ryeos_api::routes::invokers::stream_helpers::is_terminal(
-                                &event.event_type,
-                            );
-                        if !lifecycle {
+                        if !ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
+                            &event.event_type,
+                        ) {
                             continue;
                         }
                         for session_id in ui.browser_sessions.session_ids() {
@@ -622,6 +631,10 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Record a clean, handled shutdown so the next startup can distinguish it
+    // from a crash/SIGKILL (which leaves the `running` marker behind).
+    lifecycle_marker::record_exit(&state_dir, "signal");
+
     // Drain running threads on shutdown
     drain_running_threads(&app_state);
 
@@ -781,10 +794,12 @@ async fn run_service_standalone(
     let events = Arc::new(event_store_service::EventStoreService::new(
         state_store.clone(),
     ));
+    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
     let threads = Arc::new(thread_lifecycle::ThreadLifecycleService::new(
         state_store.clone(),
         kind_profiles.clone(),
         events.clone(),
+        event_streams.clone(),
     )?);
     let commands = Arc::new(command_service::CommandService::new(
         state_store.clone(),
@@ -812,7 +827,7 @@ async fn run_service_standalone(
         identity: Arc::new(identity),
         threads,
         events,
-        event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+        event_streams,
         commands,
         callback_tokens: Arc::new(ryeos_app::callback_token::CallbackCapabilityStore::new()),
         thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
@@ -864,8 +879,7 @@ async fn run_service_standalone(
             execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
             validate_only: false,
         },
-        requested_op: None,
-        requested_inputs: None,
+        requested_call: None,
     };
 
     let result = service_executor::execute_service(

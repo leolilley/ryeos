@@ -76,57 +76,136 @@ fn skip_signature_comment(content: &str) -> &str {
     trimmed
 }
 
-/// Strip signed YAML frontmatter (`# ryeos:signed:...` line + body).
-/// Returns the body verbatim.
-pub fn strip_signed_yaml_frontmatter(content: &str) -> String {
-    let mut lines = content.lines();
-    // Skip the signature line
-    if let Some(first) = lines.next() {
-        if first.trim().starts_with("# ryeos:signed:") || first.trim().starts_with("# ryeos: cas:")
-        {
-            return lines.collect::<Vec<_>>().join("\n");
+/// Skip a leading HTML signature comment (`<!-- ryeos:signed:… -->`) and/or
+/// a `# ryeos:signed:`/`# ryeos: cas:` line, returning the trimmed
+/// remainder. Both envelope styles are handled so the SAME helper serves
+/// markdown items (HTML envelope) and signed-YAML items (`#` envelope) —
+/// the bug this fixes is that strip and parse used to disagree on whether
+/// to skip the HTML signature before looking for `---` frontmatter.
+fn after_leading_signatures(content: &str) -> &str {
+    let mut s = content.trim_start();
+    if s.starts_with("<!--") {
+        if let Some(end) = s.find("-->") {
+            s = s[end + 3..].trim_start();
         }
     }
-    content.to_string()
+    if s.starts_with("# ryeos:signed:") || s.starts_with("# ryeos: cas:") {
+        s = match s.find('\n') {
+            Some(nl) => s[nl + 1..].trim_start(),
+            None => "",
+        };
+    }
+    s
 }
 
-/// Strip frontmatter from content, detecting whether it's markdown or YAML.
-/// Tries formats in the same order as the parser:
-///   1. `---` frontmatter (canonical)
-///   2. ` ```yaml` fenced block at doc start (alternate input form)
-///   3. Signed YAML `# ryeos:signed:...`
-pub fn strip_frontmatter(content: &str, item_id: &str) -> Result<String, KnowledgeError> {
-    let trimmed = content.trim_start();
-
-    // Markdown --- frontmatter
+/// Locate the raw YAML frontmatter block text (between delimiters), if any,
+/// after stripping leading signatures. Returns `None` when no `---` or
+/// ` ```yaml` block is present. Used by [`parse_frontmatter_result`].
+fn frontmatter_block(content: &str) -> Option<&str> {
+    let trimmed = after_leading_signatures(content);
     if trimmed.starts_with("---") {
-        return strip_markdown_frontmatter(content).map_err(|e| KnowledgeError::FrontmatterParse {
-            item_id: item_id.to_string(),
-            reason: match e {
-                KnowledgeError::FrontmatterParse { reason, .. } => reason,
-                _ => "unknown frontmatter parse error".to_string(),
-            },
-        });
+        let rest = trimmed[3..].trim_start_matches(['\r', '\n']);
+        rest.find("\n---")
+            .map(|idx| &rest[..idx])
+            .or_else(|| rest.strip_suffix("---").map(str::trim_end))
+    } else if trimmed.starts_with("```yaml") {
+        let rest = trimmed[7..].trim_start_matches(['\r', '\n']);
+        rest.find("\n```").map(|idx| &rest[..idx])
+    } else {
+        None
     }
+}
 
-    // Fenced ```yaml block at doc start (after optional signature)
-    let after_sig = skip_signature_comment(content);
-    if after_sig.trim_start().starts_with("```yaml") {
-        return strip_fenced_yaml_block(content).map_err(|e| KnowledgeError::FrontmatterParse {
-            item_id: item_id.to_string(),
-            reason: match e {
-                KnowledgeError::FrontmatterParse { reason, .. } => reason,
-                _ => "unknown frontmatter parse error".to_string(),
-            },
-        });
+/// Strict frontmatter parse for integrity validation:
+///   - `Ok(None)`        — no frontmatter block present (not an error),
+///   - `Ok(Some(obj))`   — a block parsed to a mapping (or was empty),
+///   - `Err(reason)`     — a block IS present but is not valid YAML.
+///
+/// A valid-but-non-mapping block (e.g. a YAML list) is treated as an empty
+/// mapping rather than an error — only genuine syntax errors are integrity
+/// failures.
+pub fn parse_frontmatter_result(content: &str) -> Result<Option<serde_json::Value>, String> {
+    let Some(block) = frontmatter_block(content) else {
+        return Ok(None);
+    };
+    match serde_yaml::from_str::<serde_json::Value>(block) {
+        Ok(v) if v.is_object() => Ok(Some(v)),
+        Ok(_) => Ok(Some(serde_json::json!({}))),
+        Err(e) => Err(e.to_string()),
     }
+}
 
-    // Signed YAML frontmatter
-    if trimmed.starts_with("# ryeos:signed:") || trimmed.starts_with("# ryeos: cas:") {
-        return Ok(strip_signed_yaml_frontmatter(content));
+/// Whether a knowledge item's source is a whole-document YAML file
+/// (`.yaml`/`.yml`) rather than a markdown file with a frontmatter block.
+/// The kind schema advertises both formats, so the read ops must validate
+/// both — not just markdown.
+fn is_yaml_source(source_path: &str) -> bool {
+    let p = source_path.to_ascii_lowercase();
+    p.ends_with(".yaml") || p.ends_with(".yml")
+}
+
+/// Format-aware strict metadata parse, keyed off the item's source path:
+///   - `.md`           → the markdown frontmatter block (see
+///     [`parse_frontmatter_result`]);
+///   - `.yaml`/`.yml`  → the WHOLE (signature-stripped) document is the
+///     metadata and must be syntactically valid YAML.
+///
+/// Returns `Err` only on genuine YAML syntax errors (an integrity failure
+/// the corpus `validate` must surface), `Ok(None)` when there is no
+/// metadata, and `Ok(Some(obj))` for a parsed mapping (or empty for a
+/// valid-but-non-mapping document).
+pub fn parse_metadata_result(
+    raw_content: &str,
+    source_path: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if is_yaml_source(source_path) {
+        match serde_yaml::from_str::<serde_json::Value>(raw_content) {
+            Ok(v) if v.is_object() => Ok(Some(v)),
+            Ok(serde_json::Value::Null) => Ok(None),
+            Ok(_) => Ok(Some(serde_json::json!({}))),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        parse_frontmatter_result(raw_content)
     }
+}
 
-    Ok(content.to_string())
+/// Tolerant format-aware metadata parse (empty object on any failure) —
+/// for query filters/display where a malformed item is simply unmatchable,
+/// not a hard error.
+pub fn parse_metadata(raw_content: &str, source_path: &str) -> serde_json::Value {
+    match parse_metadata_result(raw_content, source_path) {
+        Ok(Some(v)) => v,
+        _ => serde_json::json!({}),
+    }
+}
+
+/// Strip frontmatter from content, returning the body.
+///
+/// Leading signatures (HTML comment and/or `# ryeos:signed:` line) are
+/// stripped FIRST, then the frontmatter style is detected:
+///   1. `---` frontmatter (canonical markdown)
+///   2. ` ```yaml` fenced block
+///   3. neither → the post-signature content is the body verbatim (a
+///      signed-YAML item whose whole document is its content)
+pub fn strip_frontmatter(content: &str, item_id: &str) -> Result<String, KnowledgeError> {
+    let after = after_leading_signatures(content);
+
+    let relabel = |e: KnowledgeError| KnowledgeError::FrontmatterParse {
+        item_id: item_id.to_string(),
+        reason: match e {
+            KnowledgeError::FrontmatterParse { reason, .. } => reason,
+            other => other.to_string(),
+        },
+    };
+
+    if after.starts_with("---") {
+        return strip_markdown_frontmatter(after).map_err(relabel);
+    }
+    if after.starts_with("```yaml") {
+        return strip_fenced_yaml_block(after).map_err(relabel);
+    }
+    Ok(after.to_string())
 }
 
 #[cfg(test)]
@@ -155,9 +234,11 @@ mod tests {
     }
 
     #[test]
-    fn strip_signed_yaml_frontmatter_basic() {
+    fn strip_frontmatter_signed_yaml_body() {
+        // A signed-YAML item (`# ryeos:signed:` line, no `---`/```yaml
+        // block) returns the post-signature body verbatim.
         let input = "# ryeos:signed:v1:abc:def:123\nactual body\nmore body";
-        let result = strip_signed_yaml_frontmatter(input);
+        let result = strip_frontmatter(input, "test:item").unwrap();
         assert_eq!(result, "actual body\nmore body");
     }
 

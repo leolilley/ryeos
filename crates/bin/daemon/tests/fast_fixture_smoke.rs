@@ -25,10 +25,11 @@ async fn fast_fixture_boots_daemon_without_real_init() {
 
     // The deterministic publisher fingerprint must match what the
     // self-signed trust doc holds — sanity-check the fixture is
-    // wired correctly.
+    // wired correctly. Operator config lives under the app root
+    // (`<app_root>/.ai/config/keys`), see `config.rs` /
+    // `node::init`, so it is rooted at `state_path`.
     let trust_path = h
-        .user_space
-        .path()
+        .state_path
         .join(".ai/config/keys/trusted")
         .join(format!("{}.toml", fixture.publisher_fp()));
     assert!(
@@ -45,8 +46,7 @@ async fn fast_fixture_boots_daemon_without_real_init() {
     assert!(h.state_path.join(".ai/node/vault/private_key.pem").exists());
     assert!(h.state_path.join(".ai/node/vault/public_key.pem").exists());
     assert!(h
-        .user_space
-        .path()
+        .state_path
         .join(".ai/config/keys/signing/private_key.pem")
         .exists());
 }
@@ -82,7 +82,8 @@ async fn fast_fixture_output_is_byte_stable_across_runs() {
     async fn run_once() -> Vec<(String, String)> {
         let (h, fixture) = DaemonHarness::start_fast().await.expect("daemon must boot");
         let state = h.state_path.clone();
-        let user = h.user_space.path().to_path_buf();
+        // Operator config (signing key + trust docs) is rooted at the
+        // app root alongside node state — `<app_root>/.ai/config/keys`.
         let mut entries: Vec<(String, String)> = vec![
             (
                 "state/identity/private_key.pem".into(),
@@ -101,26 +102,26 @@ async fn fast_fixture_output_is_byte_stable_across_runs() {
                 hash_file(&state.join(".ai/node/vault/public_key.pem")),
             ),
             (
-                "user/signing/private_key.pem".into(),
-                hash_file(&user.join(".ai/config/keys/signing/private_key.pem")),
+                "config/signing/private_key.pem".into(),
+                hash_file(&state.join(".ai/config/keys/signing/private_key.pem")),
             ),
             (
-                "user/trusted/publisher.toml".into(),
-                hash_file(&user.join(format!(
+                "config/trusted/publisher.toml".into(),
+                hash_file(&state.join(format!(
                     ".ai/config/keys/trusted/{}.toml",
                     fixture.publisher_fp()
                 ))),
             ),
             (
-                "user/trusted/node.toml".into(),
-                hash_file(&user.join(format!(
+                "config/trusted/node.toml".into(),
+                hash_file(&state.join(format!(
                     ".ai/config/keys/trusted/{}.toml",
                     fixture.node_fp()
                 ))),
             ),
             (
-                "user/trusted/user.toml".into(),
-                hash_file(&user.join(format!(
+                "config/trusted/user.toml".into(),
+                hash_file(&state.join(format!(
                     ".ai/config/keys/trusted/{}.toml",
                     fixture.user_fp()
                 ))),

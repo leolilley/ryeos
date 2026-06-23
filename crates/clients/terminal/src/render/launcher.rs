@@ -7,7 +7,7 @@ use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::{StudioLauncherItemVm, StudioViewModel};
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 
-use super::primitives::{draw_shadow, fill_rect};
+use super::primitives::fill_rect;
 use super::text::{display_width, truncate};
 use super::theme::{ACCENT, BG, FG, GOOD, MUTED, PANEL};
 
@@ -23,7 +23,6 @@ pub fn draw_launcher(surface: &mut TextSurface, vm: &StudioViewModel) {
     let y = surface.height.saturating_sub(h) / 3;
     let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
 
-    draw_shadow(surface, rect);
     fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
     surface.draw_box(
         x,

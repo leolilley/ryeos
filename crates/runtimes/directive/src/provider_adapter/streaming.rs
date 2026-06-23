@@ -786,17 +786,19 @@ pub async fn call_provider_streaming(
             tracing::warn!("failed to read error response body: {e}");
             String::new()
         });
+        // Lead with the provider's own error body — it's the actionable part
+        // (e.g. "Insufficient balance"). The diagnostic context trails it so a
+        // truncated surface (the TUI feed line) keeps the message, not the IDs.
         bail!(
-            "provider returned {status} (streaming) \
+            "provider returned {status} (streaming): {safe_body} \
              [provider={provider_id} profile={matched_profile:?} \
-             config_hash={config_hash} request_body_sha256={request_body_sha256}]: \
-             {safe_body}",
+             config_hash={config_hash} request_body_sha256={request_body_sha256}]",
             status = status,
+            safe_body = safe_error_body(&text),
             provider_id = provider_id,
             matched_profile = matched_profile,
             config_hash = config_hash,
             request_body_sha256 = request_body_sha256,
-            safe_body = safe_error_body(&text),
         );
     }
 
@@ -1486,6 +1488,46 @@ data: [DONE]
         assert!(matches!(&deltas[0], StreamEvent::Delta(s) if s == "Hello"));
         assert!(matches!(&deltas[1], StreamEvent::Delta(s) if s == " world"));
         assert!(!dones.is_empty());
+    }
+
+    #[test]
+    fn sse_delta_merge_local_openai_includes_usage() {
+        // Conformance for the `local-openai` provider: a local
+        // OpenAI-compatible server (vLLM/llama.cpp) with
+        // `stream_options.include_usage: true` streams content deltas,
+        // then a final usage-only chunk (empty `choices`), then [DONE].
+        // The adapter must accumulate the text AND surface a Usage event
+        // so graph cost accounting receives token counts even offline.
+        let data = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"2+2"}}]}
+
+data: {"choices":[{"index":0,"delta":{"content":" = 4"}}]}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}
+
+data: [DONE]
+"#;
+        let events = parse_sse_events(data, Some("delta_merge"));
+
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Delta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "2+2 = 4");
+
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Usage(u) => Some(u),
+                _ => None,
+            })
+            .expect("a Usage event from the include_usage final chunk");
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(8));
     }
 
     #[test]

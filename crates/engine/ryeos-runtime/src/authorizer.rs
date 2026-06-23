@@ -78,13 +78,16 @@ impl Capability {
     }
 }
 
-/// Derive a canonical capability string from an executable ref.
+/// Build a canonical capability string `ryeos.<verb>.<kind>.<subject>`.
 ///
-/// `canonical_cap("service", "bundle/install", "execute")` →
-/// `"ryeos.execute.service.bundle/install"`
+/// The generic wire builder for every capability family — item-execution caps
+/// (`canonical_cap("service", "bundle/install", "execute")` →
+/// `"ryeos.execute.service.bundle/install"`) and daemon-minted runtime
+/// authority alike (callers in `ryeos_bundle::runtime_authority` build
+/// bundle-event / vault caps through this).
 ///
-/// Subject is the canonical bare item id verbatim, preserving `/`
-/// separators. `*` wildcards in grants match `/`.
+/// Subject is passed verbatim, preserving `/` separators. `*` wildcards in
+/// grants match `/`.
 pub fn canonical_cap(kind: &str, ref_path: &str, verb: &str) -> String {
     format!("ryeos.{}.{}.{}", verb, kind, ref_path)
 }
@@ -894,6 +897,18 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
             scope
         ));
     }
+    // A two-segment scope is canonical only as the `ryeos.*` wildcard. Forms
+    // like `ryeos.execute` / `ryeos.append` are inert — the matcher needs at
+    // least a kind to authorize anything — so reject them rather than admit a
+    // no-op grant that erodes the canonical-only boundary.
+    if parts.len() == 2 && parts[1] != "*" {
+        return Err(format!(
+            "scope '{}' is inert: a two-segment scope is canonical only as \
+             'ryeos.*'. Use 'ryeos.<verb>.*' or \
+             'ryeos.<verb>.<kind>.<subject>'.",
+            scope
+        ));
+    }
     for segment in &parts {
         if segment.is_empty() {
             return Err(format!("scope '{}' has an empty segment", scope));
@@ -928,7 +943,7 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
              verb tokens must be kebab-case or single words, not \
              underscore-separated. Did you mean to use a dot? \
              (e.g. 'ryeos.execute.service.system/push-head', not \
-             'ryeos.execute.service.system/push-head')",
+             'ryeos.execute_service.system/push-head')",
             scope, parts[1]
         ));
     }
@@ -966,6 +981,19 @@ mod validate_scope_pattern_tests {
         assert!(validate_scope_pattern("remote.admin").is_err());
         assert!(validate_scope_pattern("execute").is_err());
         assert!(validate_scope_pattern("node.maintenance").is_err());
+    }
+
+    #[test]
+    fn rejects_inert_two_segment_verb_scopes() {
+        // `ryeos.<verb>` is inert: it never authorizes anything because the
+        // matcher needs at least a kind. Only `ryeos.*` is valid at 2 segments.
+        assert!(validate_scope_pattern("ryeos.execute").is_err());
+        assert!(validate_scope_pattern("ryeos.append").is_err());
+        assert!(validate_scope_pattern("ryeos.put").is_err());
+        // The wildcard and the implicit-subject/full forms stay valid.
+        assert!(validate_scope_pattern("ryeos.*").is_ok());
+        assert!(validate_scope_pattern("ryeos.put.vault").is_ok());
+        assert!(validate_scope_pattern("ryeos.append.bundle-events.arc/x").is_ok());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:de5ac3bffed83e5b6af12b91b2a940e8eee550a1fddd21a9ab20059177a197af:l1Y6phTd2/iOwy33dMX5q2uEfZK8xJ99IQPJqskYwxyhEUYINSMQKec8gZBowTfUAqs8SAVr0lkpw8BNtEqmDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-18T05:07:07Z:d09ed41b84a08defa9c2b01c6f00178063f888e950e13e9009a7ef2e751de851:TW71WcKId8ik9UYzxc9U9LjnN7mqIW0M4ExwcXioZxTtiXoCmP8Fb/dDW6j2iWI5W7NhAdpgyLywZ3jwriaOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # rye:unsigned
 category: "engine/kinds/runtime"
 version: "1.0.0"
@@ -36,6 +36,10 @@ composed_value_contract:
       type: single
       prim: sequence
       elements: { type: single, prim: string }
+    required_envelope_fields:
+      type: single
+      prim: sequence
+      elements: { type: single, prim: string }
     description: { type: single, prim: string }
     schema:
       type: single
@@ -68,3 +72,6 @@ metadata:
     required_caps:
       from: path_string_seq
       key: required_caps
+    required_envelope_fields:
+      from: path_string_seq
+      key: required_envelope_fields

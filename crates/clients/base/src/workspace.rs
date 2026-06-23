@@ -16,15 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // View specs
 // ---------------------------------------------------------------------------
 
+/// A center tile: a `view:` item ref (views-as-content). Every product
+/// concept renders through this — graph/atlas included, via their
+/// `widget:`. Tiles are bindings, not code; this is the one uniform
+/// content form. The engine never names a specific view ref: which views
+/// exist is a content/surface concern, not engine code.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ViewSpec {
-    /// A `view:` item-bound tile (views-as-content). Every product
-    /// concept renders through this — tiles are bindings, not code.
-    Bound { view_ref: String },
-    /// Engine ambient: 3D topology.
-    Graph { graph_id: Option<String> },
-    /// Engine ambient: 2D namespace atlas.
-    Atlas,
+pub struct ViewSpec {
+    pub view_ref: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +44,10 @@ pub enum ViewLocalState {
     GenericList {
         cursor: usize,
         scroll: usize,
+        /// Feed sections (turns) the operator has folded shut, by section
+        /// index. Only the timeline lens uses this; row lists leave it empty.
+        #[serde(default)]
+        collapsed: std::collections::BTreeSet<usize>,
     },
     #[default]
     None,
@@ -63,48 +66,34 @@ pub enum InputCapability {
 }
 
 impl ViewSpec {
+    /// Bind a `view:` ref.
+    pub fn bound(view_ref: impl Into<String>) -> Self {
+        Self {
+            view_ref: view_ref.into(),
+        }
+    }
+
     pub fn initial_local_state(&self) -> ViewLocalState {
-        match self {
-            ViewSpec::Bound { .. } => ViewLocalState::GenericList {
-                cursor: 0,
-                scroll: 0,
-            },
-            ViewSpec::Atlas | ViewSpec::Graph { .. } => ViewLocalState::None,
+        // Every bound tile gets list-local state; for the scene widgets
+        // (graph/atlas) the cursor is simply unused.
+        ViewLocalState::GenericList {
+            cursor: 0,
+            scroll: 0,
+            collapsed: std::collections::BTreeSet::new(),
         }
     }
 
     pub fn input_capability(&self) -> InputCapability {
-        match self {
-            ViewSpec::Bound { .. } | ViewSpec::Atlas | ViewSpec::Graph { .. } => {
-                InputCapability::None
-            }
-        }
+        InputCapability::None
     }
 
-    /// Human-readable label for the input context hint.
-    pub fn input_hint(&self) -> &'static str {
-        match self {
-            ViewSpec::Bound { .. } => "view",
-            ViewSpec::Atlas => "atlas",
-            ViewSpec::Graph { .. } => "graph",
-        }
-    }
-
-    /// Short title for tile header.
+    /// Short title for tile header — the trailing segment of the ref.
     pub fn title(&self) -> String {
-        match self {
-            ViewSpec::Bound { view_ref } => {
-                view_ref.rsplit('/').next().unwrap_or(view_ref).to_string()
-            }
-            ViewSpec::Atlas => "Atlas".into(),
-            ViewSpec::Graph { graph_id } => {
-                if let Some(id) = graph_id {
-                    format!("Graph: {}", id)
-                } else {
-                    "Graph".into()
-                }
-            }
-        }
+        self.view_ref
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.view_ref)
+            .to_string()
     }
 }
 
@@ -131,7 +120,12 @@ pub struct TileState {
 ///   the stack region arranged along `stack.arrange`.
 pub fn compute_layout(tiling: &TilingSpec, tiles: &[TileId]) -> Option<LayoutTree> {
     match tiling.mode {
-        TilingModeSpec::MasterStack => master_stack_layout(tiling, tiles),
+        // Single-lens keeps the center at one tile, which master-stack
+        // already renders as a full-center monocle; share the layout so a
+        // stray extra tile still degrades safely rather than vanishing.
+        TilingModeSpec::MasterStack | TilingModeSpec::SingleLens => {
+            master_stack_layout(tiling, tiles)
+        }
     }
 }
 
@@ -527,7 +521,7 @@ mod tests {
     }
 
     fn bound(name: &str) -> ViewSpec {
-        ViewSpec::Bound {
+        ViewSpec {
             view_ref: format!("view:test/{name}"),
         }
     }
@@ -662,7 +656,8 @@ mod tests {
             ws.tiles.get(&new_id).map(|t| &t.local),
             Some(ViewLocalState::GenericList {
                 cursor: 0,
-                scroll: 0
+                scroll: 0,
+                ..
             })
         ));
     }

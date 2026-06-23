@@ -8,7 +8,6 @@ use ryeos_client_base::text_surface::{Border, Color, Style};
 
 pub const BG: Color = Color::Rgb(0x1d, 0x20, 0x21);
 pub const PANEL: Color = Color::Rgb(0x28, 0x28, 0x28);
-pub const SHADOW: Color = Color::Rgb(0x50, 0x49, 0x45);
 pub const FG: Color = Color::Rgb(0xeb, 0xdb, 0xb2);
 pub const FG_SOFT: Color = Color::Rgb(0xd5, 0xc4, 0xa1);
 pub const MUTED: Color = Color::Rgb(0xa8, 0x99, 0x84);

@@ -50,6 +50,22 @@ pub struct PublishOptions {
     /// Owner label written into PUBLISHER_TRUST.toml (e.g. "ryeos-official",
     /// "ryeos-dev"). Required when `emit_trust_doc` is true.
     pub owner: String,
+    /// Effective bundle id the generated manifest must carry — the first
+    /// bare-id segment of the bundle's item refs (runtime authority requires
+    /// `manifest.name` to equal it). `None` falls back to the bundle source
+    /// directory's basename.
+    pub name: Option<String>,
+    /// If `true`, items that fail to sign in Phase 3 are reported and skipped
+    /// instead of aborting the publish — the run continues to manifest
+    /// generation and the report is marked `partial`. The trust doc is
+    /// suppressed so a partial publish never looks like a clean release.
+    /// Default `false` (fail-fast).
+    pub skip_unsignable: bool,
+    /// If `true`, publish a bundle that declares runtime authority even when an
+    /// item's effective bundle id diverges from the manifest name. By default
+    /// such a mismatch is fatal, because the daemon hard-fails runtime-cap
+    /// minting for it — a published-but-unusable manifest. Default `false`.
+    pub allow_namespace_mismatch: bool,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
     /// operators to pin via `ryeos trust pin`. Default `true`.
@@ -76,6 +92,12 @@ pub struct PublishReport {
     pub publisher_trust_doc: Option<PathBuf>,
     /// Whether the trust doc was actually rewritten.
     pub publisher_trust_doc_changed: bool,
+    /// `true` when `skip_unsignable` swallowed one or more sign failures — the
+    /// publish is incomplete. Never `true` on a clean fail-fast publish.
+    pub partial: bool,
+    /// Item refs that failed to sign and were skipped (only populated when
+    /// `partial`). A clean publish leaves this empty.
+    pub skipped_unsignable: Vec<String>,
 }
 
 pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
@@ -129,43 +151,107 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     };
 
     // ── Phase 3: sign every other signable item ──
-    let sign_report = sign_bundle::sign_bundle_items_with_trust(
+    let mut sign_report = sign_bundle::sign_bundle_items_with_trust(
         &opts.bundle_source,
         &opts.registry_roots,
         &opts.signing_key,
         opts.base_trust_store.as_ref(),
     )
     .context("sign-items phase failed")?;
+    let mut partial = false;
+    let mut skipped_unsignable: Vec<String> = Vec::new();
     if !sign_report.is_total_success() {
-        let mut msg = format!(
-            "sign-items reported {} failure(s):\n",
-            sign_report.failed.len()
-        );
-        for f in &sign_report.failed {
-            msg.push_str(&format!(
-                "  - {}: {}\n",
-                f.item_ref,
-                f.error.as_deref().unwrap_or("(no detail)")
-            ));
+        if opts.skip_unsignable {
+            partial = true;
+            skipped_unsignable = sign_report
+                .failed
+                .iter()
+                .map(|f| f.item_ref.clone())
+                .collect();
+            tracing::warn!(
+                skipped = skipped_unsignable.len(),
+                "skip-unsignable: PARTIAL publish — continuing past {} unsignable item(s); \
+                 the manifest is still generated but this is NOT a clean release",
+                skipped_unsignable.len()
+            );
+            for f in &sign_report.failed {
+                tracing::warn!(
+                    item = %f.item_ref,
+                    error = %f.error.as_deref().unwrap_or("(no detail)"),
+                    "skipped unsignable item"
+                );
+            }
+        } else {
+            let mut msg = format!(
+                "sign-items reported {} failure(s):\n",
+                sign_report.failed.len()
+            );
+            for f in &sign_report.failed {
+                msg.push_str(&format!(
+                    "  - {}: {}\n",
+                    f.item_ref,
+                    f.error.as_deref().unwrap_or("(no detail)")
+                ));
+            }
+            bail!("{msg}");
         }
-        bail!("{msg}");
+    }
+
+    // ── Effective-bundle-id lint ──
+    // Only meaningful when the bundle asserts an effective id the runtime
+    // enforces (an explicit `--name`, or a manifest that declares runtime
+    // authority). Free-form item namespacing (e.g. core's `ryeos/...`) is left
+    // unlinted so it does not produce noise.
+    if let Some(expected) = lint_expected_bundle_id(&ai_dir, opts.name.as_deref())? {
+        sign_report.warnings = lint_item_namespaces(&sign_report, &expected);
+        for w in &sign_report.warnings {
+            tracing::warn!(item = %w.item_ref, "{}", w.message);
+        }
+        // For a bundle that declares runtime authority, a namespace mismatch is
+        // fatal: the daemon hard-fails cap minting at runtime, so the manifest
+        // would publish but never work. Refuse unless explicitly overridden.
+        if !sign_report.warnings.is_empty()
+            && !opts.allow_namespace_mismatch
+            && manifest_declares_runtime_authority(&ai_dir)?
+        {
+            bail!(
+                "refusing to publish: {} item(s) have an effective bundle id that diverges \
+                 from '{}', but the manifest declares runtime authority (bundle_events / \
+                 runtime_vault). The daemon rejects runtime-cap minting for such items, so the \
+                 manifest would be unusable. Fix the item namespaces (or pass \
+                 --allow-namespace-mismatch to override).",
+                sign_report.warnings.len(),
+                expected
+            );
+        }
     }
 
     // ── Phase 4: generate + sign bundle manifest (idempotent) ──
-    let (manifest_generated, manifest_changed) =
-        match generate_and_sign_manifest(&ai_dir, &opts.bundle_source, &opts.signing_key)
-            .context("manifest generation phase failed")?
-        {
-            Some((path, changed)) => (Some(path), changed),
-            None => (None, false),
-        };
+    let (manifest_generated, manifest_changed) = match generate_and_sign_manifest(
+        &ai_dir,
+        &opts.bundle_source,
+        opts.name.as_deref(),
+        &opts.signing_key,
+    )
+    .context("manifest generation phase failed")?
+    {
+        Some((path, changed)) => (Some(path), changed),
+        None => (None, false),
+    };
 
     // ── Phase 5: emit publisher trust doc (idempotent) ──
-    let (publisher_trust_doc, publisher_trust_doc_changed) = if opts.emit_trust_doc {
+    // Suppressed on a partial publish: a trust doc is a clean-release artifact
+    // and must not be emitted when items were skipped.
+    let (publisher_trust_doc, publisher_trust_doc_changed) = if opts.emit_trust_doc && !partial {
         let result =
             write_publisher_trust_doc(&opts.bundle_source, &opts.signing_key, &opts.owner)?;
         (Some(result.0), result.1)
     } else {
+        if opts.emit_trust_doc && partial {
+            tracing::warn!(
+                "skip-unsignable: suppressing PUBLISHER_TRUST.toml on a partial publish"
+            );
+        }
         (None, false)
     };
 
@@ -185,6 +271,8 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         manifest_changed,
         publisher_trust_doc,
         publisher_trust_doc_changed,
+        partial,
+        skipped_unsignable,
     })
 }
 
@@ -419,9 +507,92 @@ fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
 /// Returns `(Some((path, changed)))` where `changed` reflects whether
 /// the file was actually written. Returns `None` if no `manifest.source.yaml`
 /// exists (manifests are optional for third-party bundles).
-fn generate_and_sign_manifest(
+/// The effective bundle id to lint item namespaces against, or `None` when the
+/// bundle should not be linted.
+///
+/// Returns `Some` when `name_override` is set (the author explicitly asserts
+/// the bundle id) or when the manifest declares runtime authority (where the
+/// effective bundle id is enforced when minting callback caps). Otherwise
+/// `None` — item namespacing is free-form and must not be flagged.
+fn lint_expected_bundle_id(ai_dir: &Path, name_override: Option<&str>) -> Result<Option<String>> {
+    if let Some(name) = name_override {
+        return Ok(Some(name.to_string()));
+    }
+    let source_path = ai_dir.join("manifest.source.yaml");
+    if !source_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&source_path)
+        .with_context(|| format!("read manifest source {}", source_path.display()))?;
+    let src: BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+    if src.bundle_events.is_empty() && src.runtime_vault.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(src.name))
+}
+
+/// True when the bundle's manifest source declares any runtime authority
+/// (`bundle_events:` or `runtime_vault:`).
+fn manifest_declares_runtime_authority(ai_dir: &Path) -> Result<bool> {
+    let source_path = ai_dir.join("manifest.source.yaml");
+    if !source_path.exists() {
+        return Ok(false);
+    }
+    let raw = fs::read_to_string(&source_path)
+        .with_context(|| format!("read manifest source {}", source_path.display()))?;
+    let src: BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+    Ok(!src.bundle_events.is_empty() || !src.runtime_vault.is_empty())
+}
+
+/// Effective bundle id of a signer-report ref `kind:bare_id` — the first
+/// `/`-segment of the bare id, mirroring the daemon's
+/// `effective_bundle_id_from_item_ref`. `None` when the ref carries no bare id.
+fn item_effective_bundle_id(item_ref: &str) -> Option<&str> {
+    let bare = item_ref.split_once(':').map(|(_, b)| b).unwrap_or(item_ref);
+    bare.split('/').next().filter(|s| !s.is_empty())
+}
+
+/// Warn for every signed/validated/failed item whose effective bundle id
+/// diverges from `expected`. Such an item's runtime-authority caps would be
+/// minted under the wrong namespace and never match at dispatch.
+fn lint_item_namespaces(
+    report: &SignBundleReport,
+    expected: &str,
+) -> Vec<sign_bundle::ItemWarning> {
+    let mut warnings: Vec<sign_bundle::ItemWarning> = report
+        .validated
+        .iter()
+        .chain(&report.signed)
+        .chain(&report.failed)
+        .filter_map(|outcome| {
+            let eff = item_effective_bundle_id(&outcome.item_ref)?;
+            (eff != expected).then(|| sign_bundle::ItemWarning {
+                item_ref: outcome.item_ref.clone(),
+                message: format!(
+                    "effective bundle id '{eff}' diverges from the bundle's '{expected}' — \
+                     runtime-authority caps for this item would be minted under '{eff}' and \
+                     never match; namespace the item under '{expected}/…' or set --name"
+                ),
+            })
+        })
+        .collect();
+    warnings.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    warnings
+}
+
+/// Generate and sign `.ai/manifest.yaml` from `.ai/manifest.source.yaml`.
+///
+/// `name_override` is the **effective bundle id** the manifest must carry —
+/// the first bare-id segment of the bundle's item refs, which runtime
+/// authority requires to equal `manifest.name`. When `None`, the bundle
+/// source directory's basename is used (the historical default, correct when
+/// the directory name already matches the effective bundle id).
+pub fn generate_and_sign_manifest(
     ai_dir: &Path,
     bundle_source: &Path,
+    name_override: Option<&str>,
     signing_key: &SigningKey,
 ) -> Result<Option<(PathBuf, bool)>> {
     let source_path = ai_dir.join("manifest.source.yaml");
@@ -435,10 +606,13 @@ fn generate_and_sign_manifest(
         return Ok(None);
     }
 
-    let bundle_name = bundle_source
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("bundle_source path has no directory name"))?;
+    let bundle_name = match name_override {
+        Some(name) => name,
+        None => bundle_source
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("bundle_source path has no directory name"))?,
+    };
 
     let raw = fs::read_to_string(&source_path)
         .with_context(|| format!("read manifest source {}", source_path.display()))?;
@@ -519,4 +693,83 @@ fn write_publisher_trust_doc(
     fs::rename(&tmp, &target)
         .with_context(|| format!("rename {} -> {}", tmp.display(), target.display()))?;
     Ok((target, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::sign_bundle::ItemOutcome;
+
+    fn validated_report(refs: &[&str]) -> SignBundleReport {
+        SignBundleReport {
+            validated: refs
+                .iter()
+                .map(|r| ItemOutcome {
+                    item_ref: (*r).to_string(),
+                    error: None,
+                })
+                .collect(),
+            signed: Vec::new(),
+            failed: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn effective_id_is_first_bare_segment() {
+        assert_eq!(item_effective_bundle_id("tool:arc/play"), Some("arc"));
+        assert_eq!(
+            item_effective_bundle_id("tool:ryeos/core/bundle/publish"),
+            Some("ryeos")
+        );
+        assert_eq!(
+            item_effective_bundle_id("service:bundle/sign"),
+            Some("bundle")
+        );
+        assert_eq!(item_effective_bundle_id(""), None);
+    }
+
+    #[test]
+    fn lint_flags_only_divergent_items() {
+        let report = validated_report(&["tool:arc/play", "tool:arc/solve", "graph:other/x"]);
+        let warnings = lint_item_namespaces(&report, "arc");
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].item_ref, "graph:other/x");
+        assert!(warnings[0].message.contains("'other'"));
+        assert!(warnings[0].message.contains("'arc'"));
+    }
+
+    #[test]
+    fn lint_clean_when_all_items_match() {
+        let report = validated_report(&["tool:arc/play", "graph:arc/agent"]);
+        assert!(lint_item_namespaces(&report, "arc").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod runtime_authority_publish_tests {
+    use super::manifest_declares_runtime_authority;
+
+    #[test]
+    fn detects_runtime_authority_declaration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        std::fs::create_dir_all(&ai).unwrap();
+        // No manifest source → false.
+        assert!(!manifest_declares_runtime_authority(&ai).unwrap());
+        // Plain manifest → false.
+        std::fs::write(
+            ai.join("manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert!(!manifest_declares_runtime_authority(&ai).unwrap());
+        // bundle_events declared → true.
+        std::fs::write(
+            ai.join("manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\nbundle_events:\n  - event_kind: ev\n    operations: [append]\n",
+        )
+        .unwrap();
+        assert!(manifest_declares_runtime_authority(&ai).unwrap());
+    }
 }

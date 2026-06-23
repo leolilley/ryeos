@@ -2,17 +2,29 @@
 //!
 //! Each record registers one installed bundle:
 //! ```yaml
-//! section: bundles
 //! path: <absolute path to bundle root>
 //! ```
 
 use anyhow::{bail, Context};
+use serde::Deserialize;
 use serde_json::Value;
 
-use crate::node_config::{BundleRecord, NodeConfigSection, SectionRecord, SectionSourcePolicy};
+use crate::node_config::{
+    BundleRecord, NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy,
+};
 
 /// Section handler for `bundles` node-config items.
 pub struct BundleSection;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBundleRecord {
+    #[serde(default)]
+    kind: Option<String>,
+    path: std::path::PathBuf,
+    #[serde(default)]
+    command_registration_caps: Vec<String>,
+}
 
 impl NodeConfigSection for BundleSection {
     fn source_policy(&self) -> SectionSourcePolicy {
@@ -20,29 +32,29 @@ impl NodeConfigSection for BundleSection {
         SectionSourcePolicy::SystemAndState
     }
 
-    fn parse(&self, name: &str, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
-        let path = body
-            .get("path")
-            .and_then(|v| v.as_str())
-            .context("bundle record missing 'path' field")?;
-
-        let path_buf = std::path::PathBuf::from(path);
-        if !path_buf.is_absolute() {
-            bail!("bundle '{}' path must be absolute, got: {}", name, path);
+    fn parse(&self, ctx: &NodeItemContext, body: &Value) -> anyhow::Result<Box<dyn SectionRecord>> {
+        let raw: RawBundleRecord =
+            serde_json::from_value(body.clone()).context("failed to parse bundle record")?;
+        if raw.kind.as_deref().is_some_and(|kind| kind != "node") {
+            bail!(
+                "bundle '{}' declares kind {:?}, expected 'node'",
+                ctx.id,
+                raw.kind
+            );
         }
 
-        let command_registration_caps = body
-            .get("command_registration_caps")
-            .cloned()
-            .map(serde_json::from_value::<Vec<String>>)
-            .transpose()
-            .context("bundle record has invalid 'command_registration_caps' field")?
-            .unwrap_or_default();
+        if !raw.path.is_absolute() {
+            bail!(
+                "bundle '{}' path must be absolute, got: {}",
+                ctx.id,
+                raw.path.display()
+            );
+        }
 
         let record = BundleRecord {
-            name: name.to_string(),
-            path: path_buf,
-            command_registration_caps,
+            name: ctx.id.clone(),
+            path: raw.path,
+            command_registration_caps: raw.command_registration_caps,
             source_file: std::path::PathBuf::new(),
         };
         Ok(Box::new(record))

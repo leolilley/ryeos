@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:1e2cd752ec30c3410a713ccc13318337dfbe12e1607bca6af8e48ee20c1b0063:+2wxCiZtnrekHdPBSguxqbVugrtiJKhPkkycKyzvjnGG0wTxJWjPGloukon/XWGPvGX/b+GEB8pI2+d/t3L1Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:8617afdb20c42b12b1ff0326242ac3c33b130988582876a0da4159d8005a78ab:0P2/i3HcyUfJdLTj6nCMmGIGp7JcfjyOXSyr1ATxU+0smHvrgSjDJ5uNXP7uVis+uDVW5Sv/aBWPt7ju2SaxCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/execute-launch
 path: /execute/launch
 methods:

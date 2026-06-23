@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:c2dfd9a2b642d6060c18dd7ddc393333f810af65ec1d356bbf6458d945b12b56:r36beiUgoaKzQDRYE25bS14MBTehNB5e9LR6SBH9Kx5hdtmbqHsBQDYra/OSdqiRDUMKgKEvI9Vbfsgx1wnRAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: scheduler-pause
+# ryeos:signed:2026-06-19T05:40:59Z:fb803a5b182baf89a97b3b9ea5f5b525b02c0f8cdae57d2b66671558697042cd:CGk9WHsEssayIvE9Q3gnJj5HcfIU0EpTK4E2AOJUwT0HZZG+B/blQkq4vqrePW/zdcFXGgTtFk7WTVz7pkEnBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - pause

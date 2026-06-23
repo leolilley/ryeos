@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use ryeos_bundle::manifest::RuntimeVaultOperation;
+use ryeos_bundle::runtime_authority::runtime_vault_cap;
 use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use serde::{Deserialize, Serialize};
 
@@ -72,7 +74,7 @@ impl RuntimeVaultService {
         authorize_runtime_vault(
             authorizer,
             &cap.effective_caps,
-            "put",
+            &RuntimeVaultOperation::Put,
             &bundle_id,
             &params.namespace,
         )?;
@@ -94,7 +96,7 @@ impl RuntimeVaultService {
         authorize_runtime_vault(
             authorizer,
             &cap.effective_caps,
-            "get",
+            &RuntimeVaultOperation::Get,
             &bundle_id,
             &parsed.namespace,
         )?;
@@ -119,7 +121,7 @@ impl RuntimeVaultService {
         authorize_runtime_vault(
             authorizer,
             &cap.effective_caps,
-            "delete",
+            &RuntimeVaultOperation::Delete,
             &bundle_id,
             &parsed.namespace,
         )?;
@@ -142,7 +144,7 @@ impl RuntimeVaultService {
         authorize_runtime_vault(
             authorizer,
             &cap.effective_caps,
-            "list",
+            &RuntimeVaultOperation::List,
             &bundle_id,
             &params.namespace,
         )?;
@@ -195,14 +197,22 @@ fn effective_bundle_id(cap: &CallbackCapability) -> anyhow::Result<String> {
 fn authorize_runtime_vault(
     authorizer: &Authorizer,
     effective_caps: &[String],
-    verb: &str,
+    op: &RuntimeVaultOperation,
     bundle_id: &str,
     namespace: &str,
 ) -> anyhow::Result<()> {
-    let required = format!("ryeos.{verb}.vault.{bundle_id}/{namespace}");
+    let required = runtime_vault_cap(op, bundle_id, namespace);
     authorizer
         .authorize(effective_caps, &AuthorizationPolicy::require(&required))
-        .with_context(|| format!("missing required capability: {required}"))
+        .with_context(|| {
+            format!(
+                "missing required capability: {required} — runtime-vault access is runtime \
+                 authority: declare `runtime_vault:` for namespace '{namespace}' in this \
+                 bundle's `.ai/manifest.source.yaml` and sign it (`ryeos bundle publish`), then \
+                 request it from the item under `requires.capabilities.manifest`. It cannot be \
+                 self-granted under `requires.capabilities.declared`."
+            )
+        })
 }
 
 #[cfg(test)]

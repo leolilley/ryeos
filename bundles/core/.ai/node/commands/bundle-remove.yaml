@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T23:56:19Z:46f2197f7e46b5d8005080526c1d288e6fcc9c08aa89163e68b25fabf3ae73e5:KrnOx1Vx8zgnYaEDxhccT97zWI9XNUxxC9f3YJqnq/S1/SJAOcWHmMAwpz15p9bj4xKlh6qt1GJJhQP/NUrKAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: bundle-remove
+# ryeos:signed:2026-06-19T05:40:59Z:c430d8f5beb1785553ba7efbb865b053d9fa05ab76d32ad948b867c7f8da1595:6irz/5ez4buXAQdSj7SncrTgueHD90rCKhfO5/p2YUps/2QEjC+mysPUBJSqinxjVHzzDABVYSmJ4Ju7GzBaDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - bundle
 - remove

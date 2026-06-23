@@ -1,11 +1,10 @@
 //! Typed dispatch errors with explicit HTTP status mapping.
 //!
-//! Replaces the V5.2/V5.3-pre substring HTTP mapping that used to live
-//! in the execute handler (`msg.contains("insufficient capabilities")`,
-//! `msg.contains("push first")`, `msg.contains("is not root-executable")`).
 //! Each enumerated variant carries the structured fields callers need
 //! to reason about the failure, plus a `http_status()` method that
-//! the execute response mode consults exactly once per request.
+//! the execute response mode consults exactly once per request. Status
+//! mapping is by variant, never by matching substrings of an error
+//! message.
 //!
 //! The variant names — and the `http_status()` arms — are the source
 //! of truth for `/execute` non-200 surfaces. The pin tests in
@@ -13,11 +12,10 @@
 //! JSON shapes; if a future variant changes the status mapping, the
 //! pin test catches it before the HTTP contract drifts.
 //!
-//! **V5.4 P1.2**: operator-fixable failures are now distinct variants
-//! instead of collapsing into `Internal(#[from] anyhow::Error) → 500`.
-//! The HTTP contract is honest: cap denial → 403, manifest miss → 502,
-//! push-first → 409, unknown service handler → 502, materialization
-//! error → 502. Only truly unexpected internal errors remain 500.
+//! Operator-fixable failures are distinct variants with honest status
+//! codes: cap denial → 403, manifest miss → 502, push-first → 409,
+//! unknown service handler → 502, materialization error → 502. Only
+//! truly unexpected internal errors are 500.
 
 use axum::http::StatusCode;
 
@@ -79,15 +77,14 @@ pub enum DispatchError {
     SchemaMisconfigured { kind: String, detail: String },
     /// `Display` is the bare reason — pin tests assert byte-equality
     /// of the wording (`"detached mode not yet supported for native runtimes"`,
-    /// etc.). The variant name carries the diagnostic context; the
-    /// surface string preserves the V5.2 contract.
+    /// etc.). The variant name carries the diagnostic context.
     #[error("{reason}")]
     CapabilityRejected { reason: String },
-    #[error("streaming dispatch outcome is not implemented in V5.3")]
+    #[error("streaming dispatch outcome is not implemented")]
     StreamingNotImplemented,
     #[error("project source error: {0}")]
     ProjectSource(String),
-    // ── P1.2: operator-fixable failures, no longer 500 ────────────
+    // ── operator-fixable failures (not 500) ───────────────────────
     /// Service handler not found in the in-process handler registry.
     /// The kind schema declared `InProcessHandler { Services }` but
     /// no handler matched the item's service name.
@@ -151,14 +148,14 @@ pub enum DispatchError {
         executor_ref: String,
         detail: String,
     },
-    /// A declared required secret was not in the operator vault.
+    /// A declared required secret was not found in any source.
     /// Generic at the dispatch layer; the `source_kind`/`source_name`
     /// fields attribute *which* subsystem demanded the secret (today
     /// only `"provider"` from LLM preflight; future kinds e.g. `"tool"`
-    /// or `"runtime"` slot in without changing the wire shape).
-    /// Operator-actionable: run
-    /// `ryeos-core-tools vault put --name <env_var> --value-stdin`.
-    #[error("required secret missing for '{item_ref}': set vault entry '{env_var}' (source: {source_kind}/{source_name})")]
+    /// or `"runtime"` slot in without changing the wire shape). The
+    /// secret resolves from sealed vault, daemon host env, or `.env`
+    /// overlay; `remediation` carries the actionable string.
+    #[error("required secret missing for '{item_ref}': `{env_var}` was not found in sealed vault, daemon host environment, or `.env` overlay (source: {source_kind}/{source_name})")]
     RequiredSecretMissing {
         item_ref: String,
         env_var: String,
@@ -169,36 +166,36 @@ pub enum DispatchError {
     /// Project source push-first — the project has not been pushed to
     /// the daemon's CAS before execution was requested. The Display
     /// is the bare wording (e.g. `"no pushed HEAD for project '<path>' \
-    /// — push first"`) so the V5.2 pin in `dispatch_pin.rs::\
-    /// pin_native_runtime_with_pushed_head` continues to hold byte-\
-    /// identically. The HTTP layer maps this variant to 409.
+    /// — push first"`) so the pin in `dispatch_pin.rs::\
+    /// pin_native_runtime_with_pushed_head` holds byte-identically. The
+    /// HTTP layer maps this variant to 409.
     #[error("{0}")]
     ProjectSourcePushFirst(String),
     /// Project source checkout failed — the pushed HEAD snapshot
     /// could not be checked out from CAS.
     #[error("project source checkout failed: {0}")]
     ProjectSourceCheckoutFailed(String),
-    // ── Op dispatch errors ─────────────────────────────────────────
-    /// The requested operation is not declared on the kind's schema.
-    #[error("unknown op '{requested}' for kind '{kind}'; declared ops: [{declared}]")]
-    UnknownOp {
+    // ── Method dispatch errors ─────────────────────────────────────
+    /// The requested method is not declared on the kind's schema.
+    #[error("unknown method '{requested}' for kind '{kind}'; declared methods: [{declared}]")]
+    UnknownMethod {
         kind: String,
         requested: String,
         declared: String,
     },
-    /// A required input for the op is missing or has wrong type.
-    #[error("invalid input for op '{op}': {reason}")]
-    OpInvalidInput { op: String, reason: String },
-    /// The op's runtime returned a structured failure.
-    #[error("op '{op}' on kind '{kind}' failed: {reason}")]
-    OpFailed {
+    /// A required arg for the method is missing or has wrong type.
+    #[error("invalid arg for method '{method}': {reason}")]
+    MethodInvalidArg { method: String, reason: String },
+    /// The method's runtime returned a structured failure.
+    #[error("method '{method}' on kind '{kind}' failed: {reason}")]
+    MethodFailed {
         kind: String,
-        op: String,
+        method: String,
         reason: String,
     },
-    /// The op returned NotImplemented (phase gate).
-    #[error("op '{op}' on kind '{kind}' is not implemented (phase {phase})")]
-    OpNotImplemented { kind: String, op: String, phase: u8 },
+    /// The method returned NotImplemented (phase gate).
+    #[error("method '{method}' on kind '{kind}' is not implemented (phase {phase})")]
+    MethodNotImplemented { kind: String, method: String, phase: u8 },
     /// Projection invariant violated during slim-payload construction.
     #[error("projection invariant violated: {reason}")]
     ProjectionInvariant { reason: String },
@@ -274,10 +271,21 @@ pub enum DispatchError {
     Internal(#[from] anyhow::Error),
 }
 
+/// Operator-actionable remediation for a missing required secret. The secret
+/// resolves from any of the three sources (sealed vault, daemon host env,
+/// `.env` overlay), so the remediation names all three. Shared by the dispatch
+/// and resume paths so the wording cannot drift between them.
+pub fn required_secret_remediation(env_var: &str) -> String {
+    format!(
+        "Set `{env_var}` via `ryeos vault set --name {env_var} --value <value>`, \
+         a daemon/service environment variable, or a project/operator `.env`"
+    )
+}
+
 impl DispatchError {
     /// Map the typed variant to the HTTP status `/execute` returns.
-    /// The execute response mode calls this once per error path; there is no
-    /// substring fallback anywhere else.
+    /// The execute response mode calls this once per error path; status
+    /// is determined by variant, never by matching the message string.
     pub fn http_status(&self) -> StatusCode {
         match self {
             Self::InvalidRef(..)
@@ -305,10 +313,10 @@ impl DispatchError {
             | Self::RuntimeMaterializationFailed { .. }
             | Self::RequiredSecretMissing { .. }
             | Self::ProjectSourceCheckoutFailed(_)
-            | Self::OpFailed { .. }
-            | Self::OpNotImplemented { .. } => StatusCode::BAD_GATEWAY,
-            Self::UnknownOp { .. }
-            | Self::OpInvalidInput { .. }
+            | Self::MethodFailed { .. }
+            | Self::MethodNotImplemented { .. } => StatusCode::BAD_GATEWAY,
+            Self::UnknownMethod { .. }
+            | Self::MethodInvalidArg { .. }
             | Self::ProjectionInvariant { .. }
             | Self::InvalidLaunchMode { .. }
             | Self::ComposedValueContractViolation { .. }
@@ -351,10 +359,10 @@ impl DispatchError {
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
             Self::MissingCap { .. } => "missing_cap",
             Self::NotFound => "not_found",
-            Self::UnknownOp { .. } => "unknown_op",
-            Self::OpInvalidInput { .. } => "op_invalid_input",
-            Self::OpFailed { .. } => "op_failed",
-            Self::OpNotImplemented { .. } => "op_not_implemented",
+            Self::UnknownMethod { .. } => "unknown_method",
+            Self::MethodInvalidArg { .. } => "method_invalid_arg",
+            Self::MethodFailed { .. } => "method_failed",
+            Self::MethodNotImplemented { .. } => "method_not_implemented",
             Self::ProjectionInvariant { .. } => "projection_invariant",
             Self::ProtocolNotRegistered(_) => "protocol_not_registered",
             Self::StreamingNotDetachable => "streaming_not_detachable",
@@ -375,6 +383,41 @@ impl DispatchError {
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+
+    #[test]
+    fn required_secret_missing_names_all_three_sources() {
+        let err = DispatchError::RequiredSecretMissing {
+            item_ref: "directive:test/x".to_string(),
+            env_var: "ZEN_API_KEY".to_string(),
+            source_kind: "provider".to_string(),
+            source_name: "zen".to_string(),
+            remediation: required_secret_remediation("ZEN_API_KEY"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("sealed vault"), "got: {msg}");
+        assert!(msg.contains("daemon host environment"), "got: {msg}");
+        assert!(msg.contains(".env"), "got: {msg}");
+        assert!(
+            !msg.contains("set vault entry"),
+            "stale wording leaked: {msg}"
+        );
+
+        let rem = required_secret_remediation("ZEN_API_KEY");
+        assert!(
+            rem.contains("ryeos vault set --name ZEN_API_KEY --value <value>"),
+            "got: {rem}"
+        );
+        assert!(rem.contains("environment variable"), "got: {rem}");
+        assert!(rem.contains(".env"), "got: {rem}");
+        assert!(
+            !rem.contains("vault put"),
+            "stale vault command leaked: {rem}"
+        );
+        assert!(
+            !rem.contains("ryeos-core-tools"),
+            "stale binary leaked: {rem}"
+        );
+    }
 
     fn sample_details() -> ContractViolationDetails {
         ContractViolationDetails {

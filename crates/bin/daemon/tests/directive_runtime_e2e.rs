@@ -74,9 +74,9 @@ fn plant_model_routing(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
 /// (`required: true, expect_value_type: string`).
 ///
 /// `execute_caps`, if non-empty, is rendered into the directive's
-/// `permissions.execute:` block. The directive kind's
+/// `requires.capabilities.declared:` list. The directive kind's
 /// `composer_config.policy_facts[name=effective_caps]` reads
-/// `[permissions, execute]` and surfaces the values as
+/// `[requires, capabilities, declared]` and surfaces the values as
 /// `EnvelopePolicy.effective_caps` for the runtime's
 /// `Harness::check_permission` and `Dispatcher::check_permission` to
 /// gate tool calls.
@@ -94,9 +94,9 @@ fn plant_directive(
     } else {
         let lines = execute_caps
             .iter()
-            .map(|c| format!("    - \"{c}\"\n"))
+            .map(|c| format!("      - \"{c}\"\n"))
             .collect::<String>();
-        format!("permissions:\n  execute:\n{lines}")
+        format!("requires:\n  capabilities:\n    declared:\n{lines}")
     };
     let dir_relative = Path::new(rel_path)
         .parent()
@@ -503,7 +503,7 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
 
 // ── P3b.5: Cap denial fails cleanly ────────────────────────────────────
 //
-// The directive declares a `permissions.execute` cap that does NOT
+// The directive declares a `declared` cap that does NOT
 // match the tool the LLM tries to invoke. The runner's
 // `DispatchingTools` state catches this BEFORE any
 // `callback.dispatch_action` call: it pushes a synthetic

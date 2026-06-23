@@ -34,6 +34,7 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
       - name: Assert publisher key secret exists
@@ -94,6 +95,12 @@ jobs:
           # binaries in the bundles.
           platforms: linux/amd64
           push: true
+          # Injected into the binary at compile time (.git is dockerignored, so
+          # the in-container git fallback can't resolve the SHA) and onto the
+          # image as OCI labels via the Dockerfile ARGs.
+          build-args: |
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.ver.outputs.build_date }}
           tags: |
             ghcr.io/leolilley/ryeos-standard:${{ steps.ver.outputs.version }}
             ghcr.io/leolilley/ryeos-standard:latest

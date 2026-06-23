@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:de784bcc40ff25634d032bc4bce9c2f246e41538b629a652804442d253e4d962:6mweMbQgvgPxDutxAERjuLv9ONAzeg4DuBusNaC4D/UAw2ohHJ7U2nvo3klbqvyC0cJvBT+Hdb0EqmIE8LfbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: vault-set
+# ryeos:signed:2026-06-19T05:40:59Z:9a891cf88db92cade396b21ebdfed6964539a94812db67e565bc95d5d18dfd32:o+Ab2dTSstXWIcNBJ+7TvR6j7P9xwCZk9qP5Q+ZBEu7mjTwp0oSe8vXVsXdu+TWAYjdDFuFrz657JjvfqzTTAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - vault
 - set

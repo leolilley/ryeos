@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ryeos_runtime::envelope::RuntimeCost;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {
@@ -65,8 +67,12 @@ pub struct GraphNode {
     pub parallel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
+    /// Return-node output template. A YAML scalar deserializes to a
+    /// `Value::String` and a YAML map/list to `Value::Object`/`Array`;
+    /// `interpolate` recurses through all of them, so both
+    /// `output: "${state.x}"` and `output: {id: "${state.id}"}` work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
+    pub output: Option<Value>,
     #[serde(default)]
     pub env_requires: Vec<String>,
 }
@@ -112,19 +118,20 @@ pub struct ConditionalEdge {
 /// 1. The graph runtime (this crate) parses it as the strict typed
 ///    `GraphFile` for walker execution.
 /// 2. The daemon-side `graph_permissions` composer parses the same
-///    YAML into a generic JSON `Value` to lift `permissions` into
-///    `effective_caps` on the callback token.
+///    YAML into a generic JSON `Value` to lift
+///    `requires.capabilities.declared` into `effective_caps` on the
+///    callback token.
 ///
-/// The `permissions` field therefore lives in two parsing paths. We
-/// keep it on the typed shape (rather than dropping
-/// `deny_unknown_fields`) so that:
+/// `requires` therefore lives in two parsing paths. We keep it on the
+/// typed shape (rather than dropping `deny_unknown_fields`) so that:
 ///   - the runtime is the strict gatekeeper: malformed entries
-///     (non-string, etc.) hard-error here before the composer's more
-///     permissive `filter_map` ever sees them.
-///   - the field is propagated to `GraphDefinition.declared_permissions`
-///     and surfaced by callers (logged at launch in `main.rs`), making
-///     it live and verifying the runtime received the same declared
-///     cap-set the daemon composed for the callback token.
+///     (unknown keys, bad operations) hard-error here before the
+///     composer's more permissive read ever sees them.
+///   - the declared list is propagated to
+///     `GraphDefinition.declared_permissions` and surfaced by callers
+///     (logged at launch in `main.rs`), making it live and verifying the
+///     runtime received the same declared cap-set the daemon composed
+///     for the callback token.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GraphFile {
@@ -134,8 +141,13 @@ struct GraphFile {
     #[allow(dead_code)]
     description: Option<String>,
     config: GraphConfig,
+    /// Unified capability requirements (`requires.capabilities`): `declared`
+    /// (self-asserted action authority, composed into effective_caps) and
+    /// `manifest` (runtime callback authority minted from the signed manifest).
+    /// `deny_unknown_fields` makes a legacy top-level `permissions:` fail to
+    /// parse — there is no back-compat path.
     #[serde(default)]
-    permissions: Vec<String>,
+    requires: Option<ryeos_bundle::runtime_authority::RuntimeRequires>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,9 +156,9 @@ pub struct GraphDefinition {
     pub graph_id: String,
     /// Human/item reference for this authored execution definition.
     ///
-    /// `graph_id` is a legacy human/runtime identifier. This ref is
-    /// the stable conceptual bridge from a realized execution trace
-    /// back to the signed portable capability that was invoked.
+    /// `graph_id` is the human/runtime identifier. This ref is the
+    /// stable conceptual bridge from a realized execution trace back to
+    /// the signed portable capability that was invoked.
     pub definition_ref: String,
     /// Content identity of the signature-stripped authored definition body.
     ///
@@ -156,12 +168,18 @@ pub struct GraphDefinition {
     pub definition_hash: String,
     pub file_path: Option<String>,
     pub config: GraphConfig,
-    /// Permissions the graph YAML declares for itself. The daemon's
-    /// `graph_permissions` composer also reads these from the same
-    /// YAML to populate `effective_caps` on the callback token; the
-    /// runtime side keeps them visible for traceability + parity
-    /// checks (see `main.rs` launch log).
+    /// Self-asserted action authority the graph declares for itself
+    /// (`requires.capabilities.declared`). The daemon's
+    /// `graph_permissions` composer reads the same path to populate
+    /// `effective_caps` on the callback token; the runtime side keeps it
+    /// visible for traceability + parity checks (see `main.rs` launch log).
     pub declared_permissions: Vec<String>,
+    /// Structured runtime capability requirements declared by the graph
+    /// (`requires.capabilities`). The daemon is the authority: it mints the
+    /// requested manifest-backed subset into the callback token at launch.
+    /// Retained here for traceability and static validation parity.
+    pub runtime_capability_requirements:
+        Option<ryeos_bundle::runtime_authority::RuntimeCapabilityRequirements>,
 }
 
 impl GraphDefinition {
@@ -169,6 +187,19 @@ impl GraphDefinition {
         let cleaned = lillux::signature::strip_signature_lines(raw);
         let definition_hash = lillux::cas::sha256_hex(cleaned.as_bytes());
         let file: GraphFile = serde_yaml::from_str(&cleaned)?;
+        let runtime_capability_requirements = match file.requires {
+            Some(requires) => {
+                let caps = requires.capabilities;
+                ryeos_bundle::runtime_authority::validate_runtime_capability_requirements(&caps)
+                    .map_err(|e| anyhow::anyhow!("invalid `requires.capabilities`: {e}"))?;
+                Some(caps)
+            }
+            None => None,
+        };
+        let declared_permissions = runtime_capability_requirements
+            .as_ref()
+            .map(|caps| caps.declared.clone())
+            .unwrap_or_default();
         let graph_id = if let Some(fp) = file_path {
             let stem = std::path::Path::new(fp)
                 .file_stem()
@@ -196,7 +227,8 @@ impl GraphDefinition {
             graph_id,
             file_path: file_path.map(String::from),
             config: file.config,
-            declared_permissions: file.permissions,
+            declared_permissions,
+            runtime_capability_requirements,
         })
     }
 }
@@ -220,6 +252,14 @@ pub struct GraphResult {
     pub errors: Option<Vec<ErrorRecord>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Aggregate token/spend cost across every cost-bearing node in the
+    /// run. `None` when no node reported cost (e.g. a pure-tool graph).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
+    /// Per-node cost breakdown, one record per cost-bearing node. Empty
+    /// when no node reported cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_costs: Vec<NodeCostRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +268,18 @@ pub struct ErrorRecord {
     pub step: u32,
     pub node: String,
     pub error: String,
+}
+
+/// Cost attributed to a single node's action (a directive or sub-graph
+/// child that reported usage). Foreach nodes aggregate all iteration
+/// costs into one record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCostRecord {
+    pub node: String,
+    pub step: u32,
+    pub item_id: String,
+    pub cost: RuntimeCost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +295,9 @@ pub struct NodeReceipt {
     pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Cost reported by this node's native child, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RuntimeCost>,
 }
 
 pub struct WalkContext {
@@ -326,20 +381,21 @@ category: test
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 
-    /// Closes the dual-parser concern: graph_permissions composer reads
-    /// `permissions` from the same YAML; the runtime must propagate
-    /// the declared list to GraphDefinition so callers can log/verify
-    /// parity, not silently drop it on the floor.
+    /// `requires.capabilities.declared` propagates to `declared_permissions` —
+    /// the same path the `graph_permissions` composer lifts into
+    /// `effective_caps`, so the runtime can log/verify parity.
     #[test]
-    fn permissions_propagate_to_definition() {
+    fn declared_execute_propagates_to_definition() {
         let yaml = r#"
 version: "1.0.0"
 category: test
-permissions:
-  - ryeos.execute.tool.echo
-  - ryeos.execute.tool.read
 config:
   start: a
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.echo
+      - ryeos.execute.tool.read
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert_eq!(
@@ -351,33 +407,25 @@ config:
         );
     }
 
-    /// Structural-shape check on `permissions`: the typed
-    /// `Vec<String>` rejects entries that aren't scalar (arrays,
-    /// mappings, etc.), so a graph YAML the runtime accepts cannot
-    /// hand the composer a structurally-broken permissions list.
-    /// (Note: serde_yaml will coerce bare YAML scalars like `42` /
-    /// `true` to their string form, so the composer's per-entry
-    /// `as_str` filter is still the cap-shape gate for those — the
-    /// runtime is the *structural* gatekeeper, not a string-only
-    /// gate.)
+    /// No back-compat: a legacy top-level `permissions:` block fails the strict
+    /// `deny_unknown_fields` parse rather than being silently ignored.
     #[test]
-    fn structural_non_scalar_permissions_rejected_by_runtime() {
+    fn legacy_top_level_permissions_rejected() {
         let yaml = r#"
 version: "1.0.0"
 category: test
 permissions:
   - ryeos.execute.tool.echo
-  - [nested, array]
 config:
   start: a
 "#;
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 
-    /// `permissions` is optional — graphs without a declared cap-set
-    /// still parse and yield an empty `declared_permissions`.
+    /// A graph without `requires:` parses and yields an empty
+    /// `declared_permissions`.
     #[test]
-    fn missing_permissions_yields_empty_declared() {
+    fn missing_requires_yields_empty_declared() {
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -386,6 +434,84 @@ config:
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert!(def.declared_permissions.is_empty());
+        assert!(def.runtime_capability_requirements.is_none());
+    }
+
+    /// `requires.capabilities.manifest` parses into the structured requirement
+    /// field, separate from `declared`.
+    #[test]
+    fn requires_capabilities_parse_into_definition() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.echo
+    manifest:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: [append]
+      runtime_vault:
+        - namespace: oauth
+          operations: [get]
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        assert_eq!(
+            def.declared_permissions,
+            vec!["ryeos.execute.tool.echo".to_string()]
+        );
+        let reqs = def
+            .runtime_capability_requirements
+            .expect("requirements parsed");
+        let caps = ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, "arc");
+        assert_eq!(
+            caps.into_iter().collect::<Vec<_>>(),
+            vec![
+                "ryeos.append.bundle-events.arc/arc_pattern_event".to_string(),
+                "ryeos.get.vault.arc/oauth".to_string(),
+            ]
+        );
+    }
+
+    /// Static validation runs at parse time: empty operation lists are
+    /// rejected by the runtime before the daemon ever sees the graph.
+    #[test]
+    fn requires_with_empty_operations_rejected() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+requires:
+  capabilities:
+    manifest:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: []
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
+    }
+
+    /// Unknown keys under `requires` fail the strict typed parse.
+    #[test]
+    fn requires_with_unknown_key_rejected() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: a
+requires:
+  capabilities:
+    manifest:
+      bundle_events:
+        - event_kind: arc_pattern_event
+          operations: [append]
+          extra: nope
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 
     #[test]

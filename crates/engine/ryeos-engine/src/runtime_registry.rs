@@ -56,6 +56,8 @@ pub struct RuntimeYaml {
     #[serde(default)]
     pub required_caps: Vec<String>,
     #[serde(default)]
+    pub required_envelope_fields: Vec<String>,
+    #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub schema: Option<RuntimeSchema>,
@@ -402,6 +404,7 @@ mod tests {
             binary_ref: "bin/x86_64-unknown-linux-gnu/test-runtime".to_owned(),
             abi_version: SUPPORTED_RUNTIME_ABI_VERSION.to_owned(),
             required_caps: vec![],
+            required_envelope_fields: vec![],
             description: None,
             schema: None,
         }

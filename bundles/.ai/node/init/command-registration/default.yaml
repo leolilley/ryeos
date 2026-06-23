@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-13T11:23:18Z:dcc062f07c5159a3e4eb23f788ff239797efb47b11bc7c2823ea82b55a907077:m5PHXKUBH1lMHgyMO0F+6qyj+X9odDky9ENfbBKpb4rea86LSoQUjOaGby73UuEgI1lUIvFX1QggkiuHK9m7Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-section: command_registration
-name: default
+# ryeos:signed:2026-06-23T05:17:17Z:a70e485d726978aa62be6f97d40c60ac0cca3fff9c4ae71a9b5925db72cb818d:tigkKJ19IQ/ZZ065fNflo6yh8I3iTHVOpax6zFALOZOllEYa6HGf6HUgAKlVAqm8zzkTpqWRC4m0kKWd2AhyDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 claim_rules:
   - claim:
       kind: command.root

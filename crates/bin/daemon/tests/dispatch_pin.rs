@@ -144,10 +144,7 @@ description: "synth runtime for V5.3 dispatch_pin capability tests"
         .unwrap_or_else(|_| bundle_root.clone());
     let reg_dir = state_path.join(".ai/node/bundles");
     std::fs::create_dir_all(&reg_dir)?;
-    let reg_body = format!(
-        "kind: node\nsection: bundles\nid: pin-fixture\npath: {}\n",
-        abs.display()
-    );
+    let reg_body = format!("kind: node\npath: {}\n", abs.display());
     let signed_reg = lillux::signature::sign_content(&reg_body, &fixture.publisher, "#", None);
     std::fs::write(reg_dir.join("pin-fixture.yaml"), signed_reg)?;
     Ok(())

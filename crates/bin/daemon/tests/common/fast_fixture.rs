@@ -267,7 +267,7 @@ pub fn populate_initialized_state(state_path: &Path, _home_dir: &Path) -> Result
     })
 }
 
-/// Write a `kind: node, section: bundles` record registering the core
+/// Write a `kind: node` bundle record registering the core
 /// bundle that lives at `state_path` itself (the daemon harness copies
 /// `bundles/core` into the test tempdir and uses that as
 /// `app_root`). `bootstrap::verify_initialized` requires at
@@ -279,17 +279,65 @@ pub fn register_core_bundle_at_state(state_path: &Path, fixture: &FastFixture) -
         .with_context(|| format!("canonicalize {}", state_path.display()))?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!(
-        "kind: node\nsection: bundles\nid: core\npath: {}\n",
-        abs.display()
-    );
+    let body = node_bundle_record_body("core", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("core.yaml"), signed)?;
     Ok(())
 }
 
-/// Write a `kind: node, section: bundles` record pointing at
+/// The `command_registration_caps` the node-init bundle-registration grants
+/// assign to `bundle_name`, read from the same signed source the real install
+/// materializes from (`bundles/.ai/node/init/bundle-registration-grants/
+/// default.yaml`). Empty when the bundle declares no grants. Mirroring
+/// production here is what lets a fixture-registered bundle register a command
+/// whose dispatch kind is gated behind a registration capability — e.g.
+/// standard's `graph validate`, which dispatches `direct_execute_item_ref`.
+fn bundle_registration_caps(bundle_name: &str) -> Result<Vec<String>> {
+    #[derive(serde::Deserialize)]
+    struct Grants {
+        #[serde(default)]
+        bundles: std::collections::BTreeMap<String, BundleGrant>,
+    }
+    #[derive(serde::Deserialize)]
+    struct BundleGrant {
+        #[serde(default)]
+        command_registration_caps: Vec<String>,
+    }
+    let source = super::workspace_root()
+        .join("bundles")
+        .join(AI_DIR)
+        .join("node")
+        .join("init")
+        .join("bundle-registration-grants")
+        .join("default.yaml");
+    let raw = fs::read_to_string(&source)
+        .with_context(|| format!("read bundle registration grants {}", source.display()))?;
+    let grants: Grants = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse bundle registration grants {}", source.display()))?;
+    Ok(grants
+        .bundles
+        .get(bundle_name)
+        .map(|g| g.command_registration_caps.clone())
+        .unwrap_or_default())
+}
+
+/// Render a signed-ready `kind: node` bundle record body for `bundle_name`,
+/// including any `command_registration_caps` the node-init grants assign it —
+/// the same shape the real install writes to `.ai/node/bundles/<name>.yaml`.
+fn node_bundle_record_body(bundle_name: &str, path: &Path) -> Result<String> {
+    let mut body = format!("kind: node\npath: {}\n", path.display());
+    let caps = bundle_registration_caps(bundle_name)?;
+    if !caps.is_empty() {
+        body.push_str("command_registration_caps:\n");
+        for cap in &caps {
+            body.push_str(&format!("  - {cap}\n"));
+        }
+    }
+    Ok(body)
+}
+
+/// Write a `kind: node` bundle record pointing at
 /// `bundles/standard`, signed with the publisher key. Use this
 /// when a test needs the standard bundle's runtime/directive YAMLs in
 /// the daemon's effective bundle roots.
@@ -302,10 +350,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     let abs = standard.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!(
-        "kind: node\nsection: bundles\nid: standard\npath: {}\n",
-        abs.display()
-    );
+    let body = node_bundle_record_body("standard", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
@@ -315,7 +360,7 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     Ok(())
 }
 
-/// Write a `kind: node, section: bundles` record pointing at
+/// Write a `kind: node` bundle record pointing at
 /// `bundles/studio`, signed with the publisher key. Use this when
 /// a test needs the Studio bundle's UI routes and services.
 pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
@@ -326,10 +371,7 @@ pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Resul
     let abs = studio.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = format!(
-        "kind: node\nsection: bundles\nid: studio\npath: {}\n",
-        abs.display()
-    );
+    let body = node_bundle_record_body("studio", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("studio.yaml"), signed)?;
@@ -349,6 +391,18 @@ pub fn write_authorized_key_signed_by(
     subject_sk: &SigningKey,
     signer_sk: &SigningKey,
 ) -> Result<()> {
+    write_authorized_key_with_scopes(state_path, subject_sk, signer_sk, &["*"])
+}
+
+/// Like [`write_authorized_key_signed_by`] but with explicit `scopes`, for
+/// tests that need a capability-restricted principal (e.g. asserting a
+/// runtime-cap rejection). `signer_sk` MUST be the node identity.
+pub fn write_authorized_key_with_scopes(
+    state_path: &Path,
+    subject_sk: &SigningKey,
+    signer_sk: &SigningKey,
+    scopes: &[&str],
+) -> Result<()> {
     let vk = subject_sk.verifying_key();
     let fp = lillux::signature::compute_fingerprint(&vk);
     let auth_dir = state_path
@@ -359,10 +413,15 @@ pub fn write_authorized_key_signed_by(
     fs::create_dir_all(&auth_dir)?;
 
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+    let scopes_toml = scopes
+        .iter()
+        .map(|s| format!("\"{s}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     let toml_body = format!(
         r#"fingerprint = "{fp}"
 public_key = "ed25519:{key_b64}"
-scopes = ["*"]
+scopes = [{scopes_toml}]
 label = "fast-fixture-authorized-key"
 "#
     );

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-06-21T02:55:23Z:2f8e53a599ba722ba1e544c71761df1f23beb0d3eb5c6b4fc32c97ceff3b1c83:XF+843hoXmrrzyVhzH3+lZuEknIcOpGEorsQ8tmfMNC3lcs5AQIXHN4VMSS7QN6G6Seqxpp0ElM0lPMQ9/prDg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 <!-- rye:signed:2026-06-03T03:31:14Z:83b615045b2b8b868eea1e9f1fdfae1262ce7ed0566b139fdd720a1e60c080d6:mxfdvN-ApQCYLttwgrL3jMDqm7QJd59IADtIpukJ2zvQ_-sESWc7_kbZHR_NkUST_RecYDgRJQUvdI4tS-4yDw:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future/creative-code-spaces
@@ -40,6 +41,8 @@ A world is not a server-owned database. It is a signed CAS graph interpreted by 
 A hosted node can keep that world online, admit changes, publish heads, serve subscriptions, and run jobs. But durable reality remains verifiable signed state.
 
 The Cockpit is the home dimension where a principal sees, opens, inspects, remixes, hosts, and syncs those worlds.
+
+The deeper endgame is not only many user-owned worlds. It is many user-created layers for making worlds: renderers, engines, frames, object systems, editors, policies, simulations, portals, and games. One person can create a renderer; another can create a world family on top; another can create a game, mod, object pack, or social space on top of that. RyeOS should make those layers portable, inspectable, signed, forkable, and hostable.
 
 ## Worlds as digital places with gravity
 
@@ -148,6 +151,8 @@ same signed state
 
 This is the key difference from ordinary games and platforms. The shared truth is semantic and signed; the geometry is a choice.
 
+Dimensions are also authored artifacts. A community should be able to create a new visual or interactive interpretation of existing world state without asking RyeOS to bless a single graphics stack. Three.js, cards, voxels, text, graph views, custom editors, and future immersive runtimes can all be user-created dimensions over the same substrate.
+
 ## Frames as constitutions
 
 A frame is the constitution of a world family.
@@ -166,6 +171,8 @@ It defines:
 - what counts as accepted reality.
 
 A hard-scifi simulation frame, garden frame, codebase frame, classroom frame, art frame, and dungeon frame should not share one universal policy. Each frame carries its own rules.
+
+Frames are therefore not only protocol machinery. They are the shareable form of a genre or world-making tradition. A frame can become the thing other people build on: the base rules for a garden, the canon machinery for a fiction room, the component model for a creature game, the physics contract for a simulation, or the inspection model for a codebase world.
 
 ## Hosted nodes as presence, not authority
 

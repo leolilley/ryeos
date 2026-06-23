@@ -40,6 +40,22 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
             .push("config.nodes is empty — at least one node is required".into());
     }
 
+    // Bundle-event / vault capabilities are runtime authority: a signed manifest
+    // mints them; a graph's `permissions:` cannot. Surface the SAME refusals the
+    // daemon applies at cap-assembly time — both well-formed reserved grants AND
+    // malformed/partial-wildcard forms (e.g. `ryeos.p*.vault.*`) — so the author
+    // gets the feedback here, not only at launch. The daemon enforces this
+    // authoritatively regardless (this is UX).
+    for grant in &def.declared_permissions {
+        if let Err(err) = ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(
+            std::slice::from_ref(grant),
+        ) {
+            result
+                .errors
+                .push(format!("graph permission rejected: {err}"));
+        }
+    }
+
     for (name, node) in &cfg.nodes {
         validate_node(name, node, cfg, &mut result);
     }
@@ -78,6 +94,18 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 result.errors.push(format!(
                     "foreach node '{name}' must declare 'as' for the iteration variable"
                 ));
+            }
+            // `collect` and `as` must differ: the walker writes the
+            // collected results under `collect`, then removes the
+            // iteration variable `as` from state — if they share a name
+            // the collected results are removed too (silent data loss).
+            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as) {
+                if collect == as_var {
+                    result.errors.push(format!(
+                        "foreach node '{name}' uses '{collect}' for both 'collect' and 'as' — \
+                         the collected results would be removed with the iteration variable"
+                    ));
+                }
             }
         }
         NodeType::Gate => {
@@ -144,6 +172,16 @@ fn validate_edges(
                     ));
                 }
             }
+            // A conditional `next` with no default branch (an edge with
+            // no `when`) terminates the graph when no condition matches.
+            // That dead-end is usually a mistake — warn so authors add a
+            // fallback if they didn't intend it.
+            if !edges.is_empty() && edges.iter().all(|ce| ce.when.is_some()) {
+                result.warnings.push(format!(
+                    "conditional 'next' in node '{node_name}' has no default branch — \
+                     if no condition matches, the graph terminates here"
+                ));
+            }
         }
     }
 }
@@ -162,33 +200,40 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
     }
 
     let mut assigned_keys: HashSet<String> = HashSet::new();
-    let mut referenced_keys: HashSet<String> = HashSet::new();
+    let mut referenced_state: HashSet<String> = HashSet::new();
+    let mut referenced_inputs: HashSet<String> = HashSet::new();
 
-    for (name, node) in &cfg.nodes {
-        if let Some(ref assign) = node.assign {
-            collect_state_refs(assign, &mut referenced_keys);
-            if let Value::Object(map) = assign {
-                for k in map.keys() {
-                    assigned_keys.insert(k.clone());
-                }
-            }
+    for node in cfg.nodes.values() {
+        for field in [
+            node.assign.as_ref(),
+            node.action.as_ref(),
+            node.output.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            collect_refs(field, "state", &mut referenced_state);
+            collect_refs(field, "inputs", &mut referenced_inputs);
         }
         if let Some(ref over) = node.over {
-            collect_path_refs(over, &mut referenced_keys);
-        }
-        if let Some(ref action) = node.action {
-            collect_state_refs(action, &mut referenced_keys);
+            collect_path_refs(over, "state", &mut referenced_state);
+            collect_path_refs(over, "inputs", &mut referenced_inputs);
         }
         if let Some(ref next) = node.next {
-            collect_edge_refs(next, &mut referenced_keys);
+            collect_edge_refs(next, "state", &mut referenced_state);
+            collect_edge_refs(next, "inputs", &mut referenced_inputs);
+        }
+        if let Some(Value::Object(map)) = node.assign.as_ref() {
+            for k in map.keys() {
+                assigned_keys.insert(k.clone());
+            }
         }
         if let Some(ref collect_var) = node.collect {
             assigned_keys.insert(collect_var.clone());
         }
-        let _ = name;
     }
 
-    for key in &referenced_keys {
+    for key in &referenced_state {
         if !assigned_keys.contains(key) {
             result
                 .warnings
@@ -196,39 +241,63 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
         }
     }
 
+    // `${inputs.*}` references must be declared in the graph's
+    // `config_schema.properties` (when a schema is declared) — otherwise
+    // the input is undocumented and unvalidated.
+    if let Some(props) = cfg
+        .config_schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+    {
+        for key in &referenced_inputs {
+            if !props.contains_key(key) {
+                result.warnings.push(format!(
+                    "input referenced as ${{inputs.{key}}} but '{key}' is not declared in config.config_schema.properties"
+                ));
+            }
+        }
+    }
+
     result
 }
 
-fn collect_state_refs(value: &serde_json::Value, refs: &mut HashSet<String>) {
+/// Collect `${<prefix>.KEY}` references from any JSON value (recursing
+/// through objects and arrays). `prefix` is `state` or `inputs`.
+fn collect_refs(value: &serde_json::Value, prefix: &str, refs: &mut HashSet<String>) {
     match value {
-        serde_json::Value::String(s) => collect_path_refs(s, refs),
+        serde_json::Value::String(s) => collect_path_refs(s, prefix, refs),
         serde_json::Value::Object(map) => {
             for v in map.values() {
-                collect_state_refs(v, refs);
+                collect_refs(v, prefix, refs);
             }
         }
         serde_json::Value::Array(arr) => {
             for v in arr {
-                collect_state_refs(v, refs);
+                collect_refs(v, prefix, refs);
             }
         }
         _ => {}
     }
 }
 
-fn collect_path_refs(template: &str, refs: &mut HashSet<String>) {
-    let re = regex::Regex::new(r"\$\{state\.([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
+fn collect_path_refs(template: &str, prefix: &str, refs: &mut HashSet<String>) {
+    let re = regex::Regex::new(&format!(
+        r"\$\{{{}\.([a-zA-Z_][a-zA-Z0-9_]*)",
+        regex::escape(prefix)
+    ))
+    .unwrap();
     for cap in re.captures_iter(template) {
         refs.insert(cap[1].to_string());
     }
 }
 
-fn collect_edge_refs(edge: &EdgeSpec, refs: &mut HashSet<String>) {
+fn collect_edge_refs(edge: &EdgeSpec, prefix: &str, refs: &mut HashSet<String>) {
     match edge {
         EdgeSpec::Conditional { branches: edges } => {
             for ce in edges {
                 if let Some(ref when) = ce.when {
-                    collect_state_refs(when, refs);
+                    collect_refs(when, prefix, refs);
                 }
             }
         }
@@ -436,6 +505,194 @@ config:
     // R-D: nodes with no action and no explicit node_type must be rejected.
 
     #[test]
+    fn validate_graph_rejects_foreach_collect_equals_as() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: "results"
+      collect: "results"
+      action: {item_id: "tool:test/echo"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("iterate") && e.contains("both 'collect' and 'as'")),
+            "expected collect==as error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn analyze_graph_warns_conditional_without_default() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: check
+  nodes:
+    check:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: {path: state.mode, op: eq, value: fast}
+            to: done
+    done:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("check") && w.contains("no default branch")),
+            "expected no-default warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_no_default_warning_when_default_present() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: check
+  nodes:
+    check:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: {path: state.mode, op: eq, value: fast}
+            to: done
+          - to: done
+    done:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("no default branch")),
+            "default branch present — should not warn: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_warns_undeclared_input() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  config_schema:
+    type: object
+    properties:
+      declared: {type: string}
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo", params: {a: "${inputs.declared}", b: "${inputs.missing}"}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("missing") && w.contains("config_schema")),
+            "expected undeclared-input warning for 'missing', got: {:?}",
+            result.warnings
+        );
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("inputs.declared")),
+            "declared input must not warn: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_no_input_warning_without_config_schema() {
+        // No config_schema → can't know declared inputs → don't warn.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo", params: {a: "${inputs.anything}"}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("config_schema")),
+            "no schema → no input warnings: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_scans_return_output_for_undeclared_input() {
+        // `${inputs.*}` in a return node's `output` is also checked.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  config_schema:
+    type: object
+    properties:
+      known: {type: string}
+  nodes:
+    done:
+      node_type: return
+      output:
+        id: "${inputs.unknown}"
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("unknown") && w.contains("config_schema")),
+            "expected output ${{inputs.unknown}} to warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
     fn validate_graph_rejects_node_with_no_action_or_type() {
         let yaml = r#"
 version: "1.0.0"
@@ -460,6 +717,103 @@ config:
                 .iter()
                 .any(|e| e.contains("orphan") && e.contains("ambiguous")),
             "expected error for node with no action/type, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_runtime_authority_permission() {
+        // A graph cannot self-grant bundle-event/vault runtime authority via
+        // `declared` — that authority comes only from a signed manifest.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+requires:
+  capabilities:
+    declared:
+      - ryeos.append.bundle-events.foo/evt
+      - ryeos.execute.tool.echo
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("bundle-events.foo/evt") && e.contains("reserved")),
+            "expected runtime-authority reject, got: {:?}",
+            result.errors
+        );
+        // The ordinary execute permission must NOT be flagged.
+        assert!(
+            !result.errors.iter().any(|e| e.contains("tool.echo")),
+            "ordinary execute permission must not be flagged: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_wildcard_runtime_authority_permission() {
+        // A wildcard that intrudes on the runtime-authority namespace is flagged
+        // too, not only an exact cap.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+requires:
+  capabilities:
+    declared:
+      - ryeos.scan.bundle-events.*
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("scan.bundle-events.*") && e.contains("reserved")),
+            "expected wildcard intrusion to be rejected, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_malformed_partial_wildcard_permission() {
+        // A partial-wildcard grant the scope grammar forbids (`ryeos.p*.vault.*`)
+        // must be flagged here too — the same refusal launch applies — not only
+        // at cap assembly.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+requires:
+  capabilities:
+    declared:
+      - ryeos.p*.vault.*
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("ryeos.p*.vault.*") && e.contains("not a canonical")),
+            "expected malformed grant to be rejected, got: {:?}",
             result.errors
         );
     }

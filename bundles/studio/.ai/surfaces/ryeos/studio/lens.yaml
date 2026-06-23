@@ -1,0 +1,78 @@
+# ryeos:signed:2026-06-23T05:17:26Z:0a73d43dc632af255cda21d6df670c3763982deb7deaff7c9181e32a795d9bd4:n8PYSQlCGmNJJKirdcmGcT2mbt49cNDkKjcH5eXFdI1BYqohJ2wUwA+RX+PeuO8hHsKo/2avQhdNsSHeXfjaDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: studio-lens
+version: "1.0.0"
+description: >-
+  The cell-grid single-lens operator surface. One center lens fills the
+  screen at a time; breadth comes from swapping the lens (Ctrl+K launcher),
+  never from arranging panes. The foot input routes at the directive, so the
+  timeline lens reads as a live cognition feed you talk into. This is the
+  TUI's own composition over the shared model — not the web's tiled Studio.
+
+# Single lens: the center holds exactly one tile and opening a view REPLACES
+# it rather than splitting. `compute_layout` renders the one tile full-bleed.
+tiling:
+  mode: single_lens
+  master: { side: left, arrange: vertical, ratio: 1.0, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+# Open on the cognition feed (the claude-style lens): a single timeline tile
+# whose source is the route head thread, filling as execution streams.
+tiles:
+  - "view:ryeos/chain/timeline"
+
+# Only the foot input and a thin top status strip — no edge panes.
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
+
+style:
+  border: thin
+
+backdrop: view:ryeos/backdrop/shard
+
+# The full lens set — swap the single center lens to reach any of these.
+library:
+  - view:ryeos/chain/timeline
+  - view:ryeos/input
+  - view:ryeos/threads/list
+  - view:ryeos/item/inspector
+  - view:ryeos/items/space
+  - view:ryeos/files/list
+  - view:ryeos/graph/topology
+  - view:ryeos/remotes/list
+  - view:ryeos/schedules/list
+  - view:ryeos/commands/grammar
+  - view:ryeos/bundles/list
+  - view:ryeos/node/status
+  - view:ryeos/gc/status
+  - view:ryeos/backdrop/shard
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.files
+    label: Files
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View
+  - id: view.graph
+    label: Graph
+    category: View

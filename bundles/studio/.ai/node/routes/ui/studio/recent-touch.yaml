@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:9e42ab564fc66957432b59a85ca052e9f00bd941603638679525a23dab35bf2b:rva3NynKCAaeOuwlxShrVY9UCzUQpDgHmhs5nHqB8KvNYzj++BM8UFeCA707zDil94qORjvM/f0fVyosjtkLDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/studio
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:721623434c86513b03fe2fea495217173a7e36f8c46430b443230ad9464f5026:6ucokZfnIJE/1X1kY7Ev48dPAcNfdisFtHGNpk0q1YfePAvLCx2s8mWh8HGDMy5e6a7gykqLLbcScR1T+NjDCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/studio/recent/touch
 path: /ui/api/studio/recent/touch
 methods:

@@ -107,8 +107,19 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn finalize_thread(&self, thread_id: &str, status: &str) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "status": status});
+    async fn finalize_thread(
+        &self,
+        thread_id: &str,
+        completion: TerminalCompletion,
+    ) -> Result<Value, CallbackError> {
+        let mut params = json!({
+            "thread_id": thread_id,
+            "status": completion.status,
+            "outcome_code": completion.outcome_code,
+            "result": completion.result,
+            "error": completion.error,
+            "cost": completion.cost,
+        });
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.finalize_thread", params)

@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:3b6fd9adfc019b2ecd95ddc23066d4efc0452988f98943b7d38e687b0c81a124:UmRJIsIQry5KR4OxSxhELlZV20QtxbItzulAKMS5XGmijATJKXEQfsqsdXX4I/9VWej/rcbYDjiAt2+2vexiCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-pull
+# ryeos:signed:2026-06-19T05:40:59Z:e6ef83baf0573f38be6a209104f3957ee3818f219e8e65285c59ef1b4830f126:zKDWHqHNMWhE6CD/bO6glLKSUWaMk4I2krZ5cK43rBad8Bdce6rznwXpPeRx37sNoMv9tFWYDyhttkF1XeXNAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - pull

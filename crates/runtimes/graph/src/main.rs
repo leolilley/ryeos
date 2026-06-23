@@ -63,6 +63,22 @@ struct ResolvedLaunch {
     invocation_id: Option<String>,
 }
 
+/// Static validation report for a graph: `{valid, errors, warnings, …}`.
+/// Reached only via the daemon-spawned `validate` execution input — the
+/// daemon trust-gates the graph (resolve → verify) before the runtime
+/// ever runs, so the runtime never analyzes untrusted content.
+fn validate_report(graph: &model::GraphDefinition) -> Value {
+    let report = validation::analyze_graph(graph);
+    json!({
+        "valid": report.errors.is_empty(),
+        "graph_id": graph.graph_id,
+        "definition_ref": graph.definition_ref,
+        "node_count": graph.config.nodes.len(),
+        "errors": report.errors,
+        "warnings": report.warnings,
+    })
+}
+
 fn main() -> anyhow::Result<()> {
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_graph_runtime());
 
@@ -80,6 +96,34 @@ fn main() -> anyhow::Result<()> {
     let graph =
         model::GraphDefinition::from_yaml(&raw, Some(&resolved.graph_path.to_string_lossy()))?;
 
+    // Validate-as-input: a graph run carrying the reserved `validate`
+    // input returns the static analysis report instead of executing. The
+    // signal is just another execution input — it flows through the
+    // existing envelope, so no engine/daemon plumbing is involved.
+    if resolved
+        .inputs
+        .get("validate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let report = validate_report(&graph);
+        let valid = report
+            .get("valid")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let runtime_result = RuntimeResult {
+            success: valid,
+            status: if valid { "valid" } else { "invalid" }.to_string(),
+            thread_id: resolved.thread_id.clone(),
+            result: Some(report),
+            outputs: Value::Null,
+            cost: None,
+            warnings: Vec::new(),
+        };
+        println!("{}", serde_json::to_string(&runtime_result)?);
+        return Ok(());
+    }
+
     tracing::info!(
         thread_id = %resolved.thread_id,
         graph_run_id = ?resolved.graph_run_id,
@@ -88,6 +132,7 @@ fn main() -> anyhow::Result<()> {
         bundle_roots = ?resolved.bundle_roots,
         graph_id = %graph.graph_id,
         declared_permissions = ?graph.declared_permissions,
+        runtime_capability_requirements = ?graph.runtime_capability_requirements,
         "launch resolved"
     );
 
@@ -247,7 +292,10 @@ fn main() -> anyhow::Result<()> {
         thread_id: resolved.thread_id.clone(),
         result: Some(serde_json::to_value(&graph_result)?),
         outputs: serde_json::Value::Null,
-        cost: None,
+        // Surface the graph's aggregate token/spend so the daemon's
+        // `/execute` response carries non-null cost for a graph that
+        // invoked cost-bearing children (directives/sub-graphs).
+        cost: graph_result.cost.clone(),
         warnings,
     };
 

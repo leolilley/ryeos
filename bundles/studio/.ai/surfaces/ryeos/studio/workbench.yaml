@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T05:38:46Z:64714c11fe756ced083a2a44b2f89be58aa868bfb756827c01512b01a055b13c:MnWFwrYeyywvVmq0Tzc+ZWIpX3K0bYn6CzPlKMJUId+jJ4SOSY/vjcKLIQpqIhT4cVNE9s/zgT6Z9vVQOG3YDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-19T02:44:51Z:f44892ca1fbb47642bcc413200af33a355f462cef79752106b26dbac17d7b857:48707OEiPRycD2XjZjGKxtN7GW3NxYgl5kpXeo1ZnAosqINOQ1tbIXcFlje5puPyITz/JEdWSI1ufPuNaySNDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
@@ -10,7 +10,7 @@ tiling:
   insert: end
 
 tiles:
-  - graph
+  - "view:ryeos/graph/topology"
   - "view:ryeos/threads/list"
 
 slots:
@@ -21,6 +21,8 @@ style:
   border: thin
 
 library:
+  - view:ryeos/graph/topology
+  - view:ryeos/atlas
   - view:ryeos/threads/list
   - view:ryeos/item/inspector
   - view:ryeos/chain/timeline
@@ -39,7 +41,7 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:rye/agent/core/base
+      directive: directive:ryeos/ops/base
 
 ambient:
   show_background: true

@@ -14,6 +14,7 @@ pub mod model;
 pub mod reducer;
 pub mod scene_model;
 pub mod seat;
+pub mod timeline;
 pub mod tokenize;
 pub mod view_model;
 
@@ -27,5 +28,6 @@ pub use keymap::{
 pub use model::{BrowserSession, BrowserViewport, StudioCore, StudioEnvelope};
 pub use scene_model::StudioSceneModel;
 pub use seat::{InputRoute, InvokeTemplate, SeatEvent, SeatEventKind, SeatFold, SeatLog};
+pub use timeline::{StudioLiveDelta, StudioTimelineEntryVm};
 pub use tokenize::{classify_line, InputLine, TokenizeError};
 pub use view_model::StudioViewModel;

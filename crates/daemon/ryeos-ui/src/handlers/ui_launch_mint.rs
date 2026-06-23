@@ -162,8 +162,6 @@ mod tests {
 
     fn make_launch_route(path: &str, token_template: &str) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "ui/launch".into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),

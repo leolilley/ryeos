@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-10T04:03:52Z:c5be19951851228d874ba5bd5d175e12b658e3199723fcdcd41a15f0d705976c:achMkOb8w8AmjvbCXKS4e8/r+SR2GpC1W7wT5915rZuY7j4TpT/XZRvzPj3CZYzIYMwCDahwyJy1O7ePUWIYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-configure
+# ryeos:signed:2026-06-19T05:40:59Z:bc227b5713f760aefac15528482b8c20dad592ec64f1892046a2ae5197c56417:dLVOgtgSusE8hNYxvwHe6WDKXGlIGtoKonXYVpQwwekeYAgCa6R5rHOnLIYwTksk6I6T1rT5VpaKWi0YI5t9CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - configure

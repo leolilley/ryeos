@@ -33,6 +33,34 @@ pub fn interpolate(template: &Value, context: &Value) -> anyhow::Result<Value> {
     }
 }
 
+/// Input/context keys a template references via `{input:KEY}` or `${KEY...}`.
+///
+/// Callers that also surface raw inputs (e.g. the directive runtime appending
+/// an `Inputs:` block) use this to avoid re-rendering inputs the template
+/// already placed — a body of `{input:input}` consumes `input`, so it is not
+/// dumped a second time.
+pub fn referenced_input_keys(template: &str) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for cap in INPUT_RE.captures_iter(template) {
+        keys.insert(cap[1].to_string());
+    }
+    for cap in INTERP_RE.captures_iter(template) {
+        // Inputs referenced via expression are `${inputs.KEY ...}` — inputs
+        // live under the `inputs` context key; other paths (state, etc.) are
+        // not inputs and must not suppress the inputs dump.
+        if let Some(rest) = cap[1].trim_start().strip_prefix("inputs.") {
+            let key: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !key.is_empty() {
+                keys.insert(key);
+            }
+        }
+    }
+    keys
+}
+
 fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> {
     tracing::trace!(template = %template, "interpolating template");
 
@@ -233,7 +261,12 @@ fn apply_pipes(val: Value, pipes: &[String]) -> Option<Value> {
     for pipe in pipes {
         result = match pipe.as_str() {
             "json" => {
-                let s = stringify_value(&result)?;
+                // Serialize ANY JSON value, not just scalars. This is the
+                // explicit escape hatch for embedding objects/arrays in
+                // prompt text: `"Stats: ${state.stats|json}"`. Bare embedded
+                // `${path}` without `|json` still errors on objects/arrays
+                // (see `stringify_value`), forcing authors to opt in.
+                let s = serde_json::to_string(&result).ok()?;
                 Value::String(s)
             }
             "from_json" => {
@@ -438,6 +471,72 @@ mod tests {
         assert_eq!(
             interpolate(&json!("${items | length}"), &ctx).unwrap(),
             json!(3)
+        );
+    }
+
+    #[test]
+    fn whole_expression_preserves_object() {
+        // Whole-expression `${path}` resolving to an object keeps the native
+        // JSON type — the structured-parameter transport path.
+        let ctx = json!({"state": {"stats": {"hp": 7, "items": ["a", "b"]}}});
+        assert_eq!(
+            interpolate(&json!("${state.stats}"), &ctx).unwrap(),
+            json!({"hp": 7, "items": ["a", "b"]})
+        );
+    }
+
+    #[test]
+    fn interpolate_action_params_accept_object_from_inputs() {
+        // A graph action passing an object into a directive param via
+        // whole-expression interpolation must arrive as structured JSON.
+        let action = json!({
+            "item_id": "directive:arc/reason",
+            "params": {"stats": "${inputs.stats}"}
+        });
+        let ctx = json!({"inputs": {"stats": {"hp": 7}}});
+        let result = interpolate_action(&action, &ctx).unwrap();
+        assert_eq!(result["params"]["stats"], json!({"hp": 7}));
+    }
+
+    #[test]
+    fn embedded_json_pipe_serializes_object() {
+        let ctx = json!({"state": {"stats": {"hp": 7}}});
+        assert_eq!(
+            interpolate(&json!("Stats: ${state.stats|json}"), &ctx).unwrap(),
+            json!("Stats: {\"hp\":7}")
+        );
+    }
+
+    #[test]
+    fn embedded_json_pipe_serializes_array() {
+        let ctx = json!({"state": {"items": ["a", "b"]}});
+        assert_eq!(
+            interpolate(&json!("Items: ${state.items|json}"), &ctx).unwrap(),
+            json!("Items: [\"a\",\"b\"]")
+        );
+    }
+
+    #[test]
+    fn from_json_round_trips_json_pipe() {
+        // `|json` serializes, `|from_json` parses back to the original value.
+        let ctx = json!({"state": {"stats": {"hp": 7, "items": ["a"]}}});
+        let serialized = interpolate(&json!("${state.stats|json}"), &ctx).unwrap();
+        let reparsed =
+            interpolate(&json!("${blob|from_json}"), &json!({"blob": serialized})).unwrap();
+        assert_eq!(reparsed, json!({"hp": 7, "items": ["a"]}));
+    }
+
+    #[test]
+    fn embedded_object_without_json_pipe_errors() {
+        // Embedding an object in text WITHOUT `|json` must still error —
+        // authors must opt into serialization explicitly.
+        let ctx = json!({"state": {"stats": {"hp": 7}}});
+        let result = interpolate(&json!("Stats: ${state.stats}"), &ctx);
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("cannot be stringified"),
+            "error should explain the object cannot be stringified: {msg}"
         );
     }
 }

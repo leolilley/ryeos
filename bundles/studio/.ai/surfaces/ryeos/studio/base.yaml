@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T11:23:26Z:8c57f606814111a43a78bb2c221bd36429659f0f6a1f2eb346c9ba908da3824a:JWdf5LcpNWnXp6SNU2LXEEfHrl4z1EwwdgNLSm0GC/Ryz6KQQ53sVQLyYNDxoi7uV8/4lWeeYg35SzghoIIHBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-19T02:44:51Z:6dd86032bccef8d0e864e49586d001792b399ebdc59a54f155ed6ed10654459c:9QOxVjStZS0QwyWzow+II8VtDVU/LH4v3TQ3bPlHBO9yB35Ewp6kfxV5l+TDP5KVFRr5y5ypcw9DefvNJ6XjAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -44,7 +44,7 @@ input:
       type: service
       ref: service:threads/input
     params:
-      directive: directive:rye/agent/core/base
+      directive: directive:ryeos/ops/base
 
 ambient:
   show_background: true

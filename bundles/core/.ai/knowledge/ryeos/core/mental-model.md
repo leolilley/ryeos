@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:330f1d4e1b29c0a8b14b09d855ba88979b5911d55cf4e35835b722c579499175:dYMD//cy0gpuJXvDjWxMYnNbEoth6qyaKyDP9RxUAQLewRfzrb/qxJ8Jd7BWof49bq7fUyWsePo/dwVxd5Y2BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-22T04:23:12Z:44221fa7daabd49b15c85a591fa212b5647c0b3e36193fb80092e35436fe195e:axYvu8KVAcCE1fxUNOAKoOdEfJamVEmF1xs+8kGpVYHBaJOhw524Kv5G+zGdP31Q/i5pogrtjNSyw5yILj+6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, overview]
@@ -120,11 +120,11 @@ time (with a clear error telling you exactly what to fix).
 
 Use `ryeos sign <ref>` to sign items. Use `ryeos verify <ref>` to check them.
 
-### Capabilities (Permissions)
-Execution is **capability-gated**. Directives and tools declare which
-capabilities they need in `permissions.execute`. The daemon checks these
-against the calling context before allowing execution. Capabilities use
-dot-namespaced strings like `ryeos.execute.tool.ryeos.file-system.*`.
+### Capabilities
+Execution is **capability-gated**. Items declare which capabilities they need
+under `requires.capabilities.declared` (a flat list of self-asserted caps). The
+daemon checks these against the calling context before allowing execution.
+Capabilities use dot-namespaced strings like `ryeos.execute.tool.ryeos.file-system.*`.
 
 ### Threads
 Every execution runs in a **thread** — a tracked unit of work with its

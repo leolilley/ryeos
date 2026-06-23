@@ -1,0 +1,24 @@
+# ryeos:signed:2026-06-21T04:03:58Z:0a43ae6df0f303aa3005daae57143e9b337ae33263ea16eb7cb9b028efb8d35a:YSQm0e/z05IPC5EahbqwSNDLSuJmAj0cs6oJpxg0DjsfnGbMiz3iM8XORjjvvtxXDHArvJasESVgggNYSnj4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/node"
+name: "logs"
+executor_id: "@subprocess"
+required_caps: []
+description: "Tail the local node's trace events and startup stderr from the app root."
+
+config:
+  command: "bin:ryeos-core-tools"
+  args:
+    - "logs"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    app_root:
+      type: string
+      description: "App root (parent of .ai/). Defaults to RYEOS_APP_ROOT or the XDG data dir."
+    lines:
+      type: integer
+      description: "Number of trailing lines to show from each log. Default 200."

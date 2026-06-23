@@ -108,19 +108,19 @@ pub enum LaunchAugmentationError {
     #[error("projection invariant violated: {reason}")]
     ProjectionInvariant { reason: String },
 
-    #[error("child {kind}/{op} bootstrap failed: exit={exit_code}, stderr={stderr}")]
+    #[error("child {kind}/{method} bootstrap failed: exit={exit_code}, stderr={stderr}")]
     ChildBootstrap {
         kind: String,
-        op: String,
+        method: String,
         exit_code: i32,
         stderr: String,
     },
 
-    #[error("child {kind}/{op} returned failure: {error:?}")]
+    #[error("child {kind}/{method} returned failure: {error:?}")]
     ChildFailed {
         kind: String,
-        op: String,
-        error: Option<ryeos_runtime::op_wire::BatchOpError>,
+        method: String,
+        error: Option<ryeos_runtime::method_wire::MethodCallError>,
     },
 
     #[error("serde: {0}")]

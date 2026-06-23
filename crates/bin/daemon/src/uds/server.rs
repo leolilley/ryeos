@@ -18,8 +18,8 @@ use ryeos_app::runtime_vault_service::{
 };
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{
-    ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams,
-    ThreadFinalizeParams, ThreadGetParams, ThreadMarkRunningParams,
+    ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams, ThreadGetParams,
+    ThreadMarkRunningParams,
 };
 
 pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
@@ -215,11 +215,79 @@ fn handle_attach_process(
         .context("failed to encode threads.attach_process result")
 }
 
+/// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
+///
+/// `cost` is the runtime's own cost JSON (`{input_tokens, output_tokens,
+/// total_usd}`); it is mapped into a [`FinalCost`] before finalization.
+#[derive(serde::Deserialize)]
+struct RuntimeFinalizeParams {
+    thread_id: String,
+    status: String,
+    #[serde(default)]
+    outcome_code: Option<String>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
+    #[serde(default)]
+    cost: Option<serde_json::Value>,
+}
+
+/// Map a runtime self-reported terminal status. Timeout is daemon-owned — the
+/// launch supervisor finalizes timed-out runs via the fallback path — so a
+/// runtime never self-reports `timed_out` here, and any unrecognized status is
+/// rejected rather than guessed.
+fn terminal_status_from_str(status: &str) -> Result<ryeos_engine::contracts::ThreadTerminalStatus> {
+    use ryeos_engine::contracts::ThreadTerminalStatus;
+    Ok(match status {
+        "completed" => ThreadTerminalStatus::Completed,
+        "failed" => ThreadTerminalStatus::Failed,
+        "cancelled" => ThreadTerminalStatus::Cancelled,
+        "continued" => ThreadTerminalStatus::Continued,
+        "killed" => ThreadTerminalStatus::Killed,
+        other => anyhow::bail!("invalid terminal status: {other}"),
+    })
+}
+
+fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contracts::FinalCost {
+    ryeos_engine::contracts::FinalCost {
+        turns: 0,
+        input_tokens: cost
+            .get("input_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        output_tokens: cost
+            .get("output_tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        spend: cost
+            .get("total_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        provider: None,
+        metadata: None,
+    }
+}
+
 fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
-    let params: ThreadFinalizeParams =
-        serde_json::from_value(params.clone()).context("invalid threads.finalize params")?;
-    serde_json::to_value(state.threads.finalize_thread(&params)?)
-        .context("failed to encode threads.finalize result")
+    let params: RuntimeFinalizeParams =
+        serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
+    let completion = ryeos_engine::contracts::ExecutionCompletion {
+        status: terminal_status_from_str(&params.status)?,
+        outcome_code: params.outcome_code,
+        result: params.result,
+        error: params.error,
+        artifacts: Vec::new(),
+        final_cost: params.cost.as_ref().map(final_cost_from_runtime_json),
+        continuation_request: None,
+        metadata: None,
+    };
+    serde_json::to_value(
+        state
+            .threads
+            .finalize_from_completion(&params.thread_id, &completion)?,
+    )
+    .context("failed to encode runtime.finalize_thread result")
 }
 
 fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -274,19 +342,10 @@ fn handle_append_event_batch(
     let params: EventAppendBatchParams =
         serde_json::from_value(params.clone()).context("invalid events.append_batch params")?;
     let result = state.events.append_batch(&params)?;
-    // Group by thread_id and bulk-publish so each thread's
-    // subscribers receive its events in persisted order under a
-    // single hub lock acquisition per thread.
-    let mut by_thread: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
-    for ev in &result.persisted {
-        by_thread
-            .entry(ev.thread_id.clone())
-            .or_default()
-            .push(ev.clone());
-    }
-    for (thread_id, events) in &by_thread {
-        state.event_streams.publish_batch(thread_id, events);
-    }
+    // Publish the whole batch in persisted order under one hub-lock acquire:
+    // each thread's lane sees its events in order, and the firehose sees the
+    // batch contiguously without interleaving a concurrent publisher.
+    state.event_streams.publish_ordered(&result.persisted);
     serde_json::to_value(result).context("failed to encode events.append_batch result")
 }
 
@@ -528,7 +587,9 @@ mod tests {
     use ryeos_app::kind_profiles::KindProfileRegistry;
     use ryeos_app::state::AppState;
     use ryeos_app::state_store::StateStore;
-    use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
+    use ryeos_app::thread_lifecycle::{
+        ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
+    };
     use ryeos_app::write_barrier::WriteBarrier;
     use std::sync::Arc;
     use std::time::Instant;
@@ -576,9 +637,15 @@ mod tests {
         );
         let kind_profiles = Arc::new(KindProfileRegistry::build(None));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
+        let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
-            ThreadLifecycleService::new(state_store.clone(), kind_profiles.clone(), events.clone())
-                .expect("HOSTNAME not set in test environment"),
+            ThreadLifecycleService::new(
+                state_store.clone(),
+                kind_profiles.clone(),
+                events.clone(),
+                event_streams.clone(),
+            )
+            .expect("HOSTNAME not set in test environment"),
         );
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
@@ -609,7 +676,7 @@ mod tests {
             identity: Arc::new(identity),
             threads,
             events,
-            event_streams: Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY)),
+            event_streams,
             commands,
             callback_tokens: Arc::new(CallbackCapabilityStore::new()),
             thread_auth: Arc::new(ryeos_app::callback_token::ThreadAuthStore::new()),
@@ -798,13 +865,133 @@ mod tests {
                     "callback_token": cbt.token,
                     "thread_id": "T-1",
                     "status": "completed",
-                    "outcome_code": "test",
+                    "outcome_code": "success",
+                    "result": "4",
+                    "cost": {"input_tokens": 10, "output_tokens": 2, "total_usd": 0.01},
                 }),
             ),
             &state,
         )
         .await;
         assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
+
+        // The completion's result and outcome_code must be persisted and
+        // readable, not only returned live.
+        let persisted = state
+            .threads
+            .get_thread_result("T-1")
+            .unwrap()
+            .expect("thread result row present after finalize");
+        assert_eq!(persisted.outcome_code.as_deref(), Some("success"));
+        assert_eq!(persisted.result, Some(json!("4")));
+    }
+
+    #[tokio::test]
+    async fn finalize_publishes_terminal_event_to_live_subscriber() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-pub", "T-pub"))
+            .unwrap();
+
+        // A subscriber attached before finalization must receive the
+        // terminal event live, not only via event-store replay.
+        let mut rx = state.event_streams.subscribe("T-pub");
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-pub".to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: Some(json!("4")),
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("terminal event delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "thread_completed");
+        assert_eq!(event.thread_id, "T-pub");
+        // Live subscribers must see the terminal result in the payload.
+        assert_eq!(event.payload.get("result"), Some(&json!("4")));
+        assert_eq!(event.payload.get("outcome_code"), Some(&json!("success")));
+    }
+
+    #[tokio::test]
+    async fn cancel_publishes_thread_cancelled_to_live_subscriber() {
+        // Cancellation finalizes through the same publish path; a subscriber
+        // attached after prior events still receives `thread_cancelled`.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-cancel", "T-cancel"))
+            .unwrap();
+        state.threads.mark_running("T-cancel").unwrap();
+
+        let mut rx = state.event_streams.subscribe("T-cancel");
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-cancel".to_string(),
+                status: "cancelled".to_string(),
+                outcome_code: Some("cancelled".to_string()),
+                result: None,
+                error: Some(serde_json::json!({ "reason": "cancelled_by_request" })),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cancellation delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "thread_cancelled");
+        assert_eq!(event.thread_id, "T-cancel");
+    }
+
+    #[tokio::test]
+    async fn append_thread_events_publishes_to_live_subscriber() {
+        // Seat braids append directly through the lifecycle service; a
+        // `thread_events` subscriber attached before the append must receive
+        // the seat event live, not only via replay.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-seat", "T-seat"))
+            .unwrap();
+        state.threads.mark_running("T-seat").unwrap();
+
+        let mut rx = state.event_streams.subscribe("T-seat");
+        let persisted = state
+            .threads
+            .append_thread_events(
+                "T-seat",
+                "T-seat",
+                &[ryeos_app::state_store::NewEventRecord {
+                    event_type: "seat.note".to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: serde_json::json!({ "text": "hello" }),
+                }],
+            )
+            .unwrap()
+            .expect("append accepted on a running thread");
+        assert_eq!(persisted.len(), 1);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("seat event delivered live before timeout")
+            .expect("receiver did not lag/close");
+        assert_eq!(event.event_type, "seat.note");
+        assert_eq!(event.thread_id, "T-seat");
     }
 
     #[tokio::test]

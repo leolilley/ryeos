@@ -14,8 +14,8 @@ pub mod framing;
 pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod interpolation;
+pub mod method_wire;
 pub mod model_resolution;
-pub mod op_wire;
 pub mod paths;
 pub mod progress;
 pub mod provider_snapshot;
@@ -32,16 +32,17 @@ pub use authorizer::{
 };
 pub use callback::{
     client_from_env, ActionPayload, CallbackError, DispatchActionRequest, ReplayResponse,
-    ReplayedEventRecord, RuntimeCallbackAPI,
+    ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
-    CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandDef, CommandDispatch,
-    CommandHelpDef, CommandOrigin, CommandParameterBinding, CommandParameterBindingMode,
-    CommandProjectDefault, CommandProjectPolicy, CommandProjectResolution, CommandProvenance,
-    CommandRegistrationClaim, CommandRegistrationClaimPattern, CommandRegistrationPolicy,
-    CommandRegistrationRule, CommandRegistry, CommandRegistryError, FlagKeyNormalization,
+    CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandControlFlag, CommandDef,
+    CommandDispatch, CommandHelpDef, CommandOrigin, CommandParameterBinding,
+    CommandParameterBindingMode, CommandProjectDefault, CommandProjectPolicy,
+    CommandProjectResolution, CommandProvenance, CommandRegistrationClaim,
+    CommandRegistrationClaimPattern, CommandRegistrationPolicy, CommandRegistrationRule,
+    CommandRegistry, CommandRegistryError, ControlFlagBinding, FlagKeyNormalization,
     MatchedCommand,
 };
 pub use condition::{apply_operator, matches, resolve_path};
@@ -52,7 +53,7 @@ pub use events::{RuntimeEventType, StorageClass};
 pub use framing::{recv_frame, send_frame};
 pub use hooks_eval::{merge_hooks, run_hooks, HookDispatcher};
 pub use hooks_loader::{HookDefinition, HooksLoader};
-pub use interpolation::{interpolate, interpolate_action};
+pub use interpolation::{interpolate, interpolate_action, referenced_input_keys};
 pub use lillux::crypto::SigningKey;
 pub use paths::{
     safe_rel_path, thread_knowledge_path, thread_state_dir, thread_transcript_path, AI_DIR,

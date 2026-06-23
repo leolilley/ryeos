@@ -213,23 +213,47 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         let user_prompt = bootstrap_output.config.user_prompt.clone();
         let inputs = envelope.request.inputs.clone();
 
-        // Apply template interpolation with envelope inputs as context
-        let interpolated_prompt = if !inputs.is_null() {
-            ryeos_runtime::interpolate(&serde_json::json!(user_prompt), &inputs)
-                .map(|v| v.as_str().unwrap_or(&user_prompt).to_string())
-                .unwrap_or(user_prompt)
+        // Interpolation context: inputs are nested under `inputs` so the body's
+        // `{input:KEY}` and `${inputs.KEY}` references resolve — the same
+        // context shape graph actions use. Failures propagate: a body that
+        // references a missing input is an authoring error, not something to
+        // mask by silently shipping the raw template.
+        let interpolated_prompt = if inputs.is_null() {
+            user_prompt.clone()
         } else {
-            user_prompt
+            let context = serde_json::json!({ "inputs": inputs });
+            match ryeos_runtime::interpolate(&serde_json::json!(user_prompt), &context)? {
+                serde_json::Value::String(rendered) => rendered,
+                other => {
+                    anyhow::bail!("directive body interpolated to a non-string value: {other}")
+                }
+            }
         };
 
-        let prompt = if inputs.is_object() && !inputs.as_object().is_none_or(|o| o.is_empty()) {
-            format!(
-                "{}\n\nInputs:\n{}",
-                interpolated_prompt,
-                serde_json::to_string_pretty(&inputs)?
-            )
-        } else {
-            interpolated_prompt
+        // Surface only the inputs the template did NOT already place via a
+        // `{input:KEY}` / `${inputs.KEY}` reference. A directive that references
+        // its inputs (e.g. a conversational `{input:input}`) renders one clean
+        // message; one that declares inputs without referencing them still gets
+        // them appended for the model.
+        let prompt = match inputs.as_object() {
+            Some(obj) if !obj.is_empty() => {
+                let referenced = ryeos_runtime::referenced_input_keys(&user_prompt);
+                let leftover: serde_json::Map<String, serde_json::Value> = obj
+                    .iter()
+                    .filter(|(key, _)| !referenced.contains(key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                if leftover.is_empty() {
+                    interpolated_prompt
+                } else {
+                    format!(
+                        "{}\n\nInputs:\n{}",
+                        interpolated_prompt,
+                        serde_json::to_string_pretty(&serde_json::Value::Object(leftover))?
+                    )
+                }
+            }
+            _ => interpolated_prompt,
         };
 
         let mut messages = Vec::new();

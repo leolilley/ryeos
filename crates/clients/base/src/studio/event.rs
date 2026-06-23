@@ -95,6 +95,19 @@ pub enum StudioAction {
     CancelThread {
         thread_id: String,
     },
+    /// Steer the route's head thread via `service:commands/submit`
+    /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
+    /// head thread at dispatch time. This is the same authority the CLI's
+    /// `ryeos commands submit` uses — no new bypass; see the daemon authz
+    /// note at `command_service.submit` / `.tmp/thread-authorization-review.md`.
+    SubmitThreadCommand {
+        command: String,
+    },
+    /// Aim the input route at a thread — the feed re-projects to its braid.
+    /// Activating a forked-subthread feed entry "enters" that subthread.
+    AimThread {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,18 +130,27 @@ pub enum StudioUiEvent {
         path: String,
     },
     SetAtlasLayerVisible {
+        /// Target tile; `None` (default) targets the ambient backdrop atlas.
+        #[serde(default)]
+        tile_id: Option<String>,
         kind: AtlasItemKind,
         visible: bool,
     },
     SetAtlasLens {
+        #[serde(default)]
+        tile_id: Option<String>,
         lens: AtlasLensVm,
     },
     SetAtlasProjection {
+        #[serde(default)]
+        tile_id: Option<String>,
         projection: AtlasProjectionVm,
         #[serde(default)]
         root: Option<String>,
     },
     SetAtlasFileSpacePath {
+        #[serde(default)]
+        tile_id: Option<String>,
         root: String,
         path: String,
     },
@@ -163,6 +185,12 @@ pub enum StudioUiEvent {
         tile_id: String,
         index: usize,
     },
+    /// Fold (`collapsed: true`) or unfold a turn-section of a feed lens.
+    SetFold {
+        tile_id: String,
+        section: usize,
+        collapsed: bool,
+    },
     ActivateFocused,
 }
 
@@ -188,6 +216,16 @@ pub enum StudioEvent {
         result: StudioEffectResult,
     },
     DaemonEvent {
+        payload: serde_json::Value,
+    },
+    /// One frame from the head thread's live SSE tail. The reducer applies
+    /// ryeos event semantics so both clients reach them through `dispatch`:
+    /// cognition deltas accumulate into the live buffer; durable milestones
+    /// supersede it and refetch the braid snapshot. Clients only open the
+    /// stream and forward each frame's `(event_type, payload)`.
+    ThreadTail {
+        thread_id: String,
+        event_type: String,
         payload: serde_json::Value,
     },
     Tick {

@@ -160,6 +160,12 @@ impl EventStoreService {
             next_cursor,
         })
     }
+
+    /// The thread a live chain tail should currently follow — owner of the
+    /// chain's highest-`chain_seq` event. `None` when the chain has no events.
+    pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
+        self.state_store.chain_head_thread(chain_root_id)
+    }
 }
 
 /// V5.5 D11: delegate to the typed `RuntimeEventType` enum.

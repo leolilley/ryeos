@@ -107,23 +107,8 @@ pub async fn handle(
         })
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
-    // Broadcast the terminal event to any live subscribers for this
-    // thread.
-    if let Ok(events) = state
-        .events
-        .replay(&ryeos_app::event_store_service::EventReplayParams {
-            chain_root_id: None,
-            thread_id: Some(req.thread_id.clone()),
-            after_chain_seq: None,
-            limit: 1,
-        })
-    {
-        for event in &events.events {
-            if event.event_type == "thread_cancelled" {
-                state.event_streams.publish(&req.thread_id, event.clone());
-            }
-        }
-    }
+    // `finalize_thread` persists then publishes the `thread_cancelled`
+    // event, so live subscribers receive it directly.
 
     Ok(json!({
         "thread_id": req.thread_id,

@@ -165,6 +165,54 @@ mod integration_tests {
             .expect("thread should exist");
 
         assert_eq!(detail.status, "completed");
+
+        // The terminal outcome_code and result must survive finalization and
+        // be readable back, not just returned live.
+        let result = store
+            .get_thread_result("T-final-1")
+            .expect("get_thread_result should succeed")
+            .expect("thread result row should exist");
+        assert_eq!(result.outcome_code.as_deref(), Some("success"));
+        assert_eq!(result.result, Some(serde_json::json!({"message": "done"})));
+    }
+
+    #[test]
+    fn state_store_reads_back_structured_error_as_object() {
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-err-1", "T-err-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store
+            .mark_thread_running("T-err-1", None)
+            .expect("mark_thread_running");
+
+        let err = serde_json::json!({
+            "code": "required_secret_missing",
+            "env_var": "ZEN_API_KEY"
+        });
+        let finalize = FinalizeThreadRecord {
+            status: "failed".to_string(),
+            outcome_code: Some("required_secret_missing".to_string()),
+            result_json: None,
+            error_json: Some(err.clone()),
+            artifacts: vec![],
+            final_cost: None,
+        };
+        store
+            .finalize_thread("T-err-1", &finalize)
+            .expect("finalize_thread");
+
+        // The structured error must read back as the original object, not a
+        // stringified blob.
+        let result = store
+            .get_thread_result("T-err-1")
+            .expect("get_thread_result")
+            .expect("thread result row should exist");
+        assert_eq!(
+            result.outcome_code.as_deref(),
+            Some("required_secret_missing")
+        );
+        assert_eq!(result.error, Some(err));
     }
 
     // ── CAS-truth derived projection tests ──────────────────────────

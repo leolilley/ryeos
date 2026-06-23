@@ -78,6 +78,10 @@ impl CommandService {
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
 
+        // AUTHZ NOTE: per-thread ownership is enforced upstream in
+        // handlers/commands_submit.rs (`ctx.require_owner`, commit 4510c4bc) —
+        // this service runs only after the caller is confirmed the thread's
+        // owner. This layer gates on capability + allowed_actions(kind,status).
         let allowed = self.kind_profiles.allowed_actions(
             &thread.kind,
             &thread.status,

@@ -49,7 +49,7 @@
 //!
 //! No silent dropping of bad entries: typed-fail-loud, end-to-end.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::VarError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -231,6 +231,25 @@ pub trait NodeVault: Send + Sync + std::fmt::Debug {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum VaultReadError {
+    #[error(
+        "missing declared secret(s) for principal `{principal}`: [{}]. \
+         The item declares these in `required_secrets` but none of the checked \
+         sources provides them: sealed vault, daemon host environment, or \
+         `.env` overlay. For hosted deployments, configure them as service \
+         variables. For local/dev, use `ryeos vault put` or a project/user \
+         `.env`, or remove the declaration.",
+        names.join(", ")
+    )]
+    MissingSecrets {
+        principal: String,
+        names: Vec<String>,
+    },
+    #[error("vault read error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+
 /// Read only the secrets declared on the spawning item's
 /// `ItemMetadata.required_secrets`, refusing if any declared secret
 /// is missing.
@@ -271,7 +290,7 @@ pub fn read_required_secrets(
     principal: &str,
     required_secrets: &[String],
     dotenv_search_dirs: &[PathBuf],
-) -> Result<HashMap<String, String>> {
+) -> std::result::Result<HashMap<String, String>, VaultReadError> {
     if required_secrets.is_empty() {
         return Ok(HashMap::new());
     }
@@ -282,10 +301,20 @@ pub fn read_required_secrets(
     }
     let vault_map = vault.read_all(principal)?;
     let host_env_map = read_declared_host_env(required_secrets)?;
-    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+    // Only consult the `.env` overlay for secrets the higher-precedence sources
+    // (vault, daemon host env) did not already satisfy. This keeps vault > host
+    // > dotenv precedence at the I/O level: a poisoned or unreadable `.env`
+    // cannot fail a launch whose secrets are already fully resolved upstream,
+    // and the overlay only ever sees the declared keys it still needs.
+    let dotenv_wanted: HashSet<String> = required_secrets
+        .iter()
+        .filter(|k| !vault_map.contains_key(k.as_str()) && !host_env_map.contains_key(k.as_str()))
+        .cloned()
+        .collect();
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs, &dotenv_wanted)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     let mut out = HashMap::with_capacity(required_secrets.len());
-    let mut missing: Vec<&str> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     for key in required_secrets {
         // Vault wins on conflict; host env is the deployment fallback;
         // .env is the local/dev convenience fallback.
@@ -296,19 +325,14 @@ pub fn read_required_secrets(
         } else if let Some(v) = dotenv_map.get(key.as_str()) {
             out.insert(key.clone(), v.clone());
         } else {
-            missing.push(key.as_str());
+            missing.push(key.clone());
         }
     }
     if !missing.is_empty() {
-        bail!(
-            "vault: missing declared secret(s) for principal `{principal}`: [{}]. \
-             The item declares these in `required_secrets` but none of the checked \
-             sources provides them: sealed vault, daemon host environment, or \
-             `.env` overlay. For hosted deployments, configure them as service \
-             variables. For local/dev, use `ryeos vault put` or a project/user \
-             `.env`, or remove the declaration.",
-            missing.join(", ")
-        );
+        return Err(VaultReadError::MissingSecrets {
+            principal: principal.to_string(),
+            names: missing,
+        });
     }
     Ok(out)
 }
@@ -615,9 +639,101 @@ pub fn read_explicit_secret(
     if let Some(value) = host_env_map.get(name) {
         return Ok(Some(value.clone()));
     }
-    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs)
+    // Vault and host env missed — consult `.env`, scoped to just this key so an
+    // unrelated blocked/malformed line in the file cannot fail the resolution.
+    let wanted: HashSet<String> = required.iter().cloned().collect();
+    let dotenv_map = ryeos_vault::dotenv::read_dotenv_overlay(dotenv_search_dirs, &wanted)
         .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
     Ok(dotenv_map.get(name).cloned())
+}
+
+/// Which source would satisfy a declared secret. Reported by `env-check`
+/// without ever exposing the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretSource {
+    /// Sealed operator vault.
+    Vault,
+    /// Daemon host environment.
+    HostEnv,
+    /// A `.env` overlay file in the given directory.
+    Dotenv(PathBuf),
+    /// Not found in any source.
+    Missing,
+}
+
+impl SecretSource {
+    /// Short stable label for wire/CLI output.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SecretSource::Vault => "vault",
+            SecretSource::HostEnv => "host_env",
+            SecretSource::Dotenv(_) => "dotenv",
+            SecretSource::Missing => "missing",
+        }
+    }
+}
+
+/// Report, per requested name, WHICH source would satisfy it — without
+/// returning any secret value. Mirrors the precedence of
+/// [`read_required_secrets`] exactly (vault > host env > `.env` overlay, with
+/// the overlay scoped to names unresolved by the higher sources), so a report
+/// reflects what a real launch would resolve. Results preserve `names` order.
+///
+/// This is the engine behind `ryeos tool env-check`: it never reads or returns
+/// the secret material, only presence and source.
+pub fn resolve_secret_sources(
+    vault: &dyn NodeVault,
+    principal: &str,
+    names: &[String],
+    dotenv_search_dirs: &[PathBuf],
+) -> Result<Vec<(String, SecretSource)>> {
+    // Same boundary checks as `read_required_secrets`, so a report reflects
+    // exactly what a real launch would do: empty fast-path (no source reads),
+    // and reject invalid/blocked declared names up front rather than
+    // misreporting them as `host_env`/`missing`.
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    for name in names {
+        validate_operator_secret_name(name)?;
+        crate::process::validate_spawn_secret_name(name)
+            .map_err(|e| anyhow!("vault: invalid declared secret `{name}`: {e:#}"))?;
+    }
+    let vault_map = vault.read_all(principal)?;
+    let host_env_map = read_declared_host_env(names)?;
+    // Only the names the higher-precedence sources did not satisfy reach the
+    // `.env` probe — and we probe each dir separately so we can attribute which
+    // file would supply the key (later dir wins, matching resolution order).
+    let unresolved: HashSet<String> = names
+        .iter()
+        .filter(|n| !vault_map.contains_key(n.as_str()) && !host_env_map.contains_key(n.as_str()))
+        .cloned()
+        .collect();
+    let mut dotenv_dir_for: HashMap<String, PathBuf> = HashMap::new();
+    if !unresolved.is_empty() {
+        for dir in dotenv_search_dirs {
+            let map =
+                ryeos_vault::dotenv::read_dotenv_overlay(std::slice::from_ref(dir), &unresolved)
+                    .map_err(|e| anyhow!("vault: dotenv overlay: {e:#}"))?;
+            for key in map.keys() {
+                dotenv_dir_for.insert(key.clone(), dir.clone());
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let source = if vault_map.contains_key(name.as_str()) {
+            SecretSource::Vault
+        } else if host_env_map.contains_key(name.as_str()) {
+            SecretSource::HostEnv
+        } else if let Some(dir) = dotenv_dir_for.get(name) {
+            SecretSource::Dotenv(dir.clone())
+        } else {
+            SecretSource::Missing
+        };
+        out.push((name.clone(), source));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1032,24 +1148,178 @@ mod tests {
     }
 
     #[test]
-    fn dotenv_overlay_rejects_blocked_name() {
+    fn dotenv_overlay_ignores_unrelated_blocked_name() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(".env"), "PATH=/evil\n").unwrap();
+        // A project `.env` legitimately mixes a declared tool secret with
+        // unrelated control config. The blocked control key must be ignored,
+        // not fail the resolution of the secret the tool actually declared.
+        // (A blocked name can never itself be a declared secret — see
+        // `declared_secret_rejects_blocked_host_env_name`.)
+        std::fs::write(
+            tmp.path().join(".env"),
+            "PATH=/evil\nRYEOSD_URL=https://x\nMY_SECRET=ok\n",
+        )
+        .unwrap();
 
         let v = FixedVault(HashMap::new());
-        // Even with no required_secrets touching PATH, the parser
-        // bails because the file itself is poisoned. The dispatcher
-        // should not silently absorb a project's attempt to shadow
-        // PATH. (Empty required_secrets short-circuits before the
-        // .env read, so we declare a different secret to force the
-        // .env walk.)
-        let required = vec!["UNRELATED".to_string()];
+        let required = vec!["MY_SECRET".to_string()];
         let dirs = vec![tmp.path().to_path_buf()];
-        let err = read_required_secrets(&v, "op", &required, &dirs).unwrap_err();
-        let msg = format!("{err:#}");
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(bindings.get("MY_SECRET"), Some(&"ok".to_string()));
+        assert!(!bindings.contains_key("PATH"));
+        assert!(!bindings.contains_key("RYEOSD_URL"));
+    }
+
+    #[test]
+    fn dotenv_not_consulted_when_vault_satisfies_all() {
+        // vault provides every required secret, so a poisoned `.env` (here a
+        // malformed line that WOULD fail if parsed for a wanted key) is never
+        // read — vault > host > dotenv precedence holds at the I/O level.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "MALFORMED LINE NO EQUALS\n").unwrap();
+
+        let mut all = HashMap::new();
+        all.insert("FOO".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+
+        let required = vec!["FOO".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(bindings.get("FOO"), Some(&"from-vault".to_string()));
+    }
+
+    #[test]
+    fn read_explicit_secret_ignores_unrelated_blocked_dotenv_key() {
+        // Provider-key path: an unrelated blocked control key in `.env` must
+        // not fail resolution of the provider's auth secret.
+        let tmp = tempfile::tempdir().unwrap();
+        // Unique key name (not ZEN_API_KEY) so a concurrent host-env test can't
+        // shadow it — this test reads host env but takes no ENV_LOCK.
+        std::fs::write(
+            tmp.path().join(".env"),
+            "RYEOSD_URL=https://x\nPROVIDER_IGNORE_KEY=zk\n",
+        )
+        .unwrap();
+
+        let v = FixedVault(HashMap::new());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "PROVIDER_IGNORE_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("zk".to_string()));
+    }
+
+    #[test]
+    fn host_env_satisfied_skips_poisoned_dotenv() {
+        // Host env provides the only required secret; the `.env` (a bare wanted
+        // key that WOULD fail if parsed) is never read because dotenv_wanted is
+        // empty once vault + host satisfy everything.
+        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_POISON", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "SNAPTRACK_TEST_HOST_POISON\n").unwrap();
+        let v = FixedVault(HashMap::new());
+        let required = vec!["SNAPTRACK_TEST_HOST_POISON".to_string()];
+        let dirs = vec![tmp.path().to_path_buf()];
+        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        assert_eq!(
+            bindings.get("SNAPTRACK_TEST_HOST_POISON"),
+            Some(&"from-host".to_string())
+        );
+    }
+
+    #[test]
+    fn read_explicit_secret_vault_beats_host_and_dotenv() {
+        let _env = EnvVarGuard::set(&[("ZEN_API_KEY", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY=from-dotenv\n").unwrap();
+        let mut all = HashMap::new();
+        all.insert("ZEN_API_KEY".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("from-vault".to_string()));
+    }
+
+    #[test]
+    fn read_explicit_secret_host_beats_dotenv() {
+        let _env = EnvVarGuard::set(&[("ZEN_API_KEY", Some("from-host"))]);
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY=from-dotenv\n").unwrap();
+        let v = FixedVault(HashMap::new());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("from-host".to_string()));
+    }
+
+    #[test]
+    fn read_explicit_secret_vault_skips_poisoned_dotenv() {
+        // vault satisfies the key, so the bare-wanted-key `.env` (which would
+        // fail if parsed) is never read.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY\n").unwrap();
+        let mut all = HashMap::new();
+        all.insert("ZEN_API_KEY".to_string(), "from-vault".to_string());
+        let v = FixedVault(all);
+        let dirs = vec![tmp.path().to_path_buf()];
+        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        assert_eq!(got, Some("from-vault".to_string()));
+    }
+
+    #[test]
+    fn resolve_secret_sources_reports_per_secret_source() {
+        let _env = EnvVarGuard::set(&[("ENVCHECK_HOST", Some("h"))]);
+        let user = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        // project `.env` has a wanted key plus an unrelated blocked control key
+        // that must be ignored (not fail the report).
+        std::fs::write(
+            project.path().join(".env"),
+            "ENVCHECK_DOTENV=d\nRYEOSD_URL=x\n",
+        )
+        .unwrap();
+        let mut all = HashMap::new();
+        all.insert("ENVCHECK_VAULT".to_string(), "v".to_string());
+        let v = FixedVault(all);
+
+        let names = vec![
+            "ENVCHECK_VAULT".to_string(),
+            "ENVCHECK_HOST".to_string(),
+            "ENVCHECK_DOTENV".to_string(),
+            "ENVCHECK_MISSING".to_string(),
+        ];
+        let dirs = vec![user.path().to_path_buf(), project.path().to_path_buf()];
+        let report = resolve_secret_sources(&v, "op", &names, &dirs).unwrap();
+
+        // Order preserved.
+        let labels: Vec<&str> = report.iter().map(|(_, s)| s.label()).collect();
+        assert_eq!(labels, vec!["vault", "host_env", "dotenv", "missing"]);
+        assert_eq!(report[0].0, "ENVCHECK_VAULT");
+
+        // The dotenv hit is attributed to the project dir (later overrides user).
+        let dotenv = &report[2].1;
         assert!(
-            msg.contains("PATH") && msg.contains("blocked"),
-            "expected blocked PATH error, got: {msg}"
+            matches!(dotenv, SecretSource::Dotenv(d) if d == project.path()),
+            "expected project dotenv dir, got: {dotenv:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_secret_sources_empty_names_reads_nothing() {
+        // No declared secrets: report is empty and no source is consulted —
+        // matches `read_required_secrets`' empty fast-path.
+        let v = FixedVault(HashMap::new());
+        let report = resolve_secret_sources(&v, "op", &[], &[]).unwrap();
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn resolve_secret_sources_rejects_blocked_name_like_launch() {
+        // A blocked name can never be a declared secret; env-check must reject
+        // it up front (as a real launch would), not report it as host_env.
+        let _env = EnvVarGuard::set(&[("PATH", Some("/evil"))]);
+        let v = FixedVault(HashMap::new());
+        let err = resolve_secret_sources(&v, "op", &["PATH".to_string()], &[]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PATH") || format!("{err:#}").contains("blocked"),
+            "got: {err:#}"
         );
     }
 

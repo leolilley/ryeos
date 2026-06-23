@@ -296,14 +296,17 @@ fn is_signature_line(line: &str, prefix: &str, suffix: Option<&str>) -> bool {
     };
 
     let payload_area = match suffix {
-        Some(s) => match after_prefix.trim_end().strip_suffix(s) {
-            Some(inner) => inner.trim_end(),
-            None => return false,
-        },
+        Some(s) => after_prefix
+            .trim_end()
+            .strip_suffix(s)
+            .map(str::trim_end)
+            .unwrap_or_else(|| after_prefix.trim_end()),
         None => after_prefix.trim_end(),
     };
 
     payload_area.starts_with(SIGNATURE_PREFIX)
+        || payload_area == "ryeos:signed"
+        || payload_area.starts_with("ryeos:signed ")
 }
 
 #[cfg(test)]
@@ -370,6 +373,34 @@ mod tests {
     fn strip_signature_lines_removes_signed_lines() {
         let content = "# ryeos:signed:2026-04-10T00:00:00Z:abc:sig:fp\nprint('hello')\n";
         assert_eq!(strip_signature_lines(content), "print('hello')\n");
+    }
+
+    #[test]
+    fn strip_signature_lines_with_envelope_removes_malformed_placeholder() {
+        let content = "# ryeos:signed placeholder\nname: hello\n";
+
+        assert_eq!(
+            strip_signature_lines_with_envelope(content, "#", None),
+            "name: hello\n"
+        );
+    }
+
+    #[test]
+    fn strip_signature_lines_with_envelope_removes_html_placeholder_without_suffix() {
+        let content = "<!-- ryeos:signed placeholder\n```yaml\nname: hello\n```\nBody\n";
+
+        assert_eq!(
+            strip_signature_lines_with_envelope(content, "<!--", Some("-->")),
+            "```yaml\nname: hello\n```\nBody\n"
+        );
+    }
+
+    #[test]
+    fn parse_signature_line_stays_strict_for_malformed_placeholder() {
+        assert!(parse_signature_line("# ryeos:signed placeholder", "#", None).is_none());
+        assert!(
+            parse_signature_line("<!-- ryeos:signed placeholder", "<!--", Some("-->")).is_none()
+        );
     }
 
     #[test]

@@ -43,8 +43,6 @@ pub struct DirectiveHeader {
     #[serde(default)]
     pub model: Option<ModelSpec>,
     #[serde(default)]
-    pub permissions: Option<PermissionsSpec>,
-    #[serde(default)]
     pub limits: Option<LimitsSpec>,
     #[serde(default)]
     pub outputs: Option<Vec<OutputSpec>>,
@@ -60,26 +58,8 @@ pub struct DirectiveHeader {
 /// dispatcher, augmentations) and is read directly off
 /// `KindComposedView` by the daemon, not by the runtime.
 pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
-    "name",
-    "extends",
-    "model",
-    "permissions",
-    "limits",
-    "outputs",
-    "context",
-    "hooks",
+    "name", "extends", "model", "limits", "outputs", "context", "hooks",
 ];
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PermissionsSpec {
-    #[serde(default)]
-    pub execute: Vec<String>,
-    #[serde(default)]
-    pub fetch: Vec<String>,
-    #[serde(default)]
-    pub sign: Vec<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

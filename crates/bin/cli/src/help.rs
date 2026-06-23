@@ -281,11 +281,6 @@ fn print_installed_command_help(
         .map(|s| s.description.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(&command_descriptor.description);
-    let is_direct_execute = matches!(
-        command_descriptor.command.dispatch,
-        ryeos_runtime::CommandDispatch::DirectExecuteItemRef { .. }
-    );
-
     writeln!(out, "ryeos {command} — {description}")?;
     writeln!(out)?;
     if let Some(item) = &item {
@@ -304,13 +299,57 @@ fn print_installed_command_help(
         installed_usage_line(&command_descriptor, item.as_ref())
     )?;
 
-    if is_direct_execute {
+    // Control flags, rendered from the command's declared `control_flags`
+    // (data-driven — no hardcoded flag list). Value flags (method/args) show a
+    // `<value>` hint; aliases are listed alongside the primary spelling.
+    if !command_descriptor.command.control_flags.is_empty() {
         writeln!(out)?;
         writeln!(out, "CONTROL FLAGS:")?;
-        writeln!(
-            out,
-            "  --async              Accepted/background launch for tool refs; returns a thread_id"
-        )?;
+        for cf in &command_descriptor.command.control_flags {
+            let mut names = vec![format!("--{}", cf.flag)];
+            names.extend(cf.aliases.iter().map(|alias| format!("--{alias}")));
+            let value_hint = if cf.binding.takes_value() {
+                " <value>"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "  {:<24} {}",
+                format!("{}{}", names.join(", "), value_hint),
+                cf.help
+            )?;
+        }
+    }
+
+    // Parameter passing, from the command's declared `parameter_binding`.
+    if let Some(binding) = &command_descriptor.command.parameter_binding {
+        if !matches!(
+            binding.mode,
+            ryeos_runtime::CommandParameterBindingMode::None
+        ) {
+            writeln!(out)?;
+            writeln!(out, "PARAMETERS:")?;
+            if let Some(input_flag) = &binding.input_flag {
+                writeln!(
+                    out,
+                    "  {:<24} Read JSON parameters from a file (or - for stdin)",
+                    format!("--{input_flag} <file>")
+                )?;
+            }
+            writeln!(
+                out,
+                "  {:<24} Set parameter <key> (repeatable)",
+                "--<key> <value>"
+            )?;
+            if binding.single_json_object_arg {
+                writeln!(
+                    out,
+                    "  {:<24} A single JSON object of parameters",
+                    "'<json>'"
+                )?;
+            }
+        }
     }
 
     let project_resolution = command_descriptor
@@ -525,7 +564,7 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
             writeln!(out, "CONTROL FLAGS:")?;
             writeln!(
                 out,
-                "  --async         Accepted/background launch for tool refs; returns a thread_id"
+                "  --async         Accepted/background launch for root-executable refs; returns a thread_id"
             )?;
             writeln!(out)?;
             writeln!(out, "PARAMETER INPUT:")?;
@@ -584,8 +623,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "remote-doctor".into(),
                 tokens: vec!["remote".into(), "doctor".into()],
                 description: "Diagnose remote setup".into(),
@@ -600,6 +637,7 @@ mod tests {
                 }],
                 defaults: Default::default(),
                 parameter_binding: None,
+                control_flags: Vec::new(),
                 project: Some(ryeos_runtime::CommandProjectPolicy {
                     resolution: ryeos_runtime::CommandProjectResolution::Optional,
                     default: ryeos_runtime::CommandProjectDefault::None,
@@ -644,8 +682,6 @@ mod tests {
     fn installed_direct_execute_help_usage_includes_async_control_flag() {
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "execute".into(),
                 tokens: vec!["execute".into()],
                 description: "Execute an item".into(),
@@ -660,6 +696,7 @@ mod tests {
                 }],
                 defaults: Default::default(),
                 parameter_binding: None,
+                control_flags: Vec::new(),
                 project: None,
                 dispatch: ryeos_runtime::CommandDispatch::DirectExecuteItemRef {
                     item_ref_arg: "item_ref".into(),
@@ -687,8 +724,6 @@ mod tests {
         );
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "web".into(),
                 tokens: vec!["web".into()],
                 description: "Open Studio".into(),
@@ -703,6 +738,7 @@ mod tests {
                 }],
                 defaults,
                 parameter_binding: None,
+                control_flags: Vec::new(),
                 project: None,
                 dispatch: ryeos_runtime::CommandDispatch::ExecuteRef {
                     execute: "client:ryeos/web".into(),

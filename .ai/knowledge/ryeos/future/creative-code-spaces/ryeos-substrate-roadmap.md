@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-06-21T02:55:23Z:7f5cbb914232bbf5206181e56720a1ff50b3ad0f216317839dc7ed910a2b08ec:iGOYZEBNxfudT9EwtV7hmWp1SnVZSPiFve9AdHqbVW17dyigGnp5omny/eHhsK1Kqm0uabEiRtbn6rnuzVyYCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 <!-- rye:signed:2026-06-03T03:31:14Z:41823d75c9809ff76ae9e8e621014b981eee359eee6629cdf16592a39765c42f:kG1hveYOMEoTULljD7ppaUekyvjBwknaPiBOKNeQ2tSlj2wtSO_x4HIaFYKq9sNkWORKz3-gHaDjMlUEKKPrDg:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future/creative-code-spaces
@@ -148,8 +149,11 @@ local node
 
 Frames are installable contracts for valid worlds/dimensions.
 
+They should be treated as authorable layers, not only internal protocol definitions. A creator should eventually be able to define a narrow frame or renderer, publish it, and let other people build worlds, games, objects, and portals on top of it.
+
 A frame package may contain:
 
+- object type definitions;
 - object schemas;
 - validators;
 - canonicalization rules;
@@ -173,6 +177,20 @@ world state + timeline frame     -> history view
 ```
 
 The runtime should begin with declarative primitives and deterministic validators. Arbitrary generated code should come later, behind constrained hooks.
+
+Near-term product work should still show a visible creation ladder, even before generalized frame authoring is solved:
+
+```text
+blank space
+  -> object
+  -> rule/behavior
+  -> renderer interpretation
+  -> frame/world template
+  -> portal
+  -> fork/remix by another user
+```
+
+This ladder is how users understand that RyeOS is not supplying one game or one graphics engine. RyeOS is supplying the substrate where engines, renderers, games, and spaces can be created as signed layers.
 
 ## Phase 5: portal model
 

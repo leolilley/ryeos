@@ -1,8 +1,8 @@
 //! Node-config: daemon-consumed control-plane configuration items.
 //!
 //! `kind: node` items are signed YAML files at `.ai/node/<section>/...`.
-//! Each declares `section: <name>` which must match the section it was
-//! loaded under.
+//! The first path segment under `.ai/node` selects the section handler; the
+//! section is loader-owned structure, not YAML payload.
 //!
 //! Section directories (routes, commands) support recursive subfolders:
 //!
@@ -34,6 +34,23 @@ use crate::node_config::sections::command::CommandRecord;
 use crate::node_config::sections::command_registration::CommandRegistrationPolicyRecord;
 use crate::node_config::sections::hosted_node::HostedNodePolicyRecord;
 use crate::route_raw::RawRouteSpec;
+
+/// Loader-derived structural context for a node-config item.
+#[derive(Debug, Clone)]
+pub struct NodeItemContext {
+    /// Section name selected by `.ai/node/<section>/...`.
+    pub section: String,
+    /// Relative item id below the section root, without extension.
+    pub id: String,
+    /// Filename stem.
+    pub stem: String,
+    /// Path relative to the section root, including extension.
+    pub rel_path: PathBuf,
+    /// Absolute source file path.
+    pub source_file: PathBuf,
+    /// Trusted signer fingerprint from the verified signature.
+    pub signer_fingerprint: String,
+}
 
 /// Which sources a section scans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +101,11 @@ pub trait NodeConfigSection: Send + Sync {
     fn source_policy(&self) -> SectionSourcePolicy;
 
     /// Parse a verified YAML body into a section record.
-    fn parse(&self, name: &str, body: &serde_json::Value)
-        -> anyhow::Result<Box<dyn SectionRecord>>;
+    fn parse(
+        &self,
+        ctx: &NodeItemContext,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<Box<dyn SectionRecord>>;
 }
 
 /// A parsed section record (type-erased).

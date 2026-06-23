@@ -14,6 +14,7 @@ use crate::result_guard::ResultGuard;
 use crate::resume::ResumeState;
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::RuntimeResult;
+use ryeos_runtime::TerminalCompletion;
 
 #[derive(Debug)]
 pub enum State {
@@ -713,6 +714,10 @@ impl Runner {
                                                 item_id: dispatch_result.canonical_ref.clone(),
                                                 params: dispatch_result.arguments.clone(),
                                                 thread: "inline".to_string(),
+                                                // Directive tool-calls dispatch
+                                                // `tool:` refs at their default
+                                                // method; no method selector.
+                                                call: None,
                                             },
                                         },
                                     )
@@ -910,8 +915,19 @@ impl Runner {
                                     continue;
                                 }
 
-                                // Finalize thread
-                                if let Err(e) = self.callback.finalize_thread("completed").await {
+                                // Finalize thread. The persisted result mirrors
+                                // the live RuntimeResult.result here (the
+                                // `directive_return` sentinel); the structured
+                                // outputs travel in `outputs` + the published
+                                // artifact, so /execute and threads.get agree.
+                                let completion = TerminalCompletion {
+                                    status: "completed".to_string(),
+                                    outcome_code: Some("success".to_string()),
+                                    result: Some(json!("directive_return")),
+                                    error: None,
+                                    cost: serde_json::to_value(self.budget.cost()).ok(),
+                                };
+                                if let Err(e) = self.callback.finalize_thread(completion).await {
                                     guard.finalized = true;
                                     return Self::attach_warnings(RuntimeResult {
                                         success: false,
@@ -1100,7 +1116,14 @@ impl Runner {
                 }
 
                 State::Finalizing { result } => {
-                    if let Err(e) = self.callback.finalize_thread("completed").await {
+                    let completion = TerminalCompletion {
+                        status: "completed".to_string(),
+                        outcome_code: Some("success".to_string()),
+                        result: Some(result.clone()),
+                        error: None,
+                        cost: serde_json::to_value(self.budget.cost()).ok(),
+                    };
+                    if let Err(e) = self.callback.finalize_thread(completion).await {
                         let runtime_result = RuntimeResult {
                             success: false,
                             status: "errored".to_string(),
@@ -1145,7 +1168,14 @@ impl Runner {
                         "thread_failed(emit_error)",
                         self.callback.emit_error(&error).await,
                     );
-                    if let Err(e) = self.callback.finalize_thread("failed").await {
+                    let completion = TerminalCompletion {
+                        status: "failed".to_string(),
+                        outcome_code: Some("failed".to_string()),
+                        result: None,
+                        error: Some(json!(error)),
+                        cost: serde_json::to_value(self.budget.cost()).ok(),
+                    };
+                    if let Err(e) = self.callback.finalize_thread(completion).await {
                         // Finalize failed — surface in the error result
                         warnings.push(format!(
                             "resume-critical callback finalize_thread(failed) also failed: {e}"

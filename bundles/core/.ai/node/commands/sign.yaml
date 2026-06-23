@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T23:56:19Z:9b24997c7f8ef69da508b9a1a75b2ae62a26a9471510d948a9bb905e5074aee0:ZD3YJynty0V5ZAi0DUUGW4nOoGyulaxRyufuxkh0UxgbI77P36XZerlk4MIC+6kazlgjatAQlP+dR/SWJbTVCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: sign
+# ryeos:signed:2026-06-19T05:40:59Z:b13f74ac5ba9322db8cb31d934847fe084dca500184607cead84f9f553166f51:s7v/i44Gt32+5TLGO24DslIOaunQ34WOxSg/rYYlfIfLDX0OQWUiTMxQEaJG3KbJwEMvHDgu2e5OdM8KX/0bAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - s
 description: Cryptographically sign an item or item glob by canonical ref

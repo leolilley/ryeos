@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:3403c2c8be011abf26fc7632c3a99fdce4d6cb43514da2a9edb5379c92845fbb:AobiAND7sZV4Q6eBrYU8jSLg76WVVxDjCxYfneGhcpEtO9LFjykIberKb7aqJhbSMZ1AOFqVsSzVfA8tfMqlCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/graph
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:c00b097c6af773743d1c2425cbbfceea800d918823bd895b001fb50abe110477:gGlLHJvjzEkgc5c09401c9u8/l8epa9VTvL8OvL3d1//FE/374JiRZf9RZCUhb5OKMGiSDqy6LZb8Ok40t/GCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/graph/topology
 path: /ui/api/graph/topology
 methods:

@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS thread_results (
     chain_root_id TEXT NOT NULL,
     status TEXT NOT NULL,
     result BLOB,
+    outcome_code TEXT,
     error TEXT,
     updated_at TEXT NOT NULL
 );
@@ -274,7 +275,7 @@ const PROJECTION_APP_ID: i32 = 0x5259_504a;
 /// Current projection schema epoch. This is stored in SQLite's
 /// `PRAGMA user_version` slot, but RyeOS treats it as the projection
 /// schema epoch. Bump this for incompatible projection schema changes.
-const PROJECTION_SCHEMA_EPOCH: i32 = 2;
+const PROJECTION_SCHEMA_EPOCH: i32 = 3;
 
 /// Schema spec for projection.db — the single source of truth for
 /// what tables/columns/indexes this database must contain.
@@ -565,6 +566,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "result",
                         col_type: "BLOB",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "outcome_code",
+                        col_type: "TEXT",
                         pk: false,
                         not_null: false,
                     },
@@ -2726,25 +2733,28 @@ pub fn project_thread_snapshot(
     // Idempotent under INSERT OR REPLACE: the snapshot is the source
     // of truth, so re-projection (rebuild, re-apply) overwrites with
     // the same row.
-    if snapshot.result.is_some() || snapshot.error.is_some() {
+    if snapshot.result.is_some() || snapshot.error.is_some() || snapshot.outcome_code.is_some() {
         let result_blob = snapshot
             .result
             .as_ref()
             .map(|v| serde_json::to_vec(v).unwrap_or_default());
-        let error_text = snapshot.error.as_ref().map(|v| match v {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        });
+        // Store the error as JSON text so a structured error round-trips back
+        // into the same shape on read (a string error stays a JSON string).
+        let error_text = snapshot
+            .error
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         db.connection()
             .execute(
                 "INSERT OR REPLACE INTO thread_results (
-                thread_id, chain_root_id, status, result, error, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)",
+                thread_id, chain_root_id, status, result, outcome_code, error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     &snapshot.thread_id,
                     chain_root_id,
                     snapshot.status.to_string(),
                     result_blob,
+                    &snapshot.outcome_code,
                     error_text,
                     &snapshot.updated_at,
                 ],
@@ -4152,6 +4162,70 @@ mod tests {
 
         let result = project_thread_snapshot(&db, &snapshot, "T-root");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn project_snapshot_writes_result_row_for_outcome_code_only_terminal() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        // A terminal snapshot carrying only an outcome_code (no result, no
+        // error) must still produce a thread_results row so the outcome is
+        // readable.
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-oc-only",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .status(ThreadStatus::Completed)
+        .outcome_code(Some("success".to_string()))
+        .build();
+
+        project_thread_snapshot(&db, &snapshot, "T-root").unwrap();
+
+        let row = crate::queries::get_thread_result(&db, "T-oc-only")
+            .unwrap()
+            .expect("thread_results row should exist for outcome_code-only terminal");
+        assert_eq!(row.outcome_code.as_deref(), Some("success"));
+        assert!(row.result.is_none());
+        assert!(row.error.is_none());
+    }
+
+    #[test]
+    fn project_snapshot_stores_structured_error_as_round_trippable_json() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        // A structured (object) error must persist as JSON text so the read
+        // path parses it back into the same object, not a stringified blob.
+        let err = serde_json::json!({
+            "code": "required_secret_missing",
+            "env_var": "ZEN_API_KEY"
+        });
+        let snapshot = ThreadSnapshotBuilder::new(
+            "T-err",
+            "T-root",
+            "directive",
+            "system/test",
+            "directive-runtime",
+        )
+        .status(ThreadStatus::Failed)
+        .outcome_code(Some("required_secret_missing".to_string()))
+        .error(Some(err.clone()))
+        .build();
+
+        project_thread_snapshot(&db, &snapshot, "T-root").unwrap();
+
+        let row = crate::queries::get_thread_result(&db, "T-err")
+            .unwrap()
+            .expect("thread_results row should exist");
+        let stored: serde_json::Value =
+            serde_json::from_str(&row.error.expect("error stored")).expect("error is JSON");
+        assert_eq!(stored, err);
     }
 
     #[test]

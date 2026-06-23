@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-06-21T02:55:23Z:3afaa61d4ac71e7fb26db2d25d5926937f6a1e42c9409f30119b77445c123f32:OVX0VAlAfi+CFUvsnPGChwIlwbECCNHP4UHah9HxIc+tBPGEdIlCCoEMx7xHYZWNikROVXQcFfvh/OC9ut+TCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 <!-- rye:signed:2026-06-03T03:31:14Z:d8bc3e01059956ee65f4c4e3e6fe2329a995792ab4d81955f9459cf9d5d7e909:h0V2gxpPl3HFlLr_vgOtzBB-bAnN9gtJLvcSrlFRUA5MkNJJbAgSMihAyN7kMul5JBOh-TDDVFWroT2twWkhAg:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future/creative-code-spaces
@@ -25,14 +26,16 @@ tags:
 
 This note describes the staged rendering/runtime path for RyeOS worlds.
 
-Three.js is a strong first dimension because it makes signed state visible quickly. But Three.js is not the world itself. The world is signed state plus frame policy. Three.js is one projection/runtime interpretation of that state.
+Three.js is a strong first example dimension because it makes signed state visible quickly. But Three.js is not the world itself, and it should not be presented as the graphics answer for all RyeOS spaces. The world is signed state plus frame policy. Three.js is one projection/runtime interpretation of that state.
+
+The broader goal is that renderers and engines are themselves user-created layers. Someone can build a Three.js scene engine; someone else can build a card renderer, voxel renderer, text MUD renderer, graph editor, or custom simulation runtime; others can build games and worlds on top of those layers.
 
 ## Core strategy
 
-Start with a dimension, not a universe simulator.
+Start with an authorable dimension, not a universe simulator.
 
 ```text
-Stage 1: Three.js dimension over signed scene objects
+Stage 1: simple renderer dimension over signed scene objects
 Stage 2: Declarative behavior primitives
 Stage 3: Frame-specific simulation rules
 Stage 4: Directive/tool entities as inhabitants
@@ -40,11 +43,11 @@ Stage 5: Replayable graph time
 Stage 6: Constrained executable hooks
 ```
 
-The first stage should be shallow enough to build, but real enough that it uses the same signed object and frame model that deeper simulations will need.
+The first stage should be shallow enough to build, but real enough that it uses the same signed object and frame model that deeper simulations will need. If the first implementation uses Three.js, the product should still show it as a layer that can be inspected, forked, replaced, and reused by other spaces.
 
-## Stage 1: Three.js dimension over signed scene objects
+## Stage 1: simple renderer dimension over signed scene objects
 
-The first dimension renders signed scene objects through a small frame contract.
+The first dimension renders signed scene objects through a small frame contract. Three.js is a practical candidate, but the contract should not assume Three.js as the only possible interpretation.
 
 Object examples:
 

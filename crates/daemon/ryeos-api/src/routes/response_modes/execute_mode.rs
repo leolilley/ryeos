@@ -55,12 +55,36 @@ pub struct ExecuteRequest {
     pub validate_only: bool,
     #[serde(default)]
     pub project_source: Option<ProjectSource>,
+    /// Method call: `{ method, args }`. The method selector is control
+    /// plane — it chooses daemon-owned projection/validation/trust before
+    /// the runtime is spawned — while the args are data plane. Absent for
+    /// terminator/delegate kinds, which ignore it.
     #[serde(default)]
-    pub operation: Option<String>,
-    #[serde(default)]
-    pub inputs: Option<Value>,
+    pub call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub usage_subject: Option<ryeos_state::UsageSubject>,
+    /// When true, attach a `debug` block (resolved cmd/args/cwd/env keys +
+    /// exit code and size-limited raw stdout/stderr) to the result.
+    #[serde(default)]
+    pub debug_raw: bool,
+}
+
+impl ExecuteRequest {
+    /// The requested method name, if a `call.method` was provided.
+    pub fn method(&self) -> Option<String> {
+        self.call.as_ref().and_then(|c| c.method.clone())
+    }
+
+    /// The requested method args, if `call.args` was provided.
+    pub fn args(&self) -> Option<Value> {
+        self.call.as_ref().and_then(|c| c.args.clone())
+    }
+
+    /// The requested call block, borrowed — the single caller-intent unit
+    /// fed into `ExecutionContext.requested_call`.
+    pub fn call(&self) -> Option<&ryeos_engine::method_call::MethodCall> {
+        self.call.as_ref()
+    }
 }
 
 fn default_launch_mode() -> String {
@@ -296,7 +320,13 @@ impl CompiledResponseMode for CompiledExecuteMode {
             },
             current_site_id: site_id.to_string(),
             origin_site_id: site_id.to_string(),
-            execution_hints: Default::default(),
+            execution_hints: {
+                let mut hints = ryeos_engine::contracts::ExecutionHints::default();
+                if request.debug_raw {
+                    hints.values.insert("debug_raw".to_string(), json!(true));
+                }
+                hints
+            },
             validate_only: request.validate_only,
         };
 
@@ -310,8 +340,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // resolution flows through this Arc.
             engine: project_ctx.request_engine.clone(),
             plan_ctx,
-            requested_op: request.operation.clone(),
-            requested_inputs: request.inputs.clone(),
+            requested_call: request.call().cloned(),
         };
 
         // Parse the user-supplied root ref.
@@ -465,23 +494,46 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         item_ref, e
                     ))
                 })?;
-            if parsed_item_ref.kind() != "tool" {
+            // Accepted launch admits any kind whose schema declares it
+            // root-executable in `execution.thread_profile.root_executable`,
+            // read straight from the engine's kind registry rather than a
+            // hardcoded kind list. (This is a stricter, API-level gate than
+            // the dispatcher's `NotRootExecutable`, which only rejects kinds
+            // with no `execution:` block at all.) Authorization is orthogonal
+            // and already enforced above (per-ref execute cap) and below
+            // (item-declared required caps).
+            let kind = parsed_item_ref.kind();
+            let root_executable = project_ctx
+                .request_engine
+                .kinds
+                .get(kind)
+                .and_then(|schema| schema.execution())
+                .and_then(|exec| exec.thread_profile.as_ref())
+                .is_some_and(|tp| tp.root_executable);
+            if !root_executable {
                 return Ok((
                     StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "launch_mode='accepted' currently supports tool refs only" })),
+                    axum::Json(json!({
+                        "error": format!(
+                            "launch_mode='accepted' requires a root-executable kind; '{kind}' is not root-executable"
+                        )
+                    })),
                 )
                     .into_response());
             }
-            let accepted_resolved = match ryeos_app::thread_lifecycle::resolve_root_execution(
+            // Existence + trust gate: resolve + trust-verify the root item so
+            // invalid refs and trust violations fail before a thread_id is
+            // minted. This does NOT demand a terminal `executor_id` — which
+            // executor runs (a terminal subprocess for tools, or a
+            // runtime-registry runtime for directive/graph) is decided by
+            // `dispatch::dispatch` in the spawned task below. Required caps
+            // and secrets are enforced here from the resolved metadata.
+            let accepted_resolved = match ryeos_app::thread_lifecycle::preflight_root_execution(
                 ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
                     engine: &project_ctx.request_engine,
                     site_id,
                     project_path: &project_ctx.effective_path,
                     item_ref,
-                    // Accepted launch dispatches the background execution
-                    // through the normal inline lifecycle; preflight the
-                    // same launch mode so unsupported refs fail before we
-                    // mint and return a thread_id.
                     launch_mode: "inline",
                     parameters: request.parameters.clone(),
                     requested_by: Some(caller_principal_id.clone()),
@@ -502,20 +554,35 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         .into_response());
                 }
             };
-            if let Err(err) = ryeos_app::thread_lifecycle::validate_item(
-                &project_ctx.request_engine,
-                &accepted_resolved,
+            // Route preflight: walk the dispatch chain and run the cheap
+            // route-level checks dispatch makes before creating the thread
+            // row (terminal `executor_id` + tool `requires` declaration,
+            // direct-runtime registry caps, method-arg validation), so the
+            // common pre-thread failures reject synchronously without minting
+            // a `thread_id`. Deeper failures are caught by persistence-first
+            // leaf dispatch + the launch finalize-on-error net, not here.
+            // In-process service kinds run synchronously and never thread a
+            // pre-minted id, so they are not eligible for accepted launch.
+            match ryeos_executor::dispatch::preflight_root_dispatch(
+                item_ref,
+                root_canonical.kind.as_str(),
+                &exec_ctx,
+                &state,
             ) {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({
-                        "error": format!("accepted launch validation failed: {err}"),
-                    })),
-                )
-                    .into_response());
+                Ok(ryeos_executor::dispatch::RootDispatchClass::InProcess) => {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({
+                            "error": "launch_mode='accepted' is not supported for in-process kinds; they execute synchronously — call execute without --async",
+                        })),
+                    )
+                        .into_response());
+                }
+                Ok(_) => {}
+                Err(e) => return Ok(dispatch_error_response(e)),
             }
             let required_caps = ryeos_app::service_registry::extract_required_caps(
-                &accepted_resolved.resolved_item.metadata.extra,
+                &accepted_resolved.metadata.extra,
             );
             if !required_caps.is_empty() {
                 let cap_refs = required_caps.iter().map(String::as_str).collect::<Vec<_>>();
@@ -536,7 +603,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             if let Err(err) = ryeos_app::vault::read_required_secrets(
                 state.vault.as_ref(),
                 &caller_principal_id,
-                &accepted_resolved.resolved_item.metadata.required_secrets,
+                &accepted_resolved.metadata.required_secrets,
                 &dotenv_dirs,
             ) {
                 return Ok((
@@ -568,8 +635,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     validate_only: false,
                     usage_subject: usage_subject.clone(),
                     usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    operation: request.operation.clone(),
-                    inputs: request.inputs.clone(),
+                    call: request.call().cloned(),
                     previous_thread_id: None,
                 },
             );
@@ -610,8 +676,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let request_can_need_remote_config = request.launch_mode == "inline"
             && !request.validate_only
             && matches!(project_source, ProjectSource::LiveFs)
-            && request.operation.is_none()
-            && request.inputs.is_none();
+            && request.method().is_none()
+            && request.args().is_none();
         let remotes = if remote_target_requested && request_can_need_remote_config {
             let project_for_layering: Option<&std::path::Path> = if no_project_requested {
                 None
@@ -669,8 +735,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     parameters: request.parameters.clone(),
                     acting_principal: &caller_principal_id,
                     remote_ignore: &remote_ignore,
-                    operation: None,
-                    inputs: None,
+                    call: None,
                 };
                 match crate::remote::forward::execute_unary_forward(
                     &state_arc,
@@ -709,8 +774,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
             pre_minted_thread_id: None,
             usage_subject,
             usage_subject_asserted_by,
-            operation: request.operation.clone(),
-            inputs: request.inputs.clone(),
             previous_thread_id: None,
         };
 
@@ -793,10 +856,10 @@ fn plan_target_site_forward(
         ));
     }
 
-    if request.operation.is_some() || request.inputs.is_some() {
+    if request.method().is_some() || request.args().is_some() {
         return Err(target_site_unsupported(
             target_site_id,
-            "operation/inputs are not supported for target-site forwarding v1",
+            "call.method/call.args are not supported for target-site forwarding v1",
         ));
     }
 
@@ -951,8 +1014,6 @@ mod tests {
 
     fn make_raw(auth: &str, body: RawRequestBody) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "core/execute".into(),
             path: "/execute".into(),
             methods: ["POST".into()].into_iter().collect(),
@@ -1068,9 +1129,9 @@ mod tests {
             target_site_id: target_site_id.map(String::from),
             validate_only: false,
             project_source: None,
-            operation: None,
-            inputs: None,
+            call: None,
             usage_subject: None,
+            debug_raw: false,
         }
     }
 
@@ -1182,9 +1243,12 @@ mod tests {
     }
 
     #[test]
-    fn target_site_plan_rejects_operation_or_inputs() {
+    fn target_site_plan_rejects_method_or_args() {
         let mut req = target_request(Some("site:remote"));
-        req.operation = Some("op".into());
+        req.call = Some(ryeos_engine::method_call::MethodCall {
+            method: Some("query".into()),
+            args: None,
+        });
         let err = plan_target_site_forward(
             &req,
             &ProjectSource::LiveFs,
@@ -1194,7 +1258,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("operation/inputs"));
+        assert!(err.to_string().contains("call.method/call.args"));
     }
 
     #[test]

@@ -5,15 +5,16 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::identity::NodeIdentity;
 use crate::io::atomic;
 
 /// Write a signed `kind: node` item.
 ///
-/// Builds a YAML body with the `section` field prepended, signs it with
-/// the node's identity, and writes atomically.
+/// Serializes the provided YAML body as-is, signs it with the node's identity,
+/// and writes atomically. Section identity comes from the output path, not the
+/// body.
 ///
 /// Output path: `<base_dir>/<section>/<name>.yaml`.
 ///
@@ -28,18 +29,25 @@ pub fn write_signed_node_item(
     body: &serde_json::Value,
     identity: &NodeIdentity,
 ) -> Result<std::path::PathBuf> {
-    // Build canonical YAML: section first, then remaining body fields
+    // Build canonical YAML from body fields. Structural node-config metadata is
+    // path-derived and must never be serialized.
     let mut yaml_map = serde_yaml::Mapping::new();
-    yaml_map.insert(
-        serde_yaml::Value::String("section".into()),
-        serde_yaml::Value::String(section.into()),
-    );
 
-    // Merge body fields (skip "section" if present in body — ours wins)
     if let Some(map) = body.as_object() {
         for (k, v) in map {
-            if k == "section" {
-                continue;
+            if k == "section" || k == "category" {
+                bail!(
+                    "node config writer refusing legacy structural field '{}' for section '{}' item '{}'",
+                    k,
+                    section,
+                    name
+                );
+            }
+            if section == "commands" && k == "name" {
+                bail!(
+                    "node config writer refusing command structural field 'name' for item '{}'",
+                    name
+                );
             }
             yaml_map.insert(
                 serde_yaml::Value::String(k.clone()),
@@ -63,4 +71,61 @@ pub fn write_signed_node_item(
         .with_context(|| format!("failed to write node config item {}", output_path.display()))?;
 
     Ok(output_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lillux::crypto::EncodePrivateKey;
+    use rand::rngs::OsRng;
+
+    fn identity() -> NodeIdentity {
+        let tmp = tempfile::tempdir().unwrap();
+        let key_path = tmp.path().join("identity/private_key.pem");
+        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
+        let key = lillux::crypto::SigningKey::generate(&mut OsRng);
+        std::fs::write(
+            &key_path,
+            key.to_pkcs8_pem(Default::default()).unwrap().as_bytes(),
+        )
+        .unwrap();
+        NodeIdentity::load(&key_path).unwrap()
+    }
+
+    #[test]
+    fn rejects_legacy_section_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = write_signed_node_item(
+            tmp.path(),
+            "schedules",
+            "demo",
+            &serde_json::json!({ "section": "schedules", "schedule_id": "demo" }),
+            &identity(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("legacy structural field 'section'"),
+            "got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn rejects_command_name_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = write_signed_node_item(
+            tmp.path(),
+            "commands",
+            "demo",
+            &serde_json::json!({ "name": "demo", "tokens": ["demo"] }),
+            &identity(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("command structural field 'name'"),
+            "got: {err:#}"
+        );
+    }
 }

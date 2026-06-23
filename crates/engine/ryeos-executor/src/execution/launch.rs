@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -15,9 +15,10 @@ use super::limits::{
     load_limits_config,
 };
 use super::thread_meta::ThreadMeta;
-use ryeos_app::callback_token::{compute_ttl, effective_bundle_id_from_item_ref};
+use ryeos_app::callback_token::{compute_ttl, effective_bundle_id_for_request};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
+use ryeos_app::vault::VaultReadError;
 
 /// Typed error for native executor materialization failures.
 ///
@@ -59,17 +60,156 @@ pub enum MaterializationError {
         trust_class: ryeos_engine::resolution::TrustClass,
         fingerprint: Option<String>,
     },
-    #[error(
-        "provider secret `{env_var}` (for provider `{provider_id}`) is not in vault — \
-             run: ryeos-core-tools vault put --name {env_var} --value-stdin"
-    )]
-    ProviderSecretMissing {
-        provider_id: String,
-        env_var: String,
-        item_ref: String,
-    },
     #[error("{0}")]
     Internal(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum SecretSource {
+    Metadata,
+    Provider { provider_id: String },
+}
+
+impl SecretSource {
+    pub fn kind_for_wire(&self) -> &'static str {
+        match self {
+            SecretSource::Metadata => "declared",
+            SecretSource::Provider { .. } => "provider",
+        }
+    }
+
+    pub fn name_for_wire(&self) -> String {
+        match self {
+            SecretSource::Metadata => "item metadata".to_string(),
+            SecretSource::Provider { provider_id } => provider_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SecretRequirement {
+    pub name: String,
+    pub sources: Vec<SecretSource>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MissingSecret {
+    pub name: String,
+    pub sources: Vec<SecretSource>,
+}
+
+impl MissingSecret {
+    pub fn primary_source(&self) -> &SecretSource {
+        self.sources
+            .iter()
+            .find(|source| matches!(source, SecretSource::Provider { .. }))
+            .unwrap_or(&self.sources[0])
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderPreflight {
+    pub snapshot: ryeos_runtime::ResolvedProviderSnapshot,
+    pub env_var: Option<String>,
+    pub provider_id: String,
+}
+
+const ENVELOPE_FIELD_PROVIDER_SNAPSHOT: &str = "provider_snapshot";
+
+pub(crate) fn requires_provider_snapshot(required_envelope_fields: &[String]) -> bool {
+    required_envelope_fields
+        .iter()
+        .any(|field| field == ENVELOPE_FIELD_PROVIDER_SNAPSHOT)
+}
+
+pub(crate) fn build_secret_requirements(
+    metadata_required_secrets: &[String],
+    provider_preflight: Option<&ProviderPreflight>,
+) -> Vec<SecretRequirement> {
+    let mut requirements: Vec<SecretRequirement> = metadata_required_secrets
+        .iter()
+        .map(|name| SecretRequirement {
+            name: name.clone(),
+            sources: vec![SecretSource::Metadata],
+        })
+        .collect();
+
+    if let Some(preflight) = provider_preflight {
+        if let Some(env_var) = preflight.env_var.as_ref() {
+            let provider_source = SecretSource::Provider {
+                provider_id: preflight.provider_id.clone(),
+            };
+            if let Some(existing) = requirements.iter_mut().find(|req| req.name == *env_var) {
+                existing.sources.push(provider_source);
+            } else {
+                requirements.push(SecretRequirement {
+                    name: env_var.clone(),
+                    sources: vec![provider_source],
+                });
+            }
+        }
+    }
+
+    requirements
+}
+
+pub(crate) fn missing_secrets_from_requirements(
+    missing_names: &[String],
+    requirements: &[SecretRequirement],
+) -> Vec<MissingSecret> {
+    missing_names
+        .iter()
+        .filter_map(|name| {
+            requirements
+                .iter()
+                .find(|req| &req.name == name)
+                .map(|req| MissingSecret {
+                    name: req.name.clone(),
+                    sources: req.sources.clone(),
+                })
+        })
+        .collect()
+}
+
+pub(crate) fn required_secret_missing_payload(
+    item_ref: &str,
+    missing: &MissingSecret,
+) -> serde_json::Value {
+    let source = missing.primary_source();
+    crate::structured_error::StructuredErrorPayload::required_secret_missing(
+        format!(
+            "missing required secret `{}` for `{}`",
+            missing.name, item_ref
+        ),
+        missing.name.clone(),
+        source.kind_for_wire(),
+        source.name_for_wire(),
+        crate::dispatch_error::required_secret_remediation(&missing.name),
+    )
+    .to_value()
+}
+
+fn finalize_missing_secret_launch(
+    state: &AppState,
+    thread_id: &str,
+    item_ref: &str,
+    secrets: &[MissingSecret],
+) {
+    let Some(first) = secrets.first() else {
+        return;
+    };
+    let payload = required_secret_missing_payload(item_ref, first);
+    let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
+        thread_id: thread_id.to_string(),
+        status: "failed".to_string(),
+        outcome_code: Some("required_secret_missing".to_string()),
+        result: Some(payload.clone()),
+        error: Some(payload),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    });
 }
 
 /// Typed error returned by [`build_and_launch`]. Materialization
@@ -78,6 +218,15 @@ pub enum MaterializationError {
 pub enum BuildAndLaunchError {
     #[error("materialization failed: {0}")]
     Materialization(#[from] MaterializationError),
+    #[error("missing required secret(s) for `{item_ref}`")]
+    MissingSecrets {
+        item_ref: String,
+        secrets: Vec<MissingSecret>,
+    },
+    /// A composed permission tried to self-grant manifest runtime authority
+    /// (bundle events / vault). Mapped to `DispatchError::CapabilityRejected`.
+    #[error("{reason}")]
+    CapabilityRejected { reason: String },
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -451,23 +600,11 @@ fn build_verified_loader_for_thread(
     ))
 }
 
-/// Resolve which provider this directive will use and inject its
-/// vault secret (if any) into `bindings`. Used by both launch and
-/// resume — keep the contract identical.
-///
-/// Returns `Err(MaterializationError::ProviderSecretMissing)` if the
-/// resolved provider declares an `auth.env_var` and that env var is
-/// not present in the vault.
-pub(crate) fn preflight_inject_provider_secret(
+pub(crate) fn resolve_provider_preflight(
     composed: &ryeos_engine::resolution::KindComposedView,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     operator_trusted_keys_dir: &Path,
-    vault: &dyn ryeos_app::vault::NodeVault,
-    acting_principal: &str,
-    item_ref_str: &str,
-    dotenv_search_dirs: &[std::path::PathBuf],
-    bindings: &mut std::collections::HashMap<String, String>,
-) -> Result<ryeos_runtime::ResolvedProviderSnapshot, MaterializationError> {
+) -> Result<ProviderPreflight, MaterializationError> {
     let header = ryeos_runtime::model_resolution::DirectiveModelHeader {
         model: extract_model_spec_from_resolved(composed)
             .map_err(|e| MaterializationError::Internal(e.to_string()))?,
@@ -477,51 +614,11 @@ pub(crate) fn preflight_inject_provider_secret(
     let resolved_target = ryeos_runtime::model_resolution::preflight_resolve(&header, &loader)
         .map_err(|e| MaterializationError::Internal(e.to_string()))?;
 
-    if let Some(env_var) = resolved_target.provider.auth.env_var.as_deref() {
-        ryeos_app::process::validate_spawn_secret_name(env_var)
-            .map_err(|e| MaterializationError::Internal(e.to_string()))?;
-        // If the secret is already present in bindings (e.g. from
-        // `read_required_secrets` which layers vault + dotenv overlay),
-        // skip the vault read — the dispatch path already resolved it.
-        if bindings.contains_key(env_var) {
-            tracing::debug!(
-                provider_id = %resolved_target.provider_id,
-                env_var = %env_var,
-                "vault: provider secret already in bindings (likely from dotenv overlay)"
-            );
-        } else {
-            match ryeos_app::vault::read_explicit_secret(
-                vault,
-                acting_principal,
-                env_var,
-                dotenv_search_dirs,
-            )
-            .map_err(|e| MaterializationError::Internal(e.to_string()))?
-            {
-                Some(value) => {
-                    bindings.insert(env_var.to_string(), value);
-                    tracing::debug!(
-                        provider_id = %resolved_target.provider_id,
-                        env_var = %env_var,
-                        "vault: injected selected provider secret"
-                    );
-                }
-                None => {
-                    return Err(MaterializationError::ProviderSecretMissing {
-                        provider_id: resolved_target.provider_id,
-                        env_var: env_var.to_string(),
-                        item_ref: item_ref_str.to_string(),
-                    });
-                }
-            }
-        }
-    } else {
-        tracing::debug!(
-            provider_id = %resolved_target.provider_id,
-            "provider declares no auth env var — no vault injection needed"
-        );
-    }
-    Ok(resolved_target)
+    Ok(ProviderPreflight {
+        env_var: resolved_target.provider.auth.env_var.clone(),
+        provider_id: resolved_target.provider_id.clone(),
+        snapshot: resolved_target,
+    })
 }
 
 pub struct NativeLaunchResult {
@@ -576,11 +673,35 @@ pub struct BuildAndLaunchParams<'a> {
     pub project_path: &'a Path,
     pub provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     pub parameters: &'a Value,
-    pub vault_bindings: &'a HashMap<String, String>,
-    pub extra_effective_caps: &'a [String],
+    pub metadata_required_secrets: &'a [String],
+    pub required_envelope_fields: &'a [String],
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
+}
+
+/// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
+/// returns before the thread reached a terminal status. This covers the
+/// post-create `?` paths (execution policy, limits, resolution pipeline,
+/// effective trust, capability mint) that would otherwise leave the row stuck
+/// at `created` — the sync `/execute` counterpart of the accepted-launch
+/// finalize-on-error net. It no-ops when the thread is already terminal —
+/// normal success (the runtime self-finalized), or a path that finalized
+/// explicitly — so it never overrides a real outcome.
+struct FinalizeFailedOnDrop<'a> {
+    state: &'a AppState,
+    thread_id: String,
+}
+
+impl Drop for FinalizeFailedOnDrop<'_> {
+    fn drop(&mut self) {
+        crate::dispatch::finalize_method_thread_if_needed(
+            self.state,
+            &self.thread_id,
+            "failed",
+            None,
+        );
+    }
 }
 
 pub async fn build_and_launch(
@@ -594,8 +715,8 @@ pub async fn build_and_launch(
         project_path,
         provenance,
         parameters,
-        vault_bindings,
-        extra_effective_caps,
+        metadata_required_secrets,
+        required_envelope_fields,
         pre_minted_thread_id,
         previous_thread_id,
     } = params;
@@ -605,7 +726,7 @@ pub async fn build_and_launch(
         acting_principal,
         item_ref = %resolved.item_ref,
         kind = %resolved.resolved_item.kind,
-        vault_count = vault_bindings.len(),
+        required_secret_count = metadata_required_secrets.len(),
         "launching native runtime"
     );
     // 1. Create DB thread (status = created)
@@ -614,6 +735,14 @@ pub async fn build_and_launch(
         None => state.threads.create_root_thread(resolved)?,
     };
     let thread_id = thread.thread_id.clone();
+
+    // Arm the persistence-first guard: any post-create failure below finalizes
+    // the thread `failed` instead of leaving it stuck at `created` (no-op once
+    // the thread is terminal).
+    let _finalize_guard = FinalizeFailedOnDrop {
+        state,
+        thread_id: thread_id.clone(),
+    };
 
     let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
     let effective_parsers = engine
@@ -754,7 +883,7 @@ pub async fn build_and_launch(
                 })?;
         if let Some(exec) = launching_kind_schema.execution() {
             if !exec.launch_augmentations.is_empty() {
-                crate::augmentations::run_augmentations(
+                if let Err(e) = crate::augmentations::run_augmentations(
                     exec,
                     &mut resolution,
                     &thread.thread_id,
@@ -766,7 +895,32 @@ pub async fn build_and_launch(
                     state,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("launch augmentation failed: {e}"))?;
+                {
+                    // The thread was created (status `created`) above. An
+                    // augmentation failure (e.g. an unresolved context ref)
+                    // must finalize it `failed` rather than orphan it at
+                    // `created` with no `thread_failed` event — otherwise the
+                    // async launch path leaves the thread stuck and silent.
+                    // Mirrors the pre-runtime spawn-failure finalize below;
+                    // best-effort so a finalize error never masks the cause.
+                    let reason = format!("launch augmentation failed: {e}");
+                    // Put the reason in `error` (not `result`) + a stable
+                    // outcome_code so the `thread_failed` event payload carries
+                    // it (state_store surfaces error_json), and the timeline can
+                    // show *why* it failed, not just that it did.
+                    let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
+                        thread_id: thread_id.clone(),
+                        status: "failed".to_string(),
+                        outcome_code: Some("launch_augmentation_failed".to_string()),
+                        result: None,
+                        error: Some(json!({ "message": reason })),
+                        metadata: None,
+                        artifacts: Vec::new(),
+                        final_cost: None,
+                        summary_json: None,
+                    });
+                    return Err(anyhow::anyhow!(reason).into());
+                }
             }
         }
     }
@@ -786,9 +940,33 @@ pub async fn build_and_launch(
     // without a permission model surface no `effective_caps` fact →
     // empty caps (deny-all). Runtimes consume `resolution.composed`
     // directly and never re-derive.
-    let effective_caps: Vec<String> = derive_effective_caps(&resolution.composed)
+    // Composed permissions are caller-declared input; the runtime callback caps
+    // minted below are daemon-derived from the signed manifest. A composed grant
+    // must not overlap the manifest runtime-authority namespace (bundle events /
+    // vault): that authority is minted only from a signed manifest, never
+    // self-granted via `permissions:`. Reject while the two sources are still
+    // distinguishable, before they are unioned.
+    let composed_effective_caps = derive_effective_caps(&resolution.composed);
+    ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
+        .map_err(|err| BuildAndLaunchError::CapabilityRejected {
+            reason: err.to_string(),
+        })?;
+
+    // Manifest-backed runtime callback caps (bundle-events / runtime-vault) are
+    // minted from the *composed* `requires` block: for directives the
+    // extends-chain composer has already narrowed a child against its parent, so
+    // a child can never request more than the parent template. The signed
+    // bundle manifest remains the final upper bound (checked inside the minter).
+    let runtime_capability_caps = crate::dispatch::mint_runtime_capability_caps(
+        resolution.composed.composed.get("requires"),
+        &resolved.resolved_item,
+        &engine.trust_store,
+    )
+    .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
+
+    let effective_caps: Vec<String> = composed_effective_caps
         .into_iter()
-        .chain(extra_effective_caps.iter().cloned())
+        .chain(runtime_capability_caps)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -857,7 +1035,9 @@ pub async fn build_and_launch(
         ttl,
         effective_caps.clone(),
         child_provenance,
-        effective_bundle_id_from_item_ref(&resolved.item_ref),
+        // Same bundle identity the runtime-cap minter used (resolved canonical
+        // ref), so token-claimed caps and minted caps cannot diverge.
+        effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
     );
 
@@ -872,22 +1052,45 @@ pub async fn build_and_launch(
     )
     .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
 
-    // 6c. Narrow preflight: resolve which provider this directive will use,
-    //     inject only that provider's secret from the vault. Fail loud here
-    //     so the operator gets a clear remediation hint before spawn.
-    let mut effective_vault = vault_bindings.clone();
+    // 6c. Runtime envelope requirements can add derived secrets. The engine
+    //     only carries opaque envelope field names; executor owns the
+    //     `provider_snapshot` LaunchEnvelope contract and resolves it here.
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
     let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-    let provider_snapshot = preflight_inject_provider_secret(
-        &resolution.composed,
-        &engine_roots,
-        &operator_trusted_keys_dir,
+    let provider_preflight = if requires_provider_snapshot(required_envelope_fields) {
+        Some(resolve_provider_preflight(
+            &resolution.composed,
+            &engine_roots,
+            &operator_trusted_keys_dir,
+        )?)
+    } else {
+        None
+    };
+    let secret_requirements =
+        build_secret_requirements(metadata_required_secrets, provider_preflight.as_ref());
+    let secret_names: Vec<String> = secret_requirements
+        .iter()
+        .map(|req| req.name.clone())
+        .collect();
+    let effective_vault = ryeos_app::vault::read_required_secrets(
         state.vault.as_ref(),
         acting_principal,
-        &resolved.item_ref,
+        &secret_names,
         &dotenv_dirs,
-        &mut effective_vault,
-    )?;
+    )
+    .map_err(|e| match e {
+        VaultReadError::MissingSecrets { names, .. } => {
+            let secrets = missing_secrets_from_requirements(&names, &secret_requirements);
+            finalize_missing_secret_launch(state, &thread_id, &resolved.item_ref, &secrets);
+            BuildAndLaunchError::MissingSecrets {
+                item_ref: resolved.item_ref.clone(),
+                secrets,
+            }
+        }
+        VaultReadError::Internal(e) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {e:#}"))
+        }
+    })?;
 
     // 7. Resolve the native executor from the system bundle's CAS.
     //    Materialized to content-addressed cache under app-root state,
@@ -909,7 +1112,7 @@ pub async fn build_and_launch(
     //    Using LaunchEnvelopeBuilder to centralize construction and
     //    prevent future field drift. New fields on LaunchEnvelope
     //    only need updating in the builder, not at every call site.
-    let envelope = LaunchEnvelopeBuilder::new(
+    let mut envelope_builder = LaunchEnvelopeBuilder::new(
         cap.invocation_id.clone(),
         thread_id.clone(),
         EnvelopeRoots {
@@ -934,11 +1137,14 @@ pub async fn build_and_launch(
         },
         resolution,
     )
-    .inventory(inventory)
-    .provider_snapshot(
-        serde_json::to_value(&provider_snapshot).expect("ResolvedProviderSnapshot serializable"),
-    )
-    .build();
+    .inventory(inventory);
+    if let Some(preflight) = provider_preflight.as_ref() {
+        envelope_builder = envelope_builder.provider_snapshot(
+            serde_json::to_value(&preflight.snapshot)
+                .expect("ResolvedProviderSnapshot serializable"),
+        );
+    }
+    let envelope = envelope_builder.build();
 
     // 8. Write thread.json (status = created, pre-execution audit).
     //    `effective_trust_class` is recorded so the on-disk audit trail
@@ -998,7 +1204,9 @@ pub async fn build_and_launch(
         &engine_roots,
         &state.config.app_root,
     );
-    let provider_secret_name = provider_snapshot.provider.auth.env_var.clone();
+    let provider_secret_name = provider_preflight
+        .as_ref()
+        .and_then(|preflight| preflight.env_var.clone());
     let app_root_owned = state.config.app_root.clone();
     let cas_root_owned = state.config.app_root.join("cas");
 
@@ -1099,7 +1307,7 @@ pub async fn build_and_launch(
             thread_id: thread_id.clone(),
             status: terminal_status.to_string(),
             outcome_code: if terminal_status == "completed" {
-                None
+                Some("success".to_string())
             } else {
                 Some(terminal_status.to_string())
             },

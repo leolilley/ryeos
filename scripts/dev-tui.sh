@@ -30,7 +30,7 @@ Build ryeos-ui-terminal from this checkout and run it directly,
 bypassing the packaged client:ryeos/tui bundle-binary dispatch.
 
 Arguments:
-  SURFACE_REF       Surface to open (default: surface:ryeos/studio/base)
+  SURFACE_REF       Surface to open (default: surface:ryeos/studio/lens)
 
 Options:
   --release         Build and run the release profile (default: debug)
@@ -45,7 +45,11 @@ Examples:
 EOF
 }
 
-SURFACE="surface:ryeos/studio/base"
+# Default to the single-lens cell-grid home surface: one center lens at a
+# time (the cognition feed), swapped via the launcher. Needs a
+# `populate-bundles --all` to sign + resolve it; pass `surface:ryeos/studio/base`
+# explicitly for the web-style tiled surface.
+SURFACE="surface:ryeos/studio/lens"
 PROFILE="debug"
 PROJECT="$PWD"
 READ_ONLY=0

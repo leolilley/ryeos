@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:475d73e7940e403e40b99ec087fac15e970747e829be41812593eee0de168456:Z0QOeXSlVGcEhjyS6YnPZG70bfKceE63nto1yB74ZFmY8lh501Azy51g4/BTQbPLdRO63/pZfHKuwPN7CJVaCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: scheduler-deregister
+# ryeos:signed:2026-06-19T05:40:59Z:32ec16bde336337546a8fea89dba35cb30a6839c22e359957464781bec51f7d1:D9DmzLECSQxitwlV/hjCc1dmsaNTc+IIFkUoJAkRr3rDtc24iHLiQsBHxd7xRLEU2ao/v5GIC1ChiYTt9aEgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - deregister

@@ -627,9 +627,7 @@ fn is_runtime_support_file(kind_directory: &str, rel: &Path) -> bool {
 struct PreflightNodeBundleRecord {
     #[allow(dead_code)]
     kind: Option<String>,
-    section: String,
     #[allow(dead_code)]
-    id: Option<String>,
     path: PathBuf,
     #[allow(dead_code)]
     #[serde(default)]
@@ -639,12 +637,6 @@ struct PreflightNodeBundleRecord {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightNodeRouteRecord {
-    #[allow(dead_code)]
-    #[serde(default)]
-    section: String,
-    #[allow(dead_code)]
-    #[serde(default)]
-    category: Option<String>,
     id: String,
     path: String,
     methods: std::collections::HashSet<String>,
@@ -751,9 +743,6 @@ enum PreflightRawRequestBody {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightCommandRecord {
-    category: String,
-    section: String,
-    name: String,
     tokens: Vec<String>,
     description: String,
     #[serde(default)]
@@ -775,7 +764,26 @@ struct PreflightCommandRecord {
     #[allow(dead_code)]
     #[serde(default)]
     project: Option<PreflightCommandProject>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    control_flags: Vec<PreflightCommandControlFlag>,
     dispatch: PreflightCommandDispatch,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreflightCommandControlFlag {
+    #[allow(dead_code)]
+    flag: String,
+    #[allow(dead_code)]
+    help: String,
+    // Routing destination — validated against the real `ControlFlagBinding`
+    // enum by the command model at load; preflight only checks structure.
+    #[allow(dead_code)]
+    binding: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    aliases: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -968,8 +976,6 @@ enum PreflightCommandAvailability {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreflightHostedNodePolicyRecord {
-    category: String,
-    section: String,
     #[allow(dead_code)]
     version: String,
     schema_version: String,
@@ -1181,23 +1187,20 @@ fn validate_node_config_item(
     let body_str = lillux::signature::strip_signature_lines(&content);
     let body: serde_json::Value =
         serde_yaml::from_str(&body_str).context("failed to parse YAML body")?;
-    let declared_section = body
-        .get("section")
-        .and_then(|value| value.as_str())
-        .context("missing 'section' field")?;
-    if declared_section != expected_section {
-        bail!(
-            "declares section '{}' but was loaded under section '{}'",
-            declared_section,
-            expected_section
-        );
+    for forbidden in ["category", "section"] {
+        if body.get(forbidden).is_some() {
+            bail!(
+                "declares legacy structural field '{}' (section/category are derived from path and must not be in node YAML)",
+                forbidden
+            );
+        }
     }
 
     match expected_section {
         "bundles" => validate_node_bundle_record(file_path, &body),
         "hosted" => validate_hosted_node_policy(file_path, &body),
         "routes" => validate_node_route_record(&body),
-        "commands" => validate_node_command_record(file_path, &body),
+        "commands" => validate_node_command_record(file_path, section_root, &body),
         _ => Ok(()),
     }
 }
@@ -1205,9 +1208,6 @@ fn validate_node_config_item(
 fn validate_node_bundle_record(file_path: &Path, body: &serde_json::Value) -> Result<()> {
     let record: PreflightNodeBundleRecord = serde_json::from_value(body.clone())
         .context("failed to parse bundle node-config record")?;
-    if record.section != "bundles" {
-        bail!("bundle record section must be 'bundles'");
-    }
     if !record.path.is_absolute() {
         bail!("bundle record missing absolute 'path' field");
     }
@@ -1258,45 +1258,66 @@ fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_node_command_record(file_path: &Path, body: &serde_json::Value) -> Result<()> {
+fn validate_node_command_record(
+    file_path: &Path,
+    section_root: &Path,
+    body: &serde_json::Value,
+) -> Result<()> {
     let record: PreflightCommandRecord = serde_json::from_value(body.clone())
         .context("failed to parse command node-config record")?;
-    if record.category != "commands" {
-        bail!("command record category must be 'commands'");
+    if body.get("name").is_some() {
+        bail!("command record declares legacy structural field 'name'");
     }
-    if record.section != "commands" {
-        bail!("command record section must be 'commands'");
+    let command_id = file_path
+        .strip_prefix(section_root)
+        .context("failed to derive command id from path")?;
+    let mut command_id_path = command_id.to_path_buf();
+    command_id_path.set_extension("");
+    let command_name = command_id_path
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(part) => part
+                .to_str()
+                .map(|s| s.to_string())
+                .context("command path contains non-UTF-8 segment"),
+            _ => bail!("command path contains non-normal segment"),
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("/");
+    if command_name.is_empty() {
+        bail!("command record has empty path-derived id");
     }
-    let filename = file_path
+    let stem = file_path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .context("command record has no filename stem")?;
-    if record.name != filename {
-        bail!(
-            "command record declares name '{}' but filename is '{}'",
-            record.name,
-            filename
-        );
+    for segment in command_name.split('/') {
+        if !is_valid_command_name(segment) {
+            bail!(
+                "invalid command path segment '{}': must match ^[a-z][a-z0-9-]*$",
+                segment
+            );
+        }
     }
-    if !is_valid_command_name(&record.name) {
+    if !is_valid_command_name(stem) {
         bail!(
             "invalid command name '{}': must match ^[a-z][a-z0-9-]*$",
-            record.name
+            stem
         );
     }
     if record.description.is_empty() {
         bail!("command record missing non-empty 'description'");
     }
-    validate_preflight_command_tokens(&record.name, &record.tokens)?;
-    validate_preflight_command_dispatch(&record.name, &record.dispatch)?;
+    validate_preflight_command_tokens(&command_name, &record.tokens)?;
+    validate_preflight_command_dispatch(&command_name, &record.dispatch)?;
     for (arg_idx, argument) in record.arguments.iter().enumerate() {
         if argument.name.is_empty() {
-            bail!("{} arguments[{arg_idx}] has empty name", record.name);
+            bail!("{} arguments[{arg_idx}] has empty name", command_name);
         }
         if argument.positional == 0 {
             bail!(
                 "{} arguments[{arg_idx}] positional must be greater than zero",
-                record.name
+                command_name
             );
         }
     }
@@ -1305,14 +1326,14 @@ fn validate_node_command_record(file_path: &Path, body: &serde_json::Value) -> R
             if slot.field.is_empty() {
                 bail!(
                     "{} forms[{form_idx}].slots[{slot_idx}] has empty field",
-                    record.name
+                    command_name
                 );
             }
         }
     }
     for (idx, alias) in record.aliases.iter().enumerate() {
         validate_preflight_command_tokens(
-            &format!("{} aliases[{idx}]", record.name),
+            &format!("{} aliases[{idx}]", command_name),
             &alias.tokens,
         )?;
     }
@@ -1324,12 +1345,6 @@ fn validate_hosted_node_policy(file_path: &Path, body: &serde_json::Value) -> Re
         .context("failed to parse hosted node-config policy")?;
     if file_path.file_stem().and_then(|stem| stem.to_str()) != Some("policy") {
         bail!("hosted-node policy filename must be 'policy'");
-    }
-    if record.category != "hosted" {
-        bail!("hosted policy category must be 'hosted'");
-    }
-    if record.section != "hosted" {
-        bail!("hosted policy section must be 'hosted'");
     }
     if record.schema_version != "1.0.0" {
         bail!("hosted-node policy schema_version must be '1.0.0'");
@@ -1423,6 +1438,28 @@ mod tests {
     use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Regression: the shipped execute command declares `control_flags`; the
+    /// preflight command-record schema must accept it (it previously rejected
+    /// the unknown field, breaking `ryeos init`).
+    #[test]
+    fn preflight_accepts_execute_control_flags() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| p.join("bundles/core/.ai/node/commands/execute.yaml").is_file())
+            .expect("workspace root")
+            .join("bundles/core/.ai/node/commands/execute.yaml");
+        let raw = std::fs::read_to_string(&path).expect("read execute.yaml");
+        let body: String = raw
+            .lines()
+            .filter(|l| !l.starts_with("# ryeos:signed:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
+        let record: PreflightCommandRecord =
+            serde_json::from_value(value).expect("preflight command record parse");
+        assert_eq!(record.control_flags.len(), 6, "expected 6 control flags");
+    }
 
     struct BundleLayout {
         _tmp: tempfile::TempDir,
@@ -1885,7 +1922,6 @@ description: "fixed parser handler for preflight tests"
         // are NOT canonical refs and must not be parsed as such here. This is the
         // exact case that broke `ryeos init` on the core bundle.
         let event_stream_route = serde_json::json!({
-            "section": "routes",
             "id": "execute/stream",
             "path": "/execute/stream",
             "methods": ["POST"],
@@ -1903,7 +1939,6 @@ description: "fixed parser handler for preflight tests"
         // A canonical-ref-shaped source (e.g. `handler` mode) is equally valid:
         // preflight does not care which form the owning mode uses.
         let handler_route = serde_json::json!({
-            "section": "routes",
             "id": "test-route",
             "path": "/test",
             "methods": ["GET"],
@@ -1931,10 +1966,7 @@ description: "fixed parser handler for preflight tests"
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
             "node/commands/demo.yaml",
-            r#"category: commands
-section: commands
-name: demo
-tokens: ["demo"]
+            r#"tokens: ["demo"]
 description: Demo command
 dispatch:
   kind: execute_ref
@@ -1962,10 +1994,7 @@ aliases:
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
-            r#"category: commands
-section: commands
-name: demo
-tokens: ["demo"]
+            r#"tokens: ["demo"]
 description: Demo command
 dispatch:
   kind: execute_ref
@@ -2019,9 +2048,7 @@ execute: tool:demo/run
         let layout = BundleLayout::new("test-bundle");
         layout.sign_and_write(
             "node/command_registration/default.yaml",
-            r#"section: command_registration
-name: default
-claim_rules:
+            r#"claim_rules:
   - claim:
       kind: command.root
       value: execute

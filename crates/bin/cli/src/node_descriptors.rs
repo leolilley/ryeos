@@ -85,8 +85,6 @@ mod tests {
             bundles: vec![],
             routes: vec![],
             commands: vec![ryeos_runtime::CommandDef {
-                category: "commands".into(),
-                section: "commands".into(),
                 name: "bundle-sign".into(),
                 tokens: vec!["bundle".into(), "sign".into()],
                 description: "Sign bundle".into(),
@@ -101,6 +99,7 @@ mod tests {
                 }],
                 defaults: Default::default(),
                 parameter_binding: None,
+                control_flags: Vec::new(),
                 project: Some(ryeos_runtime::CommandProjectPolicy {
                     resolution: ryeos_runtime::CommandProjectResolution::Optional,
                     default: ryeos_runtime::CommandProjectDefault::None,

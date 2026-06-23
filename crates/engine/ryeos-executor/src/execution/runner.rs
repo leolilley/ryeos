@@ -28,7 +28,7 @@ use ryeos_engine::protocol_vocabulary::{produce_env_value, EnvInjectionSource};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::compute_ttl;
-use ryeos_app::callback_token::effective_bundle_id_from_item_ref;
+use ryeos_app::callback_token::effective_bundle_id_for_request;
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::state::AppState;
@@ -43,10 +43,9 @@ use ryeos_app::thread_lifecycle::{
 /// Typed error for the resume path (`run_existing_detached`).
 ///
 /// Each variant maps to a distinct `outcome_code` via `guard.fail_thread()`.
-/// The `Preflight` variant preserves the structured
-/// `MaterializationError::ProviderSecretMissing` payload so downstream
-/// consumers (loggers, future HTTP surfaces) can extract `env_var`,
-/// `provider_name`, and `remediation` without string parsing.
+/// Resume preflight uses structured payloads for operator-fixable failures
+/// such as missing required secrets so downstream consumers can extract
+/// `env_var`, source attribution, and remediation without string parsing.
 #[derive(Debug, thiserror::Error)]
 pub enum ResumeError {
     #[error("cas context failed: {0}")]
@@ -555,6 +554,9 @@ fn finalize_completion(
 pub struct InlineResult {
     pub finalized_thread: ThreadDetail,
     pub result: Value,
+    /// The `--debug-raw` block (resolved cmd/args/cwd/env keys + exit code and
+    /// size-limited raw stdout/stderr), present only when the flag was set.
+    pub debug: Option<Value>,
 }
 
 /// Result of a detached execution launch.
@@ -583,6 +585,11 @@ fn mint_callback_env(
     caller_scopes: Vec<String>,
     provenance: ExecutionProvenance,
     item_ref: &str,
+    // Bundle identity for the token, derived once from the resolved canonical
+    // ref by the caller via `effective_bundle_id_for_request` so it matches the
+    // identity the runtime-cap minter used. `item_ref` stays the requested ref
+    // for provenance/display.
+    effective_bundle_id: Option<String>,
 ) -> Result<(HashMap<String, String>, String, String)> {
     let ttl = compute_ttl(duration_seconds);
     let cap = state.callback_tokens.generate_with_context(
@@ -591,7 +598,7 @@ fn mint_callback_env(
         ttl,
         effective_caps,
         provenance,
-        effective_bundle_id_from_item_ref(item_ref),
+        effective_bundle_id,
         Some(item_ref.to_string()),
     );
 
@@ -736,6 +743,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        effective_bundle_id_for_request(&params.resolved),
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -846,6 +854,14 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
         }
     };
 
+    // Lift the `--debug-raw` block out of the completion metadata before
+    // finalization consumes the completion. `None` on the normal path.
+    let debug_block = completion
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("debug"))
+        .cloned();
+
     if !params.provenance.is_borrowed_child() {
         let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
         post_execution_foldback(PostExecutionFoldbackParams {
@@ -880,6 +896,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     Ok(InlineResult {
         finalized_thread: finalized,
         result: serde_json::to_value(&result).unwrap_or(json!(null)),
+        debug: debug_block,
     })
 }
 
@@ -960,6 +977,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        effective_bundle_id_for_request(&params.resolved),
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);
@@ -1445,11 +1463,10 @@ pub fn execution_params_from_resume_context(
         state.engine.clone(),
     );
 
-    // NOTE: read_required_secrets and preflight_inject_provider_secret
-    // are NOT called here. They run later, inside run_existing_detached(),
-    // AFTER prepare_cas_context() returns the effective_path — so that
-    // dotenv overlay and provider resolution see the snapshot checkout,
-    // not the live project tree.
+    // NOTE: read_required_secrets and envelope-field preflight are NOT
+    // called here. They run later, inside run_existing_detached(), AFTER
+    // prepare_cas_context() returns the effective_path — so dotenv overlay
+    // and provider resolution see the snapshot checkout, not the live tree.
 
     Ok(ExecutionParams {
         resolved,
@@ -1521,98 +1538,105 @@ pub async fn run_existing_detached(
         };
     }
 
-    // ── Vault + narrow preflight (post-CAS) ─────────────────────────
+    // ── Vault + envelope-field preflight (post-CAS) ─────────────────
     // These MUST run after prepare_cas_context so dotenv overlay and
     // provider resolution see the snapshot checkout, not the live tree.
     {
-        // Dotenv search dirs derived from effective_path (the snapshot
-        // checkout), matching launch's behavior which uses the execution
-        // root for dotenv discovery.
+        let engine = params.provenance.request_engine();
+        let required_envelope_fields = engine
+            .runtimes
+            .lookup_for(&params.resolved.resolved_item.kind)
+            .map(|runtime| runtime.yaml.required_envelope_fields.clone())
+            .unwrap_or_default();
+
+        let provider_preflight =
+            if crate::execution::launch::requires_provider_snapshot(&required_envelope_fields) {
+                let engine_roots = engine.resolution_roots(Some(effective_path.clone()));
+                let effective_parsers = engine
+                    .effective_parser_dispatcher(Some(&effective_path))
+                    .map_err(|e| {
+                    guard.fail_thread("preflight_failed");
+                    guard.cleanup();
+                    ResumeError::Other(anyhow::anyhow!("resume: effective parser dispatcher: {e}"))
+                })?;
+
+                let resolution = ryeos_engine::resolution::run_resolution_pipeline(
+                    &params.resolved.resolved_item.canonical_ref,
+                    &engine.kinds,
+                    &effective_parsers,
+                    &engine_roots,
+                    &engine.trust_store,
+                    &engine.composers,
+                )
+                .map_err(|e| {
+                    guard.fail_thread("preflight_failed");
+                    guard.cleanup();
+                    ResumeError::Other(anyhow::anyhow!(
+                        "resume: resolution pipeline for preflight: {e}"
+                    ))
+                })?;
+
+                let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+                Some(
+                    crate::execution::launch::resolve_provider_preflight(
+                        &resolution.composed,
+                        &engine_roots,
+                        &operator_trusted_keys_dir,
+                    )
+                    .map_err(|e| {
+                        guard.fail_thread("preflight_failed");
+                        guard.cleanup();
+                        ResumeError::Preflight(e)
+                    })?,
+                )
+            } else {
+                None
+            };
+
+        let secret_requirements = crate::execution::launch::build_secret_requirements(
+            &params.resolved.resolved_item.metadata.required_secrets,
+            provider_preflight.as_ref(),
+        );
+        let secret_names: Vec<String> = secret_requirements
+            .iter()
+            .map(|req| req.name.clone())
+            .collect();
         let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(&effective_path));
         let vault_bindings = ryeos_app::vault::read_required_secrets(
             state.vault.as_ref(),
             &params.acting_principal,
-            &params.resolved.resolved_item.metadata.required_secrets,
+            &secret_names,
             &dotenv_dirs,
         )
-        .map_err(|e| {
-            guard.fail_thread("vault_read_failed");
-            guard.cleanup();
-            ResumeError::VaultRead(e)
-        })?;
-
-        // Narrow preflight: resolve provider and inject its secret.
-        // Uses effective_path for engine roots so model_routing.yaml
-        // and provider configs are read from the snapshot checkout.
-        // Use the provenance engine. Today resume provenance falls back
-        // to state.engine; the field keeps the contract honest if
-        // resume later starts threading an overlay engine.
-        let engine_roots = params
-            .provenance
-            .request_engine()
-            .resolution_roots(Some(effective_path.clone()));
-        let effective_parsers = params
-            .provenance
-            .request_engine()
-            .effective_parser_dispatcher(Some(&effective_path))
-            .map_err(|e| {
-                guard.fail_thread("preflight_failed");
-                guard.cleanup();
-                ResumeError::Other(anyhow::anyhow!("resume: effective parser dispatcher: {e}"))
-            })?;
-
-        let resolution = ryeos_engine::resolution::run_resolution_pipeline(
-            &params.resolved.resolved_item.canonical_ref,
-            &params.provenance.request_engine().kinds,
-            &effective_parsers,
-            &engine_roots,
-            &params.provenance.request_engine().trust_store,
-            &params.provenance.request_engine().composers,
-        )
-        .map_err(|e| {
-            guard.fail_thread("preflight_failed");
-            guard.cleanup();
-            ResumeError::Other(anyhow::anyhow!(
-                "resume: resolution pipeline for preflight: {e}"
-            ))
-        })?;
-
-        let mut vault_bindings = vault_bindings;
-        let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-        crate::execution::launch::preflight_inject_provider_secret(
-            &resolution.composed,
-            &engine_roots,
-            &operator_trusted_keys_dir,
-            state.vault.as_ref(),
-            &params.acting_principal,
-            &params.resolved.item_ref,
-            &dotenv_dirs,
-            &mut vault_bindings,
-        )
-        .map_err(|e| {
-            let code = match &e {
-                crate::execution::launch::MaterializationError::ProviderSecretMissing {
-                    provider_id,
-                    env_var,
-                    ..
-                } => {
-                    let payload =
-                        crate::structured_error::StructuredErrorPayload::required_secret_missing(
-                            e.to_string(),
-                            env_var,
-                            "provider",
-                            provider_id,
-                            format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
-                        );
-                    guard.fail_thread_with_error("required_secret_missing", payload.to_value());
-                    guard.cleanup();
-                    return ResumeError::Preflight(e);
+        .map_err(|e| match e {
+            ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+                let missing = crate::execution::launch::missing_secrets_from_requirements(
+                    &names,
+                    &secret_requirements,
+                );
+                if let Some(first) = missing.first() {
+                    let payload = crate::execution::launch::required_secret_missing_payload(
+                        &params.resolved.item_ref,
+                        first,
+                    );
+                    guard.fail_thread_with_error("required_secret_missing", payload);
+                } else {
+                    guard.fail_thread("vault_read_failed");
                 }
-                _ => "preflight_failed",
-            };
-            guard.fail_thread(code);
-            guard.cleanup();
-            ResumeError::Preflight(e)
+                guard.cleanup();
+                ResumeError::VaultRead(
+                    ryeos_app::vault::VaultReadError::MissingSecrets {
+                        principal: params.acting_principal.clone(),
+                        names,
+                    }
+                    .into(),
+                )
+            }
+            ryeos_app::vault::VaultReadError::Internal(e) => {
+                guard.fail_thread("vault_read_failed");
+                guard.cleanup();
+                ResumeError::VaultRead(ryeos_app::vault::VaultReadError::Internal(e).into())
+            }
         })?;
 
         params.vault_bindings = vault_bindings;
@@ -1633,6 +1657,7 @@ pub async fn run_existing_detached(
         vec!["execute".to_string()],
         child_provenance,
         &params.resolved.item_ref,
+        effective_bundle_id_for_request(&params.resolved),
     )?;
     guard.track_callback_token(cb_token);
     guard.track_thread_auth_token(tat_token);

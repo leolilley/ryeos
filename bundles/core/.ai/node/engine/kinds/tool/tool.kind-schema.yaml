@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-08T00:42:14Z:2f20eee21cda3861be8e1620ea66e18d09edc859676c7c9e47e838669ae56c21:uUHObewiuqmTWkf3bs0eCOrv9Jt+7UhStU9/XW5+JZzIcAxakR2GkI9pPLaPELrwOCFqvnL9r/w8YhkaLPMGDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-22T02:50:06Z:0a9f8c306b4eb6c616c305ce7cad997d6400b23ecccc1a1710b3184243b03566:X51NZ2WmnfGY+uL0hsjn52/UYEq/pArKjMqX9qmmD4HQQRrmlwE9u10qbvWPTw0EcoS2+eFCSL4syiK2aGcuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -44,6 +44,13 @@ composer: handler:ryeos/core/identity
 composed_value_contract:
   root_type: mapping
   required: {}
+  optional:
+    # Structured runtime capability requirements. The daemon mints the
+    # requested manifest-backed subset into the callback token at launch —
+    # this is NOT self-grantable authority like `required_caps`.
+    requires:
+      type: single
+      prim: mapping
 runtime:
   handlers:
     - type: config
@@ -70,6 +77,11 @@ runtime:
     # Ignored here (runtime block parser) so tool YAMLs may declare
     # it without triggering UnknownRuntimeBlock.
     - required_caps
+    # `requires` is the structured runtime-capability requirement block,
+    # extracted into metadata and consumed by the launch path to mint
+    # callback caps. Ignored here (runtime block parser) so tool YAMLs may
+    # declare it without triggering UnknownRuntimeBlock.
+    - requires
     # `config_schema` is validated as a pre-pass against the user's
     # ROOT tool item (see plan_builder.rs::build_plan and
     # runtime/config_schema.rs). Wrapper / runtime YAMLs may declare
@@ -112,3 +124,8 @@ metadata:
     required_caps:
       from: path_string_seq
       key: required_caps
+    # Carry the structured `requires:` block verbatim into metadata.extra so
+    # the launch path can mint the requested manifest-backed callback caps.
+    requires:
+      from: path_value
+      key: requires

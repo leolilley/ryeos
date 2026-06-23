@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-13T00:29:10Z:5fbb05c9eb56dbed2ef4013a5fa9fd776c92c33e1e0c1f7d580d242af8de6b28:p7dxFiSsACv+9+9XhE1qc97cpL+/VIn+LBnopWCLQfxAF26a2wUCt7xOLP7ygZvLKTjQRORsYQeoMjHi16AIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: tui
+# ryeos:signed:2026-06-23T05:17:25Z:f47f2fe3793fb3d22cfb05ff1a671fa964f8564dfa846b2679b047969a5c985b:wZ+BoN+nZLlnuwf6Np5+H9X1JhCgqC10ergm+jbkY+yeaBXvoWQTpQuQUVekBXSi0trgGKyyiIOdueEXbA9ICQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - tui
 description: Open the terminal RyeOS Studio
@@ -9,7 +6,7 @@ forms:
 - slots:
   - field: surface
 defaults:
-  surface: surface:ryeos/studio/base
+  surface: surface:ryeos/studio/lens
 project:
   resolution: optional
   bind_parameter: project

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:05e70e58f40cba1ca85c944b6bcd08c20917e4dd9d8b6b72b2f8ac87a245925b:p32j8n6Y4iEbtZ3u1seE2Mh3/fgiGrEWKkZy03APvqP9HGXQ3dSShKHdLyw9Y3jrSPo6TXjNFKSXsNkzeiP3CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-23T05:17:20Z:e32be7264b8a41386f9582c186f94eff42a1ca41a99de9f237ff846d64e869af:1jxRDRNMocvrBMyNAfCswOxi/ADIaS6lciMES9/A1HAhCV6HnFklw2Ex4QtjJ3mXtypO4wAIJu7qXiKzhjFTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -8,15 +8,26 @@ resolution:
 effective_trust:
   include_references: false
 execution:
-  # Op-dispatch execution model. The daemon resolves the requested op
-  # (default: `compose`) against the declared operations, validates
-  # inputs, then spawns the kind's runtime with a BatchOpEnvelope.
-  # Mixed-dispatch reject forbids `operations` + `delegate`/`terminator`.
-  operations:
-    - name: compose
-      side_effects: writes_chain
-      dispatch: { via: runtime_registry }
-      inputs:
+  # Method-dispatch execution model. The daemon resolves the requested
+  # method (default: `compose`) against the declared methods, validates
+  # args, then spawns the kind's runtime with a MethodCallEnvelope.
+  # Mixed-dispatch reject forbids `methods` + `delegate`/`terminator`.
+  #
+  # `methods:` lists the GENERICALLY-DISPATCHABLE methods (invocable via
+  # `execute … call.method=<name>`). It is NOT the full set the runtime
+  # implements: `compose_positions` (multi-root context composition) is also
+  # handled by the knowledge runtime, but ONLY via the
+  # `compose_context_positions` launch augmentation, which builds a bespoke
+  # multi-root payload and is not generically dispatchable. It is
+  # intentionally absent here so a direct `call.method=compose_positions`
+  # is cleanly rejected as undeclared.
+  method_dispatch:
+    via: runtime_registry
+    default: compose
+  methods:
+    compose:
+      scope: single_root
+      args:
         token_budget:
           type: integer
           required: false
@@ -27,21 +38,47 @@ execution:
             type: string
           required: false
           default: []
-    - name: compose_positions
-      side_effects: writes_projection
-      dispatch: { via: runtime_registry }
-      inputs:
-        roots_by_position:
-          type: object
+    # Read side. These methods do not mutate state; the daemon builds the
+    # verified corpus (items_by_ref/edges) and the runtime computes over it.
+    query:
+      scope: corpus
+      args:
+        query:
+          type: string
           required: true
-        per_position_budget:
-          type: object
-          required: false
-        default_budget:
+        limit:
           type: integer
           required: false
-          default: 2000
-  default_operation: compose
+          default: 10
+        include_content:
+          type: boolean
+          required: false
+          default: false
+        filters:
+          type: object
+          required: false
+    graph:
+      scope: corpus
+      args:
+        roots:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
+        depth:
+          type: integer
+          required: false
+          default: 3
+    validate:
+      scope: corpus
+      args:
+        roots:
+          type: array
+          items:
+            type: string
+          required: false
+          default: []
   thread_profile:
     name: knowledge_run
     root_executable: true

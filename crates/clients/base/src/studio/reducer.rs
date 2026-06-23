@@ -30,6 +30,11 @@ impl StudioCore {
             StudioEvent::Ui { event } => self.dispatch_ui(event),
             StudioEvent::EffectResult { result } => self.apply_effect_result(result),
             StudioEvent::DaemonEvent { payload: _ } => self.initial_effects(),
+            StudioEvent::ThreadTail {
+                thread_id,
+                event_type,
+                payload,
+            } => self.apply_thread_tail(&thread_id, &event_type, &payload),
             StudioEvent::Tick { now_ms } => {
                 self.runtime.now_ms = now_ms;
                 // The frame clock advances `generation` so generation-keyed
@@ -68,24 +73,36 @@ impl StudioCore {
                 // view binding's params.
                 Vec::new()
             }
-            StudioUiEvent::SetAtlasLayerVisible { kind, visible } => {
-                self.ui.atlas.set_layer_visible(kind, visible);
+            StudioUiEvent::SetAtlasLayerVisible {
+                tile_id,
+                kind,
+                visible,
+            } => {
+                self.atlas_target_mut(&tile_id)
+                    .set_layer_visible(kind, visible);
                 self.bump_generation();
                 Vec::new()
             }
-            StudioUiEvent::SetAtlasLens { lens } => {
-                self.ui.atlas.set_lens(lens);
+            StudioUiEvent::SetAtlasLens { tile_id, lens } => {
+                self.atlas_target_mut(&tile_id).set_lens(lens);
                 self.bump_generation();
                 Vec::new()
             }
-            StudioUiEvent::SetAtlasProjection { projection, root } => {
-                self.ui.atlas.active_projection = projection;
-                if projection.is_file_space() {
-                    if let Some(root) = root {
-                        self.ui.atlas.file_space_root = root;
+            StudioUiEvent::SetAtlasProjection {
+                tile_id,
+                projection,
+                root,
+            } => {
+                {
+                    let atlas = self.atlas_target_mut(&tile_id);
+                    atlas.active_projection = projection;
+                    if projection.is_file_space() {
+                        if let Some(root) = root {
+                            atlas.file_space_root = root;
+                        }
+                        atlas.file_space_path.clear();
+                        atlas.set_lens(crate::atlas::AtlasLensVm::None);
                     }
-                    self.ui.atlas.file_space_path.clear();
-                    self.ui.atlas.set_lens(crate::atlas::AtlasLensVm::None);
                 }
                 self.bump_generation();
                 match projection {
@@ -99,9 +116,14 @@ impl StudioCore {
                     }
                     crate::atlas::AtlasProjectionVm::FileSpace => {
                         if self.has_project_bound() {
+                            let (root, path) = {
+                                let atlas = self.atlas_target(&tile_id);
+                                (atlas.file_space_root.clone(), atlas.file_space_path.clone())
+                            };
                             vec![self.emit(StudioEffectKind::FetchFileSpace {
-                                root: self.ui.atlas.file_space_root.clone(),
-                                path: self.ui.atlas.file_space_path.clone(),
+                                tile_id: tile_id.clone(),
+                                root,
+                                path,
                                 max_depth: 8,
                                 max_entries: 3000,
                             })]
@@ -111,16 +133,28 @@ impl StudioCore {
                     }
                 }
             }
-            StudioUiEvent::SetAtlasFileSpacePath { root, path } => {
-                self.ui.atlas.active_projection = crate::atlas::AtlasProjectionVm::FileSpace;
-                self.ui.atlas.file_space_root = root;
-                self.ui.atlas.file_space_path = path;
-                self.ui.atlas.set_lens(crate::atlas::AtlasLensVm::None);
+            StudioUiEvent::SetAtlasFileSpacePath {
+                tile_id,
+                root,
+                path,
+            } => {
+                {
+                    let atlas = self.atlas_target_mut(&tile_id);
+                    atlas.active_projection = crate::atlas::AtlasProjectionVm::FileSpace;
+                    atlas.file_space_root = root;
+                    atlas.file_space_path = path;
+                    atlas.set_lens(crate::atlas::AtlasLensVm::None);
+                }
                 self.bump_generation();
                 if self.has_project_bound() {
+                    let (root, path) = {
+                        let atlas = self.atlas_target(&tile_id);
+                        (atlas.file_space_root.clone(), atlas.file_space_path.clone())
+                    };
                     vec![self.emit(StudioEffectKind::FetchFileSpace {
-                        root: self.ui.atlas.file_space_root.clone(),
-                        path: self.ui.atlas.file_space_path.clone(),
+                        tile_id: tile_id.clone(),
+                        root,
+                        path,
                         max_depth: 8,
                         max_entries: 3000,
                     })]
@@ -268,6 +302,19 @@ impl StudioCore {
                 }
                 Vec::new()
             }
+            StudioUiEvent::SetFold {
+                tile_id,
+                section,
+                collapsed,
+            } => {
+                let Some(tile_id) = parse_tile_id(&tile_id) else {
+                    return Vec::new();
+                };
+                if self.set_tile_fold(tile_id, section, collapsed) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             StudioUiEvent::ActivateFocused => action_for_focused_row(self)
                 .map_or_else(Vec::new, |action| self.dispatch_action(action)),
         }
@@ -291,9 +338,15 @@ impl StudioCore {
                 effects
             }
             StudioAction::OpenNewView { view } => {
-                let effects = self.add_center_tile(view);
-                self.bump_generation();
-                effects
+                // Single-lens surfaces have no "another tile": a new-view
+                // request collapses to replacing the one center lens.
+                if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens {
+                    self.open_view(view)
+                } else {
+                    let effects = self.add_center_tile(view);
+                    self.bump_generation();
+                    effects
+                }
             }
             StudioAction::CloseFocused => {
                 if self.close_tile_or_empty(self.workspace.focused_tile) {
@@ -387,12 +440,15 @@ impl StudioCore {
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
             // Inspection IS selection: a facet write on the seat braid.
+            // Inspection IS selection: a facet write, peer to `input.route`.
+            // The engine never opens or names the inspector — it's a view that
+            // reads `@facet:selection.*` and refreshes `on_facet: selection`,
+            // shown as a slot or a lens like any other facet-bound view.
             StudioAction::InspectItem { canonical_ref } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "item": canonical_ref }),
                 );
-                self.ensure_inspector_tile();
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
@@ -402,16 +458,19 @@ impl StudioCore {
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "thread": thread_id }),
                 );
-                self.ensure_inspector_tile();
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
+            StudioAction::AimThread { thread_id } => self.apply_ui_affordance(
+                super::seat::KEY_INPUT_ROUTE.to_string(),
+                None,
+                Some(serde_json::json!({ "thread": thread_id })),
+            ),
             StudioAction::InspectSummary { title, detail } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
                     serde_json::json!({ "summary": { "title": title, "detail": detail } }),
                 );
-                self.ensure_inspector_tile();
                 self.bump_generation();
                 self.effects_for_facet(super::seat::KEY_SELECTION)
             }
@@ -486,6 +545,29 @@ impl StudioCore {
                     Vec::new()
                 } else {
                     vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
+                }
+            }
+            StudioAction::SubmitThreadCommand { command } => {
+                if self.is_read_only() {
+                    self.notice("This session is read-only.", StudioTone::Warn);
+                    Vec::new()
+                } else if let Some(thread_id) = self.seat.fold().input_route().thread {
+                    // Steer the head thread through the shared control channel.
+                    // Authority == the CLI's `commands submit`; see
+                    // .tmp/thread-authorization-review.md for the authz model.
+                    vec![self.emit(StudioEffectKind::Invoke {
+                        target: super::effect::InvokeRef::Ref {
+                            item_ref: "service:commands/submit".to_string(),
+                        },
+                        params: serde_json::json!({
+                            "thread_id": thread_id,
+                            "command_type": command,
+                        }),
+                        route_seq: None,
+                    })]
+                } else {
+                    self.notice(format!("No active thread to {command}."), StudioTone::Warn);
+                    Vec::new()
                 }
             }
         }
@@ -745,13 +827,58 @@ impl StudioCore {
     }
 
     fn cycle_workspace_tab(&mut self, direction: StudioStackMoveDirection) -> Vec<StudioEffect> {
-        let len = self.workspaces.len().max(1);
         let delta = match direction {
             StudioStackMoveDirection::Up => -1,
             StudioStackMoveDirection::Down => 1,
         };
+        // Single-lens has no workspace tabs to page — "cycle" swaps the one
+        // center lens through the surface library instead.
+        if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens {
+            return self.cycle_lens(delta);
+        }
+        let len = self.workspaces.len().max(1);
         let next = wrap_index(self.active_workspace, delta, len);
         self.switch_workspace_tab(next)
+    }
+
+    /// The surface's ordered library, filtered to refs that work as a center
+    /// lens: a real bound view that is neither a scene backdrop nor the foot
+    /// input. Single-lens `Ctrl+←/→` cycles this list.
+    fn lens_library(&self) -> Vec<String> {
+        self.data
+            .session
+            .as_ref()
+            .and_then(|session| session.effective_surface.as_ref())
+            .and_then(|surface| surface.get("library"))
+            .and_then(|library| library.as_array())
+            .map(|refs| {
+                refs.iter()
+                    .filter_map(|value| value.as_str())
+                    .filter(|view_ref| {
+                        self.views.get(*view_ref).is_some_and(|binding| {
+                            binding.widget != "scene" && binding.input.is_none()
+                        })
+                    })
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn cycle_lens(&mut self, delta: i32) -> Vec<StudioEffect> {
+        let lenses = self.lens_library();
+        if lenses.is_empty() {
+            return Vec::new();
+        }
+        let current = self.workspace.focused_view().map(|view| view.view_ref.clone());
+        let index = current
+            .as_ref()
+            .and_then(|cur| lenses.iter().position(|lens| lens == cur))
+            .unwrap_or(0);
+        let next = wrap_index(index, delta, lenses.len());
+        self.open_view(ViewSpec {
+            view_ref: lenses[next].clone(),
+        })
     }
 
     fn switch_workspace_tab(&mut self, index: usize) -> Vec<StudioEffect> {
@@ -765,6 +892,7 @@ impl StudioCore {
         self.active_workspace = index;
         self.data.tile_items.clear();
         self.data.tile_files.clear();
+        self.data.tile_file_space.clear();
         self.data.file_read = None;
         self.push_motion(StudioMotionEventVm::FocusChanged {
             tile_id: self.workspace.focused_tile.0.to_string(),
@@ -776,25 +904,6 @@ impl StudioCore {
         self.initial_effects()
     }
 
-    fn ensure_inspector_tile(&mut self) {
-        if let Some(tile_id) = self.workspace.tile_ids().into_iter().find(|tile_id| {
-            self.workspace.tiles.get(tile_id).is_some_and(|tile| {
-                matches!(
-                    &tile.view,
-                    ViewSpec::Bound { view_ref } if view_ref == "view:ryeos/item/inspector"
-                )
-            })
-        }) {
-            self.workspace.focused_tile = tile_id;
-            self.push_motion(StudioMotionEventVm::FocusChanged {
-                tile_id: tile_id.0.to_string(),
-            });
-            return;
-        }
-        self.add_tile_motions(ViewSpec::Bound {
-            view_ref: "view:ryeos/item/inspector".to_string(),
-        });
-    }
 
     fn set_tile_cursor(&mut self, tile_id: TileId, index: usize) -> bool {
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
@@ -812,19 +921,25 @@ impl StudioCore {
         }
     }
 
-    fn open_view(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
-        if is_clear_center_view(&view) {
-            if !self.workspace.center_is_empty() {
-                for tile_id in self.workspace.tile_ids() {
-                    self.push_motion(StudioMotionEventVm::TileExit {
-                        tile_id: tile_id.0.to_string(),
-                    });
+    fn set_tile_fold(&mut self, tile_id: TileId, section: usize, collapsed: bool) -> bool {
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return false;
+        };
+        match &mut tile.local {
+            ViewLocalState::GenericList {
+                collapsed: folds, ..
+            } => {
+                if collapsed {
+                    folds.insert(section)
+                } else {
+                    folds.remove(&section)
                 }
             }
-            self.workspace.reset_to_empty();
-            self.bump_generation();
-            return self.effects_for_view(&view);
+            ViewLocalState::None => false,
         }
+    }
+
+    fn open_view(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
         for tile_id in self.workspace.tile_ids() {
             if self
                 .workspace
@@ -833,6 +948,22 @@ impl StudioCore {
                 .is_some_and(|tile| tile.view == view)
             {
                 self.workspace.focused_tile = tile_id;
+                self.push_motion(StudioMotionEventVm::FocusChanged {
+                    tile_id: tile_id.0.to_string(),
+                });
+                self.bump_generation();
+                return self.effects_for_view(&view);
+            }
+        }
+
+        // Single-lens surfaces (the cell-grid TUI) hold exactly one center
+        // tile: opening a different view REPLACES the lens in place rather
+        // than splitting a second tile. Breadth comes from swapping the
+        // single lens, never from arranging panes.
+        if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
+            && !self.workspace.center_is_empty()
+        {
+            if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
                 self.push_motion(StudioMotionEventVm::FocusChanged {
                     tile_id: tile_id.0.to_string(),
                 });
@@ -897,12 +1028,14 @@ impl StudioCore {
 
     fn add_center_tile(&mut self, view: ViewSpec) -> Vec<StudioEffect> {
         let tile_id = self.add_tile_motions(view);
-        let view = self
+        let Some(view) = self
             .workspace
             .tiles
             .get(&tile_id)
             .map(|tile| tile.view.clone())
-            .unwrap_or(ViewSpec::Graph { graph_id: None });
+        else {
+            return Vec::new();
+        };
         self.effects_for_view(&view)
     }
 
@@ -996,9 +1129,7 @@ impl StudioCore {
             .into_iter()
             .filter_map(|tile_id| {
                 let tile = self.workspace.tiles.get(&tile_id)?;
-                let ViewSpec::Bound { view_ref } = &tile.view else {
-                    return None;
-                };
+                let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
                 let subscribed = binding.refresh.get("on_facet").and_then(|v| v.as_str())
                     == Some(facet)
@@ -1020,16 +1151,33 @@ impl StudioCore {
             .collect()
     }
 
+    /// Resolve the atlas arrangement a `SetAtlas*` event targets: `Some(tile)`
+    /// → that tile's per-tile arrangement, created from the default on first
+    /// touch; `None` → the ambient backdrop atlas.
+    fn atlas_target_mut(&mut self, tile_id: &Option<String>) -> &mut crate::atlas::AtlasUiStateVm {
+        match tile_id {
+            Some(id) => self.ui.tile_atlas.entry(id.clone()).or_default(),
+            None => &mut self.ui.atlas,
+        }
+    }
+
+    fn atlas_target(&self, tile_id: &Option<String>) -> &crate::atlas::AtlasUiStateVm {
+        match tile_id {
+            Some(id) => self.ui.tile_atlas.get(id).unwrap_or(&self.ui.atlas),
+            None => &self.ui.atlas,
+        }
+    }
+
     fn effects_for_view(&mut self, view: &ViewSpec) -> Vec<StudioEffect> {
-        match view {
-            ViewSpec::Bound { view_ref } => {
-                let view_ref = view_ref.clone();
-                let tile_id = self.workspace.focused_tile;
-                self.emit_fetch_source(tile_id, &view_ref)
-                    .into_iter()
-                    .collect()
-            }
-            ViewSpec::Atlas => vec![
+        let view_ref = view.view_ref.clone();
+        // Scene widgets pull engine data the generic source path doesn't
+        // carry; everything else fetches its declared source.
+        let widget = self
+            .views
+            .get(&view_ref)
+            .map(|binding| binding.widget.clone());
+        match widget.as_deref() {
+            Some("atlas") => vec![
                 self.emit(StudioEffectKind::FetchDimension),
                 self.emit(StudioEffectKind::FetchTopology),
                 self.emit(StudioEffectKind::FetchItems {
@@ -1039,10 +1187,16 @@ impl StudioCore {
                     limit: 1000,
                 }),
             ],
-            ViewSpec::Graph { .. } => vec![
+            Some("graph") => vec![
                 self.emit(StudioEffectKind::FetchDimension),
                 self.emit(StudioEffectKind::FetchTopology),
             ],
+            _ => {
+                let tile_id = self.workspace.focused_tile;
+                self.emit_fetch_source(tile_id, &view_ref)
+                    .into_iter()
+                    .collect()
+            }
         }
     }
 
@@ -1251,6 +1405,7 @@ impl StudioCore {
                 self.data.items = None;
                 self.data.file_space = None;
                 self.data.tile_items.clear();
+                self.data.tile_file_space.clear();
                 self.data.files = None;
                 self.data.tile_files.clear();
                 self.data.file_read = None;
@@ -1299,7 +1454,17 @@ impl StudioCore {
             StudioEffectResultKind::FileSpace => {
                 self.apply_parsed::<StudioFileSpaceDto>(data, "file_space", |core, file_space| {
                     if effect_matches_current_file_space(Some(&expected), core, &file_space) {
-                        core.data.file_space = Some(file_space);
+                        if let StudioEffectKind::FetchFileSpace {
+                            tile_id: Some(tile_id),
+                            ..
+                        } = &expected
+                        {
+                            core.data
+                                .tile_file_space
+                                .insert(tile_id.clone(), file_space);
+                        } else {
+                            core.data.file_space = Some(file_space);
+                        }
                     }
                 });
             }
@@ -1358,12 +1523,6 @@ fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
         ArrangeSpec::Horizontal => StudioSplitAxisVm::Horizontal,
         ArrangeSpec::Vertical => StudioSplitAxisVm::Vertical,
     }
-}
-
-/// Opening the bare topology view clears the center to empty (the
-/// ambient topology / backdrop owns the frame) rather than adding a tile.
-fn is_clear_center_view(view: &ViewSpec) -> bool {
-    matches!(view, ViewSpec::Graph { graph_id: None })
 }
 
 fn filtered_launcher_items(core: &StudioCore) -> Vec<super::view_model::StudioLauncherItemVm> {
@@ -1538,28 +1697,15 @@ fn file_root_requires_project(root: &str) -> bool {
     matches!(root, "project" | "project_ai")
 }
 
+/// A route is the view's own ref — every view is addressable by ref
+/// (`#view:…`), graph/atlas included. The engine names no specific view.
 fn view_from_route(route: &str) -> Option<ViewSpec> {
-    // Routes name engine views only; content views address by ref
-    // (`#view:…`).
     let route = route.trim_start_matches('#');
-    if let Some(view_ref) = route.strip_prefix("view:").map(|_| route) {
-        return Some(ViewSpec::Bound {
-            view_ref: view_ref.to_string(),
-        });
-    }
-    match route {
-        "" | "graph" => Some(ViewSpec::Graph { graph_id: None }),
-        "atlas" => Some(ViewSpec::Atlas),
-        _ => None,
-    }
+    route.starts_with("view:").then(|| ViewSpec::bound(route))
 }
 
-fn route_for_view(view: &ViewSpec) -> Option<&'static str> {
-    match view {
-        ViewSpec::Atlas => Some("atlas"),
-        ViewSpec::Graph { graph_id: None } => Some("graph"),
-        ViewSpec::Bound { .. } | ViewSpec::Graph { graph_id: Some(_) } => None,
-    }
+fn route_for_view(view: &ViewSpec) -> Option<String> {
+    Some(view.view_ref.clone())
 }
 
 fn effect_matches_current_items(expected: Option<&StudioEffectKind>, core: &StudioCore) -> bool {
@@ -1572,16 +1718,30 @@ fn effect_matches_current_items(expected: Option<&StudioEffectKind>, core: &Stud
     else {
         return true;
     };
-    if tile_id.is_none() {
+    let Some(tile_id) = tile_id.as_deref() else {
+        // The shared/ambient fetch is unscoped.
         return query.is_none() && kind.is_none();
-    }
-    let Some(tile_id) = tile_id.as_deref().and_then(parse_tile_id) else {
+    };
+    // A tile-scoped fetch is current iff that tile still binds an atlas view
+    // whose declared `body.scope` still matches this fetch's (query, kind) —
+    // content is the scope, so a re-bound or re-scoped tile drops the stale
+    // response instead of caching it.
+    let Some(tile_id) = parse_tile_id(tile_id) else {
         return false;
     };
-    // Tile-scoped item filters died with the legacy item tiles; only
-    // untargeted (atlas) fetches remain valid.
-    let _ = (core, tile_id);
-    query.is_none() && kind.is_none()
+    let Some(binding) = core
+        .workspace
+        .tiles
+        .get(&tile_id)
+        .and_then(|tile| core.views.get(&tile.view.view_ref))
+    else {
+        return false;
+    };
+    if binding.widget != "atlas" {
+        return false;
+    }
+    let (want_query, want_kind) = super::model::atlas_item_scope(binding);
+    &want_query == query && &want_kind == kind
 }
 
 fn effect_matches_current_files(
@@ -1610,14 +1770,27 @@ fn effect_matches_current_file_space(
     core: &StudioCore,
     file_space: &StudioFileSpaceDto,
 ) -> bool {
-    let Some(StudioEffectKind::FetchFileSpace { root, path, .. }) = expected else {
+    let Some(StudioEffectKind::FetchFileSpace {
+        tile_id,
+        root,
+        path,
+        ..
+    }) = expected
+    else {
         return true;
     };
-    core.ui.atlas.active_projection.is_file_space()
-        && root == &core.ui.atlas.file_space_root
-        && path == &core.ui.atlas.file_space_path
-        && root == &file_space.root
-        && path == &file_space.path
+    let response_matches = root == &file_space.root && path == &file_space.path;
+    // Per-tile fetch: validate against THIS tile's file-space arrangement;
+    // the shared fetch validates against the ambient atlas state.
+    let atlas = match tile_id.as_deref().map(parse_tile_id) {
+        Some(Some(tile_id)) => core.tile_atlas_state(tile_id),
+        Some(None) => return false,
+        None => &core.ui.atlas,
+    };
+    atlas.active_projection.is_file_space()
+        && root == &atlas.file_space_root
+        && path == &atlas.file_space_path
+        && response_matches
 }
 
 fn effect_matches_current_file_read(
@@ -1657,7 +1830,24 @@ mod tests {
             session_id: "session-1".to_string(),
             surface_ref: "surface:ryeos/studio/base".to_string(),
             user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
-            effective_surface: None,
+            // A realistic session carries its surface as data: the engine's
+            // default slot set is now empty (it names no views), so the test
+            // session declares its slots here as fixture data — the input,
+            // threads, and inspector slots the suite was written against.
+            effective_surface: Some(serde_json::json!({
+                "name": "studio-base",
+                "slots": {
+                    "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 },
+                    "left": { "content": "view:ryeos/threads/list", "open": false, "size": 32 },
+                    "right": { "content": "view:ryeos/item/inspector", "open": false, "size": 40 }
+                },
+                "views": {
+                    "view:ryeos/input": {
+                        "widget": "text",
+                        "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
+                    }
+                }
+            })),
             project_path: Some("/tmp/project".to_string()),
             read_only: true,
             granted_caps: Vec::new(),
@@ -1739,7 +1929,7 @@ mod tests {
         );
         let tile_id = core
             .workspace
-            .add_tile(ViewSpec::Bound {
+            .add_tile(ViewSpec {
                 view_ref: "view:test/inspector".to_string(),
             })
             .0
@@ -1877,10 +2067,15 @@ mod tests {
     #[test]
     fn graph_view_effects_fetch_topology() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/graph/topology",
+            serde_json::json!({ "widget": "graph" }),
+        );
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Graph { graph_id: None },
+                    view: ViewSpec::bound("view:ryeos/graph/topology"),
                 },
             },
         });
@@ -1933,7 +2128,8 @@ mod tests {
             },
         });
 
-        let scene = crate::studio::scene_model::build_scene_model(&core);
+        let scene =
+            crate::studio::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas surface should build scene atlas");
         assert_eq!(atlas.root_label, ".ai");
         assert!(atlas
@@ -1980,7 +2176,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_includes_engine_views_and_content_library() {
+    fn launcher_lists_embedded_views_including_scene_widgets() {
         let mut core = StudioCore::default();
         core.views.insert(
             "view:ryeos/threads/list".to_string(),
@@ -1990,14 +2186,20 @@ mod tests {
             }))
             .unwrap(),
         );
+        // Graph/atlas are ordinary embedded views now — no hardcoded items.
+        core.views.insert(
+            "view:ryeos/graph/topology".to_string(),
+            serde_json::from_value(serde_json::json!({ "widget": "graph" })).unwrap(),
+        );
         let items = launcher_items(&core);
+        // The scene-widget view launches as a Bound tile, labeled by ref.
         assert!(items.iter().any(|item| {
-            item.label == "Graph"
+            item.label == "ryeos/graph/topology"
                 && matches!(
-                    item.action,
+                    &item.action,
                     StudioAction::OpenView {
-                        view: ViewSpec::Graph { graph_id: None }
-                    }
+                        view: ViewSpec { view_ref }
+                    } if view_ref == "view:ryeos/graph/topology"
                 )
         }));
         // Content views launch as Bound tiles, labeled by ref.
@@ -2006,7 +2208,7 @@ mod tests {
                 && matches!(
                     &item.action,
                     StudioAction::OpenView {
-                        view: ViewSpec::Bound { view_ref }
+                        view: ViewSpec { view_ref }
                     } if view_ref == "view:ryeos/threads/list"
                 )
         }));
@@ -2238,7 +2440,7 @@ mod tests {
 
         assert_eq!(
             core.workspace.focused_view(),
-            Some(&ViewSpec::Bound {
+            Some(&ViewSpec {
                 view_ref: "view:ryeos/items/space".to_string()
             })
         );
@@ -2544,7 +2746,7 @@ mod tests {
                 "input": { "id": "q", "placeholder": "filter…", "feeds": { "param": "query", "debounce_ms": 120 } }
             }),
         );
-        let tile_id = core.workspace.add_tile(ViewSpec::Bound {
+        let tile_id = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/filter".to_string(),
         });
         core.workspace.focused_tile = tile_id;
@@ -2619,7 +2821,7 @@ mod tests {
                 }]
             }),
         );
-        let tile_id = core.workspace.add_tile(ViewSpec::Bound {
+        let tile_id = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/palette".to_string(),
         });
         core.workspace.focused_tile = tile_id;
@@ -2655,7 +2857,7 @@ mod tests {
                 }]
             }),
         );
-        let tile_id = core.workspace.add_tile(ViewSpec::Bound {
+        let tile_id = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/palette".to_string(),
         });
         core.workspace.focused_tile = tile_id;
@@ -2683,10 +2885,10 @@ mod tests {
                 "input": { "id": "q", "feeds": { "param": "query" } }
             }),
         );
-        let first = core.workspace.add_tile(ViewSpec::Bound {
+        let first = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/filter".to_string(),
         });
-        let second = core.workspace.add_tile(ViewSpec::Bound {
+        let second = core.workspace.add_tile(ViewSpec {
             view_ref: "view:test/filter".to_string(),
         });
         assert_ne!(first, second);
@@ -3073,7 +3275,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
                 },
@@ -3083,7 +3285,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3093,7 +3295,7 @@ mod tests {
         assert_eq!(core.workspace.tile_ids().len(), before + 1);
         assert!(matches!(
             core.workspace.focused_view(),
-            Some(ViewSpec::Bound { view_ref }) if view_ref == "view:test/services"
+            Some(ViewSpec { view_ref }) if view_ref == "view:test/services"
         ));
         assert!(core
             .ui
@@ -3111,13 +3313,201 @@ mod tests {
     }
 
     #[test]
+    fn single_lens_open_view_replaces_center_instead_of_splitting() {
+        // The cell-grid (TUI) composition: one center lens. Opening a
+        // different view swaps the lens in place — the tile count stays at
+        // one, no split, and the new view fetches.
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        seed_view(&mut core, "view:ryeos/items/space");
+        seed_view(&mut core, "view:test/services");
+
+        // First open fills the empty center with the one lens.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec {
+                        view_ref: "view:ryeos/items/space".to_string(),
+                    },
+                },
+            },
+        });
+        assert_eq!(core.workspace.tile_ids().len(), 1);
+        core.ui.motion.clear();
+
+        // Switching the lens replaces in place — still exactly one tile.
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec {
+                        view_ref: "view:test/services".to_string(),
+                    },
+                },
+            },
+        });
+
+        assert_eq!(
+            core.workspace.tile_ids().len(),
+            1,
+            "single-lens never splits a second tile"
+        );
+        assert!(matches!(
+            core.workspace.focused_view(),
+            Some(ViewSpec { view_ref }) if view_ref == "view:test/services"
+        ));
+        assert!(
+            !core
+                .ui
+                .motion
+                .iter()
+                .any(|event| matches!(event, StudioMotionEventVm::TileSplit { .. })),
+            "no split motion when swapping the single lens"
+        );
+        assert!(
+            matches!(
+                effects.first().map(|effect| &effect.kind),
+                Some(StudioEffectKind::FetchSource { .. })
+            ),
+            "the swapped-in lens fetches its source"
+        );
+
+        // OpenNewView also collapses to a replace — no second tile.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenNewView {
+                    view: ViewSpec {
+                        view_ref: "view:ryeos/items/space".to_string(),
+                    },
+                },
+            },
+        });
+        assert_eq!(
+            core.workspace.tile_ids().len(),
+            1,
+            "OpenNewView does not add a tile in single-lens"
+        );
+    }
+
+    #[test]
+    fn single_lens_cycle_tab_walks_the_library_skipping_scene_and_input() {
+        // In single-lens, Ctrl+←/→ (CycleTab) swaps the one center lens
+        // through the surface library — scene backdrops and the foot input
+        // are not lenses and are skipped.
+        let session = BrowserSession {
+            session_id: "s".to_string(),
+            surface_ref: "surface:ryeos/studio/lens".to_string(),
+            user_principal_id: Some(format!("fp:{}", "ab".repeat(32))),
+            effective_surface: Some(serde_json::json!({
+                "name": "lens-test",
+                "library": ["view:a", "view:scene", "view:input", "view:b"],
+                "views": {
+                    "view:a": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } },
+                    "view:scene": { "widget": "scene" },
+                    "view:input": { "widget": "text", "input": { "id": "line" } },
+                    "view:b": { "widget": "rows", "source": { "ref": "service:x", "params": {}, "collection": "rows" } }
+                }
+            })),
+            project_path: Some("/tmp/p".to_string()),
+            read_only: false,
+            granted_caps: Vec::new(),
+            events_url: None,
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+
+        // The lens-able library excludes the scene backdrop and the input.
+        assert_eq!(
+            core.lens_library(),
+            vec!["view:a".to_string(), "view:b".to_string()]
+        );
+
+        let open = |core: &mut StudioCore, view_ref: &str| {
+            core.dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::Activate {
+                    action: StudioAction::OpenView {
+                        view: ViewSpec {
+                            view_ref: view_ref.to_string(),
+                        },
+                    },
+                },
+            });
+        };
+        let cycle = |core: &mut StudioCore| {
+            core.dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::Activate {
+                    action: StudioAction::CycleTab {
+                        direction: StudioStackMoveDirection::Down,
+                    },
+                },
+            });
+        };
+
+        open(&mut core, "view:a");
+        cycle(&mut core);
+        assert!(
+            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:b"),
+            "cycle forward moves to the next lens"
+        );
+        assert_eq!(core.workspace.tile_ids().len(), 1, "cycling stays single-lens");
+
+        cycle(&mut core);
+        assert!(
+            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:a"),
+            "cycle wraps back to the first lens"
+        );
+    }
+
+    #[test]
+    fn inspect_is_a_plain_selection_facet_write() {
+        // Inspection is a facet write, peer to input.route — the engine never
+        // opens, names, or swaps to the inspector. The center lens is
+        // unchanged and no tile is added; the inspector is a facet-bound view
+        // (slot or lens) reached by ordinary navigation, live via on_facet.
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        seed_view(&mut core, "view:ryeos/items/space");
+
+        // Start on a list lens.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::OpenView {
+                    view: ViewSpec {
+                        view_ref: "view:ryeos/items/space".to_string(),
+                    },
+                },
+            },
+        });
+        assert_eq!(core.workspace.tile_ids().len(), 1);
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectItem {
+                    canonical_ref: "tool:ryeos/x".to_string(),
+                },
+            },
+        });
+
+        // The selection facet is set …
+        assert_eq!(
+            core.seat.fold().get(crate::studio::seat::KEY_SELECTION),
+            Some(&serde_json::json!({ "item": "tool:ryeos/x" })),
+        );
+        // … and nothing was opened or swapped: same single tile, same lens.
+        assert_eq!(core.workspace.tile_ids().len(), 1);
+        assert!(
+            matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"),
+            "inspect does not open or swap to the inspector — it only writes the facet"
+        );
+    }
+
+    #[test]
     fn open_new_view_allows_duplicate_workspace_tiles() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         seed_view(&mut core, "view:ryeos/items/space");
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
                 },
@@ -3127,7 +3517,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
                 },
@@ -3139,7 +3529,7 @@ mod tests {
             .tiles
             .values()
             .filter(|tile| {
-                matches!(&tile.view, ViewSpec::Bound { view_ref } if view_ref == "view:ryeos/items/space")
+                matches!(&tile.view, ViewSpec { view_ref } if view_ref == "view:ryeos/items/space")
             })
             .count();
         assert_eq!(core.workspace.tile_ids().len(), before + 1);
@@ -3161,7 +3551,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3170,7 +3560,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
                 },
@@ -3199,7 +3589,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3252,7 +3642,7 @@ mod tests {
         assert!(!core.ui.launcher.open);
         assert!(matches!(
             core.workspace.focused_view(),
-            Some(ViewSpec::Bound { view_ref }) if view_ref == "view:ryeos/items/space"
+            Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"
         ));
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
@@ -3266,7 +3656,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3277,7 +3667,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
                 },
@@ -3302,7 +3692,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3311,7 +3701,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/threads/list".to_string(),
                     },
                 },
@@ -3320,7 +3710,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
                 },
@@ -3357,7 +3747,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3366,7 +3756,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
                 },
@@ -3387,7 +3777,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/files".to_string(),
                     },
                 },
@@ -3396,7 +3786,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenNewView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
                 },
@@ -3429,7 +3819,7 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:test/services".to_string(),
                     },
                 },
@@ -3458,7 +3848,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::OpenView {
-                    view: ViewSpec::Bound {
+                    view: ViewSpec {
                         view_ref: "view:ryeos/items/space".to_string(),
                     },
                 },
@@ -3486,5 +3876,88 @@ mod tests {
         assert!(core.data.dimension.is_none());
         assert!(core.data.items.is_none());
         assert_eq!(core.ui.notices.len(), 1);
+    }
+
+    #[test]
+    fn thread_tail_deltas_accumulate_then_clear_on_durable() {
+        let mut core = StudioCore::default();
+
+        // Streaming cognition deltas accumulate; no refetch while live.
+        let effects = core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "delta": "Hel" }),
+        });
+        assert!(effects.is_empty());
+        core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "delta": "lo" }),
+        });
+        assert_eq!(
+            core.data.live_delta.as_ref().map(|d| d.text.as_str()),
+            Some("Hello")
+        );
+
+        // The settled turn (content, no delta) supersedes the live buffer.
+        core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "cognition_out".to_string(),
+            payload: serde_json::json!({ "content": "Hello", "turn": 1 }),
+        });
+        assert!(core.data.live_delta.is_none());
+    }
+
+    #[test]
+    fn thread_tail_ephemeral_nontext_is_noop() {
+        let mut core = StudioCore::default();
+        let effects = core.dispatch(StudioEvent::ThreadTail {
+            thread_id: "T-1".to_string(),
+            event_type: "stream_opened".to_string(),
+            payload: serde_json::json!({}),
+        });
+        assert!(effects.is_empty());
+        assert!(core.data.live_delta.is_none());
+    }
+
+    #[test]
+    fn submit_thread_command_targets_commands_submit_for_head_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-1" }),
+        );
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SubmitThreadCommand {
+                    command: "interrupt".to_string(),
+                },
+            },
+        });
+        assert_eq!(effects.len(), 1);
+        let StudioEffectKind::Invoke { target, params, .. } = &effects[0].kind else {
+            panic!("expected an Invoke effect");
+        };
+        assert!(matches!(
+            target,
+            crate::studio::effect::InvokeRef::Ref { item_ref }
+                if item_ref == "service:commands/submit"
+        ));
+        assert_eq!(params["thread_id"], "T-1");
+        assert_eq!(params["command_type"], "interrupt");
+    }
+
+    #[test]
+    fn submit_thread_command_without_head_thread_notices() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::SubmitThreadCommand {
+                    command: "interrupt".to_string(),
+                },
+            },
+        });
+        assert!(effects.is_empty());
+        assert!(!core.ui.notices.is_empty());
     }
 }

@@ -52,7 +52,7 @@ use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    DelegationVia, ExecutionSchema, InProcessRegistryKind, OperationDecl, TerminatorDecl,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, MethodDecl, MethodScope, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -115,14 +115,6 @@ pub struct DispatchRequest<'a> {
     pub pre_minted_thread_id: Option<String>,
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
-    /// **Op dispatch**: the operation name from the `/execute` request.
-    /// When `None`, the op resolver uses `default_operation` from the
-    /// schema. When `Some` but the kind has no `operations`, the field
-    /// is ignored (terminator/delegate paths don't use it).
-    pub operation: Option<String>,
-    /// **Op dispatch**: op-specific inputs from the `/execute` request.
-    /// Validated against the op's `InputDecl` spec before dispatch.
-    pub inputs: Option<Value>,
     /// Chained-resume turn: when `Some`, the launch envelope carries this
     /// as `EnvelopeRequest.previous_thread_id` and the runtime replays the
     /// prior thread's events into the new run (conversation = thread
@@ -195,14 +187,15 @@ pub(crate) enum HopAction {
     /// default runtime — chase its canonical_ref next iteration. This
     /// is an EXPLICIT named registry hop, not a silent fallback.
     UseRegistry(CanonicalRef),
-    /// Schema declares `operations` (op-dispatch path). The kind is
-    /// dispatched by resolving the requested op, validating inputs,
-    /// and spawning the kind's runtime with a `BatchOpEnvelope`.
-    /// Carries the kind name (from the schema, not hardcoded) and
-    /// the resolved `OperationDecl`.
-    DispatchOp {
+    /// Schema declares `methods` (method-dispatch path). The kind is
+    /// dispatched by resolving the requested method, validating args,
+    /// and spawning the kind's runtime with a `MethodCallEnvelope`.
+    /// Carries the kind name (from the schema, not hardcoded), the
+    /// resolved method name, and its `MethodDecl`.
+    DispatchMethod {
         kind: String,
-        op_decl: OperationDecl,
+        method_name: String,
+        method_decl: MethodDecl,
     },
 }
 
@@ -346,27 +339,24 @@ pub(crate) fn resolve_dispatch_hop(
         None
     };
 
-    // **Op-dispatch path**: if the schema declares `operations`, take
-    // the op-dispatch path instead of terminator/alias/delegate. The
-    // boot-time mixed-dispatch reject guarantees `operations` is never
+    // **Method-dispatch path**: if the schema declares `methods`, take
+    // the method-dispatch path instead of terminator/alias/delegate. The
+    // boot-time mixed-dispatch reject guarantees `methods` is never
     // non-empty alongside terminator/alias/delegate, so this branch is
     // unambiguous.
-    if !exec.operations.is_empty() {
-        let requested_op = ctx.requested_op.as_deref();
-        let op_decl = resolve_requested_op(
-            requested_op,
-            &exec.default_operation,
-            &exec.operations,
-            &schema_kind,
-        )?;
+    if !exec.methods.is_empty() {
+        let requested_method = ctx.requested_method();
+        let (method_name, method_decl) =
+            resolve_requested_method(requested_method, exec, &schema_kind)?;
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
             thread_profile,
             runtime,
-            next: HopAction::DispatchOp {
+            next: HopAction::DispatchMethod {
                 kind: schema_kind,
-                op_decl,
+                method_name,
+                method_decl,
             },
         });
     }
@@ -468,108 +458,172 @@ pub(crate) fn resolve_dispatch_hop(
     })
 }
 
-// ── Op dispatch helpers ───────────────────────────────────────────────
+// ── Method dispatch helpers ───────────────────────────────────────────
 
-/// Resolve the requested operation name to a declared `OperationDecl`.
+/// Resolve the requested method name to its declared `(name, MethodDecl)`.
 ///
-/// If the caller provided an explicit op name, look it up in the schema's
-/// `operations`. If no op was requested, use `default_operation` (which
-/// MUST be declared on an op-bearing schema). Unknown/missing ops produce
-/// structured errors listing the declared ops (Rule 8).
-fn resolve_requested_op(
+/// If the caller provided an explicit method name, look it up in the
+/// schema's `methods`. If no method was requested, use
+/// `method_dispatch.default` (which MUST be declared on a method-bearing
+/// schema). Unknown/missing methods produce structured errors listing the
+/// declared methods (Rule 8).
+fn resolve_requested_method(
     requested: Option<&str>,
-    default_operation: &Option<String>,
-    operations: &[OperationDecl],
+    exec: &ExecutionSchema,
     kind: &str,
-) -> Result<OperationDecl, DispatchError> {
-    let op_name = match requested {
+) -> Result<(String, MethodDecl), DispatchError> {
+    let method_name = match requested {
         Some(name) => name,
-        None => default_operation
-            .as_deref()
+        None => exec
+            .method_dispatch
+            .as_ref()
+            .and_then(|md| md.default.as_deref())
             .ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
-                detail: "schema declares operations but no default_operation, and no \
-                         operation was specified in the request"
+                detail: "schema declares methods but no method_dispatch.default, and no \
+                         method was specified in the request"
                     .into(),
             })?,
     };
 
-    operations
-        .iter()
-        .find(|op| op.name == op_name)
+    exec.methods
+        .get(method_name)
         .cloned()
+        .map(|decl| (method_name.to_string(), decl))
         .ok_or_else(|| {
-            let declared: Vec<String> = operations.iter().map(|op| op.name.clone()).collect();
-            DispatchError::UnknownOp {
+            let declared: Vec<String> = exec.methods.keys().cloned().collect();
+            DispatchError::UnknownMethod {
                 kind: kind.to_string(),
-                requested: op_name.to_string(),
+                requested: method_name.to_string(),
                 declared: declared.join(", "),
             }
         })
 }
 
-/// Validate the caller's `inputs` object against the op's typed spec.
-/// Each declared input with `required: true` must be present and match
-/// the declared type. Optional inputs with defaults are filled in.
+/// Validate the caller's `args` object against the method's typed spec.
+/// Each declared arg with `required: true` must be present and match the
+/// declared type. Optional args with defaults are filled in. Args not
+/// declared on the method are REJECTED — the declared arg set is a strict
+/// contract.
 ///
-/// Returns the validated+defaulted inputs as a `serde_json::Value::Object`.
-fn validate_op_inputs(inputs: Option<&Value>, op: &OperationDecl) -> Result<Value, DispatchError> {
-    let mut inputs_map = match inputs {
+/// Returns the validated+defaulted args as a `serde_json::Value::Object`.
+fn validate_method_args(
+    args: Option<&Value>,
+    method_name: &str,
+    method: &MethodDecl,
+) -> Result<Value, DispatchError> {
+    let mut args_map = match args {
         Some(Value::Object(map)) => map.clone(),
         Some(other) => {
-            return Err(DispatchError::OpInvalidInput {
-                op: op.name.clone(),
-                reason: format!("inputs must be an object, got {}", other),
+            return Err(DispatchError::MethodInvalidArg {
+                method: method_name.to_string(),
+                reason: format!("args must be an object, got {}", other),
             });
         }
         None => serde_json::Map::new(),
     };
 
-    for (name, decl) in &op.inputs {
-        match inputs_map.get(name) {
+    // Reject any arg the method does not declare. This makes the declared
+    // arg set a real contract rather than a permissive suggestion.
+    for key in args_map.keys() {
+        if !method.args.contains_key(key) {
+            let mut declared: Vec<&String> = method.args.keys().collect();
+            declared.sort();
+            return Err(DispatchError::MethodInvalidArg {
+                method: method_name.to_string(),
+                reason: format!("unknown arg '{key}'; declared args: {declared:?}"),
+            });
+        }
+    }
+
+    for (name, decl) in &method.args {
+        match args_map.get(name) {
             Some(val) => {
-                // Type-check the value against the declared type.
-                validate_input_type(val, &decl.ty, name, &op.name)?;
+                // Full declaration check: type + enum + min + array items.
+                validate_arg_value(val, decl, name, method_name)?;
             }
             None => {
                 if decl.required {
-                    return Err(DispatchError::OpInvalidInput {
-                        op: op.name.clone(),
-                        reason: format!("required input '{name}' is missing"),
+                    return Err(DispatchError::MethodInvalidArg {
+                        method: method_name.to_string(),
+                        reason: format!("required arg '{name}' is missing"),
                     });
                 }
-                // Apply default if present.
+                // Apply default if present. Validate it against the
+                // declaration too — a schema default that violates its own
+                // type/enum/min would otherwise reach the runtime unchecked.
                 if let Some(default) = &decl.default {
-                    inputs_map.insert(name.clone(), default.clone());
+                    validate_arg_value(default, decl, name, method_name)?;
+                    args_map.insert(name.clone(), default.clone());
                 }
             }
         }
     }
 
-    Ok(Value::Object(inputs_map))
+    Ok(Value::Object(args_map))
 }
 
-/// Check that a JSON value matches the declared `InputType`.
-fn validate_input_type(
+/// Validate a JSON value against a full arg declaration: the declared
+/// type, plus the optional `enum`, `min`, and array-`items` constraints.
+/// Recurses into array elements so `array items: string` is enforced
+/// element-wise before the runtime is spawned.
+fn validate_arg_value(
     val: &Value,
-    ty: &ryeos_engine::kind_registry::InputType,
+    decl: &ryeos_engine::kind_registry::ArgDecl,
     name: &str,
-    op_name: &str,
+    method_name: &str,
 ) -> Result<(), DispatchError> {
-    use ryeos_engine::kind_registry::InputType;
-    let ok = match ty {
-        InputType::String => val.is_string(),
-        InputType::Integer => val.is_i64() || val.is_u64(),
-        InputType::Boolean => val.is_boolean(),
-        InputType::Array => val.is_array(),
-        InputType::Object => val.is_object(),
+    use ryeos_engine::kind_registry::ArgType;
+
+    let err = |reason: String| DispatchError::MethodInvalidArg {
+        method: method_name.to_string(),
+        reason,
+    };
+
+    // 1. Top-level type.
+    let ok = match decl.ty {
+        ArgType::String => val.is_string(),
+        ArgType::Integer => val.is_i64() || val.is_u64(),
+        ArgType::Boolean => val.is_boolean(),
+        ArgType::Array => val.is_array(),
+        ArgType::Object => val.is_object(),
     };
     if !ok {
-        return Err(DispatchError::OpInvalidInput {
-            op: op_name.to_string(),
-            reason: format!("input '{name}' expected type {:?}, got {}", ty, val),
-        });
+        return Err(err(format!(
+            "arg '{name}' expected type {:?}, got {}",
+            decl.ty, val
+        )));
     }
+
+    // 2. enum (applies to string values).
+    if let Some(allowed) = &decl.enum_values {
+        if let Some(s) = val.as_str() {
+            if !allowed.iter().any(|a| a == s) {
+                return Err(err(format!(
+                    "arg '{name}' must be one of {allowed:?}, got {s:?}"
+                )));
+            }
+        }
+    }
+
+    // 3. min (applies to integer values).
+    if let Some(min) = decl.min {
+        if let Some(n) = val.as_i64() {
+            if n < min {
+                return Err(err(format!("arg '{name}' must be >= {min}, got {n}")));
+            }
+        }
+    }
+
+    // 4. Array element type, when declared via `items`.
+    if matches!(decl.ty, ArgType::Array) {
+        if let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array()) {
+            for (i, el) in arr.iter().enumerate() {
+                validate_arg_value(el, items_decl, &format!("{name}[{i}]"), method_name)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -577,43 +631,49 @@ fn validate_input_type(
 /// knowledge runtime. The daemon owns this conversion because it consumes
 /// an engine type (`ResolutionOutput`) and produces a knowledge type
 /// (`SingleRootPayload`).
-fn project_single_root(
-    resolution: &ryeos_engine::resolution::ResolutionOutput,
-) -> Result<ryeos_runtime::op_wire::SingleRootPayload, DispatchError> {
-    use ryeos_runtime::op_wire::{EdgeKind, GraphEdge, TrustClass, VerifiedItem};
-
-    let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
-        std::collections::BTreeMap::new();
-
-    // Helper to convert engine ResolvedAncestor → knowledge VerifiedItem.
-    let ancestor_to_verified = |a: &ryeos_engine::resolution::ResolvedAncestor| VerifiedItem {
+/// Convert an engine `ResolvedAncestor` (a verified, signature-checked
+/// item) into the wire `VerifiedItem`. Shared by single-root and corpus
+/// projection so trust-class and metadata mapping stay identical.
+fn verified_from(
+    a: &ryeos_engine::resolution::ResolvedAncestor,
+) -> ryeos_runtime::method_wire::VerifiedItem {
+    use ryeos_runtime::method_wire::{TrustClass, VerifiedItem};
+    VerifiedItem {
         raw_content: a.raw_content.clone(),
         raw_content_digest: a.raw_content_digest.clone(),
-        metadata: serde_json::to_value(serde_json::json!({
+        metadata: serde_json::json!({
             "source_path": a.source_path,
             "trust_class": format!("{:?}", a.trust_class),
             "requested_id": a.requested_id,
-        }))
-        .unwrap_or(Value::Null),
+        }),
         trust_class: match a.trust_class {
             ryeos_engine::resolution::TrustClass::TrustedBundle => TrustClass::TrustedBundle,
             ryeos_engine::resolution::TrustClass::TrustedProject => TrustClass::TrustedProject,
             ryeos_engine::resolution::TrustClass::UntrustedProject => TrustClass::UntrustedProject,
             ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Unsigned,
         },
-    };
+    }
+}
+
+fn project_single_root(
+    resolution: &ryeos_engine::resolution::ResolutionOutput,
+) -> Result<ryeos_runtime::method_wire::SingleRootPayload, DispatchError> {
+    use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, VerifiedItem};
+
+    let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
+        std::collections::BTreeMap::new();
 
     // Root + ancestors.
     for resolved in std::iter::once(&resolution.root).chain(resolution.ancestors.iter()) {
         items_by_ref
             .entry(resolved.resolved_ref.clone())
-            .or_insert_with(|| ancestor_to_verified(resolved));
+            .or_insert_with(|| verified_from(resolved));
     }
     // Referenced items.
     for resolved in &resolution.referenced_items {
         items_by_ref
             .entry(resolved.resolved_ref.clone())
-            .or_insert_with(|| ancestor_to_verified(resolved));
+            .or_insert_with(|| verified_from(resolved));
     }
 
     // Build edges from extends chain + references.
@@ -653,40 +713,217 @@ fn project_single_root(
         }
     }
 
-    Ok(ryeos_runtime::op_wire::SingleRootPayload {
+    Ok(ryeos_runtime::method_wire::SingleRootPayload {
         root_ref: resolution.root.resolved_ref.clone(),
         items_by_ref,
         edges,
     })
 }
 
-// ── Op dispatch terminator ─────────────────────────────────────────────
-
-/// Dispatch an op-style kind by spawning its runtime with a
-/// `BatchOpEnvelope`. This is the generic op-dispatch path:
+/// Project the whole verified corpus of `kind` into `(items_by_ref, edges)`
+/// for a `scope: corpus` method (knowledge `query`/`graph`/`validate`).
 ///
-/// 1. Validate inputs against the op's typed spec.
+/// Enumerates every item of the kind across resolution roots and projects
+/// each via the engine's TOLERANT corpus resolver
+/// (`resolve_item_for_corpus`). Differences from `project_single_root`:
+///   - there is no `root_ref` — the method operates over the whole set;
+///   - a malformed item is STILL included (with `raw_content`) so the
+///     runtime `validate` reports it — it is not silently dropped;
+///   - dangling reference edges are PRESERVED (targets not required to
+///     exist) so `graph`/`validate` can report them as `missing_refs`;
+///   - an integrity failure (bad signature, unreadable) is a HARD ERROR —
+///     a corpus method never presents a clean-looking partial corpus.
+///
+/// Generic over `kind`: the executor never names a specific kind here.
+fn project_corpus(
+    kind: &str,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, ryeos_runtime::method_wire::VerifiedItem>,
+        Vec<ryeos_runtime::method_wire::GraphEdge>,
+    ),
+    DispatchError,
+> {
+    use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, VerifiedItem};
+
+    let kind_schema =
+        ctx.engine
+            .kinds
+            .get(kind)
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: kind.to_string(),
+                detail: "corpus method dispatched for a kind with no registered schema".into(),
+            })?;
+
+    let engine_roots = ctx
+        .engine
+        .resolution_roots(Some(request.project_path.to_path_buf()));
+    let effective_parsers = ctx
+        .engine
+        .effective_parser_dispatcher(Some(request.project_path))
+        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}")))?;
+
+    let refs = ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind);
+
+    let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
+        std::collections::BTreeMap::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+
+    for cref in &refs {
+        // Tolerant per-item projection: a malformed body still yields the
+        // item (so `validate` reports it); a bad signature is a hard error
+        // (so the corpus method fails loudly rather than looking clean).
+        let projection = ryeos_engine::resolution::resolve_item_for_corpus(
+            cref,
+            &ctx.engine.kinds,
+            &effective_parsers,
+            &engine_roots,
+            &ctx.engine.trust_store,
+        )
+        .map_err(|e| {
+            DispatchError::InvalidRef(cref.to_string(), format!("corpus projection failed: {e}"))
+        })?;
+
+        items_by_ref
+            .entry(projection.item.resolved_ref.clone())
+            .or_insert_with(|| verified_from(&projection.item));
+        // Edges point at declared targets even when the target is not in
+        // `items_by_ref` (dangling) — the runtime reports those.
+        for edge in projection.reference_edges {
+            edges.push(GraphEdge {
+                from: edge.from_ref,
+                to: edge.to_ref,
+                kind: EdgeKind::References,
+                depth_from_root: None,
+            });
+        }
+    }
+
+    // The same reference can surface from multiple items — dedup.
+    edges.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    edges.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
+
+    Ok((items_by_ref, edges))
+}
+
+// ── Method dispatch terminator ─────────────────────────────────────────
+
+/// Dispatch a method-style kind by spawning its runtime with a
+/// `MethodCallEnvelope`. This is the generic method-dispatch path:
+///
+/// 1. Validate args against the method's typed spec.
 /// 2. Look up the runtime via `RuntimeRegistry::lookup_for(kind)`.
 /// 3. Run the engine's resolution pipeline for the item.
-/// 4. Project to `SingleRootPayload` (single-root ops only).
+/// 4. Project to `SingleRootPayload` (single-root methods only).
 /// 5. Mint thread record + callback token.
-/// 6. Build `BatchOpEnvelope` and spawn via lillux::run.
-/// 7. Parse `BatchOpResult` and return the output.
+/// 6. Build `MethodCallEnvelope` and spawn via lillux::run.
+/// 7. Parse `MethodCallResult` and return the output.
 ///
 /// The runtime binary (e.g. `ryeos-knowledge-runtime`) handles the
-/// actual op logic. The daemon never calls ops in-process (Rule 1).
-pub(crate) async fn dispatch_op(
-    kind: &str,
-    op_decl: &OperationDecl,
+/// actual method logic. The daemon never calls methods in-process (Rule 1).
+/// Build the method-dispatch envelope payload from the method's `scope`:
+/// a single resolved root (extends chain + references) or the whole verified
+/// corpus of the kind. Fallible (resolution pipeline, effective-trust gate,
+/// corpus build). Callers run it either as `validate_only` validation (no
+/// thread minted) or inside the post-mint guard, so a projection failure
+/// finalizes the created thread instead of orphaning the returned id.
+fn project_method_payload(
+    method_decl: &MethodDecl,
     canonical_ref: &CanonicalRef,
-    _hop_verified: Option<VerifiedItem>,
+    hop_verified: Option<&VerifiedItem>,
+    kind: &str,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    ctx: &ExecutionContext,
+    request: &DispatchRequest<'_>,
+) -> Result<Value, DispatchError> {
+    let payload = match method_decl.scope {
+        MethodScope::SingleRoot => {
+            let effective_parsers = ctx
+                .engine
+                .effective_parser_dispatcher(Some(request.project_path))
+                .map_err(|e| {
+                    DispatchError::InvalidRef(
+                        canonical_ref.to_string(),
+                        format!("parser dispatcher: {e}"),
+                    )
+                })?;
+            let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
+                canonical_ref,
+                &ctx.engine.kinds,
+                &effective_parsers,
+                engine_roots,
+                &ctx.engine.trust_store,
+                &ctx.engine.composers,
+            )
+            .map_err(|e| {
+                DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    format!("resolution pipeline failed: {e}"),
+                )
+            })?;
+
+            crate::execution::launch::enforce_effective_trust(
+                resolution_output.effective_trust_class,
+                &canonical_ref.to_string(),
+                kind,
+            )
+            .map_err(|e| DispatchError::InvalidRef(canonical_ref.to_string(), e.to_string()))?;
+
+            let single_root = project_single_root(&resolution_output)?;
+            serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?
+        }
+        MethodScope::Corpus => {
+            // A corpus method still requires the invoked ref to resolve AND
+            // verify — it authorizes/routes the call even though it does
+            // not bound the corpus. `resolve_dispatch_hop` leaves
+            // `hop_verified` as `None` when resolution/verification failed,
+            // so a missing or unverifiable requested ref must be rejected
+            // here rather than silently running over the whole corpus.
+            let root = hop_verified.ok_or_else(|| {
+                DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    "requested ref did not resolve/verify; a corpus method still requires a \
+                     valid invoked ref to authorize the call"
+                        .to_string(),
+                )
+            })?;
+            // Mirror spawn trust policy (`enforce_effective_trust`): refuse
+            // an unauthenticated root.
+            if matches!(
+                root.trust_class,
+                ryeos_engine::contracts::TrustClass::Unsigned
+            ) {
+                return Err(DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    "requested ref is Unsigned; refusing to run a corpus method on an \
+                     unauthenticated root"
+                        .to_string(),
+                ));
+            }
+
+            let (items_by_ref, edges) = project_corpus(kind, request, ctx)?;
+            serde_json::json!({ "items_by_ref": items_by_ref, "edges": edges })
+        }
+    };
+    Ok(payload)
+}
+
+pub(crate) async fn dispatch_method(
+    kind: &str,
+    method_name: &str,
+    method_decl: &MethodDecl,
+    canonical_ref: &CanonicalRef,
+    hop_verified: Option<VerifiedItem>,
     thread_profile: Option<String>,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    // 1. Validate inputs against the op's spec.
-    let validated_inputs = validate_op_inputs(request.inputs.as_ref(), op_decl)?;
+    // 1. Validate args against the method's spec. Args come from the single
+    // source of truth (`ctx.requested_call`), same as the preflight below.
+    let validated_args = validate_method_args(ctx.requested_args(), method_name, method_decl)?;
 
     // 2. Look up the runtime via registry.
     let verified_runtime = ctx.engine.runtimes.lookup_for(kind).map_err(|_| {
@@ -700,7 +937,7 @@ pub(crate) async fn dispatch_op(
         DispatchError::SchemaMisconfigured {
             kind: kind.to_string(),
             detail: format!(
-                "no runtime serves kind '{kind}' for op dispatch \
+                "no runtime serves kind '{kind}' for method dispatch \
                  (registered runtimes: [{}])",
                 serves.join(", ")
             ),
@@ -710,62 +947,83 @@ pub(crate) async fn dispatch_op(
     let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
     let executor_ref = format!("native:{bare}");
 
-    // 3. Run the engine resolution pipeline to get a full
-    //    ResolutionOutput (extends chain + references + content).
+    // Resolution roots are needed both for payload projection and for the
+    // launch/inventory step below, so compute them once at this scope.
     let engine_roots = ctx
         .engine
         .resolution_roots(Some(request.project_path.to_path_buf()));
-    let effective_parsers = ctx
-        .engine
-        .effective_parser_dispatcher(Some(request.project_path))
-        .map_err(|e| {
-            DispatchError::InvalidRef(canonical_ref.to_string(), format!("parser dispatcher: {e}"))
-        })?;
-    let resolution_output = ryeos_engine::resolution::run_resolution_pipeline(
-        canonical_ref,
-        &ctx.engine.kinds,
-        &effective_parsers,
-        &engine_roots,
-        &ctx.engine.trust_store,
-        &ctx.engine.composers,
-    )
-    .map_err(|e| {
-        DispatchError::InvalidRef(
-            canonical_ref.to_string(),
-            format!("resolution pipeline failed: {e}"),
-        )
-    })?;
 
-    crate::execution::launch::enforce_effective_trust(
-        resolution_output.effective_trust_class,
-        &canonical_ref.to_string(),
-        kind,
-    )
-    .map_err(|e| DispatchError::InvalidRef(canonical_ref.to_string(), e.to_string()))?;
+    // Payload projection (single-root resolution+trust / corpus build) is
+    // deferred via `project_method_payload`: for `validate_only` it runs
+    // below as validation; for a real dispatch it runs inside the post-mint
+    // guard, so a projection failure finalizes the created thread rather than
+    // orphaning the returned id.
 
-    // 4. Project the resolution output to a SingleRootPayload.
-    let single_root = project_single_root(&resolution_output)?;
-
-    // 5. Build the envelope payload: merge root + inputs.
-    //    The op-declared inputs are nested under an `inputs` key so
-    //    the runtime binary can deserialize them into its typed struct
-    //    (e.g. `ComposePayload { root: SingleRootPayload, inputs: ComposeInputs }`).
-    let op_name = &op_decl.name;
-    let mut payload =
-        serde_json::to_value(&single_root).map_err(|e| DispatchError::Internal(e.into()))?;
-    if let Value::Object(ref mut map) = payload {
-        map.insert("inputs".to_string(), validated_inputs);
-    }
-
-    // 6. Mint thread record + callback token.
     let thread_profile_str =
         thread_profile
             .as_deref()
             .ok_or_else(|| DispatchError::SchemaMisconfigured {
                 kind: kind.to_string(),
-                detail: "op dispatch requires execution.thread_profile".into(),
+                detail: "method dispatch requires execution.thread_profile".into(),
             })?;
-    let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+
+    // 6. Validate the launch mode up front — BEFORE the validate_only
+    //    short-circuit, so a `validate_only` request with a bad mode is
+    //    rejected rather than reported valid. Method dispatch runs the
+    //    runtime synchronously and returns its result, so it only supports
+    //    `inline`: `detached` is a known-but-unsupported capability, and
+    //    anything else is an outright invalid mode (which must not be
+    //    silently recorded on the thread or surface as an opaque internal
+    //    error).
+    match request.launch_mode {
+        "inline" => {}
+        "detached" => {
+            return Err(DispatchError::CapabilityRejected {
+                reason: "detached mode not yet supported for method dispatch".into(),
+            });
+        }
+        other => {
+            return Err(DispatchError::InvalidLaunchMode {
+                other: other.to_string(),
+            });
+        }
+    }
+
+    // 7. validate_only: run the full pre-spawn path (args validation, runtime
+    //    lookup, launch-mode check — already done — plus payload projection
+    //    incl. resolution/trust/corpus) and report the call as valid without
+    //    minting a thread or spawning the runtime. Mirrors the
+    //    subprocess/service validate paths.
+    if request.validate_only {
+        project_method_payload(
+            method_decl,
+            canonical_ref,
+            hop_verified.as_ref(),
+            kind,
+            &engine_roots,
+            ctx,
+            request,
+        )?;
+        return Ok(json!({
+            "validated": true,
+            "item_ref": canonical_ref.to_string(),
+            "kind": kind,
+            "method": method_name,
+            "executor_ref": executor_ref,
+        }));
+    }
+
+    // 8. Mint the thread record + callback token. Honor a pre-minted
+    //    thread id when the caller supplied one: the SSE/gateway source
+    //    mints the id up front so it can subscribe to the event hub
+    //    BEFORE dispatch begins — minting a fresh id here would orphan
+    //    that subscription and the stream would observe no events.
+    //    Launch mode and usage attribution are carried from the request,
+    //    not hardcoded.
+    let thread_id = request
+        .pre_minted_thread_id
+        .clone()
+        .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
     let chain_root_id = thread_id.clone(); // top-level, chain_root == self
 
     state
@@ -776,17 +1034,17 @@ pub(crate) async fn dispatch_op(
             kind: thread_profile_str.to_string(),
             item_ref: canonical_ref.to_string(),
             executor_ref: executor_ref.clone(),
-            launch_mode: "inline".to_string(),
+            launch_mode: request.launch_mode.to_string(),
             current_site_id: ctx.plan_ctx.current_site_id.clone(),
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(request.acting_principal.to_string()),
-            usage_subject: None,
-            usage_subject_asserted_by: None,
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         })
         .map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
 
-    // Generate callback token. The op child borrows the dispatch
+    // Generate callback token. The method child borrows the dispatch
     // provenance instead of minting an unprovenanced token.
     let ttl = ryeos_app::callback_token::compute_ttl(None);
     let child_provenance = request.provenance.clone_for_borrowed_child();
@@ -794,215 +1052,286 @@ pub(crate) async fn dispatch_op(
         &thread_id,
         request.project_path.to_path_buf(),
         ttl,
-        Vec::new(), // op threads have no caps for now
+        Vec::new(), // method threads have no caps for now
         child_provenance,
         None,
         Some(canonical_ref.to_string()),
     );
 
-    let callback = ryeos_runtime::envelope::EnvelopeCallback {
-        socket_path: state.config.uds_path.clone(),
-        token: cap.token.clone(),
-    };
-
-    let envelope = ryeos_runtime::op_wire::BatchOpEnvelope {
-        schema_version: 1,
-        kind: kind.to_string(),
-        op: op_name.clone(),
-        thread_id: thread_id.clone(),
-        callback,
-        project_root: request.project_path.to_path_buf(),
-        payload,
-    };
-
-    let stdin_data =
-        serde_json::to_string(&envelope).map_err(|e| DispatchError::Internal(e.into()))?;
-
-    // 7. Mint thread auth token and build env injections. The op-dispatch
-    //    subprocess needs the same daemon env vars as the normal subprocess
-    //    path: socket path, callback token, thread ID, thread auth token,
-    //    and optionally project path. System/user roots come from the
-    //    daemon-root layer, not per-spawn env.
+    // 9. Mint the thread-auth token now, so BOTH the callback and
+    //    thread-auth tokens exist before the guarded block below and are
+    //    revoked by its cleanup regardless of which post-mint step fails.
     let thread_auth = state.thread_auth.mint(
         &thread_id,
         request.acting_principal.to_string(),
         ctx.caller_scopes.clone(),
         ttl,
     );
-    let callback_token_str = cap.token.clone();
-    let thread_auth_token_str = thread_auth.token.clone();
-    let socket_path_str = state.config.uds_path.to_string_lossy().to_string();
 
-    let mut per_spawn: Vec<(String, String)> = vec![
-        ("RYEOSD_SOCKET_PATH".to_string(), socket_path_str),
-        ("RYEOSD_CALLBACK_TOKEN".to_string(), callback_token_str),
-        ("RYEOSD_THREAD_ID".to_string(), thread_id.clone()),
-        (
-            "RYEOSD_THREAD_AUTH_TOKEN".to_string(),
-            thread_auth_token_str,
-        ),
-    ];
-    if !request.project_path.as_os_str().is_empty() {
-        per_spawn.push((
-            "RYEOSD_PROJECT_PATH".to_string(),
-            request.project_path.to_string_lossy().to_string(),
-        ));
-    }
-
-    // 8. Resolve the native executor path and spawn via lillux.
-    let bundle_roots: Vec<std::path::PathBuf> = engine_roots
-        .ordered
-        .iter()
-        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-        .map(|r| {
-            r.ai_root
-                .parent()
-                .map(|pp| pp.to_path_buf())
-                .unwrap_or(r.ai_root.clone())
-        })
-        .collect();
-    let cache_root = state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state");
-    let executor_path = crate::execution::launch::resolve_native_executor_path(
-        &bundle_roots,
-        &executor_ref,
-        &cache_root,
-        &ctx.engine.trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
-    )
-    .map_err(|e| DispatchError::RuntimeMaterializationFailed {
-        executor_ref: executor_ref.clone(),
-        detail: e.to_string(),
-    })?;
-
-    let executor_path_str = executor_path.to_string_lossy().to_string();
-    let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
-        &engine_roots,
-        &state.config.app_root,
-    );
-    let envs = ryeos_app::process::build_subprocess_envs_with_roots(
-        &std::collections::BTreeMap::new(),
-        &per_spawn,
-        roots,
-    )
-    .map_err(|e| DispatchError::Internal(e.into()))?;
-    let result = tokio::task::spawn_blocking(move || {
-        lillux::run(lillux::SubprocessRequest {
-            cmd: executor_path_str,
-            args: vec![],
-            cwd: None,
-            envs,
-            stdin_data: Some(stdin_data),
-            timeout: 120.0,
-        })
-    })
-    .await
-    .map_err(|e| DispatchError::Internal(e.into()))?;
-
-    if !result.success {
-        // Try to parse a BatchOpResult from stdout for structured error.
-        if let Ok(batch_result) =
-            serde_json::from_str::<ryeos_runtime::op_wire::BatchOpResult>(&result.stdout)
-        {
-            if let Some(error) = batch_result.error {
-                // Finalize thread as failed.
-                let _ = state
-                    .threads
-                    .finalize_thread(&finalize_params(&thread_id, "failed", None));
-                return Err(map_batch_error(kind, op_name, error));
-            }
+    // 10-11. All post-mint work runs inside this guarded block. ANY failure
+    //       here — envelope serialize, native executor resolution, env
+    //       build, spawn join, or result parse — returns `Err` and still
+    //       falls through to the cleanup below, which finalizes the thread
+    //       as failed (if the runtime did not already) and revokes both
+    //       borrowed-child tokens. The runtime self-finalizes via its
+    //       callback, so on the normal path the cleanup's finalize no-ops.
+    let outcome: Result<Value, DispatchError> = async {
+        // Project the payload now — AFTER the thread row exists — so a
+        // resolution/trust/corpus failure falls through to the cleanup below
+        // and finalizes the thread as failed (no orphaned returned id).
+        let mut payload = project_method_payload(
+            method_decl,
+            canonical_ref,
+            hop_verified.as_ref(),
+            kind,
+            &engine_roots,
+            ctx,
+            request,
+        )?;
+        if let Value::Object(ref mut map) = payload {
+            map.insert("args".to_string(), validated_args);
         }
-        let _ = state
-            .threads
-            .finalize_thread(&finalize_params(&thread_id, "failed", None));
-        return Err(DispatchError::OpFailed {
-            kind: kind.to_string(),
-            op: op_name.clone(),
-            reason: format!(
-                "exit_code={}, stderr={}",
-                result.exit_code,
-                result.stderr.trim()
-            ),
-        });
-    }
 
-    // 8. Parse BatchOpResult.
-    let batch_result: ryeos_runtime::op_wire::BatchOpResult = serde_json::from_str(&result.stdout)
-        .map_err(|e| {
-            let _ = state
-                .threads
-                .finalize_thread(&finalize_params(&thread_id, "failed", None));
-            DispatchError::OpFailed {
-                kind: kind.to_string(),
-                op: op_name.clone(),
-                reason: format!("failed to parse BatchOpResult: {e}"),
-            }
+        let callback = ryeos_runtime::envelope::EnvelopeCallback {
+            socket_path: state.config.uds_path.clone(),
+            token: cap.token.clone(),
+        };
+
+        let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
+            schema_version: 1,
+            kind: kind.to_string(),
+            method: method_name.to_string(),
+            thread_id: thread_id.clone(),
+            callback,
+            project_root: request.project_path.to_path_buf(),
+            payload,
+        };
+
+        let stdin_data =
+            serde_json::to_string(&envelope).map_err(|e| DispatchError::Internal(e.into()))?;
+
+        // The method subprocess needs the same daemon env vars as the
+        // normal subprocess path: socket path, callback token, thread ID,
+        // thread auth token, and optionally project path. System/user roots
+        // come from the daemon-root layer, not per-spawn env.
+        let socket_path_str = state.config.uds_path.to_string_lossy().to_string();
+        let mut per_spawn: Vec<(String, String)> = vec![
+            ("RYEOSD_SOCKET_PATH".to_string(), socket_path_str),
+            ("RYEOSD_CALLBACK_TOKEN".to_string(), cap.token.clone()),
+            ("RYEOSD_THREAD_ID".to_string(), thread_id.clone()),
+            (
+                "RYEOSD_THREAD_AUTH_TOKEN".to_string(),
+                thread_auth.token.clone(),
+            ),
+        ];
+        if !request.project_path.as_os_str().is_empty() {
+            per_spawn.push((
+                "RYEOSD_PROJECT_PATH".to_string(),
+                request.project_path.to_string_lossy().to_string(),
+            ));
+        }
+
+        // 9. Resolve the native executor path and spawn via lillux.
+        let bundle_roots: Vec<std::path::PathBuf> = engine_roots
+            .ordered
+            .iter()
+            .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
+            .map(|r| {
+                r.ai_root
+                    .parent()
+                    .map(|pp| pp.to_path_buf())
+                    .unwrap_or(r.ai_root.clone())
+            })
+            .collect();
+        let cache_root = state
+            .config
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state");
+        let executor_path = crate::execution::launch::resolve_native_executor_path(
+            &bundle_roots,
+            &executor_ref,
+            &cache_root,
+            &ctx.engine.trust_store,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+        )
+        .map_err(|e| DispatchError::RuntimeMaterializationFailed {
+            executor_ref: executor_ref.clone(),
+            detail: e.to_string(),
         })?;
 
-    if !batch_result.success {
-        let _ = state
-            .threads
-            .finalize_thread(&finalize_params(&thread_id, "failed", None));
-        return Err(match batch_result.error {
-            Some(error) => map_batch_error(kind, op_name, error),
-            None => DispatchError::OpFailed {
+        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+            &engine_roots,
+            &state.config.app_root,
+        );
+        let envs = ryeos_app::process::build_subprocess_envs_with_roots(
+            &std::collections::BTreeMap::new(),
+            &per_spawn,
+            roots,
+        )
+        .map_err(|e| DispatchError::Internal(e.into()))?;
+        let result = tokio::task::spawn_blocking(move || {
+            lillux::run(lillux::SubprocessRequest {
+                cmd: executor_path_str,
+                args: vec![],
+                cwd: None,
+                envs,
+                stdin_data: Some(stdin_data),
+                timeout: 120.0,
+            })
+        })
+        .await
+        .map_err(|e| DispatchError::Internal(e.into()))?;
+
+        // Process the runtime result. On failure, return `Err` and let the
+        // cleanup below finalize the thread; on success the runtime already
+        // self-finalized via its callback, so only fallback-finalize.
+        if !result.success {
+            // Trust a structured error only if the runtime echoed the
+            // dispatched kind/method; otherwise fall through to a generic
+            // failure so a confused result cannot masquerade as a typed one.
+            if let Ok(batch_result) =
+                serde_json::from_str::<ryeos_runtime::method_wire::MethodCallResult>(&result.stdout)
+            {
+                if batch_result.kind == kind && batch_result.method == method_name {
+                    if let Some(error) = batch_result.error {
+                        return Err(map_method_error(kind, method_name, error));
+                    }
+                }
+            }
+            return Err(DispatchError::MethodFailed {
                 kind: kind.to_string(),
-                op: op_name.clone(),
-                reason: "runtime returned success=false with no error detail".into(),
+                method: method_name.to_string(),
+                reason: format!(
+                    "exit_code={}, stderr={}",
+                    result.exit_code,
+                    result.stderr.trim()
+                ),
+            });
+        }
+
+        let batch_result: ryeos_runtime::method_wire::MethodCallResult =
+            serde_json::from_str(&result.stdout).map_err(|e| DispatchError::MethodFailed {
+                kind: kind.to_string(),
+                method: method_name.to_string(),
+                reason: format!("failed to parse MethodCallResult: {e}"),
+            })?;
+
+        // The runtime must echo back the dispatched kind/method. A mismatch
+        // means schema/runtime skew or a confused result — never trust it.
+        if batch_result.kind != kind || batch_result.method != method_name {
+            return Err(DispatchError::MethodFailed {
+                kind: kind.to_string(),
+                method: method_name.to_string(),
+                reason: format!(
+                    "runtime returned a result for '{}/{}' but '{}/{}' was dispatched",
+                    batch_result.kind, batch_result.method, kind, method_name
+                ),
+            });
+        }
+
+        if !batch_result.success {
+            return Err(match batch_result.error {
+                Some(error) => map_method_error(kind, method_name, error),
+                None => DispatchError::MethodFailed {
+                    kind: kind.to_string(),
+                    method: method_name.to_string(),
+                    reason: "runtime returned success=false with no error detail".into(),
+                },
+            });
+        }
+
+        // Success: the runtime self-finalized via its callback. Finalize as
+        // a fallback only if that callback did not land.
+        finalize_method_thread_if_needed(
+            state,
+            &thread_id,
+            "completed",
+            batch_result.output.clone(),
+        );
+
+        Ok(json!({
+            "thread": {
+                "thread_id": thread_id.clone(),
+                "kind": thread_profile_str,
+                "item_ref": canonical_ref.to_string(),
+                "status": "completed",
             },
-        });
+            "result": batch_result.output.unwrap_or(Value::Null),
+        }))
     }
+    .await;
 
-    // Finalize thread as completed.
-    let _ = state.threads.finalize_thread(&finalize_params(
-        &thread_id,
-        "completed",
-        batch_result.output.clone(),
-    ));
+    // Cleanup on every path. If the run errored, finalize the thread as
+    // failed unless the runtime already drove it terminal; then revoke both
+    // borrowed-child tokens, mirroring the subprocess runner's guard. This
+    // covers post-mint failures (executor resolution, env build, spawn
+    // join) that return before the runtime ever touched the thread.
+    if outcome.is_err() {
+        finalize_method_thread_if_needed(state, &thread_id, "failed", None);
+    }
+    state.callback_tokens.invalidate(&cap.token);
+    state.callback_tokens.invalidate_for_thread(&thread_id);
+    state.thread_auth.invalidate(&thread_auth.token);
+    state.thread_auth.invalidate_for_thread(&thread_id);
 
-    Ok(json!({
-        "thread": {
-            "thread_id": thread_id,
-            "kind": thread_profile_str,
-            "item_ref": canonical_ref.to_string(),
-            "status": "completed",
-        },
-        "result": batch_result.output.unwrap_or(Value::Null),
-    }))
+    outcome
 }
 
-/// Map a `BatchOpError` from the runtime to a `DispatchError`.
-fn map_batch_error(
+/// Finalize a method-dispatch thread only when the runtime's callback did
+/// not already drive it terminal. Method runtimes self-finalize via the
+/// callback client (borrowed-child model); the executor finalizes only on
+/// the paths where the runtime crashed or its callback never landed. This
+/// no-ops if the thread is already terminal, so the normal path never
+/// double-finalizes.
+pub(crate) fn finalize_method_thread_if_needed(
+    state: &AppState,
+    thread_id: &str,
+    status: &str,
+    result: Option<Value>,
+) {
+    if let Ok(Some(detail)) = state.threads.get_thread(thread_id) {
+        if ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+            .is_some_and(|s| s.is_terminal())
+        {
+            return;
+        }
+    }
+    let _ = state
+        .threads
+        .finalize_thread(&finalize_params(thread_id, status, result));
+}
+
+/// Map a `MethodCallError` from the runtime to a `DispatchError`.
+fn map_method_error(
     kind: &str,
-    op: &str,
-    error: ryeos_runtime::op_wire::BatchOpError,
+    method: &str,
+    error: ryeos_runtime::method_wire::MethodCallError,
 ) -> DispatchError {
-    use ryeos_runtime::op_wire::BatchOpError;
+    use ryeos_runtime::method_wire::MethodCallError;
     match error {
-        BatchOpError::NotImplemented { phase, .. } => DispatchError::OpNotImplemented {
+        MethodCallError::NotImplemented { phase, .. } => DispatchError::MethodNotImplemented {
             kind: kind.to_string(),
-            op: op.to_string(),
+            method: method.to_string(),
             phase,
         },
-        BatchOpError::InvalidInput { reason, .. } => DispatchError::OpInvalidInput {
-            op: op.to_string(),
+        MethodCallError::InvalidArg { reason, .. } => DispatchError::MethodInvalidArg {
+            method: method.to_string(),
             reason,
         },
-        BatchOpError::UnknownOp {
+        MethodCallError::UnknownMethod {
             requested,
             declared,
             ..
-        } => DispatchError::UnknownOp {
+        } => DispatchError::UnknownMethod {
             kind: kind.to_string(),
             requested,
             declared: declared.join(", "),
         },
-        BatchOpError::OpFailed { reason } => DispatchError::OpFailed {
+        MethodCallError::MethodFailed { reason } => DispatchError::MethodFailed {
             kind: kind.to_string(),
-            op: op.to_string(),
+            method: method.to_string(),
             reason,
         },
     }
@@ -1080,29 +1409,32 @@ pub async fn dispatch_service(
                 item_ref,
                 Some("service"),
             )
-            .map_err(|e| match e.downcast_ref::<ryeos_engine::error::EngineError>() {
-                // The service item YAML is absent from every search
-                // space — the bundle shipping it is not installed.
-                // Surface the installed-bundle list instead of an
-                // opaque 500 so a remote operator can repair the
-                // deployment without source-level debugging.
-                Some(ryeos_engine::error::EngineError::ItemNotFound {
-                    searched_spaces, ..
-                }) => {
-                    let mut installed_bundles: Vec<String> = state
-                        .node_config
-                        .bundles
-                        .iter()
-                        .map(|b| b.name.clone())
-                        .collect();
-                    installed_bundles.sort();
-                    DispatchError::ServiceNotInstalled {
-                        service_ref: item_ref.to_string(),
-                        installed_bundles,
-                        searched_spaces: searched_spaces.clone(),
+            .map_err(|e| {
+                match e.downcast_ref::<ryeos_engine::error::EngineError>() {
+                    // The service item YAML is absent from every search
+                    // space — the bundle shipping it is not installed.
+                    // Surface the installed-bundle list instead of an
+                    // opaque 500 so a remote operator can repair the
+                    // deployment without source-level debugging.
+                    Some(ryeos_engine::error::EngineError::ItemNotFound {
+                        searched_spaces,
+                        ..
+                    }) => {
+                        let mut installed_bundles: Vec<String> = state
+                            .node_config
+                            .bundles
+                            .iter()
+                            .map(|b| b.name.clone())
+                            .collect();
+                        installed_bundles.sort();
+                        DispatchError::ServiceNotInstalled {
+                            service_ref: item_ref.to_string(),
+                            installed_bundles,
+                            searched_spaces: searched_spaces.clone(),
+                        }
                     }
+                    _ => DispatchError::Internal(e),
                 }
-                _ => DispatchError::Internal(e),
             })?;
             let params = service_params_with_project_path(
                 request.params.clone(),
@@ -1117,7 +1449,11 @@ pub async fn dispatch_service(
             if request.validate_only {
                 let description = verified.resolved.metadata.description.clone();
                 let input_schema = verified.resolved.metadata.extra.get("schema").cloned();
-                let endpoint = verified.resolved.metadata.extra.get("endpoint")
+                let endpoint = verified
+                    .resolved
+                    .metadata
+                    .extra
+                    .get("endpoint")
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let required_caps = ryeos_app::service_registry::extract_required_caps(
@@ -1136,17 +1472,16 @@ pub async fn dispatch_service(
                 }));
             }
 
-            let result: ServiceExecutionResult =
-                service_executor::execute_service_verified(
-                    verified,
-                    item_ref,
-                    params,
-                    ExecutionMode::Live,
-                    ctx,
-                    state,
-                    None,
-                )
-                .await?;
+            let result: ServiceExecutionResult = service_executor::execute_service_verified(
+                verified,
+                item_ref,
+                params,
+                ExecutionMode::Live,
+                ctx,
+                state,
+                None,
+            )
+            .await?;
             let envelope = serde_json::json!({
                 "thread": {
                     "thread_id": result.audit_thread_id,
@@ -1183,6 +1518,24 @@ pub(crate) fn strip_binary_ref_prefix(binary_ref: &str) -> Result<String, Dispat
         });
     }
     Ok(parts[2..].join("/"))
+}
+
+/// Terminal-path executor gate, shared by the terminal subprocess dispatcher
+/// and the accepted-launch preflight so they cannot drift. A resolved item on
+/// the terminal (DetachedOk) path that carries no `executor_id` is a bare
+/// terminator and cannot be launched as a root.
+fn require_terminal_executor_id(
+    verified: Option<&VerifiedItem>,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    if verified.is_some_and(|item| item.resolved.metadata.executor_id.is_none()) {
+        return Err(DispatchError::RootExecutorMissing {
+            item_ref: item_ref.to_string(),
+            detail: "items with no executor_id, including terminal executors such as `tool:ryeos/core/subprocess/execute`, cannot be launched as root tools. Create a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper."
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 /// **B1**: cap gate factored out for unit testing.
@@ -1453,17 +1806,10 @@ async fn dispatch_managed_subprocess(
         plan_context: ctx.plan_ctx.clone(),
     };
 
-    let extra_effective_caps = derive_manifest_runtime_caps(&resolved, ctx)?;
-
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
-    let vault_bindings = ryeos_app::vault::read_required_secrets(
-        state.vault.as_ref(),
-        acting_principal,
-        &resolved.resolved_item.metadata.required_secrets,
-        &dotenv_dirs,
-    )
-    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
-
+    // Runtime callback caps (bundle-events / runtime-vault) are minted inside
+    // `build_and_launch` from the *composed* `requires` block — after the
+    // extends-chain composer has narrowed a child directive against its parent.
+    // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         executor_ref: &executor_ref,
@@ -1472,26 +1818,29 @@ async fn dispatch_managed_subprocess(
         project_path,
         provenance: &request.provenance,
         parameters: &params,
-        vault_bindings: &vault_bindings,
-        extra_effective_caps: &extra_effective_caps,
+        metadata_required_secrets: &resolved.resolved_item.metadata.required_secrets,
+        required_envelope_fields: &verified_runtime.yaml.required_envelope_fields,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
     })
     .await
     .map_err(|e| match &e {
-        launch::BuildAndLaunchError::Materialization(
-            launch::MaterializationError::ProviderSecretMissing {
-                provider_id,
-                env_var,
-                item_ref,
-            },
-        ) => DispatchError::RequiredSecretMissing {
-            item_ref: item_ref.clone(),
-            env_var: env_var.clone(),
-            source_kind: "provider".to_string(),
-            source_name: provider_id.clone(),
-            remediation: format!("ryeos-core-tools vault put --name {env_var} --value-stdin"),
-        },
+        launch::BuildAndLaunchError::MissingSecrets { item_ref, secrets } => {
+            let first = secrets.first().expect("missing secret error has a secret");
+            let source = first.primary_source();
+            DispatchError::RequiredSecretMissing {
+                item_ref: item_ref.clone(),
+                env_var: first.name.clone(),
+                source_kind: source.kind_for_wire().to_string(),
+                source_name: source.name_for_wire(),
+                remediation: crate::dispatch_error::required_secret_remediation(&first.name),
+            }
+        }
+        launch::BuildAndLaunchError::CapabilityRejected { reason } => {
+            DispatchError::CapabilityRejected {
+                reason: reason.clone(),
+            }
+        }
         _ => {
             let msg = e.to_string();
             if msg.contains("manifest")
@@ -1678,13 +2027,7 @@ async fn dispatch_tool_subprocess(
 ) -> Result<Value, DispatchError> {
     let item_ref = current_ref.to_string();
 
-    if verified.is_some_and(|item| item.resolved.metadata.executor_id.is_none()) {
-        return Err(DispatchError::RootExecutorMissing {
-            item_ref,
-            detail: "items with no executor_id, including terminal executors such as `tool:ryeos/core/subprocess/execute`, cannot be launched as root tools. Create a wrapper tool with `executor_id: \"@subprocess\"` and a `config:` block, then execute the wrapper."
-                .into(),
-        });
-    }
+    require_terminal_executor_id(verified, &item_ref)?;
 
     let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
@@ -1741,7 +2084,8 @@ async fn dispatch_tool_subprocess(
     }
 
     let item_ref_for_error = resolved.item_ref.clone();
-    let effective_caps = derive_manifest_runtime_caps(&resolved, ctx)?;
+    let effective_caps =
+        derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, ctx)?;
 
     let required_caps =
         ryeos_app::service_registry::extract_required_caps(&resolved.resolved_item.metadata.extra);
@@ -1762,7 +2106,24 @@ async fn dispatch_tool_subprocess(
         &resolved.resolved_item.metadata.required_secrets,
         &dotenv_dirs,
     )
-    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}")))?;
+    .map_err(|e| match e {
+        ryeos_app::vault::VaultReadError::MissingSecrets { names, .. } => {
+            let env_var = names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            DispatchError::RequiredSecretMissing {
+                item_ref: item_ref_for_error.clone(),
+                env_var: env_var.clone(),
+                source_kind: "declared".to_string(),
+                source_name: "item metadata".to_string(),
+                remediation: crate::dispatch_error::required_secret_remediation(&env_var),
+            }
+        }
+        ryeos_app::vault::VaultReadError::Internal(e) => {
+            DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))
+        }
+    })?;
 
     let params = crate::execution::runner::ExecutionParams {
         resolved,
@@ -1792,110 +2153,176 @@ async fn dispatch_tool_subprocess(
                 item_ref: item_ref_for_error,
                 detail: e.to_string(),
             })?;
-        Ok(json!({
+        let mut envelope = json!({
             "thread": result.finalized_thread,
             "result": result.result,
-        }))
+        });
+        if let Some(debug) = result.debug {
+            envelope["debug"] = debug;
+        }
+        Ok(envelope)
     }
 }
 
-fn derive_manifest_runtime_caps(
-    resolved: &ResolvedExecutionRequest,
-    ctx: &ExecutionContext,
-) -> Result<Vec<String>, DispatchError> {
-    let item_ref = resolved.resolved_item.canonical_ref.to_string();
-    let effective_bundle_id = ryeos_app::callback_token::effective_bundle_id_from_item_ref(
-        &item_ref,
-    )
-    .ok_or_else(|| {
-        DispatchError::InvalidRef(
-            item_ref.clone(),
-            "manifest runtime authority requires a bundle-qualified item ref".into(),
-        )
-    })?;
-    ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
-        .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
-
-    let Some(ai_dir) = resolved_item_ai_dir(&resolved.resolved_item) else {
+/// Mint the bundle-event / runtime-vault callback caps an item is entitled to.
+///
+/// Launch-time satisfaction of the item's runtime capability *requirement
+/// contract* (`requires.capabilities.manifest`). `requires_value` is the raw
+/// `requires:` mapping from whichever source the caller trusts:
+///
+/// - **graph/directive (managed path):** the *composed* view, after the
+///   extends-chain composer has narrowed a child against its parent — so a
+///   child can never exceed the parent template.
+/// - **tool path:** the resolved item's extracted metadata (tools use the
+///   identity composer and never extend, so the leaf declaration is effective).
+///
+/// Semantics, regardless of source:
+///
+/// 1. Absent `requires:` → no caps. The signed manifest is an authority *upper
+///    bound*, never an automatic grant.
+/// 2. The requested subset must be backed by the signed generated manifest;
+///    requesting a cap the manifest does not declare fails launch.
+/// 3. Exactly the requested (manifest-backed) subset is minted.
+pub(crate) fn mint_runtime_capability_caps(
+    requires_value: Option<&Value>,
+    resolved_item: &ResolvedItem,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<Vec<String>, String> {
+    // (1) Requirement contract. No `requires:` → no runtime callback authority.
+    let Some(requires_value) = requires_value else {
         return Ok(Vec::new());
     };
-    let manifest =
-        ryeos_bundle::manifest::load_verified_manifest_yaml(&ai_dir, None, &ctx.engine.trust_store)
-            .map_err(|err| DispatchError::InvalidRef(item_ref.clone(), err.to_string()))?;
-    let Some(manifest) = manifest else {
-        return Ok(Vec::new());
-    };
-    if manifest.bundle_events.is_empty() && manifest.runtime_vault.is_empty() {
+    let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
+        .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
+    if reqs.manifest.bundle_events.is_empty() && reqs.manifest.runtime_vault.is_empty() {
         return Ok(Vec::new());
     }
+
+    // Single source of truth for the bundle identity: the resolved canonical
+    // ref. The callback token's `effective_bundle_id` is stamped from this same
+    // value (see `effective_bundle_id_for_request`), so the caps minted here and
+    // the token that carries them can never claim different bundles.
+    let effective_bundle_id = ryeos_app::callback_token::effective_bundle_id_from_item_ref(
+        &resolved_item.canonical_ref.to_string(),
+    )
+    .ok_or_else(|| {
+        "runtime capability requirements need a bundle-qualified item ref".to_string()
+    })?;
+    ryeos_state::objects::validate_bundle_identifier("bundle_id", &effective_bundle_id)
+        .map_err(|err| err.to_string())?;
+
+    // Deep, segment-grammar validation of each requested resource. The static
+    // shape (known keys, valid ops, non-empty arrays) was already enforced by
+    // `parse_runtime_requires`; this checks the bundle-id segment grammar that
+    // the cap-string scheme depends on.
+    for req in &reqs.manifest.bundle_events {
+        ryeos_state::objects::validate_bundle_identifier("event_kind", &req.event_kind)
+            .map_err(|err| err.to_string())?;
+    }
+    for req in &reqs.manifest.runtime_vault {
+        ryeos_app::vault::validate_runtime_vault_segment("namespace", &req.namespace)
+            .map_err(|err| err.to_string())?;
+    }
+
+    // (2) Authority upper bound = signed generated manifest. Requirements
+    // declared with no manifest backing them are a launch failure, not a
+    // silent mint-nothing.
+    let ai_dir = resolved_item_ai_dir(resolved_item).ok_or_else(|| {
+        "runtime capability requirements declared but item has no containing `.ai` directory"
+            .to_string()
+    })?;
+    let manifest = ryeos_bundle::manifest::load_verified_manifest_yaml(&ai_dir, None, trust_store)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| {
+            "runtime capability requirements declared but no signed bundle manifest backs them"
+                .to_string()
+        })?;
     if manifest.name != effective_bundle_id {
-        return Err(DispatchError::InvalidRef(
-            item_ref,
-            format!(
-                "runtime-cap manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
-                manifest.name, effective_bundle_id
-            ),
+        return Err(format!(
+            "runtime-cap manifest namespace mismatch: manifest name '{}' != effective bundle '{}'",
+            manifest.name, effective_bundle_id
         ));
     }
 
-    let mut caps = BTreeSet::new();
-    for decl in manifest.bundle_events {
-        ryeos_state::objects::validate_bundle_identifier("event_kind", &decl.event_kind)
-            .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
-        if decl.operations.is_empty() {
-            return Err(DispatchError::InvalidRef(
-                resolved.item_ref.clone(),
-                format!(
-                    "bundle_events declaration for '{}' must list at least one operation",
-                    decl.event_kind
-                ),
-            ));
-        }
-        for op in decl.operations {
-            match op {
-                ryeos_bundle::manifest::BundleEventOperation::Append => {
-                    caps.insert(format!(
-                        "ryeos.append.bundle-events.{effective_bundle_id}/{}",
-                        decl.event_kind
-                    ));
-                }
-                ryeos_bundle::manifest::BundleEventOperation::Scan => {
-                    caps.insert(format!(
-                        "ryeos.scan.bundle-events.{effective_bundle_id}/{}",
-                        decl.event_kind
-                    ));
-                }
-            }
-        }
+    // Manifest-declared caps form the upper bound. Cap strings come from the
+    // manifest declarations' own constructors (`runtime_authority`), so the
+    // minter and the daemon callback services share one definition.
+    let mut manifest_caps = BTreeSet::new();
+    for decl in &manifest.bundle_events {
+        manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
+    }
+    for decl in &manifest.runtime_vault {
+        manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
     }
 
-    for decl in manifest.runtime_vault {
-        ryeos_app::vault::validate_runtime_vault_segment("namespace", &decl.namespace)
-            .map_err(|err| DispatchError::InvalidRef(resolved.item_ref.clone(), err.to_string()))?;
-        if decl.operations.is_empty() {
+    // (3) Subset check + mint exactly the requested subset.
+    let requested =
+        ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, &effective_bundle_id);
+    let missing: Vec<String> = requested.difference(&manifest_caps).cloned().collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "requested runtime capabilities are not declared in the signed manifest \
+             (authority upper bound): {}",
+            missing.join(", ")
+        ));
+    }
+
+    Ok(requested.into_iter().collect())
+}
+
+/// Tool-path entry point: source the `requires` block from the resolved item's
+/// extracted metadata. Graph/directive mint from the composed/narrowed view at
+/// launch instead (see `build_and_launch`).
+///
+/// A tool has no composer to lift `requires.capabilities.declared` into
+/// `effective_caps`, and self-asserted action authority is not part of the tool
+/// surface — so a tool declaring `declared` is rejected rather than accepted and
+/// silently ignored. Only `requires.capabilities.manifest` (runtime authority,
+/// minted against the signed manifest) is honored for tools.
+/// Tools have no surface to honor self-declared action authority, so the
+/// *presence* of `requires.capabilities.declared` (even an empty list) is a
+/// category error, not an accept-and-ignore. Shared by terminal-tool dispatch
+/// and the accepted-launch preflight so both reject it before launch — a
+/// deterministic check that closes the phantom where an accepted terminal
+/// tool with invalid `requires` metadata would 202 then fail before its
+/// thread row is created.
+fn reject_tool_declared_capabilities(
+    requires: Option<&Value>,
+    item_ref: &str,
+) -> Result<(), DispatchError> {
+    if let Some(rv) = requires {
+        if rv
+            .get("capabilities")
+            .and_then(|c| c.get("declared"))
+            .is_some()
+        {
             return Err(DispatchError::InvalidRef(
-                resolved.item_ref.clone(),
-                format!(
-                    "runtime_vault declaration for '{}' must list at least one operation",
-                    decl.namespace
-                ),
-            ));
-        }
-        for op in decl.operations {
-            let verb = match op {
-                ryeos_bundle::manifest::RuntimeVaultOperation::Put => "put",
-                ryeos_bundle::manifest::RuntimeVaultOperation::Get => "get",
-                ryeos_bundle::manifest::RuntimeVaultOperation::Delete => "delete",
-                ryeos_bundle::manifest::RuntimeVaultOperation::List => "list",
-            };
-            caps.insert(format!(
-                "ryeos.{verb}.vault.{effective_bundle_id}/{}",
-                decl.namespace
+                item_ref.to_string(),
+                "tool items cannot self-declare action authority under \
+                 `requires.capabilities.declared`; only `requires.capabilities.manifest` \
+                 (manifest-backed runtime authority) is honored for tools"
+                    .into(),
             ));
         }
     }
+    Ok(())
+}
 
-    Ok(caps.into_iter().collect())
+/// Validate + mint a terminal tool's manifest runtime caps from its resolved
+/// item. Keyed on `&ResolvedItem` + `item_ref` (not the full execution
+/// request) so the accepted-launch preflight can run the EXACT same check the
+/// terminal subprocess runner does, before a thread row exists — both the
+/// `declared` category rejection and the full manifest-backed derivation
+/// (parse, bundle-id grammar, signed-manifest backing, subset check).
+fn derive_manifest_runtime_caps(
+    resolved_item: &ResolvedItem,
+    item_ref: &str,
+    ctx: &ExecutionContext,
+) -> Result<Vec<String>, DispatchError> {
+    let requires_value = resolved_item.metadata.extra.get("requires");
+    reject_tool_declared_capabilities(requires_value, item_ref)?;
+    mint_runtime_capability_caps(requires_value, resolved_item, &ctx.engine.trust_store)
+        .map_err(|reason| DispatchError::InvalidRef(item_ref.to_string(), reason))
 }
 
 fn resolved_item_ai_dir(item: &ResolvedItem) -> Option<std::path::PathBuf> {
@@ -1956,6 +2383,36 @@ pub async fn dispatch(
     let mut hops: usize = 0;
     let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
+
+    // Reject a method call (`call.method`/`call.args`) aimed at a kind that
+    // does not declare method dispatch. The method selector is control
+    // plane for method-bearing kinds only; a directive/tool/service does
+    // not interpret it, so silently ignoring it would hide a caller error.
+    // Method kinds are always invoked directly (they never sit behind an
+    // alias/delegate hop — mixed dispatch is forbidden), so the root ref's
+    // kind is authoritative here.
+    if ctx.has_requested_call() {
+        let has_methods = ctx
+            .engine
+            .kinds
+            .get(&current_ref.kind)
+            .and_then(|s| s.execution())
+            .map(|e| !e.methods.is_empty())
+            .unwrap_or(false);
+        if !has_methods {
+            return Err(DispatchError::MethodInvalidArg {
+                method: ctx
+                    .requested_method()
+                    .unwrap_or("<unspecified>")
+                    .to_string(),
+                reason: format!(
+                    "kind '{}' does not support method dispatch (no `methods` declared); \
+                     `call.method`/`call.args` are not accepted for this kind",
+                    current_ref.kind
+                ),
+            });
+        }
+    }
 
     // P1.1: root subject captured from the first hop's resolution.
     // For direct paths, root_subject IS the runtime. For indirect
@@ -2059,10 +2516,15 @@ pub async fn dispatch(
             HopAction::FollowAlias(next_ref) | HopAction::UseRegistry(next_ref) => {
                 current_ref = next_ref;
             }
-            HopAction::DispatchOp { kind, op_decl } => {
-                return dispatch_op(
+            HopAction::DispatchMethod {
+                kind,
+                method_name,
+                method_decl,
+            } => {
+                return dispatch_method(
                     &kind,
-                    &op_decl,
+                    &method_name,
+                    &method_decl,
                     &hop_ref,
                     verified,
                     thread_profile,
@@ -2071,6 +2533,214 @@ pub async fn dispatch(
                     state,
                 )
                 .await;
+            }
+        }
+    }
+}
+
+/// How a root ref's dispatch chain terminates — the basis for deciding
+/// whether accepted/background launch can honor a pre-minted thread id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootDispatchClass {
+    /// Terminal subprocess (DetachedOk lifecycle), e.g. a wrapper tool.
+    /// Honors a pre-minted thread id; requires an `executor_id` on the
+    /// resolved root item (checked during classification).
+    TerminalSubprocess,
+    /// Managed subprocess — directive/graph via runtime-registry delegate,
+    /// or a runtime invoked directly. Honors a pre-minted thread id.
+    ManagedSubprocess,
+    /// Method dispatch (e.g. `knowledge`). Honors a pre-minted thread id.
+    MethodDispatch,
+    /// In-process execution (services). Runs synchronously and does NOT
+    /// thread a pre-minted id — not eligible for accepted/background launch.
+    InProcess,
+}
+
+/// Preflight the dispatch route for accepted/background launch.
+///
+/// Walks the same hop chain as [`dispatch`] (via `resolve_dispatch_hop`)
+/// WITHOUT executing, and runs the cheap, deterministic route-level checks
+/// dispatch makes before creating the thread row — the
+/// method-call-on-non-method-kind guard, the terminal `executor_id` gate, the
+/// terminal-tool `requires.capabilities.declared` rejection, the direct
+/// `runtime:` registry-cap gate, and method-arg validation. These give a
+/// synchronous rejection for the common pre-thread failures, so they never
+/// mint a `thread_id`. The no-phantom guarantee itself is NOT carried by this
+/// preflight being exhaustive: deeper failures (method payload/corpus
+/// projection, managed launcher policy/trust) are handled by persistence-first
+/// leaf dispatch — create the thread row, then finalize it `failed` on any
+/// later failure — plus the launch-side finalize-on-error net. Returns the
+/// route class so the caller can refuse routes that cannot honor a pre-minted
+/// id (in-process services).
+///
+/// Synchronous: classification touches resolution, schema, and the authorizer
+/// only — never the executing leaf dispatchers.
+pub fn preflight_root_dispatch(
+    item_ref: &str,
+    original_root_kind: &str,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> Result<RootDispatchClass, DispatchError> {
+    const MAX_HOPS: usize = 8;
+    let mut visited: HashSet<CanonicalRef> = HashSet::new();
+    let mut hops: usize = 0;
+    let mut current_ref: CanonicalRef = CanonicalRef::parse(item_ref)
+        .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
+
+    // Mirror dispatch: a method call aimed at a kind that declares no methods
+    // is a caller error, not a silent no-op.
+    if ctx.has_requested_call() {
+        let has_methods = ctx
+            .engine
+            .kinds
+            .get(&current_ref.kind)
+            .and_then(|s| s.execution())
+            .map(|e| !e.methods.is_empty())
+            .unwrap_or(false);
+        if !has_methods {
+            return Err(DispatchError::MethodInvalidArg {
+                method: ctx
+                    .requested_method()
+                    .unwrap_or("<unspecified>")
+                    .to_string(),
+                reason: format!(
+                    "kind '{}' does not support method dispatch (no `methods` declared); \
+                     `call.method`/`call.args` are not accepted for this kind",
+                    current_ref.kind
+                ),
+            });
+        }
+    }
+
+    // Mirror dispatch's role derivation: only a direct `runtime:*` invocation
+    // carries the runtime registry caps that gate launch.
+    let role = if original_root_kind == ROOT_KIND_RUNTIME {
+        let verified = ctx
+            .engine
+            .runtimes
+            .lookup_by_ref(&current_ref)
+            .ok_or_else(|| {
+                let mut available: Vec<String> = ctx
+                    .engine
+                    .runtimes
+                    .all()
+                    .map(|r| r.canonical_ref.to_string())
+                    .collect();
+                available.sort();
+                DispatchError::SchemaMisconfigured {
+                    kind: current_ref.kind.clone(),
+                    detail: format!(
+                        "runtime '{item_ref}' not registered; registered runtimes: [{}]",
+                        available.join(", ")
+                    ),
+                }
+            })?;
+        SubprocessRole::RuntimeTarget {
+            verified_runtime: Box::new(verified.clone()),
+        }
+    } else {
+        SubprocessRole::Regular
+    };
+
+    loop {
+        if !visited.insert(current_ref.clone()) {
+            let mut visited_strs: Vec<String> = visited.iter().map(|r| r.to_string()).collect();
+            visited_strs.sort();
+            return Err(DispatchError::AliasCycle {
+                root_ref: item_ref.to_string(),
+                visited: visited_strs,
+            });
+        }
+        hops += 1;
+        if hops > MAX_HOPS {
+            return Err(DispatchError::AliasChainTooLong {
+                root_ref: item_ref.to_string(),
+                max_hops: MAX_HOPS,
+            });
+        }
+
+        let hop = resolve_dispatch_hop(&current_ref, ctx)?;
+        let VerifiedHop {
+            canonical_ref: hop_ref,
+            verified,
+            next,
+            ..
+        } = hop;
+
+        match next {
+            HopAction::Terminate(terminator, _) => match terminator {
+                TerminatorDecl::InProcess { .. } => return Ok(RootDispatchClass::InProcess),
+                TerminatorDecl::Subprocess { protocol_ref } => {
+                    let protocol =
+                        ctx.engine.protocols.require(&protocol_ref).map_err(|_| {
+                            DispatchError::ProtocolNotRegistered(protocol_ref.clone())
+                        })?;
+                    use ryeos_engine::protocol_vocabulary::LifecycleMode;
+                    match protocol.descriptor.lifecycle.mode {
+                        LifecycleMode::DetachedOk => {
+                            require_terminal_executor_id(verified.as_ref(), &hop_ref.to_string())?;
+                            // Mirror dispatch_tool_subprocess's FULL pre-thread
+                            // manifest-cap validation (declared rejection +
+                            // signed-manifest-backed mint) so an invalid tool
+                            // `requires.capabilities.{declared,manifest}` fails
+                            // before a thread_id is minted, not in the
+                            // background after 202.
+                            if let Some(v) = verified.as_ref() {
+                                derive_manifest_runtime_caps(
+                                    &v.resolved,
+                                    &hop_ref.to_string(),
+                                    ctx,
+                                )?;
+                            }
+                            return Ok(RootDispatchClass::TerminalSubprocess);
+                        }
+                        LifecycleMode::Managed => {
+                            if let SubprocessRole::RuntimeTarget { verified_runtime } = &role {
+                                enforce_runtime_caps(
+                                    &state.authorizer,
+                                    &hop_ref.to_string(),
+                                    &verified_runtime.yaml.required_caps,
+                                    &ctx.caller_scopes,
+                                )?;
+                            }
+                            return Ok(RootDispatchClass::ManagedSubprocess);
+                        }
+                    }
+                }
+            },
+            HopAction::FollowAlias(next_ref) | HopAction::UseRegistry(next_ref) => {
+                current_ref = next_ref;
+            }
+            HopAction::DispatchMethod {
+                kind,
+                method_name,
+                method_decl,
+            } => {
+                // Mirror the cheap pre-thread-creation work `dispatch_method`
+                // does before it creates the thread row — arg validation,
+                // runtime lookup, and binary_ref shape — so a method launch
+                // dispatch would reject (e.g. a missing required arg) fails
+                // here instead of returning a phantom thread_id.
+                validate_method_args(ctx.requested_args(), &method_name, &method_decl)?;
+                let verified_runtime = ctx.engine.runtimes.lookup_for(&kind).map_err(|_| {
+                    let mut serves: Vec<String> = ctx
+                        .engine
+                        .runtimes
+                        .all()
+                        .map(|r| format!("{}→{}", r.yaml.serves, r.canonical_ref))
+                        .collect();
+                    serves.sort();
+                    DispatchError::SchemaMisconfigured {
+                        kind: kind.clone(),
+                        detail: format!(
+                            "no runtime serves kind '{kind}' for method dispatch \
+                             (registered runtimes: [{}])",
+                            serves.join(", ")
+                        ),
+                    }
+                })?;
+                strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
+                return Ok(RootDispatchClass::MethodDispatch);
             }
         }
     }
@@ -2256,8 +2926,7 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(build_test_engine()),
             plan_ctx: test_plan_context(project_path),
-            requested_op: None,
-            requested_inputs: None,
+            requested_call: None,
         }
     }
 
@@ -2425,13 +3094,15 @@ metadata:
         resolved
     }
 
-    #[test]
-    fn manifest_runtime_caps_derive_exact_self_bundle_caps() {
-        let bundle = tempdir().join("example-bundle");
-        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
+    /// Build a `metadata.extra` map carrying a `requires:` block (the value is
+    /// the content of `requires:`, i.e. `{capabilities: {manifest: …}}`).
+    fn requires_extra(
+        requires: serde_json::Value,
+    ) -> std::collections::HashMap<String, serde_json::Value> {
+        std::collections::HashMap::from([("requires".to_string(), requires)])
+    }
+
+    const SELF_BUNDLE_MANIFEST: &str = r#"name: example-bundle
 version: "0.1.0"
 description: test
 provides_kinds: []
@@ -2443,34 +3114,60 @@ bundle_events:
 runtime_vault:
   - namespace: oauth
     operations: [put, get, delete, list]
-"#,
-        );
-        let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
+"#;
 
-        let caps = derive_manifest_runtime_caps(&resolved, &ctx).unwrap();
+    #[test]
+    fn requirement_mints_exact_requested_subset() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        // Manifest is the upper bound ([append, scan] + full vault); the item
+        // selects only `append` and vault `get`.
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ],
+                    "runtime_vault": [
+                        { "namespace": "oauth", "operations": ["get"] }
+                    ]
+                } }
+            })),
+        );
+
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
         assert_eq!(
             caps,
             vec![
                 "ryeos.append.bundle-events.example-bundle/example_event".to_string(),
-                "ryeos.delete.vault.example-bundle/oauth".to_string(),
                 "ryeos.get.vault.example-bundle/oauth".to_string(),
-                "ryeos.list.vault.example-bundle/oauth".to_string(),
-                "ryeos.put.vault.example-bundle/oauth".to_string(),
-                "ryeos.scan.bundle-events.example-bundle/example_event".to_string(),
-            ]
+            ],
+            "only the requested subset is minted, not the full manifest authority"
         );
     }
 
     #[test]
-    fn manifest_runtime_caps_empty_without_signed_declarations() {
+    fn no_requirement_mints_nothing_even_with_manifest_authority() {
         let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
         let ctx = test_execution_context(bundle.clone());
+        // No `requires:` → manifest authority is an upper bound, never an
+        // automatic grant.
         let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        assert!(
+            derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+                .unwrap()
+                .is_empty()
+        );
+    }
 
+    #[test]
+    fn requirement_not_backed_by_manifest_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
         write_signed_manifest(
             &bundle.join(ryeos_engine::AI_DIR),
             r#"name: example-bundle
@@ -2479,20 +3176,88 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events: []
+bundle_events:
+  - event_kind: example_event
+    operations: [append]
 "#,
         );
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        let ctx = test_execution_context(bundle.clone());
+        // Manifest grants only `append`; the item requests `scan`.
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["scan"] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not declared in the signed manifest"),
+            "got: {err}"
+        );
     }
 
     #[test]
-    fn manifest_runtime_caps_reject_manifest_namespace_mismatch_when_declared() {
+    fn requirement_runtime_vault_subset_semantics() {
         let bundle = tempdir().join("example-bundle");
-        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "runtime_vault": [
+                        { "namespace": "oauth", "operations": ["get", "put"] }
+                    ]
+                } }
+            })),
+        );
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec![
+                "ryeos.get.vault.example-bundle/oauth".to_string(),
+                "ryeos.put.vault.example-bundle/oauth".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn requirement_without_signed_manifest_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("no signed bundle manifest"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn requirement_manifest_namespace_mismatch_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
         write_signed_manifest(
-            &ai_dir,
+            &bundle.join(ryeos_engine::AI_DIR),
             r#"name: other-bundle
 version: "0.1.0"
 description: test
@@ -2505,67 +3270,56 @@ bundle_events:
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
-        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
         assert!(err.to_string().contains("namespace mismatch"), "got: {err}");
     }
 
     #[test]
-    fn manifest_runtime_caps_reject_invalid_manifest_declarations() {
+    fn requirement_rejects_unsafe_requested_segments() {
         let bundle = tempdir().join("example-bundle");
-        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
         let ctx = test_execution_context(bundle.clone());
-        let resolved = resolved_tool(&bundle, "tool:example-bundle/send");
 
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
-version: "0.1.0"
-description: test
-provides_kinds: []
-requires_kinds: []
-uses_kinds: []
-bundle_events:
-  - event_kind: ../bad
-    operations: [append]
-"#,
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "../bad", "operations": ["append"] }
+                    ]
+                } }
+            })),
         );
-        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
         assert!(err.to_string().contains("unsafe character"), "got: {err}");
 
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
-version: "0.1.0"
-description: test
-provides_kinds: []
-requires_kinds: []
-uses_kinds: []
-bundle_events:
-  - event_kind: example_event
-    operations: []
-"#,
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "runtime_vault": [
+                        { "namespace": "../bad", "operations": ["get"] }
+                    ]
+                } }
+            })),
         );
-        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
-        assert!(
-            err.to_string().contains("must list at least one operation"),
-            "got: {err}"
-        );
-
-        write_signed_manifest(
-            &ai_dir,
-            r#"name: example-bundle
-version: "0.1.0"
-description: test
-provides_kinds: []
-requires_kinds: []
-uses_kinds: []
-runtime_vault:
-  - namespace: ../bad
-    operations: [get]
-"#,
-        );
-        let err = derive_manifest_runtime_caps(&resolved, &ctx).unwrap_err();
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
         assert!(
             err.to_string().contains("must match [A-Za-z0-9_]+"),
             "got: {err}"
@@ -2573,9 +3327,266 @@ runtime_vault:
     }
 
     #[test]
+    fn requirement_with_empty_operations_fails_static_validation() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": [] }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("at least one operation"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn bundle_identity_uses_resolved_canonical_ref_not_item_ref() {
+        // Regression guard for the cap/token identity split: the requested
+        // `item_ref` is deliberately diverged from the resolved canonical ref.
+        // Both the minted caps AND the callback token's effective_bundle_id must
+        // follow the *resolved canonical ref*, never the requested alias —
+        // otherwise caps would be minted under one bundle while the token claims
+        // another.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let mut resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "bundle_events": [
+                        { "event_kind": "example_event", "operations": ["append"] }
+                    ]
+                } }
+            })),
+        );
+        // resolved_item.canonical_ref stays `example-bundle`; only the requested
+        // ref points at a different bundle.
+        resolved.item_ref = "tool:other-alias/send".to_string();
+
+        // Single source of truth: derived from the resolved canonical ref.
+        assert_eq!(
+            ryeos_app::callback_token::effective_bundle_id_for_request(&resolved).as_deref(),
+            Some("example-bundle"),
+            "token bundle identity must follow the resolved canonical ref, not item_ref"
+        );
+        // Caps are minted under that same identity.
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()]
+        );
+    }
+
+    // Minimal kind schema exercising the metadata rail (the tool path): a
+    // `requires` rule using the `path_value` extractor under the identity
+    // composer. Tools never extend, so the leaf declaration is effective and
+    // metadata extraction is the carrier (graph/directive use the composed view).
+    const METADATA_RAIL_KIND_SCHEMA_BODY: &str = r##"category: "engine/kinds/tool"
+version: "1.0.0"
+location:
+  directory: tools
+resolution: []
+effective_trust:
+  include_references: false
+execution:
+  terminator:
+    kind: subprocess
+    protocol: protocol:ryeos/core/runtime_v1
+  thread_profile:
+    name: tool_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    requires:
+      type: single
+      prim: mapping
+metadata:
+  rules:
+    name:
+      from: filename
+      required: true
+    requires:
+      from: path_value
+      key: requires
+"##;
+
+    #[test]
+    fn requires_metadata_rail_extraction_to_caps_pipeline() {
+        use ryeos_engine::kind_registry::KindRegistry;
+
+        // 1. Load the kind schema through the REAL loader so `from: path_value`
+        //    is parsed into the extractor (not a hand-built rule).
+        let kinds_dir = tempdir();
+        let tool_dir = kinds_dir.join("tool");
+        fs::create_dir_all(&tool_dir).unwrap();
+        let signed = lillux::signature::sign_content(
+            METADATA_RAIL_KIND_SCHEMA_BODY,
+            &signing_key(),
+            "#",
+            None,
+        );
+        fs::write(tool_dir.join("tool.kind-schema.yaml"), signed).unwrap();
+        let ts = trust_store();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).expect("load kind schema");
+        let schema = kinds.get("tool").expect("tool kind registered");
+
+        // 2. A real item document carrying a `requires.capabilities.manifest`
+        //    block (as a parser would produce it).
+        let item_yaml = r#"
+version: "1.0.0"
+category: example-bundle
+requires:
+  capabilities:
+    manifest:
+      bundle_events:
+        - event_kind: example_event
+          operations: [append]
+"#;
+        let parsed: serde_json::Value = serde_yaml::from_str(item_yaml).unwrap();
+
+        // 3. REAL metadata extraction: the path_value rule carries the nested
+        //    `requires` mapping verbatim into metadata.extra.
+        let metadata = ryeos_engine::kind_registry::apply_extraction_rules(
+            &parsed,
+            &schema.extraction_rules,
+            std::path::Path::new("/proj/.ai/tools/example-bundle/play.yaml"),
+            schema.directory.as_str(),
+        );
+        assert!(
+            metadata.extra.contains_key("requires"),
+            "path_value rule must surface `requires` into metadata.extra"
+        );
+
+        // 4. Feed the *extracted* metadata into the minter together with a
+        //    signed manifest. No manual metadata.extra injection.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let mut resolved = resolved_tool(&bundle, "tool:example-bundle/play");
+        resolved.resolved_item.metadata = metadata;
+
+        // 5. Exact manifest-backed subset is derived end-to-end.
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.append.bundle-events.example-bundle/example_event".to_string()],
+            "schema → extraction → manifest upper-bound → caps must yield the requested subset"
+        );
+    }
+
+    #[test]
+    fn edited_kind_schemas_carry_requires_on_the_right_rail() {
+        // Validates the ACTUAL repo schema edits. Only `tool` uses the metadata
+        // rail (`path_value`); graph + directive carry `requires` through the
+        // composed view, so they must NOT declare a `requires` metadata rule.
+        use ryeos_engine::kind_registry::{ExtractionRule, KindRegistry};
+        use ryeos_engine::trust::{PublisherTrustDoc, TrustStore, TrustedSigner};
+
+        fn workspace_root() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .find(|p| p.join("bundles").is_dir())
+                .expect("workspace root with bundles/ directory")
+                .to_path_buf()
+        }
+
+        let root = workspace_root();
+        let trust_text = fs::read_to_string(root.join(".dev-keys/PUBLISHER_DEV_TRUST.toml"))
+            .expect("read dev publisher trust doc");
+        let trust_doc =
+            PublisherTrustDoc::parse(&trust_text).expect("parse dev publisher trust doc");
+        let ts = TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: trust_doc.fingerprint.clone(),
+            verifying_key: trust_doc
+                .decode_verifying_key()
+                .expect("decode dev publisher key"),
+            label: Some(trust_doc.owner.clone()),
+        }]);
+        let schema_roots = [
+            root.join("bundles/core/.ai/node/engine/kinds"),
+            root.join("bundles/standard/.ai/node/engine/kinds"),
+        ];
+        let kinds =
+            KindRegistry::load_base(&schema_roots, &ts).expect("repo kind schemas load cleanly");
+
+        // Tool: metadata rail → `requires` extracted via path_value.
+        let tool = kinds.get("tool").expect("tool kind registered");
+        assert_eq!(
+            tool.extraction_rules.get("requires").map(|r| &r.extractor),
+            Some(&ExtractionRule::PathValue {
+                key: "requires".into()
+            }),
+            "tool must extract `requires` via path_value"
+        );
+
+        // Graph + directive: composed-view rail → NO `requires` metadata rule.
+        for kind in ["graph", "directive"] {
+            let schema = kinds
+                .get(kind)
+                .unwrap_or_else(|| panic!("{kind} kind registered"));
+            assert!(
+                !schema.extraction_rules.contains_key("requires"),
+                "{kind} must NOT carry `requires` on the metadata rail (it uses the composed view)"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_declared_action_authority_rejected() {
+        // Tools have no surface to honor self-declared action authority — the
+        // `declared` *key's presence* is rejected, not silently ignored. Both a
+        // populated list and an empty `declared: []` fail.
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        for declared in [json!(["ryeos.execute.tool.echo"]), json!([])] {
+            let resolved = resolved_tool_with_extra(
+                &bundle,
+                "tool:example-bundle/send",
+                requires_extra(json!({ "capabilities": { "declared": declared } })),
+            );
+            let err =
+                derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("cannot self-declare action authority"),
+                "declared={declared}: got {err}"
+            );
+        }
+    }
+
+    #[test]
     fn direct_tool_required_caps_do_not_become_callback_caps() {
         let bundle = tempdir().join("example-bundle");
         let ctx = test_execution_context(bundle.clone());
+        // `required_caps` is caller-side invoke authorization, not a runtime
+        // requirement — it must never mint callback caps.
         let resolved = resolved_tool_with_extra(
             &bundle,
             "tool:example-bundle/send",
@@ -2585,9 +3596,11 @@ runtime_vault:
             )]),
         );
 
-        assert!(derive_manifest_runtime_caps(&resolved, &ctx)
-            .unwrap()
-            .is_empty());
+        assert!(
+            derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // P1.4: tests for `lookup_runtime_for_dispatch` were removed when
@@ -2596,6 +3609,23 @@ runtime_vault:
     // (covered by `runtime_registry` integration tests) and
     // `dispatch_native_runtime` consumes that owned value, so the
     // per-call lookup path no longer exists.
+
+    #[test]
+    fn reject_tool_declared_capabilities_rejects_declared_key() {
+        let requires = serde_json::json!({ "capabilities": { "declared": [] } });
+        let err = reject_tool_declared_capabilities(Some(&requires), "tool:x/y").unwrap_err();
+        assert!(matches!(err, DispatchError::InvalidRef(..)));
+        assert!(err.to_string().contains("declared"));
+    }
+
+    #[test]
+    fn reject_tool_declared_capabilities_allows_manifest_or_absent() {
+        // manifest-only requires is fine
+        let manifest = serde_json::json!({ "capabilities": { "manifest": ["a"] } });
+        assert!(reject_tool_declared_capabilities(Some(&manifest), "tool:x/y").is_ok());
+        // no requires at all is fine
+        assert!(reject_tool_declared_capabilities(None, "tool:x/y").is_ok());
+    }
 
     #[test]
     fn strip_binary_ref_prefix_strips_triple() {
@@ -2783,8 +3813,7 @@ runtime_vault:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx,
-            requested_op: None,
-            requested_inputs: None,
+            requested_call: None,
         };
         // `unknown` kind has no schema; only `runtime` was loaded.
         // For non-runtime kinds the resolver tries engine.resolve()
@@ -2803,31 +3832,53 @@ runtime_vault:
         );
     }
 
-    // ── Op dispatch unit tests ───────────────────────────────────────
+    // ── Method dispatch unit tests ───────────────────────────────────
 
     use axum::http::StatusCode;
     use ryeos_engine::kind_registry::{
-        InputDecl, InputType, OperationDecl, OperationDispatch, SideEffectClass,
+        ArgDecl, ArgType, ExecutionSchema, MethodDecl, MethodDispatchDecl, MethodDispatchVia,
+        MethodScope,
     };
     use ryeos_engine::resolution::{
         ResolutionEdge, ResolutionOutput, ResolutionStepName, ResolvedAncestor,
         TrustClass as EngineTrustClass,
     };
-    use ryeos_runtime::op_wire::{BatchOpError, TrustClass as WireTrustClass};
+    use ryeos_runtime::method_wire::{MethodCallError, TrustClass as WireTrustClass};
     use std::collections::BTreeMap;
 
-    fn make_op(name: &str, inputs: BTreeMap<String, InputDecl>) -> OperationDecl {
-        OperationDecl {
-            name: name.to_string(),
-            side_effects: SideEffectClass::None,
-            dispatch: OperationDispatch::RuntimeRegistry,
-            inputs,
+    fn make_method(args: BTreeMap<String, ArgDecl>) -> MethodDecl {
+        MethodDecl {
+            scope: MethodScope::default(),
+            args,
         }
     }
 
-    fn string_input(required: bool) -> InputDecl {
-        InputDecl {
-            ty: InputType::String,
+    /// Build a method-bearing `ExecutionSchema` from method names + an
+    /// optional default, so the `resolve_requested_method` tests exercise
+    /// the real lookup path.
+    fn exec_with_methods(names: &[&str], default: Option<&str>) -> ExecutionSchema {
+        let mut methods = BTreeMap::new();
+        for n in names {
+            methods.insert(n.to_string(), make_method(BTreeMap::new()));
+        }
+        ExecutionSchema {
+            aliases: std::collections::HashMap::new(),
+            alias_max_depth: 8,
+            terminator: None,
+            delegate: None,
+            thread_profile: None,
+            method_dispatch: Some(MethodDispatchDecl {
+                via: MethodDispatchVia::RuntimeRegistry,
+                default: default.map(|s| s.to_string()),
+            }),
+            methods,
+            launch_augmentations: Vec::new(),
+        }
+    }
+
+    fn string_arg(required: bool) -> ArgDecl {
+        ArgDecl {
+            ty: ArgType::String,
             required,
             default: None,
             enum_values: None,
@@ -2836,9 +3887,9 @@ runtime_vault:
         }
     }
 
-    fn integer_input(required: bool, default: Option<i64>) -> InputDecl {
-        InputDecl {
-            ty: InputType::Integer,
+    fn integer_arg(required: bool, default: Option<i64>) -> ArgDecl {
+        ArgDecl {
+            ty: ArgType::Integer,
             required,
             default: default.map(|v| json!(v)),
             enum_values: None,
@@ -2847,47 +3898,70 @@ runtime_vault:
         }
     }
 
-    // ── resolve_requested_op ─────────────────────────────────────────
+    // ── resolve_requested_method ─────────────────────────────────────────
 
     #[test]
-    fn resolve_requested_op_explicit_known() {
-        let ops = vec![make_op("compose", BTreeMap::new())];
-        let r = resolve_requested_op(Some("compose"), &None, &ops, "knowledge");
+    fn resolve_requested_method_explicit_known() {
+        let exec = exec_with_methods(&["compose"], None);
+        let r = resolve_requested_method(Some("compose"), &exec, "knowledge");
         assert!(r.is_ok());
-        assert_eq!(r.unwrap().name, "compose");
+        assert_eq!(r.unwrap().0, "compose");
     }
 
     #[test]
-    fn resolve_requested_op_explicit_unknown_lists_declared() {
-        let ops = vec![
-            make_op("compose", BTreeMap::new()),
-            make_op("query", BTreeMap::new()),
-        ];
-        let err = resolve_requested_op(Some("bogus"), &None, &ops, "knowledge")
-            .expect_err("unknown op must error");
+    fn resolve_requested_method_explicit_unknown_lists_declared() {
+        let exec = exec_with_methods(&["compose", "query"], None);
+        let err = resolve_requested_method(Some("bogus"), &exec, "knowledge")
+            .expect_err("unknown method must error");
         let msg = err.to_string();
-        assert!(msg.contains("bogus"), "must name requested op, got: {msg}");
+        assert!(
+            msg.contains("bogus"),
+            "must name requested method, got: {msg}"
+        );
         assert!(msg.contains("compose"), "must list compose, got: {msg}");
         assert!(msg.contains("query"), "must list query, got: {msg}");
         assert!(
-            matches!(err, DispatchError::UnknownOp { .. }),
-            "must be UnknownOp variant"
+            matches!(err, DispatchError::UnknownMethod { .. }),
+            "must be UnknownMethod variant"
         );
     }
 
     #[test]
-    fn resolve_requested_op_falls_back_to_default() {
-        let ops = vec![make_op("compose", BTreeMap::new())];
-        let default = Some("compose".to_string());
-        let r = resolve_requested_op(None, &default, &ops, "knowledge");
-        assert!(r.is_ok());
-        assert_eq!(r.unwrap().name, "compose");
+    fn resolve_requested_method_rejects_augmentation_private_compose_positions() {
+        // `compose_positions` is a knowledge runtime handler used only by
+        // the compose_context_positions launch augmentation. It must not be
+        // accepted as a generic requested method unless the kind schema
+        // declares it in `methods`.
+        let exec = exec_with_methods(&["compose", "query", "graph", "validate"], None);
+        let err = resolve_requested_method(Some("compose_positions"), &exec, "knowledge")
+            .expect_err("augmentation-private handler must be rejected generically");
+        assert!(
+            matches!(
+                err,
+                DispatchError::UnknownMethod {
+                    ref requested,
+                    ref declared,
+                    ..
+                } if requested == "compose_positions"
+                    && !declared.contains("compose_positions")
+            ),
+            "must reject compose_positions as undeclared, got: {err:?}"
+        );
+        assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
-    fn resolve_requested_op_no_request_no_default_is_misconfigured() {
-        let ops = vec![make_op("compose", BTreeMap::new())];
-        let err = resolve_requested_op(None, &None, &ops, "knowledge")
+    fn resolve_requested_method_falls_back_to_default() {
+        let exec = exec_with_methods(&["compose"], Some("compose"));
+        let r = resolve_requested_method(None, &exec, "knowledge");
+        assert!(r.is_ok());
+        assert_eq!(r.unwrap().0, "compose");
+    }
+
+    #[test]
+    fn resolve_requested_method_no_request_no_default_is_misconfigured() {
+        let exec = exec_with_methods(&["compose"], None);
+        let err = resolve_requested_method(None, &exec, "knowledge")
             .expect_err("missing default must error");
         assert!(
             matches!(err, DispatchError::SchemaMisconfigured { .. }),
@@ -2896,33 +3970,41 @@ runtime_vault:
     }
 
     #[test]
-    fn resolve_requested_op_empty_ops_list() {
-        let err = resolve_requested_op(Some("anything"), &None, &[], "tool")
-            .expect_err("empty ops must error");
-        assert!(matches!(err, DispatchError::UnknownOp { declared, .. } if declared.is_empty()));
+    fn resolve_requested_method_empty_methods() {
+        let exec = exec_with_methods(&[], None);
+        let err = resolve_requested_method(Some("anything"), &exec, "tool")
+            .expect_err("empty methods must error");
+        assert!(
+            matches!(err, DispatchError::UnknownMethod { declared, .. } if declared.is_empty())
+        );
     }
 
-    // ── validate_op_inputs ───────────────────────────────────────────
+    // ── validate_method_args ──────────────────────────────────────────
 
     #[test]
-    fn validate_op_inputs_all_required_present() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_all_required_present() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello"})), &op);
+        let r = validate_method_args(Some(&json!({"question": "hello"})), "ask", &method);
         assert!(r.is_ok());
         let val = r.unwrap();
         assert_eq!(val["question"], "hello");
     }
 
     #[test]
-    fn validate_op_inputs_missing_required() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_missing_required() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let err = validate_op_inputs(Some(&json!({"other": "val"})), &op)
+        let err = validate_method_args(Some(&json!({"question": null})), "ask", &method)
+            .expect_err("wrong-typed required must error");
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
+
+        // Truly absent required arg is also rejected.
+        let err = validate_method_args(Some(&json!({})), "ask", &method)
             .expect_err("missing required must error");
         let msg = err.to_string();
         assert!(
@@ -2930,84 +4012,178 @@ runtime_vault:
             "must name missing field, got: {msg}"
         );
         assert!(
-            matches!(err, DispatchError::OpInvalidInput { .. }),
-            "must be OpInvalidInput variant"
+            matches!(err, DispatchError::MethodInvalidArg { .. }),
+            "must be MethodInvalidArg variant"
         );
     }
 
     #[test]
-    fn validate_op_inputs_optional_default_filled() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        inputs.insert("max_tokens".to_string(), integer_input(false, Some(42)));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_unknown_arg_rejected() {
+        // Strict contract: an arg the method does not declare is rejected.
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello"})), &op).unwrap();
+        let err =
+            validate_method_args(Some(&json!({"question": "hi", "bogus": 1})), "ask", &method)
+                .expect_err("undeclared arg must error");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown arg 'bogus'"), "got: {msg}");
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
+    }
+
+    #[test]
+    fn validate_method_args_optional_default_filled() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        args.insert("max_tokens".to_string(), integer_arg(false, Some(42)));
+        let method = make_method(args);
+
+        let r = validate_method_args(Some(&json!({"question": "hello"})), "ask", &method).unwrap();
         assert_eq!(r["max_tokens"], 42, "default must be filled");
     }
 
     #[test]
-    fn validate_op_inputs_optional_with_explicit_value() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        inputs.insert("max_tokens".to_string(), integer_input(false, Some(42)));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_rejects_invalid_default() {
+        // A schema default that violates its own declaration must be caught
+        // before it reaches the runtime, not silently inserted.
+        let mut decl = integer_arg(false, Some(0));
+        decl.min = Some(1);
+        let mut args = BTreeMap::new();
+        args.insert("limit".to_string(), decl);
+        let method = make_method(args);
 
-        let r = validate_op_inputs(Some(&json!({"question": "hello", "max_tokens": 100})), &op)
-            .unwrap();
+        let err = validate_method_args(None, "query", &method)
+            .expect_err("an out-of-range default must error");
+        assert!(err.to_string().contains(">= 1"), "got: {err}");
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
+    }
+
+    #[test]
+    fn validate_method_args_optional_with_explicit_value() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        args.insert("max_tokens".to_string(), integer_arg(false, Some(42)));
+        let method = make_method(args);
+
+        let r = validate_method_args(
+            Some(&json!({"question": "hello", "max_tokens": 100})),
+            "ask",
+            &method,
+        )
+        .unwrap();
         assert_eq!(r["max_tokens"], 100, "explicit value must override default");
     }
 
     #[test]
-    fn validate_op_inputs_wrong_type() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("question".to_string(), string_input(true));
-        let op = make_op("ask", inputs);
+    fn validate_method_args_wrong_type() {
+        let mut args = BTreeMap::new();
+        args.insert("question".to_string(), string_arg(true));
+        let method = make_method(args);
 
-        let err = validate_op_inputs(Some(&json!({"question": 123})), &op)
+        let err = validate_method_args(Some(&json!({"question": 123})), "ask", &method)
             .expect_err("wrong type must error");
         assert!(
-            matches!(err, DispatchError::OpInvalidInput { .. }),
-            "must be OpInvalidInput variant, got: {err:?}"
+            matches!(err, DispatchError::MethodInvalidArg { .. }),
+            "must be MethodInvalidArg variant, got: {err:?}"
         );
     }
 
     #[test]
-    fn validate_op_inputs_non_object_rejected() {
-        let op = make_op("ask", BTreeMap::new());
-        let err = validate_op_inputs(Some(&json!("not an object")), &op)
+    fn validate_method_args_non_object_rejected() {
+        let method = make_method(BTreeMap::new());
+        let err = validate_method_args(Some(&json!("not an object")), "ask", &method)
             .expect_err("non-object must error");
         let msg = err.to_string();
         assert!(msg.contains("must be an object"), "got: {msg}");
     }
 
     #[test]
-    fn validate_op_inputs_none_uses_defaults() {
-        let mut inputs = BTreeMap::new();
-        inputs.insert("count".to_string(), integer_input(false, Some(10)));
-        let op = make_op("list", inputs);
+    fn validate_method_args_none_uses_defaults() {
+        let mut args = BTreeMap::new();
+        args.insert("count".to_string(), integer_arg(false, Some(10)));
+        let method = make_method(args);
 
-        let r = validate_op_inputs(None, &op).unwrap();
-        assert_eq!(
-            r["count"], 10,
-            "default must be applied when inputs is None"
+        let r = validate_method_args(None, "list", &method).unwrap();
+        assert_eq!(r["count"], 10, "default must be applied when args is None");
+    }
+
+    // ── validate_method_args: enum / min / array items ────────────────
+
+    fn string_array_arg() -> ArgDecl {
+        ArgDecl {
+            ty: ArgType::Array,
+            required: false,
+            default: None,
+            enum_values: None,
+            min: None,
+            items: Some(Box::new(string_arg(false))),
+        }
+    }
+
+    #[test]
+    fn validate_method_args_array_items_type_enforced() {
+        let mut args = BTreeMap::new();
+        args.insert("roots".to_string(), string_array_arg());
+        let method = make_method(args);
+
+        // All-string array passes.
+        assert!(
+            validate_method_args(Some(&json!({"roots": ["a", "b"]})), "validate", &method).is_ok()
+        );
+
+        // A non-string element is rejected, naming the index.
+        let err = validate_method_args(Some(&json!({"roots": ["a", 7]})), "validate", &method)
+            .expect_err("non-string array element must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("roots[1]"),
+            "must name the bad index, got: {msg}"
         );
     }
 
-    // ── map_batch_error ──────────────────────────────────────────────
+    #[test]
+    fn validate_method_args_enum_enforced() {
+        let mut decl = string_arg(false);
+        decl.enum_values = Some(vec!["lexical".into(), "semantic".into()]);
+        let mut args = BTreeMap::new();
+        args.insert("mode".to_string(), decl);
+        let method = make_method(args);
+
+        assert!(validate_method_args(Some(&json!({"mode": "lexical"})), "query", &method).is_ok());
+        let err = validate_method_args(Some(&json!({"mode": "fuzzy"})), "query", &method)
+            .expect_err("out-of-enum value must error");
+        assert!(err.to_string().contains("must be one of"), "got: {err}");
+    }
 
     #[test]
-    fn map_batch_error_not_implemented_preserves_phase() {
-        let err = map_batch_error(
+    fn validate_method_args_min_enforced() {
+        let mut decl = integer_arg(false, None);
+        decl.min = Some(1);
+        let mut args = BTreeMap::new();
+        args.insert("limit".to_string(), decl);
+        let method = make_method(args);
+
+        assert!(validate_method_args(Some(&json!({"limit": 5})), "query", &method).is_ok());
+        let err = validate_method_args(Some(&json!({"limit": 0})), "query", &method)
+            .expect_err("below-min value must error");
+        assert!(err.to_string().contains(">= 1"), "got: {err}");
+    }
+
+    // ── map_method_error ──────────────────────────────────────────────
+
+    #[test]
+    fn map_method_error_not_implemented_preserves_phase() {
+        let err = map_method_error(
             "knowledge",
             "query",
-            BatchOpError::NotImplemented {
-                op: "query".into(),
+            MethodCallError::NotImplemented {
+                method: "query".into(),
                 phase: 3,
             },
         );
         assert!(
-            matches!(err, DispatchError::OpNotImplemented { phase: 3, .. }),
+            matches!(err, DispatchError::MethodNotImplemented { phase: 3, .. }),
             "phase must be preserved"
         );
         // HTTP mapping: BAD_GATEWAY (502)
@@ -3015,71 +4191,71 @@ runtime_vault:
     }
 
     #[test]
-    fn map_batch_error_invalid_input() {
-        let err = map_batch_error(
+    fn map_method_error_invalid_arg() {
+        let err = map_method_error(
             "knowledge",
             "compose",
-            BatchOpError::InvalidInput {
-                op: "compose".into(),
+            MethodCallError::InvalidArg {
+                method: "compose".into(),
                 field: Some("token_budget".into()),
                 reason: "must be positive".into(),
             },
         );
-        assert!(matches!(err, DispatchError::OpInvalidInput { .. }));
+        assert!(matches!(err, DispatchError::MethodInvalidArg { .. }));
         // HTTP mapping: BAD_REQUEST (400)
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
-    fn map_batch_error_unknown_op() {
-        let err = map_batch_error(
+    fn map_method_error_unknown_method() {
+        let err = map_method_error(
             "knowledge",
             "delete",
-            BatchOpError::UnknownOp {
+            MethodCallError::UnknownMethod {
                 kind: "knowledge".into(),
                 requested: "delete".into(),
                 declared: vec!["compose".into(), "query".into()],
             },
         );
         assert!(
-            matches!(err, DispatchError::UnknownOp { ref requested, ref declared, .. }
+            matches!(err, DispatchError::UnknownMethod { ref requested, ref declared, .. }
             if requested == "delete" && declared.contains("compose"))
         );
         assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
-    fn map_batch_error_op_failed() {
-        let err = map_batch_error(
+    fn map_method_error_method_failed() {
+        let err = map_method_error(
             "knowledge",
             "compose",
-            BatchOpError::OpFailed {
+            MethodCallError::MethodFailed {
                 reason: "OOM".into(),
             },
         );
-        assert!(matches!(err, DispatchError::OpFailed { ref reason, .. } if reason == "OOM"));
+        assert!(matches!(err, DispatchError::MethodFailed { ref reason, .. } if reason == "OOM"));
         assert_eq!(err.http_status(), StatusCode::BAD_GATEWAY);
     }
 
     #[test]
-    fn map_batch_error_not_implemented_is_not_op_failed() {
-        // Critical assertion: NotImplemented must produce OpNotImplemented,
-        // NOT OpFailed (which would lose the phase information).
-        let err = map_batch_error(
+    fn map_method_error_not_implemented_is_not_method_failed() {
+        // Critical assertion: NotImplemented must produce MethodNotImplemented,
+        // NOT MethodFailed (which would lose the phase information).
+        let err = map_method_error(
             "knowledge",
             "query",
-            BatchOpError::NotImplemented {
-                op: "query".into(),
+            MethodCallError::NotImplemented {
+                method: "query".into(),
                 phase: 5,
             },
         );
         assert!(
-            !matches!(err, DispatchError::OpFailed { .. }),
-            "NotImplemented must NOT map to OpFailed — phase info would be lost"
+            !matches!(err, DispatchError::MethodFailed { .. }),
+            "NotImplemented must NOT map to MethodFailed — phase info would be lost"
         );
         assert!(
-            matches!(err, DispatchError::OpNotImplemented { phase: 5, .. }),
-            "NotImplemented must map to OpNotImplemented with correct phase"
+            matches!(err, DispatchError::MethodNotImplemented { phase: 5, .. }),
+            "NotImplemented must map to MethodNotImplemented with correct phase"
         );
     }
 
@@ -3163,7 +4339,7 @@ runtime_vault:
         assert_eq!(payload.edges[0].to, "directive:mid");
         assert_eq!(
             payload.edges[0].kind,
-            ryeos_runtime::op_wire::EdgeKind::Extends
+            ryeos_runtime::method_wire::EdgeKind::Extends
         );
         assert_eq!(payload.edges[0].depth_from_root, Some(1));
 
@@ -3209,7 +4385,7 @@ runtime_vault:
         assert_eq!(payload.edges[0].to, "knowledge:other");
         assert_eq!(
             payload.edges[0].kind,
-            ryeos_runtime::op_wire::EdgeKind::References
+            ryeos_runtime::method_wire::EdgeKind::References
         );
         assert_eq!(
             payload.edges[0].depth_from_root, None,

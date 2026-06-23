@@ -1,0 +1,23 @@
+# ryeos:signed:2026-06-19T05:40:59Z:0a66cf33347404bc175a01464da568f29c8057cbd3d07c854b6992bb1cae73e6:m1Fm4gcC+kvnyprwjKfj8AWMNloZbYTsjLmoHqmpub1/QdfYty8zz+fzdz5LnAm6NlDa+fqFce7Tm1Vd+NMIAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- graph
+- validate
+description: "Statically validate a graph (structure, edges, references, ${inputs.*} declarations) without executing it. Returns {valid, errors, warnings}."
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+defaults:
+  validate: true
+dispatch:
+  kind: direct_execute_item_ref
+  item_ref_arg: item_ref
+  availability: both
+project:
+  resolution: optional
+  default: discover_upward_ai
+  no_project_flag: true
+  request_project_path: true
+parameter_binding:
+  mode: tail_object
+  flag_key_normalization: hyphen_to_underscore

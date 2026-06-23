@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-19T05:40:59Z:82eaa3b5c93e595fa6260c78526ce285003ae649f45d45ff7d1d612dcc16469b:ueqI8GYquN6xIT5pYPZxGlTxLKFux2lf5RRngnbasBdUKw+s4oHDEWYSIJFAvSCi64bNE4FAFrP0hXCzN9cDDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- tool
+- env-check
+description: Report which source would satisfy each declared secret of an item, without running it
+forms:
+- slots:
+  - field: item_ref
+    matcher: canonical_ref
+project:
+  resolution: required
+  bind_parameter: project_path
+dispatch:
+  kind: execute_ref
+  execute: service:tool/env-check

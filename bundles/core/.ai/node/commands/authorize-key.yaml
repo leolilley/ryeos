@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:4fdcd3d3494f4b3c9dee94594c9b9e106ec4a77b22703c035cb538e0fe230fde:zRp3XO0UdWJdrxyP5h41i1rcbuVbU1aygiG9QNiEyfIWWSldqjIkEH9r6lzk2FKRcLFccvPyp1upJkeTiaQfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: authorize-key
+# ryeos:signed:2026-06-19T05:40:59Z:420d259ecd1230947bbe94eac307f8c86da51c5202bea17dbca5f000374c7646:Wq9osqX9hhmL8j2uxCKOwoRKRZ9ol0qH4jQCuhAnWG3OGe/99JLOt/0JNIWUpwUO/ych+wlcJ6j7EIQB9ajxDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - authorize-key
 description: Authorize a key with scoped capabilities

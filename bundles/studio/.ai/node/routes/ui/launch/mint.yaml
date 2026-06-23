@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:15c316b040c670c31ae4abe636b99e67330bb88d135b7d7fc14ffaae3720b426:jhZWnq7DRuGVaIdKZxDn6RFNvd6j//XXdJrd05fwP1Ime0XrrRtSmY12/Zidwd0APkLReoCxdAopB8hxjnffCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes/ui/launch
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:c647b12737dada5e582973f8cb027407bc631056a1f82099133fa658b1b353b4:hfv2sv7jIOMCVMY5uyukdwTEpbdeR0NoRLf2t6hs+54I7aIkd63cvIb9putMwnbZAono0rrx5pAsmPmnQfLHDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: ui/api/launch/mint
 path: /ui/api/launch/mint
 methods:

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-17T01:35:08Z:31bf3332b5490431fea83144e9bfe567322875a89b8c5fe5ab08237f5b5e51fe:N4+mZV87HjXlqGyAO46A0+NYtlHUHJGzAE+46ywIzTp+bX3+8FVvLAQMYX/alMFwScRf8ri2XIiSEfATwVnVDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: graph-topology
+version: "1.0.0"
+description: >-
+  The RyeOS topology as a 3D scene — local node, projects, services, and
+  their links — built by the engine from live topology data. Selecting it
+  as a center tile renders the map. The graph is content (a `graph`
+  widget), drawn by the one generic scene renderer; it is not a renderer
+  case. New topology views are new view items, never engine code.
+
+widget: graph

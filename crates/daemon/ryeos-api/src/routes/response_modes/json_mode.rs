@@ -2,7 +2,10 @@
 //!
 //! The mode holds a compiled `CompiledRouteInvocation` that resolves to a
 //! `Json` result. At dispatch time it interpolates `source_config`, calls
-//! the invoker, and frames the result as HTTP JSON (200 or 404).
+//! the invoker, and frames the result as HTTP JSON. A non-null result is 200.
+//! A null result is treated as "absent resource" → 404 for reads (GET), but as
+//! a fault → 500 for mutations (non-GET), where a null is a wrong dispatch
+//! target or handler bug rather than a legitimate not-found.
 //!
 //! Supported source kinds:
 //! - `service:` — in-process handler (flat source_config as params)
@@ -36,6 +39,9 @@ pub struct JsonMode {
 pub struct CompiledJsonMode {
     /// The compiled service invoker.
     invoker: Arc<dyn CompiledRouteInvocation>,
+    /// The canonical source ref (e.g. `service:project/apply-snapshot`),
+    /// retained for diagnostic logging of null/404 results.
+    source_ref: String,
     /// The source_config template for runtime interpolation.
     source_config_template: serde_json::Value,
     /// Whether the route declares `request.body: json`. When true and
@@ -135,6 +141,7 @@ impl ResponseMode for JsonMode {
 
         Ok(Arc::new(CompiledJsonMode {
             invoker,
+            source_ref: source_str.to_string(),
             source_config_template: raw.response.source_config.clone(),
             body_is_json: matches!(raw.request.body, ryeos_app::route_raw::RawRequestBody::Json),
         }))
@@ -173,6 +180,11 @@ impl CompiledResponseMode for CompiledJsonMode {
             interpolation::interpolate_path(&self.source_config_template, &ctx.captures)?
         };
 
+        // Captured before `ctx.request_parts` is consumed by `inv_ctx`, for
+        // diagnostic logging and the GET-vs-mutation null policy below.
+        let request_method = ctx.request_parts.method.clone();
+        let request_uri = ctx.request_parts.uri.clone();
+
         let inv_ctx = RouteInvocationContext {
             route_id: compiled.id.clone().into(),
             method: ctx.request_parts.method,
@@ -198,11 +210,42 @@ impl CompiledResponseMode for CompiledJsonMode {
         match result {
             RouteInvocationResult::Json(value) => {
                 if value.is_null() {
-                    Ok((
-                        StatusCode::NOT_FOUND,
-                        axum::Json(serde_json::json!({ "error": "not found" })),
-                    )
-                        .into_response())
+                    // A null result is a legitimate "absent resource" only for
+                    // reads. GET → 404. For a mutation (any non-GET) a null is
+                    // almost always a wrong dispatch target or a handler bug, not
+                    // a real not-found — returning 404 there makes the failure
+                    // indistinguishable from "route not loaded" (the dispatcher
+                    // emits the same body). Return 500 with an explicit message so
+                    // the incident self-identifies instead of looking like drift.
+                    if request_method == axum::http::Method::GET {
+                        // debug!, not warn!: a null GET result is the normal
+                        // "resource absent" path (e.g. a missing thread), not an
+                        // incident.
+                        tracing::debug!(
+                            route_id = %compiled.id,
+                            method = %request_method,
+                            uri = %request_uri,
+                            source = %self.source_ref,
+                            "json route source returned null; mapping to HTTP 404"
+                        );
+                        Ok((
+                            StatusCode::NOT_FOUND,
+                            axum::Json(serde_json::json!({ "error": "not found" })),
+                        )
+                            .into_response())
+                    } else {
+                        tracing::error!(
+                            route_id = %compiled.id,
+                            method = %request_method,
+                            uri = %request_uri,
+                            source = %self.source_ref,
+                            "json route source returned null for a non-GET (mutation) route; returning HTTP 500"
+                        );
+                        Err(RouteDispatchError::Internal(format!(
+                            "json route source '{}' returned null for mutation route '{}' ({})",
+                            self.source_ref, compiled.id, request_method
+                        )))
+                    }
                 } else {
                     Ok(axum::Json(value).into_response())
                 }
@@ -271,8 +314,6 @@ mod tests {
         source_config: serde_json::Value,
     ) -> RawRouteSpec {
         RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "test-route".into(),
             path: path.into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -443,8 +484,6 @@ mod tests {
         use ryeos_app::route_raw::{RawLimits, RawRequest, RawRequestBody, RawResponseSpec};
         let mode = api_mode();
         let raw = RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),
@@ -484,8 +523,6 @@ mod tests {
         };
         let mode = api_mode();
         let raw = RawRouteSpec {
-            section: "routes".into(),
-            category: None,
             id: "test-route".into(),
             path: "/test".into(),
             methods: ["GET".into()].into_iter().collect(),

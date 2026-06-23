@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:54Z:281ccddf7f0779060cb3e97232d2c35d4f6edf146b213d60076c886581777ec6:nbMhKD849qHOc3Ih+F5bReHdZV8EukefpbBbn20zMi5Po1PUUDPFkYklPN1fofAQI1PhCps6PoY83AoQPAlEAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: remote-list
+# ryeos:signed:2026-06-19T05:40:59Z:244f3bac71241d313043ba530764ed22b0947a953b353f7f71e3f8726640c8c9:CAkO8Uf3J3kU4emV5HI5OMd42Vq9ALW/MXHkKzgBHXVBJJtNrRS+dXCkn5zxvmw8CRzMZs0ajLT4lCT/aew5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - list

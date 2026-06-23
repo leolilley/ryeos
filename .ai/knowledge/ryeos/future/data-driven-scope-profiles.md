@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-10T01:06:25Z:80b423374f74d962efa3d2c67a4a33c8f1f4d0aaf2e7e0fe486747bfb391f17f:SNcR6YwW6rjsVizSe7TcBRh32thP/wdBBBFva54rRsjv+DpcXhg2V0ciXlrGDgjPgv1WxhGhwfTA2/7pSngaCg==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-23T03:27:17Z:86ff304a4b4aff0f7a6064ad08ec736225bb3a5611b08c0a93265876413e2df4:2t1EhbsKW5KZxTApzP4VCotMP/jV4xTiNv2VLBzQ09G662JuVvahSpqk+LW7ZUyGyMMr8l33ClOxyMrdG+/sDA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 # Future: Data-driven scope profiles for authorized-key grants
 
 ## Status

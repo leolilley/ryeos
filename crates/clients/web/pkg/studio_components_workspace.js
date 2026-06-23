@@ -254,9 +254,21 @@ function timelineEntry(entry) {
     case "line":
     default: {
       const row = el("div", `studio-timeline-line ${entry.tone || "neutral"}`);
-      row.append(textEl("span", "•"), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
+      row.append(textEl("span", toneGlyph(entry.tone)), textEl("strong", entry.primary || "event"), textEl("small", entry.meta || ""));
       return row;
     }
+  }
+}
+
+// Tone → glyph, mirroring the terminal's theme::tone_glyph so a toned line
+// reads the same on both clients (✓ done, ✗ failed, ! warned, › accent).
+function toneGlyph(tone) {
+  switch (tone) {
+    case "good": return "✓";
+    case "warn": return "!";
+    case "danger": return "✗";
+    case "accent": return "›";
+    default: return "•";
   }
 }
 

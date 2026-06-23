@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:55Z:8e7ae1794761800409803fcf70b2e458ddb1fe584a76125b298e1eba59133229:Bd+iTAsA3aQ6eQ4qCyvpi8BUkp+VL8bVuzlVJFmF7ZvcpT8RQY8Sq6wPyNcYS31jKing3kG8KNkHm2JX8y6HBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: routes
-section: routes
+# ryeos:signed:2026-06-19T05:40:59Z:b7697a6c1d1196cb104440a5c4dea38494f34a5baadaa4d8642796f5c92676e8:kgbDGWhduk8clhAklQy8Aj0n5g3VUKEL5LIY2yezw8PZda+h9ZZ+gjSjAULiRLWP22n4wXjI1FaKkXjSrzZWDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 id: core/vault-list
 path: /vault/list
 methods:

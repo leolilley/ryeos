@@ -1081,7 +1081,7 @@ mod tests {
                     .join("node")
                     .join("commands")
                     .join("custom.yaml"),
-                "category: commands\nsection: commands\nname: custom\ntokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\n",
+                "tokens: [\"custom\"]\ndescription: Custom offline command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\n",
             );
             let offline_execute_line = offline_execute_line.unwrap_or("");
             self.write_signed(
@@ -1127,7 +1127,7 @@ mod tests {
                     .join("node")
                     .join("command_registration")
                     .join("default.yaml"),
-                "section: command_registration\nname: default\nclaim_rules:\n  - claim:\n      kind: command.root\n      value: execute\n    required_caps:\n      - ryeos.register.command.root.execute\n  - claim:\n      kind: command.dispatch.kind\n      value: direct_execute_item_ref\n    required_caps:\n      - ryeos.register.command.dispatch.direct_execute_item_ref\nsystem_source_caps:\n  - ryeos.register.command.root.execute\n  - ryeos.register.command.dispatch.direct_execute_item_ref\n",
+                "claim_rules:\n  - claim:\n      kind: command.root\n      value: execute\n    required_caps:\n      - ryeos.register.command.root.execute\n  - claim:\n      kind: command.dispatch.kind\n      value: direct_execute_item_ref\n    required_caps:\n      - ryeos.register.command.dispatch.direct_execute_item_ref\nsystem_source_caps:\n  - ryeos.register.command.root.execute\n  - ryeos.register.command.dispatch.direct_execute_item_ref\n",
             );
         }
 
@@ -1158,10 +1158,7 @@ mod tests {
                 .join("node")
                 .join("bundles")
                 .join(format!("{id}.yaml"));
-            let mut body = format!(
-                "kind: node\nsection: bundles\nid: {id}\npath: {}\n",
-                bundle_root.display()
-            );
+            let mut body = format!("kind: node\npath: {}\n", bundle_root.display());
             if !command_registration_caps.is_empty() {
                 body.push_str("command_registration_caps:\n");
                 for cap in command_registration_caps {
@@ -1395,8 +1392,12 @@ else:
         let fixture = Fixture::new();
         fixture.write_standard_descriptors(None);
 
-        let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
-            .unwrap_err();
+        let err = try_offline_dispatch_for_test(
+            &["custom".to_string(), "leo".to_string()],
+            &fixture.system,
+            ".",
+        )
+        .unwrap_err();
 
         match err {
             CliError::Local { detail } => {
@@ -1417,6 +1418,7 @@ else:
             try_offline_dispatch_for_test(
                 &[
                     "custom".to_string(),
+                    "leo".to_string(),
                     "--project".to_string(),
                     "/tmp/project".to_string(),
                 ],
@@ -1453,10 +1455,7 @@ else:
                 .join("node")
                 .join("bundles")
                 .join("second.yaml"),
-            &format!(
-                "kind: node\nsection: bundles\nid: second\npath: {}\n",
-                second_bundle.display()
-            ),
+            &format!("kind: node\npath: {}\n", second_bundle.display()),
         );
         fixture.write_signed(
             &second_bundle
@@ -1464,7 +1463,7 @@ else:
                 .join("node")
                 .join("commands")
                 .join("other-custom.yaml"),
-            "category: commands\nsection: commands\nname: other-custom\ntokens: [\"custom\"]\ndescription: Other offline command\ndispatch:\n  kind: execute_ref\n  execute: service:other\n",
+            "tokens: [\"custom\"]\ndescription: Other offline command\ndispatch:\n  kind: execute_ref\n  execute: service:other\n",
         );
 
         let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
@@ -1490,8 +1489,12 @@ else:
             "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"cat\"\n  input_data: \"{params_json}\"\n",
         );
 
-        let err = try_offline_dispatch_for_test(&["custom".to_string()], &fixture.system, ".")
-            .unwrap_err();
+        let err = try_offline_dispatch_for_test(
+            &["custom".to_string(), "leo".to_string()],
+            &fixture.system,
+            ".",
+        )
+        .unwrap_err();
         match err {
             CliError::Local { detail } => {
                 assert!(
@@ -1542,7 +1545,7 @@ else:
                 .join("node")
                 .join("commands")
                 .join("capture.yaml"),
-            "category: commands\nsection: commands\nname: capture\ntokens: [\"capture\"]\ndescription: Capture offline client command\ndispatch:\n  kind: execute_ref\n  execute: client:custom/capture\n",
+            "tokens: [\"capture\"]\ndescription: Capture offline client command\ndispatch:\n  kind: execute_ref\n  execute: client:custom/capture\n",
         );
         fixture.write_signed(
             &fixture
@@ -1590,7 +1593,7 @@ else:
                 .join("node")
                 .join("commands")
                 .join("capture-base.yaml"),
-            "category: commands\nsection: commands\nname: capture-base\ntokens: [\"capture\", \"base\"]\ndescription: Capture base client command\ndefaults:\n  surface: surface:demo/base\ndispatch:\n  kind: execute_ref\n  execute: client:custom/capture\n",
+            "tokens: [\"capture\", \"base\"]\ndescription: Capture base client command\ndefaults:\n  surface: surface:demo/base\ndispatch:\n  kind: execute_ref\n  execute: client:custom/capture\n",
         );
         fixture.write_signed(
             &fixture

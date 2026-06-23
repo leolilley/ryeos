@@ -210,6 +210,9 @@ pub struct ThreadSnapshot {
     pub finished_at: Option<String>,
     /// Final result payload (set on terminal snapshots).
     pub result: Option<serde_json::Value>,
+    /// Terminal outcome code (e.g. "success", "required_secret_missing").
+    #[serde(default)]
+    pub outcome_code: Option<String>,
     /// Error payload (set on failed snapshots).
     pub error: Option<serde_json::Value>,
     /// Budget / usage information (typed ThreadUsage).
@@ -330,6 +333,7 @@ pub struct ThreadSnapshotBuilder {
     started_at: Option<String>,
     finished_at: Option<String>,
     result: Option<serde_json::Value>,
+    outcome_code: Option<String>,
     error: Option<serde_json::Value>,
     budget: Option<ThreadUsage>,
     artifacts: Vec<serde_json::Value>,
@@ -368,6 +372,7 @@ impl ThreadSnapshotBuilder {
             started_at: None,
             finished_at: None,
             result: None,
+            outcome_code: None,
             error: None,
             budget: None,
             artifacts: Vec::new(),
@@ -430,6 +435,11 @@ impl ThreadSnapshotBuilder {
 
     pub fn result(mut self, result: Option<serde_json::Value>) -> Self {
         self.result = result;
+        self
+    }
+
+    pub fn outcome_code(mut self, outcome_code: Option<String>) -> Self {
+        self.outcome_code = outcome_code;
         self
     }
 
@@ -501,6 +511,7 @@ impl ThreadSnapshotBuilder {
             started_at: self.started_at,
             finished_at: self.finished_at,
             result: self.result,
+            outcome_code: self.outcome_code,
             error: self.error,
             budget: self.budget,
             artifacts: self.artifacts,
@@ -548,6 +559,31 @@ mod tests {
         assert!(snap.last_event_hash.is_none());
         assert_eq!(snap.last_chain_seq, 0);
         assert_eq!(snap.last_thread_seq, 0);
+    }
+
+    #[test]
+    fn snapshot_deserializes_without_outcome_code() {
+        // A CAS snapshot written before `outcome_code` existed has no such key.
+        // The projection rebuild deserializes snapshots directly, so a missing
+        // `outcome_code` must default to None instead of failing.
+        let snap = ThreadSnapshotBuilder::new(
+            "T-1",
+            "T-root",
+            "agent",
+            "directive:test",
+            "native:directive-runtime",
+        )
+        .outcome_code(Some("success".to_string()))
+        .build();
+        let mut value = serde_json::to_value(&snap).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("outcome_code")
+            .expect("outcome_code is serialized");
+        let restored: ThreadSnapshot =
+            serde_json::from_value(value).expect("snapshot without outcome_code must deserialize");
+        assert!(restored.outcome_code.is_none());
     }
 
     #[test]

@@ -67,7 +67,6 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
         }
 
         let hub = ctx.state.event_streams.clone();
-        let mut rx = hub.subscribe(&thread_id);
 
         let last_seen = last_event_id;
 
@@ -76,6 +75,11 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
         let keep_alive_secs = self.keep_alive_secs;
 
         let stream = async_stream::stream! {
+            // Subscribe before backfilling so live events arriving during
+            // replay are buffered, not missed. The guard reclaims the
+            // sender when the stream ends.
+            let mut sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
+
             yield Ok(
                 RouteStreamEnvelope::new(
                     "stream_started",
@@ -156,7 +160,7 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
 
                     let mut current_max = max_seq;
                     loop {
-                        match rx.recv().await {
+                        match sub.recv().await {
                             Ok(ev) => {
                                 if is_ephemeral(&ev) {
                                     yield Ok(envelope_for_persisted(&ev));

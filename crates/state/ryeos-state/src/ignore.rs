@@ -43,14 +43,21 @@ fn is_anchored_pattern(pattern: &str) -> bool {
     // A leading `/` is the explicit "anchored to repo root" sigil. An internal
     // `/` (one that survives trimming the trailing slash) also implies a path,
     // not a bare component name.
-    pattern.starts_with('/') || pattern.trim_start_matches('/').trim_end_matches('/').contains('/')
+    pattern.starts_with('/')
+        || pattern
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .contains('/')
 }
 
 /// Validate + normalize an anchored prefix: strip the leading/trailing `/`,
 /// then reject anything that isn't a clean repo-relative path.
 fn normalize_anchored(pattern: &str) -> Result<String> {
     let core = pattern.trim_start_matches('/').trim_end_matches('/');
-    anyhow::ensure!(!core.is_empty(), "empty anchored ignore pattern: {pattern:?}");
+    anyhow::ensure!(
+        !core.is_empty(),
+        "empty anchored ignore pattern: {pattern:?}"
+    );
     anyhow::ensure!(
         !core.contains('\\'),
         "anchored ignore pattern must use '/': {pattern:?}"

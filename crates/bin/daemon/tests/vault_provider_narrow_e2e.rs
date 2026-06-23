@@ -13,16 +13,14 @@
 //!    Daemon spawns the runtime; mock receives one request.
 //!
 //! 3. `resume_missing_selected_secret_fails_with_typed_error` —
-//!    Exercises the shared `preflight_inject_provider_secret` helper
-//!    via the `/execute` endpoint. The error surface (stable code,
-//!    env_var, remediation) is asserted. A full daemon-restart resume
-//!    e2e is covered by test 4 below.
+//!    Exercises the managed launch provider preflight via the `/execute`
+//!    endpoint. The error surface (stable code, env_var, remediation) is
+//!    asserted.
 //!
-//! 4. `resume_missing_secret_after_daemon_restart` — real daemon-
-//!    restart e2e: spawns a native_resume tool, kills the daemon mid-
-//!    flight, restarts, and asserts the reconciler's resume path
-//!    produces `outcome_code = "required_secret_missing"` via
-//!    `run_existing_detached`.
+//! 4. `generic_tool_resume_does_not_require_provider_secret` — real
+//!    daemon-restart e2e: spawns a native_resume tool, kills the daemon
+//!    mid-flight, restarts, and asserts generic tool resume is not coupled
+//!    to provider auth.
 
 mod common;
 
@@ -157,18 +155,13 @@ fn plant_sealed_vault_secrets(
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_selected_secret_fails_before_provider_request() {
     // Provider `zen` declares `auth.env_var: ZEN_API_KEY`. Vault is
-    // empty (no ZEN_API_KEY). The narrow preflight in
-    // `preflight_inject_provider_secret` must fail BEFORE the runtime
-    // is spawned, so the mock provider receives zero HTTP requests.
+    // empty (no ZEN_API_KEY). Runtime envelope preflight must fail BEFORE
+    // the runtime is spawned, so the mock provider receives zero HTTP
+    // requests.
     //
-    // The error message from `MaterializationError::ProviderSecretMissing`
-    // is routed through `BuildAndLaunchError::Materialization` →
-    // `DispatchError::RuntimeMaterializationFailed` (because the Display
-    // string contains "materializ") → HTTP 502.
-    //
-    // The body carries the full Display string which includes:
+    // The body carries the structured RequiredSecretMissing surface:
     //   - "ZEN_API_KEY"
-    //   - "ryeos-core-tools vault put --name ZEN_API_KEY --value-stdin"
+    //   - "ryeos vault set --name ZEN_API_KEY --value <value>"
 
     // Start mock but expect it to receive ZERO requests.
     let mock = MockProvider::start(vec![MockResponse::Text("should not be called".into())]).await;
@@ -250,8 +243,8 @@ async fn missing_selected_secret_fails_before_provider_request() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY --value-stdin"),
-        "remediation must include the vault put command; got: {remediation}"
+        remediation.contains("ryeos vault set --name ZEN_API_KEY --value <value>"),
+        "remediation must include the vault set command; got: {remediation}"
     );
 
     // The mock provider MUST NOT have received any requests — the
@@ -268,18 +261,11 @@ async fn missing_selected_secret_fails_before_provider_request() {
     drop(mock);
 }
 
-// ── Test 3: shared helper — typed error surface ─────────────────
+// ── Test 3: managed launch missing-secret typed surface ──────────
 //
-// Blocker B requires proving that the shared preflight helper
-// propagates a typed `MaterializationError::ProviderSecretMissing`
-// with structured fields, not a generic anyhow message.
-//
-// This test calls the `/execute` endpoint (which uses the same
-// shared `preflight_inject_provider_secret` helper as resume) and
-// asserts the structured error surface with stable code, env_var,
-// and remediation. The real daemon-restart resume path through
-// `run_existing_detached` is covered by test 4
-// (`resume_missing_secret_after_daemon_restart`).
+// Proves managed launch provider preflight propagates a structured
+// RequiredSecretMissing surface with stable code, env_var, and remediation,
+// not a generic anyhow message.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_missing_selected_secret_fails_with_typed_error() {
@@ -361,8 +347,8 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY"),
-        "remediation must contain the vault put command; got: {remediation}"
+        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+        "remediation must contain the vault set command; got: {remediation}"
     );
 
     // Mock provider must receive zero requests — preflight blocked.
@@ -449,29 +435,14 @@ async fn provider_with_no_auth_env_var_succeeds_with_empty_vault() {
     drop(mock);
 }
 
-// ── Test 4: real daemon-restart resume e2e ─────────────────────
+// ── Test 4: generic tool resume stays provider-independent ──────
 //
 // Exercises `run_existing_detached` through a real spawn-kill-
 // respawn cycle. Uses a tool with `native_resume: true` so the
 // reconciler picks up the orphaned thread and calls
-// `run_existing_detached`. The resume preflight runs
-// `preflight_inject_provider_secret`, which resolves model routing
-// to provider "zen" (env_var: ZEN_API_KEY) and fails because the
-// vault is empty.
-//
-// Why a tool, not a directive? The standard directive-runtime does
-// not declare `native_resume`. Creating a custom runtime that
-// serves directives would require modifying the standard bundle or
-// building a custom one — both are heavyweight for a test. A tool
-// with `@subprocess` executor + `native_resume: true` exercises the
-// same `run_existing_detached` → preflight code path without
-// requiring bundle surgery.
-//
-// Key behavioral difference: the initial `/execute` for a tool
-// goes through `dispatch_tool_subprocess` → `run_detached`, which
-// does NOT run the provider-secret preflight. Only the resume path
-// (`run_existing_detached`) runs it. This is intentional — it
-// proves the resume path's preflight works independently.
+// `run_existing_detached`. A generic tool does not have a runtime descriptor
+// requiring `provider_snapshot`, so resume must not resolve model routing or
+// require provider auth.
 
 /// Plant a `native_resume: true` tool + runtime in the project space.
 fn plant_native_resume_tool(project_path: &Path, signer: &SigningKey) -> anyhow::Result<()> {
@@ -526,8 +497,8 @@ fn read_pid_from_runtime_db(state_path: &Path, thread_id: &str) -> Option<i64> {
 }
 
 /// Read thread status + outcome_code from the projection DB.
-/// Returns `(status, outcome_code, error_detail)` where `outcome_code`
-/// is extracted from the error JSON and `error_detail` is the raw error.
+/// Returns `(status, outcome_code, error_detail)` read directly from the
+/// persisted `thread_results` columns.
 fn read_thread_outcome_full(
     state_path: &Path,
     thread_id: &str,
@@ -539,80 +510,38 @@ fn read_thread_outcome_full(
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .ok()?;
 
-    // Check thread_results for status + error.
     let mut stmt = conn
-        .prepare("SELECT status, error FROM thread_results WHERE thread_id = ?1")
+        .prepare("SELECT status, outcome_code, error FROM thread_results WHERE thread_id = ?1")
         .ok()?;
-    let result = stmt
+    let (status, outcome_code, error_json) = stmt
         .query_row(rusqlite::params![thread_id], |row| {
             let status: String = row.get(0)?;
-            let error: Option<String> = row.get(1)?;
-            Ok((status, error))
+            let outcome_code: Option<String> = row.get(1)?;
+            let error: Option<String> = row.get(2)?;
+            Ok((status, outcome_code, error))
         })
         .ok()?;
 
-    let (status, error_json) = result;
-    let outcome_code = error_json.as_ref().and_then(|e| {
-        serde_json::from_str::<serde_json::Value>(e)
-            .ok()
-            .and_then(|v| {
-                v.get("code")
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string())
-            })
-    });
     Some((status, outcome_code, error_json))
 }
 
 /// Read thread status + outcome_code from the projection DB.
-/// Returns `(status, outcome_code)` where `outcome_code` is extracted
-/// from the error JSON if present.
+/// Returns `(status, outcome_code)` read from the persisted columns.
 fn read_thread_outcome(state_path: &Path, thread_id: &str) -> Option<(String, Option<String>)> {
     read_thread_outcome_full(state_path, thread_id).map(|(s, oc, _)| (s, oc))
 }
 
-/// Read the most recent persisted event for a thread from the projection DB.
-/// Returns `(event_type, payload_json)` where payload_json is parsed from
-/// the `payload` BLOB column.
-fn read_last_event(state_path: &Path, thread_id: &str) -> Option<(String, serde_json::Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
-    let conn =
-        rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT event_type, payload FROM events \
-             WHERE thread_id = ?1 \
-             ORDER BY chain_seq DESC LIMIT 1",
-        )
-        .ok()?;
-    stmt.query_row(rusqlite::params![thread_id], |row| {
-        let event_type: String = row.get(0)?;
-        let payload_blob: Vec<u8> = row.get(1)?;
-        let payload: serde_json::Value =
-            serde_json::from_slice(&payload_blob).unwrap_or(serde_json::json!({}));
-        Ok((event_type, payload))
-    })
-    .ok()
-}
-
 #[tokio::test(flavor = "multi_thread")]
-async fn resume_missing_secret_after_daemon_restart() {
+async fn generic_tool_resume_does_not_require_provider_secret() {
     // ── Setup ────────────────────────────────────────────────────
     //
-    // The standard bundle ships provider "zen" with
-    // auth.env_var: ZEN_API_KEY and model routing mapping
-    // "general" → zen, so no provider/routing plants are needed.
-    // Vault is empty (no ZEN_API_KEY).
-    // A tool with native_resume: true is planted in the project.
+    // Vault is empty (no ZEN_API_KEY). A tool with native_resume: true is
+    // planted in the project.
     //
-    // The initial execute succeeds (tool subprocess path doesn't run
-    // the provider-secret preflight). On daemon restart, the
-    // reconciler resumes the orphaned thread via
-    // `run_existing_detached`, which runs the preflight and fails
-    // with ProviderSecretMissing.
+    // The initial execute succeeds. On daemon restart, the reconciler resumes
+    // the orphaned thread via `run_existing_detached`. Generic tool resume
+    // must not derive provider auth from model routing or fail with
+    // required_secret_missing.
 
     // Mock provider — not needed for the test assertions; kept only
     // to back the zero-request assertion at the end.
@@ -742,24 +671,40 @@ async fn resume_missing_secret_after_daemon_restart() {
     .await
     .expect("respawn daemon");
 
-    // ── Phase 3: Poll for thread to reach terminal status ───────
+    // ── Phase 3: Poll for resumed running status ─────────────
     //
-    // The reconciler runs at startup and dispatches the resume
-    // intent. `run_existing_detached` runs preflight, which resolves
-    // "general" → "zen" → ZEN_API_KEY → not in vault →
-    // ProviderSecretMissing → guard.fail_thread("required_secret_missing").
+    // Generic tool resume no longer runs provider preflight by hidden
+    // coupling. The reconciler should restart the native subprocess and
+    // leave the thread running, not fail with required_secret_missing.
     let outcome_deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let (final_status, outcome_code) = loop {
-        if let Some(result) = read_thread_outcome(&h.state_path, &thread_id) {
-            let (ref status, _) = result;
+    let resumed_pid = loop {
+        if let Some(new_pid) = read_pid_from_runtime_db(&h.state_path, &thread_id) {
+            if new_pid != pid {
+                break new_pid;
+            }
+        }
+        if let Some((status, outcome, full_error)) =
+            read_thread_outcome_full(&h.state_path, &thread_id)
+        {
+            assert_ne!(
+                outcome.as_deref(),
+                Some("required_secret_missing"),
+                "generic tool resume must not require provider auth; error={full_error:?}"
+            );
             if status == "failed" || status == "completed" || status == "killed" {
-                break result;
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!(
+                    "thread {thread_id} reached terminal status after resume; \
+                     status={status} outcome_code={outcome:?} error={full_error:?}\n\
+                     Daemon stderr (tail):\n{}",
+                    &stderr[stderr.len().saturating_sub(3000)..]
+                );
             }
         }
         if std::time::Instant::now() > outcome_deadline {
             let stderr = h.drain_stderr_nonblocking().await;
             panic!(
-                "thread {thread_id} never reached terminal status within 15s. \
+                "thread {thread_id} did not get a replacement PID within 15s. \
                  Last known state: {:?}. Daemon stderr (tail):\n{}",
                 read_thread_outcome(&h.state_path, &thread_id),
                 &stderr[stderr.len().saturating_sub(2000)..]
@@ -768,101 +713,31 @@ async fn resume_missing_secret_after_daemon_restart() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    // ── Phase 4: Assert the expected outcome ────────────────────
-    assert_eq!(
-        final_status, "failed",
-        "thread should be finalized as failed; got status={final_status}"
-    );
-    assert_eq!(
-        outcome_code.as_deref(),
-        Some("required_secret_missing"),
-        "outcome_code must be 'required_secret_missing'; got outcome_code={outcome_code:?}"
-    );
+    if let Some((status, outcome_code)) = read_thread_outcome(&h.state_path, &thread_id) {
+        assert_ne!(
+            outcome_code.as_deref(),
+            Some("required_secret_missing"),
+            "generic tool resume must not fail with provider missing"
+        );
+        assert!(
+            status == "running" || status == "created",
+            "thread should remain non-terminal after generic tool resume; got status={status} outcome={outcome_code:?}"
+        );
+    }
 
-    // F3: the error JSON in the projection DB must carry the enriched
-    // structured fields (env_var, remediation) — same surface the SSE
-    // stream exposes to watching clients.
-    let full_error = read_thread_outcome_full(&h.state_path, &thread_id)
-        .and_then(|(_, _, err)| err)
-        .expect("thread must have error JSON");
-    let error_json: serde_json::Value =
-        serde_json::from_str(&full_error).expect("error must be valid JSON");
-    assert_eq!(
-        error_json["code"].as_str(),
-        Some("required_secret_missing"),
-        "error JSON must have code=required_secret_missing; got: {error_json:#}"
-    );
-    assert_eq!(
-        error_json["env_var"].as_str(),
-        Some("ZEN_API_KEY"),
-        "error JSON must have env_var=ZEN_API_KEY; got: {error_json:#}"
-    );
-    let remediation = error_json["remediation"].as_str().unwrap_or_default();
-    assert!(
-        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY"),
-        "remediation must contain the vault put command; got: {remediation}"
-    );
+    // Clean up the resumed subprocess so test teardown does not leave a
+    // sleeping child behind.
+    unsafe {
+        libc::kill(resumed_pid as i32, libc::SIGKILL);
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // F3 final: prove the persisted thread_failed event payload carries
-    // the structured error (not just the projection DB column). This is
-    // the wire shape SSE consumers see on replay or live subscription.
-    let (event_type, payload) =
-        read_last_event(&h.state_path, &thread_id).expect("thread must have a terminal event");
-
-    assert_eq!(
-        event_type, "thread_failed",
-        "terminal event must be thread_failed; got {event_type}"
-    );
-    assert_eq!(
-        payload["outcome_code"].as_str(),
-        Some("required_secret_missing"),
-        "thread_failed.payload.outcome_code mismatch: {payload:#}"
-    );
-    assert_eq!(
-        payload["has_error"].as_bool(),
-        Some(true),
-        "thread_failed.payload.has_error must be true: {payload:#}"
-    );
-
-    // The structured error sub-object — added by the F3 envelope work.
-    let err = &payload["error"];
-    assert!(
-        err.is_object(),
-        "thread_failed.payload.error must be an object: {payload:#}"
-    );
-    assert_eq!(
-        err["code"].as_str(),
-        Some("required_secret_missing"),
-        "payload.error.code mismatch: {err:#}"
-    );
-    assert_eq!(
-        err["env_var"].as_str(),
-        Some("ZEN_API_KEY"),
-        "payload.error.env_var mismatch: {err:#}"
-    );
-    assert_eq!(
-        err["source_kind"].as_str(),
-        Some("provider"),
-        "payload.error.source_kind mismatch: {err:#}"
-    );
-    assert_eq!(
-        err["source_name"].as_str(),
-        Some("zen"),
-        "payload.error.source_name mismatch: {err:#}"
-    );
-    let evt_remediation = err["remediation"].as_str().unwrap_or_default();
-    assert!(
-        evt_remediation.contains("vault put --name ZEN_API_KEY"),
-        "payload.error.remediation must mention 'vault put --name ZEN_API_KEY'; got: {evt_remediation:?}"
-    );
-
-    // The mock provider must have received zero requests — the
-    // preflight blocked the resume before any HTTP was made.
+    // The mock provider must have received zero requests: generic tool resume
+    // neither preflights provider auth nor calls a provider.
     let captured = mock.captured_headers().await;
     assert!(
         captured.is_empty(),
-        "mock provider received {} request(s) — resume preflight should block \
-         before runtime spawn",
+        "mock provider received {} request(s) during generic tool resume",
         captured.len(),
     );
 
@@ -872,9 +747,12 @@ async fn resume_missing_secret_after_daemon_restart() {
 
 // ── Test 5: SSE stream emits structured required_secret_missing ──
 //
-// F3: proves the `/execute/stream` endpoint emits a `stream_error`
-// SSE event with the structured fields (env_var, source_kind,
-// source_name, remediation) when the preflight catches a missing provider secret.
+// F3: proves the `/execute/stream` endpoint surfaces a missing provider secret
+// as a `thread_failed` terminal whose payload carries the structured error
+// fields (env_var, source_kind, source_name, remediation). The secret preflight
+// runs inside the spawned launch (after the thread is created), so the failure
+// is a persisted thread lifecycle terminal — not a pre-spawn `stream_error`,
+// which is reserved for synchronous gateway rejections before any thread exists.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_stream_emits_structured_required_secret_missing_event() {
@@ -975,9 +853,11 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
         .expect("SSE response timed out")
         .expect("SSE response read failed");
 
-    // Parse SSE lines looking for:
-    //   event: stream_error
-    //   data: {"code":"required_secret_missing",...}
+    // Parse SSE lines looking for the `thread_failed` terminal whose payload
+    // carries a structured `required_secret_missing` error:
+    //   event: thread_failed
+    //   data: {"payload":{"outcome_code":"required_secret_missing",
+    //          "error":{"code":"required_secret_missing","env_var":...}},...}
     let mut found_error = false;
     let mut current_event_type = String::new();
     for line in text.lines() {
@@ -985,62 +865,70 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
             current_event_type = ev.trim().to_string();
         }
         if let Some(data) = line.strip_prefix("data: ") {
-            if current_event_type == "stream_error" {
+            if current_event_type == "thread_failed" {
                 let parsed: serde_json::Value =
                     serde_json::from_str(data.trim()).unwrap_or(serde_json::json!({}));
 
-                let code = parsed
+                let outcome_code = parsed
+                    .pointer("/payload/outcome_code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let error = parsed
+                    .pointer("/payload/error")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let code = error
                     .get("code")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                if code == "required_secret_missing" {
+                if outcome_code == "required_secret_missing" && code == "required_secret_missing" {
                     found_error = true;
 
                     // Assert structured fields.
-                    let env_var = parsed
+                    let env_var = error
                         .get("env_var")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert_eq!(
                         env_var, "ZEN_API_KEY",
-                        "SSE stream_error must have env_var=ZEN_API_KEY; got: {env_var}"
+                        "thread_failed error must have env_var=ZEN_API_KEY; got: {env_var}"
                     );
 
-                    let source_kind = parsed
+                    let source_kind = error
                         .get("source_kind")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert_eq!(
                         source_kind, "provider",
-                        "SSE stream_error must have source_kind=provider; got: {source_kind}"
+                        "thread_failed error must have source_kind=provider; got: {source_kind}"
                     );
 
-                    let source_name = parsed
+                    let source_name = error
                         .get("source_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert_eq!(
                         source_name, "zen",
-                        "SSE stream_error must have source_name=zen; got: {source_name}"
+                        "thread_failed error must have source_name=zen; got: {source_name}"
                     );
 
-                    let remediation = parsed
+                    let remediation = error
                         .get("remediation")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert!(
-                        remediation.contains("ryeos-core-tools vault put --name ZEN_API_KEY"),
-                        "remediation must contain vault put command; got: {remediation}"
+                        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+                        "remediation must contain vault set command; got: {remediation}"
                     );
 
                     // The error message must be a non-empty string.
-                    let error_msg = parsed
+                    let error_msg = error
                         .get("error")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
                     assert!(
                         !error_msg.is_empty(),
-                        "SSE stream_error must have non-empty error message"
+                        "thread_failed error must have non-empty error message"
                     );
                     break;
                 }
@@ -1050,8 +938,8 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
 
     assert!(
         found_error,
-        "SSE stream must contain a stream_error event with code=required_secret_missing; \
-         raw SSE output:\n{text}"
+        "SSE stream must contain a thread_failed terminal whose payload carries a \
+         structured required_secret_missing error; raw SSE output:\n{text}"
     );
 
     // Mock provider must receive zero requests — preflight blocked.

@@ -1,6 +1,4 @@
-# ryeos:signed:2026-06-05T04:12:12Z:c9902a14a2f4ef170d87a64035d936a48344c94ea491bfcd52ec6d7023b19b59:MWt23q1gcK+W3HFuxffbl/lFYBrcUsOmbJQLGIa3JrveEeR94qWKbvc9HSESov4XRhU4lzEpRpM1RFo0OjlgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: "hosted"
-section: "hosted"
+# ryeos:signed:2026-06-19T05:40:59Z:8b3feb7197976c38472d7c9b7538c9e3faaf3dd805e21f031e19aef9dc553b43:7lfKpq2KXXJqiAFQhShvlSohWcabllDy4bwsTuMJjV5bVhpcXiDz51TOFU+juItslOidnliPqadh4cg6w9iNDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 schema_version: "1.0.0"
 description: "Default hosted-node operator policy for decentralized remote admission."

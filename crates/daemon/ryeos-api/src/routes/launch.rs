@@ -67,10 +67,8 @@ pub(crate) struct DispatchLaunchOptions {
     pub validate_only: bool,
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
-    /// Optional operation name for multi-op items.
-    pub operation: Option<String>,
-    /// Optional op-specific inputs.
-    pub inputs: Option<Value>,
+    /// Optional method call (`call.method`/`call.args`) for multi-method items.
+    pub call: Option<ryeos_engine::method_call::MethodCall>,
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
@@ -84,8 +82,7 @@ impl Default for DispatchLaunchOptions {
             validate_only: false,
             usage_subject: None,
             usage_subject_asserted_by: None,
-            operation: None,
-            inputs: None,
+            call: None,
             previous_thread_id: None,
         }
     }
@@ -135,8 +132,7 @@ pub(crate) fn spawn_dispatch_launch(
     let validate_only = options.validate_only;
     let usage_subject = options.usage_subject;
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
-    let operation = options.operation;
-    let inputs = options.inputs;
+    let call = options.call;
     let previous_thread_id = options.previous_thread_id;
 
     tokio::spawn(async move {
@@ -163,8 +159,7 @@ pub(crate) fn spawn_dispatch_launch(
             caller_scopes: principal_scopes,
             engine: state_clone.engine.clone(),
             plan_ctx,
-            requested_op: operation.clone(),
-            requested_inputs: inputs.clone(),
+            requested_call: call,
         };
 
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
@@ -184,8 +179,6 @@ pub(crate) fn spawn_dispatch_launch(
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
             usage_subject,
             usage_subject_asserted_by,
-            operation,
-            inputs,
             previous_thread_id,
         };
 
@@ -198,7 +191,39 @@ pub(crate) fn spawn_dispatch_launch(
         .await
         {
             Ok(_value) => Ok(()),
-            Err(e) => Err(LaunchSpawnError::Dispatch(e)),
+            Err(e) => {
+                // Persistence-first safety net: if dispatch created the
+                // pre-minted thread row but failed before finalizing it
+                // (e.g. a managed `build_and_launch` policy/trust/grant
+                // failure that returns before spawn), finalize it `failed`
+                // so the id returned by accepted launch reaches a terminal
+                // state instead of hanging at `created`. No-ops if the
+                // thread was never created or the runtime already drove it
+                // terminal.
+                if let Ok(Some(detail)) = state_clone.threads.get_thread(&pre_minted_thread_id) {
+                    if !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+                        .is_some_and(|s| s.is_terminal())
+                    {
+                        let _ = state_clone.threads.finalize_thread(
+                            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                                thread_id: pre_minted_thread_id.clone(),
+                                status: "failed".to_string(),
+                                outcome_code: Some("failed".to_string()),
+                                result: None,
+                                error: Some(serde_json::json!({
+                                    "code": e.code(),
+                                    "reason": e.to_string(),
+                                })),
+                                metadata: None,
+                                artifacts: Vec::new(),
+                                final_cost: None,
+                                summary_json: None,
+                            },
+                        );
+                    }
+                }
+                Err(LaunchSpawnError::Dispatch(e))
+            }
         }
     })
 }
@@ -227,13 +252,12 @@ mod tests {
     }
 
     #[test]
-    fn launch_options_default_matches_previous_hardcoded_behavior() {
+    fn launch_options_default_is_inline_local() {
         let opts = DispatchLaunchOptions::default();
         assert_eq!(opts.launch_mode, "inline");
         assert_eq!(opts.target_site_id, None);
         assert_eq!(opts.validate_only, false);
-        assert_eq!(opts.operation, None);
-        assert_eq!(opts.inputs, None);
+        assert!(opts.call.is_none());
     }
 
     #[test]
@@ -244,14 +268,16 @@ mod tests {
             validate_only: true,
             usage_subject: None,
             usage_subject_asserted_by: None,
-            operation: Some("validate".to_string()),
-            inputs: Some(serde_json::json!({"key": "val"})),
+            call: Some(ryeos_engine::method_call::MethodCall {
+                method: Some("validate".to_string()),
+                args: Some(serde_json::json!({"key": "val"})),
+            }),
             previous_thread_id: None,
         };
         assert_eq!(opts.launch_mode, "detached");
         assert_eq!(opts.target_site_id.as_deref(), Some("site:remote"));
         assert!(opts.validate_only);
-        assert_eq!(opts.operation.as_deref(), Some("validate"));
-        assert_eq!(opts.inputs.as_ref().unwrap()["key"], "val");
+        assert_eq!(opts.call.as_ref().unwrap().method(), Some("validate"));
+        assert_eq!(opts.call.as_ref().unwrap().args().unwrap()["key"], "val");
     }
 }

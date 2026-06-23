@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-21T03:25:57Z:7a5f857c5ff7d9f85c145f72533b4a8cea63117b8d90c4983f82967d182f207f:gWhp/JnmY6nAMVrHxwzgBuLhBSHfleNHVAyGbrCt7jN9pj5zKyH3y+z1JRLeKuR/H56db+bO2StbQgXNHRbjCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle.manifest-sign
+availability: offline
+offline_execute: tool:ryeos/core/bundle/manifest-sign
+required_caps: []
+schema:
+  source: string
+  name: string?
+description: "Generate and sign .ai/manifest.yaml from .ai/manifest.source.yaml without running the full publish pipeline."

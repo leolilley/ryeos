@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:13d50eced434243a183c884b209d930b4139c53fb5a5b3491678e5144789602d:9zPDiSVkACNimwgEyTumr/B2wSAFZHxt4onj9og9vW4VWv23cNo5syYAClCwI4P6HCPE76G6J8Nnkmn8czGSBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-22T04:23:10Z:3b7b2112a3fec90091b90919dcae56b861b1430d4af25eb96d4df52c3dc4a8ca:yJlHLem2xsMgbmo4wH8IF/OZnCigKkiCqdYyo6WRwxNq5FMKlGF/BKl6I3mQYECUu3p7/UbwizmWmESZOxt3Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 category: "ryeos/core/markdown"
 description: "Directive parser: extracts YAML header (frontmatter or fenced block) and body from markdown"
@@ -22,7 +22,7 @@ output_schema:
     extends:
       type: union
       prims: [string, "null"]
-    permissions:
+    requires:
       type: single
       prim: mapping
     context:

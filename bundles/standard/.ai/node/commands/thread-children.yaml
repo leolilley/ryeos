@@ -1,7 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:e5b22511fe535711ddeedbd06590edad9a680944b8e90bbd2741557fe7b449ab:QNKHWoTkitrkihNKM84a+7zMZ+EQCehsi/tPaeLnV7ve5pAKg7+qH2OkR7sugW6PG25TmAVqOnfPfxDzcoIQBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-category: commands
-section: commands
-name: thread-children
+# ryeos:signed:2026-06-19T05:40:59Z:3f65d21bfdedab26319cb34593bfc276bfd268d1d79c23c158de5afc5631942b:/ujU6ZDcia9k59s8AQnzVHxxtMZC/LclvUovQOhcFn26mWLrsjw46t5AZX1COix+M4yYCTOKcHvzF7H5w3izDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - children

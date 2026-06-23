@@ -210,6 +210,9 @@ fn run_publish_once(
         signing_key: key.clone(),
         base_trust_store: None,
         owner: "test".to_string(),
+        name: None,
+        skip_unsignable: false,
+        allow_namespace_mismatch: false,
         emit_trust_doc: false,
     };
     ryeos_tools::actions::publish::run_publish(&opts)

@@ -90,6 +90,7 @@ pub struct ThreadResultRow {
     pub chain_root_id: String,
     pub status: String,
     pub result: Option<Vec<u8>>,
+    pub outcome_code: Option<String>,
     pub error: Option<String>,
     pub updated_at: String,
 }
@@ -101,6 +102,7 @@ impl ThreadResultRow {
             chain_root_id: row.get("chain_root_id")?,
             status: row.get("status")?,
             result: row.get("result")?,
+            outcome_code: row.get("outcome_code")?,
             error: row.get("error")?,
             updated_at: row.get("updated_at")?,
         })
@@ -422,7 +424,7 @@ pub fn get_thread_result(
     let mut stmt = db
         .connection()
         .prepare(
-            "SELECT thread_id, chain_root_id, status, result, error, updated_at \
+            "SELECT thread_id, chain_root_id, status, result, outcome_code, error, updated_at \
              FROM thread_results WHERE thread_id = ?",
         )
         .context("prepare get_thread_result")?;
@@ -520,6 +522,22 @@ pub fn replay_events(
         .query_map(param_refs.as_slice(), EventRow::from_row)
         .context("query replay_events")?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// The thread that owns the chain's highest-`chain_seq` event — the thread a
+/// live tail should currently follow. `chain_seq` is monotonic within a chain,
+/// so this is collision-free (unlike ordering threads by `created_at`).
+/// Returns `None` when the chain has no events yet.
+pub fn chain_head_thread(db: &ProjectionDb, chain_root_id: &str) -> anyhow::Result<Option<String>> {
+    db.connection()
+        .query_row(
+            "SELECT thread_id FROM events WHERE chain_root_id = ? \
+             ORDER BY chain_seq DESC LIMIT 1",
+            [chain_root_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("query chain_head_thread")
 }
 
 pub fn latest_thread_events(
@@ -959,6 +977,39 @@ mod tests {
         let after = replay_events(&db, "chain-A", Some("T-1"), Some(1), 10).unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].chain_seq, 2);
+    }
+
+    #[test]
+    fn chain_head_thread_is_owner_of_highest_chain_seq_event() {
+        let db = test_db();
+        let conn = db.connection();
+        // No events yet -> no head.
+        assert_eq!(chain_head_thread(&db, "chain-A").unwrap(), None);
+
+        conn.execute(
+            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES ('chain-A', 1, 'T-1', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'00')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            chain_head_thread(&db, "chain-A").unwrap(),
+            Some("T-1".to_string())
+        );
+
+        // Chain advances to a successor: the head follows the latest event,
+        // independent of insertion timestamps.
+        conn.execute(
+            "INSERT INTO events (chain_root_id, chain_seq, thread_id, thread_seq, event_type, durability, ts, payload) \
+             VALUES ('chain-A', 2, 'T-2', 0, 'start', 'durable', '2026-01-01T00:00:00Z', X'01')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            chain_head_thread(&db, "chain-A").unwrap(),
+            Some("T-2".to_string())
+        );
+
+        // A different chain is unaffected.
+        assert_eq!(chain_head_thread(&db, "chain-B").unwrap(), None);
     }
 
     #[test]

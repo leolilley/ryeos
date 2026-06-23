@@ -189,8 +189,11 @@ fn split_rect(rect: Rect, axis: StudioSplitAxisVm, ratio: f32) -> (Rect, Option<
 }
 
 fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
-    if let StudioViewVm::Timeline { entries, .. } = view {
-        widgets::timeline::draw_timeline(surface, rect, entries);
+    if let StudioViewVm::Timeline {
+        entries, selected, ..
+    } = view
+    {
+        widgets::timeline::draw_timeline(surface, rect, entries, *selected);
         return;
     }
     if let StudioViewVm::Rows { columns, rows, .. } = view {

@@ -1,0 +1,11 @@
+# ryeos:signed:2026-06-21T05:02:10Z:a5030fee1a96b1d36f0e3b2be3ac2b24e2a49811686b97629fdc632c08774341:k0nsPS96ZCVbRNs8DVD2cqWFawIPvo8zkTj4SNiXS8kBNtdm+fbZTA8kFfps9FCVGAnrgZTa0ALTdPz66lKEAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- doctor
+description: Offline project/bundle preflight checklist
+forms:
+- slots:
+  - field: source
+    matcher: path
+dispatch:
+  kind: execute_ref
+  execute: service:node/doctor

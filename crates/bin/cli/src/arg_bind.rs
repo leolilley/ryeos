@@ -15,9 +15,8 @@ use crate::error::CliDispatchError;
 
 /// Bind tail argv tokens into a JSON parameters object.
 ///
-/// Thin wrapper around the shared binder. Returns `Result` for API
-/// compatibility with callers that expect it (no fallibility today,
-/// but the return type keeps the seam clean).
+/// Thin wrapper around the shared binder, returning `Result` to match
+/// the fallible binding seam used at the call sites.
 #[allow(dead_code)]
 pub fn bind_tail(tail: &[String]) -> Result<Value, CliDispatchError> {
     Ok(ryeos_runtime::bind_argv(tail))
@@ -125,7 +124,8 @@ pub fn parse_input_arg(tail: &[String]) -> Result<Option<Value>, CliDispatchErro
             CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
                 path: "<cli>".into(),
                 item_ref: "--input".into(),
-                detail: "--input requires an argument (file path or '-' for stdin)".into(),
+                detail: "--input requires an argument (file path, inline JSON, or '-' for stdin)"
+                    .into(),
             })
         })?;
         let text = read_input_source(input_arg)?;
@@ -139,22 +139,34 @@ pub fn parse_input_arg(tail: &[String]) -> Result<Option<Value>, CliDispatchErro
     }
 }
 
-/// Parse `--input` content as JSON, falling back to YAML. Accepting YAML lets
-/// operators feed a spec straight from a `.yaml` file (e.g.
-/// `scheduler register --input spec.yaml`) instead of hand-quoting a JSON
-/// object on the shell — the SSH quoting trap. JSON is a YAML subset, so JSON
-/// input keeps working unchanged.
+/// Parse `--input` content. YAML is a strict superset of JSON, so a
+/// single YAML parse accepts both forms — no format guessing, no
+/// silent JSON→YAML fallback. Accepting YAML lets operators feed a spec
+/// straight from a `.yaml` file (e.g. `scheduler register --input
+/// spec.yaml`) instead of hand-quoting JSON on the shell.
+///
+/// `--input` is a structured params/spec value: the result must be an
+/// object or array. A bare scalar (the shape malformed JSON degrades to
+/// under YAML, e.g. `not valid {{{` → the string `"not valid {{{"`) is
+/// rejected loudly rather than slipping through.
 fn parse_input_value(text: &str, source: &str) -> Result<Value, CliDispatchError> {
-    if let Ok(value) = serde_json::from_str::<Value>(text) {
-        return Ok(value);
-    }
-    serde_yaml::from_str::<Value>(text).map_err(|e| {
+    let invalid = |detail: String| {
         CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
             path: source.to_string(),
             item_ref: "--input".into(),
-            detail: format!("failed to parse --input as JSON or YAML: {e}"),
+            detail,
         })
-    })
+    };
+
+    let value = serde_yaml::from_str::<Value>(text)
+        .map_err(|e| invalid(format!("failed to parse --input as JSON or YAML: {e}")))?;
+
+    if !value.is_object() && !value.is_array() {
+        return Err(invalid(
+            "--input must be a JSON or YAML object or array, not a scalar".into(),
+        ));
+    }
+    Ok(value)
 }
 
 fn read_input_source(source: &str) -> Result<String, CliDispatchError> {
@@ -169,6 +181,13 @@ fn read_input_source(source: &str) -> Result<String, CliDispatchError> {
             })
         })?;
         Ok(buf)
+    } else if is_inline_json(source) {
+        // Inline JSON/array literal — `--input '{"x":1}'`. Return it
+        // verbatim for `parse_input_value` to parse, rather than treating
+        // it as a file path. Only an unambiguous `{`/`[` prefix counts,
+        // so file paths and `key: value` YAML stay file-only (covered by
+        // the `@file`/stdin/positional paths).
+        Ok(source.to_string())
     } else {
         std::fs::read_to_string(source).map_err(|e| {
             CliDispatchError::Config(crate::error::CliConfigError::InvalidExecuteRef {
@@ -180,25 +199,68 @@ fn read_input_source(source: &str) -> Result<String, CliDispatchError> {
     }
 }
 
+/// An `--input` argument is inline content (not a path) when it begins
+/// with a JSON object/array marker. Whitespace is tolerated so a quoted
+/// `--input ' {"x":1}'` still counts.
+fn is_inline_json(source: &str) -> bool {
+    matches!(source.trim_start().chars().next(), Some('{') | Some('['))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_input_value_accepts_json_and_yaml() {
-        // JSON still parses (it's a YAML subset and JSON is tried first).
+        // One YAML parse handles both — JSON object syntax is valid YAML.
         let json = parse_input_value(r#"{"schedule_id":"s","enabled":true}"#, "x").unwrap();
         assert_eq!(json["schedule_id"], "s");
         assert_eq!(json["enabled"], true);
 
-        // YAML now parses too — the shell-quoting-free path.
+        // Block YAML — the shell-quoting-free path.
         let yaml = parse_input_value("schedule_id: s\nenabled: true\n", "x").unwrap();
         assert_eq!(yaml["schedule_id"], "s");
         assert_eq!(yaml["enabled"], true);
 
-        // Garbage fails with a JSON-or-YAML message.
+        // Malformed input fails with a JSON-or-YAML message.
         let err = parse_input_value("{ this: is: not valid", "x").unwrap_err();
         assert!(format!("{err:?}").contains("JSON or YAML"));
+    }
+
+    #[test]
+    fn parse_input_value_rejects_bare_scalar() {
+        // A bare scalar is valid YAML but not a params/spec value.
+        let err = parse_input_value("just a string", "x").unwrap_err();
+        assert!(format!("{err:?}").contains("object or array"));
+    }
+
+    #[test]
+    fn is_inline_json_detects_object_and_array() {
+        assert!(is_inline_json(r#"{"x":1}"#));
+        assert!(is_inline_json("  [1, 2]"));
+        // Paths and bare YAML are NOT inline.
+        assert!(!is_inline_json("params.json"));
+        assert!(!is_inline_json("/tmp/spec.yaml"));
+        assert!(!is_inline_json("key: value"));
+        assert!(!is_inline_json("-"));
+    }
+
+    #[test]
+    fn parse_input_arg_accepts_inline_json() {
+        let tail = vec![
+            "--input".into(),
+            r#"{"game_id":"g","max_actions":60}"#.into(),
+        ];
+        let value = parse_input_arg(&tail).unwrap().unwrap();
+        assert_eq!(value["game_id"], "g");
+        assert_eq!(value["max_actions"], 60);
+    }
+
+    #[test]
+    fn parse_input_arg_equals_form_accepts_inline_json() {
+        let tail = vec![r#"--input={"k":[1,2]}"#.into()];
+        let value = parse_input_arg(&tail).unwrap().unwrap();
+        assert_eq!(value["k"], serde_json::json!([1, 2]));
     }
 
     #[test]
@@ -307,20 +369,23 @@ mod tests {
     }
 
     #[test]
-    fn input_rejects_non_object_json() {
-        // Execute expects a parameters object; raw arrays/scalars are
-        // technically valid JSON but semantically wrong. parse_input_arg
-        // parses whatever JSON it gets — callers validate shape.
+    fn input_accepts_array_rejects_scalar() {
+        // Contract: `--input` accepts an object or array; a bare scalar
+        // is rejected. (Callers validate the deeper params shape.)
         let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("array.json");
-        std::fs::write(&file_path, r#"[1,2,3]"#).unwrap();
 
-        let tail = vec!["--input".into(), file_path.to_string_lossy().into_owned()];
-        let result = parse_input_arg(&tail).unwrap().unwrap();
-        assert!(
-            result.is_array(),
-            "raw array is valid JSON, caller must validate shape"
-        );
+        let array_path = dir.path().join("array.json");
+        std::fs::write(&array_path, r#"[1,2,3]"#).unwrap();
+        let array = parse_input_arg(&["--input".into(), array_path.to_string_lossy().into_owned()])
+            .unwrap()
+            .unwrap();
+        assert!(array.is_array());
+
+        let scalar_path = dir.path().join("scalar.json");
+        std::fs::write(&scalar_path, r#""just a string""#).unwrap();
+        let err = parse_input_arg(&["--input".into(), scalar_path.to_string_lossy().into_owned()])
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("object or array"));
     }
 
     #[test]

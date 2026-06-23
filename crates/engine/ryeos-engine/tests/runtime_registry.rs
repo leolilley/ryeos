@@ -104,6 +104,8 @@ binary_ref: bin/{host_triple}/directive_runner
 abi_version: v1
 required_caps:
   - ryeos.read.directive.*
+required_envelope_fields:
+  - provider_snapshot
 description: Default directive runtime
 schema:
   envelope: LaunchEnvelope
@@ -156,6 +158,10 @@ fn parse_runtime_yaml_success() {
     assert_eq!(
         yaml.required_caps,
         vec!["ryeos.read.directive.*".to_string()]
+    );
+    assert_eq!(
+        yaml.required_envelope_fields,
+        vec!["provider_snapshot".to_string()]
     );
     assert_eq!(
         yaml.description.as_deref(),
