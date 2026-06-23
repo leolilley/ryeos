@@ -528,9 +528,12 @@ pub struct DelegationSpec {
 /// runtime via lillux::run). Lives at `execution.method_dispatch.via`
 /// rather than per-method, since all methods of a kind share one route.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(tag = "via", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 pub enum MethodDispatchVia {
     /// Methods are dispatched by spawning the kind's runtime via lillux::run.
+    /// Deserializes from the bare string `runtime_registry` at
+    /// `execution.method_dispatch.via` (a named field holding this unit enum,
+    /// so it must be a plain string-valued enum, not internally tagged).
     RuntimeRegistry,
 }
 

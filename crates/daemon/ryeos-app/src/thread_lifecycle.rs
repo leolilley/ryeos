@@ -892,6 +892,62 @@ pub fn resolve_root_execution(
     })
 }
 
+/// Kind-agnostic existence + trust gate for accepted/background launch.
+///
+/// Resolves the root item and verifies its trust, returning the resolved
+/// item so the caller can enforce required caps and secrets from its
+/// metadata before a thread_id is minted. Unlike [`resolve_root_execution`]
+/// (the terminal-only resolver used by the tool subprocess path), this does
+/// not demand `metadata.executor_id` or build a plan — which executor runs
+/// (terminal subprocess vs runtime-registry runtime) is decided by
+/// `dispatch::dispatch`. Route-specific pre-thread-creation checks
+/// (terminal executor_id, direct-runtime caps) live in
+/// `ryeos_executor::dispatch::preflight_root_dispatch`.
+///
+/// Fails fast — before any thread_id is minted — on invalid refs and trust
+/// violations.
+pub fn preflight_root_execution(params: ResolveRootExecutionParams<'_>) -> Result<ResolvedItem> {
+    let ResolveRootExecutionParams {
+        engine,
+        site_id,
+        project_path,
+        item_ref,
+        launch_mode,
+        requested_by,
+        caller_scopes,
+        validate_only,
+        ..
+    } = params;
+    let project_path = project_path.to_path_buf();
+
+    let canonical_ref =
+        CanonicalRef::parse(item_ref).map_err(|e| anyhow!("invalid item ref: {e}"))?;
+
+    validate_launch_mode(launch_mode)?;
+
+    let plan_ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: requested_by.unwrap_or_else(|| "fp:local".into()),
+            scopes: caller_scopes,
+        }),
+        project_context: ProjectContext::LocalPath { path: project_path },
+        current_site_id: site_id.to_string(),
+        origin_site_id: site_id.to_string(),
+        execution_hints: ExecutionHints::default(),
+        validate_only,
+    };
+
+    let resolved = engine
+        .resolve(&plan_ctx, &canonical_ref)
+        .map_err(|e| anyhow!("resolution failed: {e}"))?;
+
+    let verified = engine
+        .verify(&plan_ctx, resolved)
+        .map_err(|e| anyhow!("verification failed: {e}"))?;
+
+    Ok(verified.resolved)
+}
+
 /// Result of dry-run validation (verify + trust + build_plan, no spawn).
 pub struct ValidatedItem {
     pub trust_class: TrustClass,

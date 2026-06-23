@@ -198,7 +198,39 @@ pub(crate) fn spawn_dispatch_launch(
         .await
         {
             Ok(_value) => Ok(()),
-            Err(e) => Err(LaunchSpawnError::Dispatch(e)),
+            Err(e) => {
+                // Persistence-first safety net: if dispatch created the
+                // pre-minted thread row but failed before finalizing it
+                // (e.g. a managed `build_and_launch` policy/trust/grant
+                // failure that returns before spawn), finalize it `failed`
+                // so the id returned by accepted launch reaches a terminal
+                // state instead of hanging at `created`. No-ops if the
+                // thread was never created or the runtime already drove it
+                // terminal.
+                if let Ok(Some(detail)) = state_clone.threads.get_thread(&pre_minted_thread_id) {
+                    if !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+                        .is_some_and(|s| s.is_terminal())
+                    {
+                        let _ = state_clone.threads.finalize_thread(
+                            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                                thread_id: pre_minted_thread_id.clone(),
+                                status: "failed".to_string(),
+                                outcome_code: Some("failed".to_string()),
+                                result: None,
+                                error: Some(serde_json::json!({
+                                    "code": e.code(),
+                                    "reason": e.to_string(),
+                                })),
+                                metadata: None,
+                                artifacts: Vec::new(),
+                                final_cost: None,
+                                summary_json: None,
+                            },
+                        );
+                    }
+                }
+                Err(LaunchSpawnError::Dispatch(e))
+            }
         }
     })
 }

@@ -550,8 +550,24 @@ impl DaemonHarness {
         fast_fixture::register_core_bundle_at_state(&state_path, &fixture)?;
         plant(&state_path, user_space.path(), &fixture)?;
 
-        // Always authorize the user key so `post_execute` can sign requests.
-        fast_fixture::write_authorized_key_signed_by(&state_path, &fixture.user, &fixture.node)?;
+        // Authorize the user key (wildcard scope) so `post_execute` can sign
+        // requests — unless the `plant` closure already wrote an authorized
+        // key for it (e.g. a capability-restricted key for a cap-rejection
+        // test), in which case we must not clobber it.
+        let user_fp = lillux::signature::compute_fingerprint(&fixture.user.verifying_key());
+        let user_key_path = state_path
+            .join(ryeos_engine::AI_DIR)
+            .join("node")
+            .join("auth")
+            .join("authorized_keys")
+            .join(format!("{user_fp}.toml"));
+        if !user_key_path.exists() {
+            fast_fixture::write_authorized_key_signed_by(
+                &state_path,
+                &fixture.user,
+                &fixture.node,
+            )?;
+        }
 
         // Bind `:0` and read the real address from daemon.json (no
         // cross-process port-pick race).
