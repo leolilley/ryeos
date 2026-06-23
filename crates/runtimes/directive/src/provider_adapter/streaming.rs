@@ -786,17 +786,19 @@ pub async fn call_provider_streaming(
             tracing::warn!("failed to read error response body: {e}");
             String::new()
         });
+        // Lead with the provider's own error body — it's the actionable part
+        // (e.g. "Insufficient balance"). The diagnostic context trails it so a
+        // truncated surface (the TUI feed line) keeps the message, not the IDs.
         bail!(
-            "provider returned {status} (streaming) \
+            "provider returned {status} (streaming): {safe_body} \
              [provider={provider_id} profile={matched_profile:?} \
-             config_hash={config_hash} request_body_sha256={request_body_sha256}]: \
-             {safe_body}",
+             config_hash={config_hash} request_body_sha256={request_body_sha256}]",
             status = status,
+            safe_body = safe_error_body(&text),
             provider_id = provider_id,
             matched_profile = matched_profile,
             config_hash = config_hash,
             request_body_sha256 = request_body_sha256,
-            safe_body = safe_error_body(&text),
         );
     }
 

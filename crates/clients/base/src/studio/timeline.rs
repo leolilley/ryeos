@@ -347,6 +347,10 @@ fn failure_reason(payload: Option<&Value>) -> Option<String> {
     p.get("error")
         .and_then(|e| e.get("message"))
         .and_then(Value::as_str)
+        // The structured error envelope (StructuredErrorPayload) carries its
+        // human message in `error.error` (e.g. "missing required secret …") —
+        // surface it rather than falling through to the terse outcome_code.
+        .or_else(|| p.get("error").and_then(|e| e.get("error")).and_then(Value::as_str))
         .or_else(|| p.get("error").and_then(Value::as_str))
         .or_else(|| p.get("message").and_then(Value::as_str))
         .or_else(|| p.get("outcome_code").and_then(Value::as_str))
@@ -457,6 +461,29 @@ mod tests {
         };
         assert_eq!(primary, "failed — boom");
         assert!(matches!(tone, StudioTone::Danger));
+    }
+
+    #[test]
+    fn execution_entry_surfaces_structured_error_envelope_message() {
+        // The structured error envelope (StructuredErrorPayload) carries its
+        // human message in `error.error`, not `error.message`. Surface that
+        // (e.g. which secret is missing) instead of the terse outcome_code.
+        let entry = execution_entry(&raw_record(json!({
+            "event_type": "thread_failed",
+            "payload": {
+                "outcome_code": "required_secret_missing",
+                "error": {
+                    "code": "required_secret_missing",
+                    "error": "missing required secret `ZEN_API_KEY` for `directive:ryeos/ops/base`",
+                    "env_var": "ZEN_API_KEY"
+                }
+            }
+        })));
+        assert!(matches!(
+            entry,
+            Some(StudioTimelineEntryVm::Line { primary, .. })
+                if primary == "failed — missing required secret `ZEN_API_KEY` for `directive:ryeos/ops/base`"
+        ));
     }
 
     #[test]
