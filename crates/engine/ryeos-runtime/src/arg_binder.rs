@@ -754,6 +754,7 @@ mod tests {
             forms,
             defaults: Default::default(),
             parameter_binding: None,
+            control_flags: Vec::new(),
             project: None,
             dispatch: crate::CommandDispatch::Group,
             source_file: std::path::PathBuf::new(),

@@ -99,6 +99,7 @@ mod tests {
                 }],
                 defaults: Default::default(),
                 parameter_binding: None,
+                control_flags: Vec::new(),
                 project: Some(ryeos_runtime::CommandProjectPolicy {
                     resolution: ryeos_runtime::CommandProjectResolution::Optional,
                     default: ryeos_runtime::CommandProjectDefault::None,

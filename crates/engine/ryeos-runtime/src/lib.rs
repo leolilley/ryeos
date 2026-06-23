@@ -14,8 +14,8 @@ pub mod framing;
 pub mod hooks_eval;
 pub mod hooks_loader;
 pub mod interpolation;
-pub mod model_resolution;
 pub mod method_wire;
+pub mod model_resolution;
 pub mod paths;
 pub mod progress;
 pub mod provider_snapshot;
@@ -37,11 +37,12 @@ pub use callback::{
 pub use checkpoint::CheckpointWriter;
 pub use command::{
     CommandAliasDef, CommandArgumentArity, CommandArgumentDef, CommandArgumentForm,
-    CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandDef, CommandDispatch,
-    CommandHelpDef, CommandOrigin, CommandParameterBinding, CommandParameterBindingMode,
-    CommandProjectDefault, CommandProjectPolicy, CommandProjectResolution, CommandProvenance,
-    CommandRegistrationClaim, CommandRegistrationClaimPattern, CommandRegistrationPolicy,
-    CommandRegistrationRule, CommandRegistry, CommandRegistryError, FlagKeyNormalization,
+    CommandArgumentKind, CommandArgumentSlot, CommandAvailability, CommandControlFlag, CommandDef,
+    CommandDispatch, CommandHelpDef, CommandOrigin, CommandParameterBinding,
+    CommandParameterBindingMode, CommandProjectDefault, CommandProjectPolicy,
+    CommandProjectResolution, CommandProvenance, CommandRegistrationClaim,
+    CommandRegistrationClaimPattern, CommandRegistrationPolicy, CommandRegistrationRule,
+    CommandRegistry, CommandRegistryError, ControlFlagBinding, FlagKeyNormalization,
     MatchedCommand,
 };
 pub use condition::{apply_operator, matches, resolve_path};
