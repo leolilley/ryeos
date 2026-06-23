@@ -60,25 +60,13 @@ pub struct ExecuteRequest {
     /// the runtime is spawned — while the args are data plane. Absent for
     /// terminator/delegate kinds, which ignore it.
     #[serde(default)]
-    pub call: Option<ExecuteCall>,
+    pub call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     /// When true, attach a `debug` block (resolved cmd/args/cwd/env keys +
     /// exit code and size-limited raw stdout/stderr) to the result.
     #[serde(default)]
     pub debug_raw: bool,
-}
-
-/// The `call` block of an `/execute` request: a method selector plus its
-/// args. Separated from the top-level request because the method is a
-/// daemon-visible behavior selector, not just another input value.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExecuteCall {
-    #[serde(default)]
-    pub method: Option<String>,
-    #[serde(default)]
-    pub args: Option<Value>,
 }
 
 impl ExecuteRequest {
@@ -90,6 +78,12 @@ impl ExecuteRequest {
     /// The requested method args, if `call.args` was provided.
     pub fn args(&self) -> Option<Value> {
         self.call.as_ref().and_then(|c| c.args.clone())
+    }
+
+    /// The requested call block, borrowed — the single caller-intent unit
+    /// fed into `ExecutionContext.requested_call`.
+    pub fn call(&self) -> Option<&ryeos_engine::method_call::MethodCall> {
+        self.call.as_ref()
     }
 }
 
@@ -346,8 +340,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // resolution flows through this Arc.
             engine: project_ctx.request_engine.clone(),
             plan_ctx,
-            requested_method: request.method(),
-            requested_args: request.args(),
+            requested_call: request.call().cloned(),
         };
 
         // Parse the user-supplied root ref.
@@ -642,8 +635,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     validate_only: false,
                     usage_subject: usage_subject.clone(),
                     usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    method: request.method(),
-                    args: request.args(),
+                    call: request.call().cloned(),
                     previous_thread_id: None,
                 },
             );
@@ -743,8 +735,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     parameters: request.parameters.clone(),
                     acting_principal: &caller_principal_id,
                     remote_ignore: &remote_ignore,
-                    method: None,
-                    args: None,
+                    call: None,
                 };
                 match crate::remote::forward::execute_unary_forward(
                     &state_arc,
@@ -783,8 +774,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
             pre_minted_thread_id: None,
             usage_subject,
             usage_subject_asserted_by,
-            method: request.method(),
-            args: request.args(),
             previous_thread_id: None,
         };
 
@@ -1256,7 +1245,7 @@ mod tests {
     #[test]
     fn target_site_plan_rejects_method_or_args() {
         let mut req = target_request(Some("site:remote"));
-        req.call = Some(ExecuteCall {
+        req.call = Some(ryeos_engine::method_call::MethodCall {
             method: Some("query".into()),
             args: None,
         });

@@ -135,8 +135,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             caller_scopes: principal_scopes,
             engine: ctx.state.engine.clone(),
             plan_ctx,
-            requested_method: None,
-            requested_args: None,
+            requested_call: None,
         };
 
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
@@ -156,8 +155,6 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             pre_minted_thread_id: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
-            method: None,
-            args: None,
             previous_thread_id: None,
         };
 

@@ -875,6 +875,7 @@ mod tests {
                 item_id: "my/tool".to_string(),
                 params: json!({}),
                 thread: "inline".to_string(),
+                call: None,
             },
         };
         let err = client.dispatch_action(req).await.unwrap_err();

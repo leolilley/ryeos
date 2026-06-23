@@ -50,23 +50,9 @@ pub(crate) struct LaunchRequest {
     /// Method call: `{ method, args }`. The method selects daemon-owned
     /// behavior; the args are data. Absent for terminator/delegate kinds.
     #[serde(default)]
-    pub(crate) call: Option<
-        crate::routes::response_modes::execute_mode::ExecuteCall,
-    >,
+    pub(crate) call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
-}
-
-impl LaunchRequest {
-    /// The requested method name, if `call.method` was provided.
-    pub(crate) fn method(&self) -> Option<String> {
-        self.call.as_ref().and_then(|c| c.method.clone())
-    }
-
-    /// The requested method args, if `call.args` was provided.
-    pub(crate) fn args(&self) -> Option<Value> {
-        self.call.as_ref().and_then(|c| c.args.clone())
-    }
 }
 
 fn default_launch_mode() -> String {
@@ -346,17 +332,14 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
-        // Extract method/args before moving the rest of `req` into options.
-        let call_method = req.method();
-        let call_args = req.args();
+        // Build launch options before moving `req` fields.
         let options = crate::routes::launch::DispatchLaunchOptions {
             launch_mode: req.launch_mode,
             target_site_id: req.target_site_id,
             validate_only: req.validate_only,
             usage_subject,
             usage_subject_asserted_by,
-            method: call_method,
-            args: call_args,
+            call: req.call,
             previous_thread_id: None,
         };
 
@@ -600,8 +583,7 @@ mod tests {
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
         assert_eq!(req.validate_only, false);
-        assert_eq!(req.method(), None);
-        assert_eq!(req.args(), None);
+        assert!(req.call.is_none());
     }
 
     #[test]
@@ -620,8 +602,9 @@ mod tests {
         assert_eq!(req.launch_mode, "detached");
         assert_eq!(req.target_site_id.as_deref(), Some("site:remote"));
         assert!(req.validate_only);
-        assert_eq!(req.method().as_deref(), Some("run"));
-        assert_eq!(req.args().unwrap()["arg"], 42);
+        let call = req.call.as_ref().expect("call present");
+        assert_eq!(call.method(), Some("run"));
+        assert_eq!(call.args().unwrap()["arg"], 42);
     }
 
     #[test]
@@ -655,7 +638,6 @@ mod tests {
         assert_eq!(req.launch_mode, "inline");
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
-        assert_eq!(req.method(), None);
-        assert_eq!(req.args(), None);
+        assert!(req.call.is_none());
     }
 }
