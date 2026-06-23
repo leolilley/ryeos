@@ -714,6 +714,10 @@ impl Runner {
                                                 item_id: dispatch_result.canonical_ref.clone(),
                                                 params: dispatch_result.arguments.clone(),
                                                 thread: "inline".to_string(),
+                                                // Directive tool-calls dispatch
+                                                // `tool:` refs at their default
+                                                // method; no method selector.
+                                                call: None,
                                             },
                                         },
                                     )

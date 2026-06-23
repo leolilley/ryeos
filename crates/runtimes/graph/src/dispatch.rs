@@ -111,6 +111,21 @@ pub async fn dispatch_action(
         .and_then(|v| v.as_str())
         .unwrap_or("inline");
 
+    // Optional method selector. The node's `call: { method, args }` block
+    // (already `${…}`-interpolated by the walker) maps onto the daemon's
+    // method dispatch. Absent (or explicit `null`, for parity with how
+    // `/execute` deserializes `Option<MethodCall>`) → the leaf takes the
+    // kind's default method. A malformed `call` is a node authoring error,
+    // surfaced loudly.
+    let call = match action.get("call") {
+        None => None,
+        Some(v) if v.is_null() => None,
+        Some(call_val) => Some(
+            serde_json::from_value::<ryeos_runtime::callback::MethodCall>(call_val.clone())
+                .map_err(|e| anyhow::anyhow!("invalid `call` block for `{item_id}`: {e}"))?,
+        ),
+    };
+
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
@@ -118,6 +133,7 @@ pub async fn dispatch_action(
             item_id: item_id.to_string(),
             params,
             thread: thread.to_string(),
+            call,
         },
     };
 
@@ -583,6 +599,174 @@ mod tests {
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
+    }
+
+    /// Mock that records the `action` of the last dispatch so a test can
+    /// assert what the graph forwarded across the callback wire.
+    struct CapturingClient {
+        last: Arc<Mutex<Option<ryeos_runtime::callback::ActionPayload>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ryeos_runtime::callback::RuntimeCallbackAPI for CapturingClient {
+        async fn dispatch_action(
+            &self,
+            request: DispatchActionRequest,
+        ) -> Result<Value, CallbackError> {
+            *self.last.lock().unwrap() = Some(request.action);
+            Ok(json!({"thread": {}, "result": {}}))
+        }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: ryeos_runtime::TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn bundle_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_get(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_delete(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_list(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"keys": []}))
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+    }
+
+    #[tokio::test]
+    async fn forwards_call_block_to_callback() {
+        let last = Arc::new(Mutex::new(None));
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(CapturingClient {
+            last: last.clone(),
+        });
+        let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
+
+        let action = json!({
+            "item_id": "knowledge:arc/resources",
+            "params": {},
+            "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
+        });
+        dispatch_action(&client, &action, "T-test", "/project", None)
+            .await
+            .expect("dispatch ok");
+
+        let forwarded = last.lock().unwrap().take().expect("action captured");
+        let call = forwarded.call.expect("call forwarded");
+        assert_eq!(call.method(), Some("query"));
+        assert_eq!(call.args().unwrap()["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn omits_call_block_when_absent() {
+        let last = Arc::new(Mutex::new(None));
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(CapturingClient {
+            last: last.clone(),
+        });
+        let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
+
+        let action = json!({ "item_id": "tool:t/echo", "params": {} });
+        dispatch_action(&client, &action, "T-test", "/project", None)
+            .await
+            .expect("dispatch ok");
+
+        let forwarded = last.lock().unwrap().take().expect("action captured");
+        assert!(forwarded.call.is_none(), "no call block → None");
+    }
+
+    #[tokio::test]
+    async fn null_call_block_treated_as_absent() {
+        let last = Arc::new(Mutex::new(None));
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> = Arc::new(CapturingClient {
+            last: last.clone(),
+        });
+        let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
+
+        // Parity with `/execute`'s `Option<MethodCall>`: explicit null == absent.
+        let action = json!({ "item_id": "tool:t/echo", "params": {}, "call": null });
+        dispatch_action(&client, &action, "T-test", "/project", None)
+            .await
+            .expect("dispatch ok");
+
+        let forwarded = last.lock().unwrap().take().expect("action captured");
+        assert!(forwarded.call.is_none(), "call: null → None");
+    }
+
+    #[tokio::test]
+    async fn malformed_call_block_fails_loudly() {
+        let client = make_mock_client(vec![]);
+        let action = json!({
+            "item_id": "knowledge:arc/resources",
+            "params": {},
+            "call": { "op": "query" }, // unknown field — deny_unknown_fields
+        });
+        let err = dispatch_action(&client, &action, "T-test", "/project", None)
+            .await
+            .expect_err("malformed call must fail");
+        assert!(
+            err.to_string().contains("invalid `call` block"),
+            "got: {err}"
+        );
     }
 
     #[test]

@@ -574,8 +574,7 @@ impl RemoteClient {
         project_path: &str,
         parameters: &Value,
         project_source: &str,
-        method: Option<&str>,
-        args: Option<&Value>,
+        call: Option<&ryeos_engine::method_call::MethodCall>,
     ) -> Result<Value> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
@@ -583,16 +582,10 @@ impl RemoteClient {
             "parameters": parameters,
             "project_source": { "kind": project_source },
         });
-        // Build the `call` block only when a method and/or args are present.
-        if method.is_some() || args.is_some() {
-            let mut call = serde_json::Map::new();
-            if let Some(m) = method {
-                call.insert("method".to_string(), Value::String(m.to_string()));
-            }
-            if let Some(a) = args {
-                call.insert("args".to_string(), a.clone());
-            }
-            body["call"] = Value::Object(call);
+        // Forward the `call` block only when it carries intent.
+        if let Some(call) = call.filter(|c| !c.is_empty()) {
+            body["call"] = serde_json::to_value(call)
+                .map_err(|e| anyhow::anyhow!("failed to serialize call block: {e}"))?;
         }
         self.signed_post("/execute", &body).await
     }

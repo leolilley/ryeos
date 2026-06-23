@@ -52,12 +52,9 @@ pub struct RemoteForwardRequest<'a> {
     pub acting_principal: &'a str,
     /// Ignore rules for project ingest.
     pub remote_ignore: &'a IgnoreMatcher,
-    /// Optional method name. If `None`, the remote uses its default.
-    /// Forwarded as-is to the remote /execute body's `call.method`.
-    pub method: Option<&'a str>,
-    /// Optional method-specific args. Forwarded as-is to the remote
-    /// /execute body's `call.args`.
-    pub args: Option<Value>,
+    /// Optional method call. Forwarded as-is to the remote /execute body's
+    /// `call` block. `None` → the remote uses its default method.
+    pub call: Option<&'a ryeos_engine::method_call::MethodCall>,
 }
 
 /// Result from the shared unary forward helper.
@@ -275,8 +272,7 @@ pub async fn execute_unary_forward(
             req.remote_project_path,
             &req.parameters,
             "pushed_head",
-            req.method,
-            req.args.as_ref(),
+            req.call,
         )
         .await
     {

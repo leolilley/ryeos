@@ -64,13 +64,31 @@ pub struct ExecutionContext {
     pub engine: Arc<ryeos_engine::engine::Engine>,
     /// Plan context for engine operations.
     pub plan_ctx: ryeos_engine::contracts::PlanContext,
-    /// **Method dispatch**: the method name from the `/execute` request's
-    /// `call.method`. Used by `resolve_dispatch_hop` when the kind schema
-    /// declares `methods`. Ignored for terminator/delegate paths.
-    pub requested_method: Option<String>,
-    /// **Method dispatch**: method args from the `/execute` request's
-    /// `call.args`.
-    pub requested_args: Option<serde_json::Value>,
+    /// **Method dispatch**: the caller's `{ method, args }` intent, from the
+    /// `/execute` request's `call` block, the graph callback action's `call`,
+    /// or accepted-launch options. This is the SINGLE source of truth for
+    /// method dispatch: `resolve_dispatch_hop` reads the method here and arg
+    /// validation reads the args here. `None`/empty → the kind's default
+    /// method. Ignored for terminator/delegate paths.
+    pub requested_call: Option<ryeos_engine::method_call::MethodCall>,
+}
+
+impl ExecutionContext {
+    /// The requested method name, if a `call.method` was provided.
+    pub fn requested_method(&self) -> Option<&str> {
+        self.requested_call.as_ref().and_then(|c| c.method())
+    }
+
+    /// The requested method args, if `call.args` were provided.
+    pub fn requested_args(&self) -> Option<&serde_json::Value> {
+        self.requested_call.as_ref().and_then(|c| c.args())
+    }
+
+    /// True when the caller expressed a method call (a method and/or args).
+    /// Used to reject a method call aimed at a kind that declares no methods.
+    pub fn has_requested_call(&self) -> bool {
+        self.requested_call.as_ref().is_some_and(|c| !c.is_empty())
+    }
 }
 
 /// Result of a service execution, including metadata for audit.

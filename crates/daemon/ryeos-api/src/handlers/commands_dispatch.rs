@@ -105,8 +105,7 @@ pub async fn handle(
         caller_scopes: ctx.scopes.clone(),
         engine: state.engine.clone(),
         plan_ctx,
-        requested_method: None,
-        requested_args: None,
+        requested_call: None,
     };
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         project_path.clone(),
@@ -125,8 +124,6 @@ pub async fn handle(
         pre_minted_thread_id: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
-        method: None,
-        args: None,
         previous_thread_id: None,
     };
 
