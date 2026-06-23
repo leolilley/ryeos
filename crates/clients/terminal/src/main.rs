@@ -86,9 +86,7 @@ fn main() {
                 eprintln!("Usage: ryeos-tui [OPTIONS] [PROJECT_PATH]");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!(
-                    "  --surface <REF>         Open a surface by canonical ref"
-                );
+                eprintln!("  --surface <REF>         Open a surface by canonical ref");
                 eprintln!(
                     "  --surface-file <PATH>   Load surface spec from a local file (untrusted preview)"
                 );

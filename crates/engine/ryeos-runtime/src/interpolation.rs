@@ -325,7 +325,10 @@ pub fn interpolate_action(action: &Value, context: &Value) -> anyhow::Result<Val
         Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (k, v) in map {
-                if k == "item_id" || k == "params" {
+                // `call` (method selector + args) is interpolated like params so
+                // `call.args` templates such as `${state.hint}` resolve; the
+                // literal `call.method` has no template and is passed through.
+                if k == "item_id" || k == "params" || k == "call" {
                     result.insert(k.clone(), interpolate(v, context)?);
                 } else {
                     result.insert(k.clone(), v.clone());
@@ -434,16 +437,21 @@ mod tests {
     }
 
     #[test]
-    fn interpolate_action_only_touches_item_id_and_params() {
+    fn interpolate_action_touches_item_id_params_and_call() {
         let action = json!({
             "item_id": "${tool.id}",
             "params": {"n": "${x}"},
+            "call": {"method": "query", "args": {"query": "${q}"}},
             "other": "${y}"
         });
-        let ctx = json!({"tool": {"id": "ryeos/tool"}, "x": 1, "y": 2});
+        let ctx = json!({"tool": {"id": "ryeos/tool"}, "x": 1, "y": 2, "q": "hint"});
         let result = interpolate_action(&action, &ctx).unwrap();
         assert_eq!(result["item_id"], "ryeos/tool");
         assert_eq!(result["params"]["n"], 1);
+        // `call.args` templates resolve; literal `call.method` passes through.
+        assert_eq!(result["call"]["method"], "query");
+        assert_eq!(result["call"]["args"]["query"], "hint");
+        // Non-dispatch keys are still left untouched.
         assert_eq!(result["other"], "${y}");
     }
 

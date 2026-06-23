@@ -870,7 +870,10 @@ impl StudioCore {
         if lenses.is_empty() {
             return Vec::new();
         }
-        let current = self.workspace.focused_view().map(|view| view.view_ref.clone());
+        let current = self
+            .workspace
+            .focused_view()
+            .map(|view| view.view_ref.clone());
         let index = current
             .as_ref()
             .and_then(|cur| lenses.iter().position(|lens| lens == cur))
@@ -903,7 +906,6 @@ impl StudioCore {
         self.bump_generation();
         self.initial_effects()
     }
-
 
     fn set_tile_cursor(&mut self, tile_id: TileId, index: usize) -> bool {
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
@@ -3448,7 +3450,11 @@ mod tests {
             matches!(core.workspace.focused_view(), Some(ViewSpec { view_ref }) if view_ref == "view:b"),
             "cycle forward moves to the next lens"
         );
-        assert_eq!(core.workspace.tile_ids().len(), 1, "cycling stays single-lens");
+        assert_eq!(
+            core.workspace.tile_ids().len(),
+            1,
+            "cycling stays single-lens"
+        );
 
         cycle(&mut core);
         assert!(

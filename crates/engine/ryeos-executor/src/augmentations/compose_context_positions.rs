@@ -189,104 +189,106 @@ pub async fn run(
     //        token revocation and failure-finalization below then run
     //        regardless, so a pre-spawn failure can no longer leak tokens
     //        or leave the child thread non-terminal.
-    let spawn_outcome: Result<ryeos_runtime::method_wire::MethodCallResult, LaunchAugmentationError> =
-        async {
-            let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
-                schema_version: 1,
+    let spawn_outcome: Result<
+        ryeos_runtime::method_wire::MethodCallResult,
+        LaunchAugmentationError,
+    > = async {
+        let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
+            schema_version: 1,
+            kind: target_kind.clone(),
+            method: target_method.clone(),
+            thread_id: child_thread_id.clone(),
+            callback: ryeos_runtime::envelope::EnvelopeCallback {
+                socket_path: state.config.uds_path.clone(),
+                token: cap.token.clone(),
+            },
+            project_root: project_path.to_path_buf(),
+            payload,
+        };
+
+        // Resolve the native executor path and spawn.
+        let bundle_roots: Vec<std::path::PathBuf> = engine_roots
+            .ordered
+            .iter()
+            .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
+            .map(|r| {
+                r.ai_root
+                    .parent()
+                    .map(|pp| pp.to_path_buf())
+                    .unwrap_or(r.ai_root.clone())
+            })
+            .collect();
+        let cache_root = state
+            .config
+            .app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state");
+        let executor_path = crate::execution::launch::resolve_native_executor_path(
+            &bundle_roots,
+            &executor_ref,
+            &cache_root,
+            &engine.trust_store,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+        )
+        .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
+
+        let executor_path_str = executor_path.to_string_lossy().to_string();
+        let stdin_data = serde_json::to_string(&envelope)?;
+        let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
+            &engine_roots,
+            &state.config.app_root,
+        );
+        let envs = ryeos_app::process::build_subprocess_envs_with_roots(
+            &std::collections::BTreeMap::new(),
+            &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
+            roots,
+        )
+        .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
+        let result = tokio::task::spawn_blocking(move || {
+            lillux::run(lillux::SubprocessRequest {
+                cmd: executor_path_str,
+                args: vec![],
+                cwd: None,
+                envs,
+                stdin_data: Some(stdin_data),
+                timeout: 60.0,
+            })
+        })
+        .await
+        .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
+
+        if !result.success {
+            return Err(LaunchAugmentationError::ChildBootstrap {
                 kind: target_kind.clone(),
                 method: target_method.clone(),
-                thread_id: child_thread_id.clone(),
-                callback: ryeos_runtime::envelope::EnvelopeCallback {
-                    socket_path: state.config.uds_path.clone(),
-                    token: cap.token.clone(),
-                },
-                project_root: project_path.to_path_buf(),
-                payload,
-            };
-
-            // Resolve the native executor path and spawn.
-            let bundle_roots: Vec<std::path::PathBuf> = engine_roots
-                .ordered
-                .iter()
-                .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
-                .map(|r| {
-                    r.ai_root
-                        .parent()
-                        .map(|pp| pp.to_path_buf())
-                        .unwrap_or(r.ai_root.clone())
-                })
-                .collect();
-            let cache_root = state
-                .config
-                .app_root
-                .join(ryeos_engine::AI_DIR)
-                .join("state");
-            let executor_path = crate::execution::launch::resolve_native_executor_path(
-                &bundle_roots,
-                &executor_ref,
-                &cache_root,
-                &engine.trust_store,
-                ryeos_engine::resolution::TrustClass::TrustedBundle,
-            )
-            .map_err(|e| LaunchAugmentationError::RuntimeRegistry(e.to_string()))?;
-
-            let executor_path_str = executor_path.to_string_lossy().to_string();
-            let stdin_data = serde_json::to_string(&envelope)?;
-            let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
-                &engine_roots,
-                &state.config.app_root,
-            );
-            let envs = ryeos_app::process::build_subprocess_envs_with_roots(
-                &std::collections::BTreeMap::new(),
-                &vec![("RYEOSD_THREAD_AUTH_TOKEN".to_string(), tat_owned)],
-                roots,
-            )
-            .map_err(|e| LaunchAugmentationError::Threads(format!("build subprocess env: {e}")))?;
-            let result = tokio::task::spawn_blocking(move || {
-                lillux::run(lillux::SubprocessRequest {
-                    cmd: executor_path_str,
-                    args: vec![],
-                    cwd: None,
-                    envs,
-                    stdin_data: Some(stdin_data),
-                    timeout: 60.0,
-                })
-            })
-            .await
-            .map_err(|e| LaunchAugmentationError::Threads(format!("spawn join: {e}")))?;
-
-            if !result.success {
-                return Err(LaunchAugmentationError::ChildBootstrap {
-                    kind: target_kind.clone(),
-                    method: target_method.clone(),
-                    exit_code: result.exit_code,
-                    stderr: result.stderr,
-                });
-            }
-
-            let batch_result: ryeos_runtime::method_wire::MethodCallResult =
-                serde_json::from_str(&result.stdout)?;
-
-            // The runtime must echo back the dispatched kind/method.
-            if batch_result.kind != *target_kind || batch_result.method != *target_method {
-                return Err(LaunchAugmentationError::ChildFailed {
-                    kind: target_kind.clone(),
-                    method: target_method.clone(),
-                    error: None,
-                });
-            }
-
-            if !batch_result.success {
-                return Err(LaunchAugmentationError::ChildFailed {
-                    kind: target_kind.clone(),
-                    method: target_method.clone(),
-                    error: batch_result.error,
-                });
-            }
-
-            Ok(batch_result)
+                exit_code: result.exit_code,
+                stderr: result.stderr,
+            });
         }
-        .await;
+
+        let batch_result: ryeos_runtime::method_wire::MethodCallResult =
+            serde_json::from_str(&result.stdout)?;
+
+        // The runtime must echo back the dispatched kind/method.
+        if batch_result.kind != *target_kind || batch_result.method != *target_method {
+            return Err(LaunchAugmentationError::ChildFailed {
+                kind: target_kind.clone(),
+                method: target_method.clone(),
+                error: None,
+            });
+        }
+
+        if !batch_result.success {
+            return Err(LaunchAugmentationError::ChildFailed {
+                kind: target_kind.clone(),
+                method: target_method.clone(),
+                error: batch_result.error,
+            });
+        }
+
+        Ok(batch_result)
+    }
+    .await;
 
     // 13. Revoke callback + thread-auth tokens now that the subprocess has
     //     run (success or failure).

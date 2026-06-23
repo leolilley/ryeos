@@ -87,14 +87,23 @@ mod tests {
             method: Some("query".into()),
             args: None,
         };
-        assert_eq!(serde_json::to_value(&method_only).unwrap(), json!({"method": "query"}));
+        assert_eq!(
+            serde_json::to_value(&method_only).unwrap(),
+            json!({"method": "query"})
+        );
 
         let args_only = MethodCall {
             method: None,
             args: Some(json!({"q": "x"})),
         };
-        assert_eq!(serde_json::to_value(&args_only).unwrap(), json!({"args": {"q": "x"}}));
+        assert_eq!(
+            serde_json::to_value(&args_only).unwrap(),
+            json!({"args": {"q": "x"}})
+        );
 
-        assert_eq!(serde_json::to_value(MethodCall::default()).unwrap(), json!({}));
+        assert_eq!(
+            serde_json::to_value(MethodCall::default()).unwrap(),
+            json!({})
+        );
     }
 }
