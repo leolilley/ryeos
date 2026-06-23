@@ -16,6 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY . .
 
+# Build provenance: baked into the binary at compile time (ryeos-app/build.rs
+# reads RYEOS_VCS_REF / RYEOS_BUILD_DATE) and onto the image as OCI labels in
+# the runtime stage. Pass via `--build-arg VCS_REF=$(git rev-parse HEAD)` and
+# `--build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`.
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG RELEASE_BUILD=0
+ENV RYEOS_VCS_REF=$VCS_REF
+ENV RYEOS_BUILD_DATE=$BUILD_DATE
+
+RUN if [ "$RELEASE_BUILD" = "1" ]; then rm -rf /build/target; fi
+
 RUN --mount=type=secret,id=publisher-key \
     test -s /run/secrets/publisher-key && \
     ./scripts/populate-bundles.sh \
@@ -50,7 +62,13 @@ ENV HOME=/data/app
 ENV RYEOS_APP_ROOT=/data/app
 EXPOSE 8000
 
+# Re-declared here: build-stage ARGs do not carry across FROM boundaries.
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
 LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
 LABEL io.ryeos.image="standard"
 LABEL io.ryeos.bundle-protocol="1.0"
 

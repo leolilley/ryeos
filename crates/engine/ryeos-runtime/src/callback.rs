@@ -2,17 +2,28 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Re-export so callback/graph/runtime callers reference one method-call type
+/// without each taking a direct `ryeos-engine` dependency.
+pub use ryeos_engine::method_call::MethodCall;
+
+/// One replayed event as the runtime consumes it. The daemon's persisted record
+/// carries more columns (chain/thread sequence, hashes, storage class); only the
+/// transcript-relevant fields are deserialized — the rest are ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReplayedEventRecord {
     pub event_type: String,
     pub payload: Value,
 }
 
+/// A page of replayed events. `next_cursor` is the `after_chain_seq` to pass on
+/// the next call when the chain has more events than the page limit; `None` when
+/// the page is the last.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayResponse {
     pub events: Vec<ReplayedEventRecord>,
+    #[serde(default)]
+    pub next_cursor: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +71,12 @@ pub struct ActionPayload {
     #[serde(default)]
     pub params: Value,
     pub thread: String,
+    /// Optional method call mirroring the `/execute` `call` block, so a graph
+    /// node action can select a non-default method (e.g. knowledge `query`).
+    /// Absent for actions that take the kind's default method, and for kinds
+    /// that declare no methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<MethodCall>,
 }
 
 #[async_trait]
@@ -99,7 +116,12 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         events: Vec<Value>,
     ) -> Result<Value, CallbackError>;
 
-    async fn replay_events(&self, thread_id: &str) -> Result<Value, CallbackError>;
+    /// Replay events for a thread or a whole chain. `params` carries
+    /// `{ thread_id? , chain_root_id? , after_chain_seq? , limit? }` — a
+    /// chain-scoped read (chain_root_id, no thread_id) folds every turn; a
+    /// thread-scoped read filters to one thread. The daemon authorizes the
+    /// target against the caller's chain.
+    async fn replay_events(&self, params: Value) -> Result<Value, CallbackError>;
 
     async fn bundle_events_append(
         &self,
@@ -159,5 +181,48 @@ pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
         ))
     } else {
         panic!("UDS socket not found at {}", socket_path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn action_payload_omits_call_when_none() {
+        let payload = ActionPayload {
+            item_id: "tool:t/echo".to_string(),
+            params: json!({}),
+            thread: "inline".to_string(),
+            call: None,
+        };
+        let v = serde_json::to_value(&payload).unwrap();
+        assert!(
+            v.get("call").is_none(),
+            "call must be skipped when None, got: {v}"
+        );
+    }
+
+    #[test]
+    fn action_payload_round_trips_call() {
+        let wire = json!({
+            "item_id": "knowledge:arc/resources",
+            "params": {},
+            "thread": "inline",
+            "call": { "method": "query", "args": { "query": "hint", "limit": 5 } },
+        });
+        let payload: ActionPayload = serde_json::from_value(wire).unwrap();
+        let call = payload.call.expect("call present");
+        assert_eq!(call.method(), Some("query"));
+        assert_eq!(call.args().unwrap()["limit"], 5);
+    }
+
+    #[test]
+    fn action_payload_defaults_call_to_none() {
+        // A wire payload with no `call` (the common case) deserializes fine.
+        let wire = json!({ "item_id": "tool:t/echo", "thread": "inline" });
+        let payload: ActionPayload = serde_json::from_value(wire).unwrap();
+        assert!(payload.call.is_none());
     }
 }

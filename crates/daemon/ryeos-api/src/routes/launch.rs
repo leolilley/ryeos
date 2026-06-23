@@ -67,10 +67,8 @@ pub(crate) struct DispatchLaunchOptions {
     pub validate_only: bool,
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
-    /// Optional method name for multi-method items (`call.method`).
-    pub method: Option<String>,
-    /// Optional method-specific args (`call.args`).
-    pub args: Option<Value>,
+    /// Optional method call (`call.method`/`call.args`) for multi-method items.
+    pub call: Option<ryeos_engine::method_call::MethodCall>,
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
@@ -84,8 +82,7 @@ impl Default for DispatchLaunchOptions {
             validate_only: false,
             usage_subject: None,
             usage_subject_asserted_by: None,
-            method: None,
-            args: None,
+            call: None,
             previous_thread_id: None,
         }
     }
@@ -135,8 +132,7 @@ pub(crate) fn spawn_dispatch_launch(
     let validate_only = options.validate_only;
     let usage_subject = options.usage_subject;
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
-    let method = options.method;
-    let args = options.args;
+    let call = options.call;
     let previous_thread_id = options.previous_thread_id;
 
     tokio::spawn(async move {
@@ -163,8 +159,7 @@ pub(crate) fn spawn_dispatch_launch(
             caller_scopes: principal_scopes,
             engine: state_clone.engine.clone(),
             plan_ctx,
-            requested_method: method.clone(),
-            requested_args: args.clone(),
+            requested_call: call,
         };
 
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
@@ -184,8 +179,6 @@ pub(crate) fn spawn_dispatch_launch(
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
             usage_subject,
             usage_subject_asserted_by,
-            method,
-            args,
             previous_thread_id,
         };
 
@@ -264,8 +257,7 @@ mod tests {
         assert_eq!(opts.launch_mode, "inline");
         assert_eq!(opts.target_site_id, None);
         assert_eq!(opts.validate_only, false);
-        assert_eq!(opts.method, None);
-        assert_eq!(opts.args, None);
+        assert!(opts.call.is_none());
     }
 
     #[test]
@@ -276,14 +268,16 @@ mod tests {
             validate_only: true,
             usage_subject: None,
             usage_subject_asserted_by: None,
-            method: Some("validate".to_string()),
-            args: Some(serde_json::json!({"key": "val"})),
+            call: Some(ryeos_engine::method_call::MethodCall {
+                method: Some("validate".to_string()),
+                args: Some(serde_json::json!({"key": "val"})),
+            }),
             previous_thread_id: None,
         };
         assert_eq!(opts.launch_mode, "detached");
         assert_eq!(opts.target_site_id.as_deref(), Some("site:remote"));
         assert!(opts.validate_only);
-        assert_eq!(opts.method.as_deref(), Some("validate"));
-        assert_eq!(opts.args.as_ref().unwrap()["key"], "val");
+        assert_eq!(opts.call.as_ref().unwrap().method(), Some("validate"));
+        assert_eq!(opts.call.as_ref().unwrap().args().unwrap()["key"], "val");
     }
 }

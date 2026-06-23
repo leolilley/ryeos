@@ -115,17 +115,6 @@ pub struct DispatchRequest<'a> {
     pub pre_minted_thread_id: Option<String>,
     pub usage_subject: Option<ryeos_state::UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
-    /// **Method dispatch**: the method name from the `/execute` request's
-    /// `call.method`. When `None`, the method resolver uses
-    /// `method_dispatch.default` from the schema. When `Some` for a kind
-    /// that declares no `methods`, dispatch REJECTS the request rather than
-    /// ignoring the field (a terminator/delegate kind does not interpret a
-    /// method call).
-    pub method: Option<String>,
-    /// **Method dispatch**: method-specific args from the `/execute`
-    /// request's `call.args`. Validated against the method's `ArgDecl`
-    /// spec before dispatch.
-    pub args: Option<Value>,
     /// Chained-resume turn: when `Some`, the launch envelope carries this
     /// as `EnvelopeRequest.previous_thread_id` and the runtime replays the
     /// prior thread's events into the new run (conversation = thread
@@ -356,7 +345,7 @@ pub(crate) fn resolve_dispatch_hop(
     // non-empty alongside terminator/alias/delegate, so this branch is
     // unambiguous.
     if !exec.methods.is_empty() {
-        let requested_method = ctx.requested_method.as_deref();
+        let requested_method = ctx.requested_method();
         let (method_name, method_decl) =
             resolve_requested_method(requested_method, exec, &schema_kind)?;
         return Ok(VerifiedHop {
@@ -932,8 +921,9 @@ pub(crate) async fn dispatch_method(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
-    // 1. Validate args against the method's spec.
-    let validated_args = validate_method_args(request.args.as_ref(), method_name, method_decl)?;
+    // 1. Validate args against the method's spec. Args come from the single
+    // source of truth (`ctx.requested_call`), same as the preflight below.
+    let validated_args = validate_method_args(ctx.requested_args(), method_name, method_decl)?;
 
     // 2. Look up the runtime via registry.
     let verified_runtime = ctx.engine.runtimes.lookup_for(kind).map_err(|_| {
@@ -2401,7 +2391,7 @@ pub async fn dispatch(
     // Method kinds are always invoked directly (they never sit behind an
     // alias/delegate hop — mixed dispatch is forbidden), so the root ref's
     // kind is authoritative here.
-    if ctx.requested_method.is_some() || ctx.requested_args.is_some() {
+    if ctx.has_requested_call() {
         let has_methods = ctx
             .engine
             .kinds
@@ -2412,9 +2402,9 @@ pub async fn dispatch(
         if !has_methods {
             return Err(DispatchError::MethodInvalidArg {
                 method: ctx
-                    .requested_method
-                    .clone()
-                    .unwrap_or_else(|| "<unspecified>".to_string()),
+                    .requested_method()
+                    .unwrap_or("<unspecified>")
+                    .to_string(),
                 reason: format!(
                     "kind '{}' does not support method dispatch (no `methods` declared); \
                      `call.method`/`call.args` are not accepted for this kind",
@@ -2599,7 +2589,7 @@ pub fn preflight_root_dispatch(
 
     // Mirror dispatch: a method call aimed at a kind that declares no methods
     // is a caller error, not a silent no-op.
-    if ctx.requested_method.is_some() || ctx.requested_args.is_some() {
+    if ctx.has_requested_call() {
         let has_methods = ctx
             .engine
             .kinds
@@ -2610,9 +2600,9 @@ pub fn preflight_root_dispatch(
         if !has_methods {
             return Err(DispatchError::MethodInvalidArg {
                 method: ctx
-                    .requested_method
-                    .clone()
-                    .unwrap_or_else(|| "<unspecified>".to_string()),
+                    .requested_method()
+                    .unwrap_or("<unspecified>")
+                    .to_string(),
                 reason: format!(
                     "kind '{}' does not support method dispatch (no `methods` declared); \
                      `call.method`/`call.args` are not accepted for this kind",
@@ -2731,7 +2721,7 @@ pub fn preflight_root_dispatch(
                 // runtime lookup, and binary_ref shape — so a method launch
                 // dispatch would reject (e.g. a missing required arg) fails
                 // here instead of returning a phantom thread_id.
-                validate_method_args(ctx.requested_args.as_ref(), &method_name, &method_decl)?;
+                validate_method_args(ctx.requested_args(), &method_name, &method_decl)?;
                 let verified_runtime = ctx.engine.runtimes.lookup_for(&kind).map_err(|_| {
                     let mut serves: Vec<String> = ctx
                         .engine
@@ -2936,8 +2926,7 @@ metadata:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(build_test_engine()),
             plan_ctx: test_plan_context(project_path),
-            requested_method: None,
-            requested_args: None,
+            requested_call: None,
         }
     }
 
@@ -3824,8 +3813,7 @@ requires:
             caller_scopes: vec!["*".into()],
             engine: std::sync::Arc::new(engine),
             plan_ctx,
-            requested_method: None,
-            requested_args: None,
+            requested_call: None,
         };
         // `unknown` kind has no schema; only `runtime` was loaded.
         // For non-runtime kinds the resolver tries engine.resolve()

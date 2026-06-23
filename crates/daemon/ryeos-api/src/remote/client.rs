@@ -44,6 +44,50 @@ impl std::fmt::Display for RemoteHttpError {
 
 impl std::error::Error for RemoteHttpError {}
 
+/// Cap on the response-body excerpt carried in a [`RemoteHttpError`]. A
+/// wrong-host / proxy / CDN error can return an arbitrarily large HTML page;
+/// keep enough to diagnose without bloating logs and error chains.
+const ERROR_BODY_EXCERPT_MAX: usize = 16 * 1024;
+
+fn truncate_error_body(body: &str) -> String {
+    if body.len() <= ERROR_BODY_EXCERPT_MAX {
+        return body.to_string();
+    }
+    let mut end = ERROR_BODY_EXCERPT_MAX;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [truncated, {} bytes total]", &body[..end], body.len())
+}
+
+/// Read a remote response and map any non-success status to a
+/// [`RemoteHttpError`] carrying the raw body excerpt. JSON is parsed only for
+/// success responses: a wrong-host / proxy / CDN error commonly returns HTML
+/// or plain text, and parsing that as JSON first would bury the real failure
+/// under a generic "failed to parse response" error.
+async fn read_json_checked(
+    method: &'static str,
+    url: &str,
+    resp: reqwest::Response,
+) -> Result<Value> {
+    let status = resp.status();
+    let body_text = resp
+        .text()
+        .await
+        .with_context(|| format!("{method} {url}: failed to read response body"))?;
+    if !status.is_success() {
+        return Err(RemoteHttpError {
+            method,
+            url: url.to_string(),
+            status,
+            body: truncate_error_body(&body_text),
+        }
+        .into());
+    }
+    serde_json::from_str(&body_text)
+        .with_context(|| format!("{method} {url}: failed to parse response as JSON"))
+}
+
 /// Cap on establishing a TCP/TLS connection to a remote. Applies to
 /// every request; without it a dead or filtered remote hangs callers
 /// for the OS connect timeout (minutes).
@@ -120,14 +164,7 @@ impl RemoteClient {
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
-        let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("failed to parse /public-key response from {}", url))?;
-        if !status.is_success() {
-            anyhow::bail!("GET {} returned {}: {}", url, status, body);
-        }
+        let body = read_json_checked("GET", &url, resp).await?;
         Ok(PublicKeyResponse {
             principal_id: body["principal_id"]
                 .as_str()
@@ -162,12 +199,7 @@ impl RemoteClient {
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
-        let status = resp.status();
-        let body: Value = resp.json().await?;
-        if !status.is_success() {
-            anyhow::bail!("GET {} returned {}: {}", url, status, body);
-        }
-        Ok(body)
+        read_json_checked("GET", &url, resp).await
     }
 
     /// GET /ingest-ignore (no auth required).
@@ -182,14 +214,7 @@ impl RemoteClient {
             .send()
             .await
             .with_context(|| format!("failed to connect to {}", url))?;
-        let status = resp.status();
-        let body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("failed to parse /ingest-ignore response from {}", url))?;
-        if !status.is_success() {
-            anyhow::bail!("GET {} returned {}: {}", url, status, body);
-        }
+        let body = read_json_checked("GET", &url, resp).await?;
         // Server returns the IgnoreConfig as JSON (with `patterns` field)
         let config: IgnoreConfig = serde_json::from_value(body)
             .context("failed to parse /ingest-ignore response as IgnoreConfig")?;
@@ -549,8 +574,7 @@ impl RemoteClient {
         project_path: &str,
         parameters: &Value,
         project_source: &str,
-        method: Option<&str>,
-        args: Option<&Value>,
+        call: Option<&ryeos_engine::method_call::MethodCall>,
     ) -> Result<Value> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
@@ -558,16 +582,10 @@ impl RemoteClient {
             "parameters": parameters,
             "project_source": { "kind": project_source },
         });
-        // Build the `call` block only when a method and/or args are present.
-        if method.is_some() || args.is_some() {
-            let mut call = serde_json::Map::new();
-            if let Some(m) = method {
-                call.insert("method".to_string(), Value::String(m.to_string()));
-            }
-            if let Some(a) = args {
-                call.insert("args".to_string(), a.clone());
-            }
-            body["call"] = Value::Object(call);
+        // Forward the `call` block only when it carries intent.
+        if let Some(call) = call.filter(|c| !c.is_empty()) {
+            body["call"] = serde_json::to_value(call)
+                .map_err(|e| anyhow::anyhow!("failed to serialize call block: {e}"))?;
         }
         self.signed_post("/execute", &body).await
     }
@@ -705,17 +723,7 @@ impl RemoteClient {
             .await
             .with_context(|| format!("GET {} failed", url))?;
 
-        let status = resp.status();
-        let resp_body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("failed to parse response from GET {}", url))?;
-
-        if !status.is_success() {
-            anyhow::bail!("GET {} returned {}: {}", url, status, resp_body);
-        }
-
-        Ok(resp_body)
+        read_json_checked("GET", &url, resp).await
     }
 
     async fn signed_post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -736,23 +744,7 @@ impl RemoteClient {
             .await
             .with_context(|| format!("POST {} failed", url))?;
 
-        let status = resp.status();
-        let resp_body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("failed to parse response from POST {}", url))?;
-
-        if !status.is_success() {
-            return Err(RemoteHttpError {
-                method: "POST",
-                url: url.clone(),
-                status,
-                body: resp_body.to_string(),
-            }
-            .into());
-        }
-
-        Ok(resp_body)
+        read_json_checked("POST", &url, resp).await
     }
 
     async fn unsigned_post(&self, path: &str, body: &Value) -> Result<Value> {
@@ -769,23 +761,7 @@ impl RemoteClient {
             .await
             .with_context(|| format!("POST {} failed", url))?;
 
-        let status = resp.status();
-        let resp_body: Value = resp
-            .json()
-            .await
-            .with_context(|| format!("failed to parse response from POST {}", url))?;
-
-        if !status.is_success() {
-            return Err(RemoteHttpError {
-                method: "POST",
-                url: url.clone(),
-                status,
-                body: resp_body.to_string(),
-            }
-            .into());
-        }
-
-        Ok(resp_body)
+        read_json_checked("POST", &url, resp).await
     }
 
     /// Build canonical request and produce the four `x-ryeos-*` headers.

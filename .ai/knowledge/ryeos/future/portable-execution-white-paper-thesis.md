@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-06T03:30:33Z:b858ace0b500bb36cfaf73c88a7f381a66992cd2258d9bdd21648fbfd6365c95:Q3lB0BW3x5dG3hVh3dEB6cZpDYsV7ihn+3EE4HBpHvl6IT0/0+C0y1oyNjNooSHnMyMJjv5aiU3tDHrXgFqoBw==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-06-23T03:27:18Z:f4afe993efecde5800ea6f110205fffe779b83d60be2fa93992b6c13df417d0c:TIqsapZ9xHvn8VY6+mTWREG7nYr4e8wCUFeEoXJA5pmZt6g+FpShhlrO+8G22f+7nB4xLyY3YqrdZaSv+ao2DQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 tags: [white-paper, portable-execution, cryptographic-identity, architecture]
 version: "0.1.0"

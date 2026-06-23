@@ -64,13 +64,31 @@ pub struct ExecutionContext {
     pub engine: Arc<ryeos_engine::engine::Engine>,
     /// Plan context for engine operations.
     pub plan_ctx: ryeos_engine::contracts::PlanContext,
-    /// **Method dispatch**: the method name from the `/execute` request's
-    /// `call.method`. Used by `resolve_dispatch_hop` when the kind schema
-    /// declares `methods`. Ignored for terminator/delegate paths.
-    pub requested_method: Option<String>,
-    /// **Method dispatch**: method args from the `/execute` request's
-    /// `call.args`.
-    pub requested_args: Option<serde_json::Value>,
+    /// **Method dispatch**: the caller's `{ method, args }` intent, from the
+    /// `/execute` request's `call` block, the graph callback action's `call`,
+    /// or accepted-launch options. This is the SINGLE source of truth for
+    /// method dispatch: `resolve_dispatch_hop` reads the method here and arg
+    /// validation reads the args here. `None`/empty → the kind's default
+    /// method. Ignored for terminator/delegate paths.
+    pub requested_call: Option<ryeos_engine::method_call::MethodCall>,
+}
+
+impl ExecutionContext {
+    /// The requested method name, if a `call.method` was provided.
+    pub fn requested_method(&self) -> Option<&str> {
+        self.requested_call.as_ref().and_then(|c| c.method())
+    }
+
+    /// The requested method args, if `call.args` were provided.
+    pub fn requested_args(&self) -> Option<&serde_json::Value> {
+        self.requested_call.as_ref().and_then(|c| c.args())
+    }
+
+    /// True when the caller expressed a method call (a method and/or args).
+    /// Used to reject a method call aimed at a kind that declares no methods.
+    pub fn has_requested_call(&self) -> bool {
+        self.requested_call.as_ref().is_some_and(|c| !c.is_empty())
+    }
 }
 
 /// Result of a service execution, including metadata for audit.
@@ -334,28 +352,33 @@ pub async fn execute_service_verified(
         // Extract typed HandlerError to preserve HTTP semantics.
         // Without this, HandlerError::NotFound surfaces as 500 via
         // the generic Internal(#[from] anyhow::Error) path.
-        if let Some(he) = e.downcast_ref::<ryeos_app::handler_error::HandlerError>() {
-            match he {
-                ryeos_app::handler_error::HandlerError::NotFound => {
-                    crate::dispatch_error::DispatchError::NotFound
-                }
-                ryeos_app::handler_error::HandlerError::Forbidden(msg) => {
-                    crate::dispatch_error::DispatchError::ServiceCapDenied {
-                        service_ref: service_ref.to_string(),
-                        required: msg.clone(),
-                        caller_scopes: ctx.caller_scopes.clone(),
-                    }
-                }
-                ryeos_app::handler_error::HandlerError::BadRequest(msg) => {
-                    crate::dispatch_error::DispatchError::MethodInvalidArg {
-                        method: endpoint.clone(),
-                        reason: msg.clone(),
-                    }
-                }
-                _ => crate::dispatch_error::DispatchError::Internal(e),
+        //
+        // Walk the whole error chain (not just the root) so a HandlerError
+        // wrapped in `.context(...)` still maps to the right status — this
+        // matches the route path's `extract_handler_error`. A root-only
+        // `downcast_ref` here silently degraded wrapped NotFound/Conflict to
+        // 500, diverging from the route (which returned 404/409 for the same
+        // handler error).
+        use ryeos_app::handler_error::HandlerError;
+        match ryeos_app::handler_error::extract_handler_error(&e) {
+            Some(HandlerError::NotFound) => crate::dispatch_error::DispatchError::NotFound,
+            Some(HandlerError::Conflict(msg)) => {
+                crate::dispatch_error::DispatchError::Conflict(msg)
             }
-        } else {
-            crate::dispatch_error::DispatchError::Internal(e)
+            Some(HandlerError::Forbidden(msg)) => {
+                crate::dispatch_error::DispatchError::ServiceCapDenied {
+                    service_ref: service_ref.to_string(),
+                    required: msg,
+                    caller_scopes: ctx.caller_scopes.clone(),
+                }
+            }
+            Some(HandlerError::BadRequest(msg)) => {
+                crate::dispatch_error::DispatchError::MethodInvalidArg {
+                    method: endpoint.clone(),
+                    reason: msg,
+                }
+            }
+            _ => crate::dispatch_error::DispatchError::Internal(e),
         }
     })?;
 

@@ -196,8 +196,7 @@ async fn execute_item_ref(
         caller_scopes: ctx.scopes.clone(),
         engine: project_ctx.request_engine.clone(),
         plan_ctx,
-        requested_method: None,
-        requested_args: None,
+        requested_call: None,
     };
 
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
@@ -217,8 +216,6 @@ async fn execute_item_ref(
         pre_minted_thread_id: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
-        method: None,
-        args: None,
         previous_thread_id: None,
     };
 

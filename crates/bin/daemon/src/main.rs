@@ -68,6 +68,21 @@ fn build_route_table(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(config::DaemonCommand::BuildInfo { revision, json }) = &cli.command {
+        let build = ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION"));
+        if *revision {
+            println!("{}", build.revision);
+        } else if *json {
+            println!("{}", serde_json::to_string(&build)?);
+        } else {
+            println!("version: {}", build.version);
+            println!("revision: {}", build.revision);
+            println!("build_date: {}", build.build_date);
+        }
+        return Ok(());
+    }
+
     let mut config = Config::load(&cli.to_sources())?;
     ryeosd::init_shutdown_channel();
 
@@ -81,6 +96,7 @@ async fn main() -> Result<()> {
     // their own state lock and must not conflict with the daemon's.
     if let Some(ref cmd) = cli.command {
         match cmd {
+            config::DaemonCommand::BuildInfo { .. } => unreachable!("handled before config load"),
             config::DaemonCommand::RunService {
                 service_ref,
                 params,
@@ -879,8 +895,7 @@ async fn run_service_standalone(
             execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
             validate_only: false,
         },
-        requested_method: None,
-        requested_args: None,
+        requested_call: None,
     };
 
     let result = service_executor::execute_service(

@@ -73,14 +73,16 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         &self,
         request: DispatchActionRequest,
     ) -> Result<Value, CallbackError> {
+        // Serialize the whole typed `ActionPayload` rather than hand-listing
+        // its fields, so wire and struct can't drift (a hand-rolled list
+        // silently dropped `call`, defaulting graph method dispatch to the
+        // kind default). The daemon deserializes this back into `ActionPayload`.
+        let action = serde_json::to_value(&request.action)
+            .map_err(|e| CallbackError::Transport(anyhow::anyhow!("serialize action: {e}")))?;
         let mut params = json!({
             "thread_id": request.thread_id,
             "project_path": request.project_path,
-            "action": {
-                "item_id": request.action.item_id,
-                "params": request.action.params,
-                "thread": request.action.thread,
-            },
+            "action": action,
         });
         self.inject_callback_token(&mut params);
         self.rpc
@@ -184,8 +186,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn replay_events(&self, thread_id: &str) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id});
+    async fn replay_events(&self, mut params: Value) -> Result<Value, CallbackError> {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.replay_events", params)

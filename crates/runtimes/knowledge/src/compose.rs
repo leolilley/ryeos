@@ -10,7 +10,7 @@ use crate::frontmatter::strip_frontmatter;
 use crate::ordering::{extends_first, OrderedItem};
 use crate::render::render_item;
 use crate::types::{
-    ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeArgs, ComposeItem, ComposeMeta,
+    ComposeArgs, ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeItem, ComposeMeta,
     ComposeOutput, ComposePayload, KnowledgeError, OmissionReason, OmittedItem, RenderedContexts,
     RenderedPosition,
 };

@@ -89,27 +89,33 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         .await
         .map_err(|e| {
             // Push (CAS upload) already succeeded above; only the apply step
-            // failed. A 404 on apply-snapshot does NOT necessarily mean the route
-            // is missing — by far the most common cause is the remotes-config URL
-            // pointing at the wrong host, so the route isn't there *at that URL*.
-            // Surface the actual URL and both likely causes instead of asserting
-            // "node too old" (which is misleading when the route exists and a
-            // direct probe returns 401/403).
+            // failed. Surface the remote's actual method, URL, status, and
+            // response body verbatim so the failure is diagnosable. We do NOT
+            // assert a cause: a 404 here is ambiguous — the dispatcher, the
+            // json response mode (null result), and a typed NotFound all emit
+            // the same `{"error":"not found"}` body — and the body is what
+            // distinguishes wrong-host from route-table drift from a real
+            // not-found.
             if let Some(http) = e.downcast_ref::<crate::remote::client::RemoteHttpError>() {
-                if http.status.as_u16() == 404 && http.url.contains("apply-snapshot") {
-                    return anyhow::anyhow!(
-                        "AI content was uploaded to the remote (snapshot {hash}), but applying it \
-                         failed: {url} returned HTTP 404 — the /project/apply-snapshot route did \
-                         not match at that URL. Likely causes, in order:\n  \
-                         1. The remote URL in your remotes config points at the wrong host (verify \
-                            it resolves to the RyeOS node — a 401/403 instead would confirm the \
-                            route exists and only auth/trust is the issue).\n  \
-                         2. The remote node core predates the apply-snapshot route — upgrade/redeploy it.\n\
-                         The uploaded objects are already on the remote, so nothing was lost.",
-                        hash = push.snapshot_hash,
-                        url = http.url,
-                    );
-                }
+                let guidance = if http.status.as_u16() == 404 {
+                    "\nA 404 here is ambiguous: the remote URL may point at the wrong host, \
+                     the live route table may differ from the expected core route, or the \
+                     route source may have returned a not-found/null result. Probe \
+                     `service:system/routes` for `/project/apply-snapshot` on the remote and \
+                     check its logs to disambiguate."
+                } else {
+                    ""
+                };
+                return anyhow::anyhow!(
+                    "AI content was uploaded to the remote (snapshot {hash}), but applying it \
+                     failed: {method} {url} returned HTTP {status}: {body}{guidance}\n\
+                     The uploaded objects are already on the remote, so nothing was lost.",
+                    hash = push.snapshot_hash,
+                    method = http.method,
+                    url = http.url,
+                    status = http.status,
+                    body = http.body,
+                );
             }
             e
         })?;

@@ -68,13 +68,21 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                 })?;
         }
 
-        // Look up the handler by endpoint.
+        // Look up the handler by endpoint. A miss means the route compiled
+        // against a service descriptor that the live registry doesn't carry
+        // (build/registration drift) — log it loudly before the 500, since the
+        // 500 body alone doesn't name the endpoint to an operator.
         let handler = inv_ctx
             .state
             .services
             .get(&self.endpoint)
             .cloned()
             .ok_or_else(|| {
+                tracing::error!(
+                    route_id = %inv_ctx.route_id,
+                    endpoint = %self.endpoint,
+                    "service endpoint not found in runtime registry; returning HTTP 500"
+                );
                 RouteDispatchError::Internal(format!(
                     "service endpoint '{}' not found in registry",
                     self.endpoint
@@ -101,6 +109,9 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                     }
                     crate::handler_error::HandlerError::BadRequest(msg) => {
                         RouteDispatchError::BadRequest(msg)
+                    }
+                    crate::handler_error::HandlerError::Conflict(msg) => {
+                        RouteDispatchError::Conflict(msg)
                     }
                     crate::handler_error::HandlerError::Internal(msg) => {
                         RouteDispatchError::Internal(msg)

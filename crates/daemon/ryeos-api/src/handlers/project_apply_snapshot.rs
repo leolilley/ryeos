@@ -31,6 +31,16 @@ pub struct Request {
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified().map_err(|e| anyhow!(e))?;
 
+    // Entry log: proves the request reached this handler (vs. being absorbed
+    // by a dispatcher 404 / wrong route) and records who is applying what.
+    tracing::info!(
+        project_path = %req.project_path,
+        snapshot_hash = %req.snapshot_hash,
+        force = req.force,
+        caller = %ctx.fingerprint,
+        "project.apply-snapshot handler entered"
+    );
+
     let project_path = canonical_existing_project_path(&req.project_path)?;
     let canonical_project_path = project_path.to_string_lossy().to_string();
     let project_hash = ryeos_state::refs::deployed_project_key(&canonical_project_path);

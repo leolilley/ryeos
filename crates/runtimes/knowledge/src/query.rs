@@ -139,10 +139,7 @@ pub fn query(payload: &QueryPayload) -> Result<QueryOutput, KnowledgeError> {
             excerpt: make_excerpt(&d.body, &query_terms),
             metadata: d.metadata.clone(),
             raw_content_digest: d.digest.clone(),
-            content: payload
-                .args
-                .include_content
-                .then(|| d.raw_content.clone()),
+            content: payload.args.include_content.then(|| d.raw_content.clone()),
         })
         .collect();
 

@@ -22,6 +22,7 @@ use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_state::objects::ThreadStatus;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,9 +43,61 @@ pub struct Request {
 
 fn is_settled(status: &str) -> bool {
     matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+        ThreadStatus::from_str_lossy(status),
+        Some(
+            ThreadStatus::Completed
+                | ThreadStatus::Failed
+                | ThreadStatus::Cancelled
+                | ThreadStatus::Killed
+                | ThreadStatus::TimedOut
+                | ThreadStatus::Continued
+        )
     )
+}
+
+/// Statuses a follow-up can braid a successor onto — must match the terminal
+/// sources `StateStore::create_continuation` accepts. A settled turn outside
+/// this set (`continued`/`cancelled`/`killed`/`timed_out`) is refused
+/// synchronously rather than launched, so the caller never watches a pre-minted
+/// successor id that was never persisted.
+fn is_continuable(status: &str) -> bool {
+    matches!(
+        ThreadStatus::from_str_lossy(status),
+        Some(ThreadStatus::Completed | ThreadStatus::Failed)
+    )
+}
+
+/// Decide whether a follow-up can braid onto `predecessor`, or must be refused.
+/// Returns the refusal notice, or `None` to proceed. Pure over the few fields
+/// the decision needs, so it is unit-testable without a daemon — and so the
+/// refusal runs **synchronously**, before the accepted-launch path returns a
+/// pre-minted id.
+///
+/// Order matters: the already-continued check runs before [`is_continuable`].
+/// An operator follow-up preserves a completed/failed predecessor's status, so
+/// an already-followed-up turn still reads `completed` (continuable); without
+/// the successor check first, a second follow-up would launch a duplicate that
+/// `create_continuation`'s single-successor guard rejects async, leaving the
+/// caller watching an id that was never persisted.
+fn follow_up_refusal(status: &str, successor: Option<&str>, thread_id: &str) -> Option<String> {
+    if !is_settled(status) {
+        // Live run: runtime-command delivery is a service upgrade
+        // (attention-design); refuse honestly rather than queue silently.
+        return Some(format!(
+            "thread {thread_id} is {status}; live delivery is not supported yet"
+        ));
+    }
+    if let Some(successor) = successor {
+        return Some(format!(
+            "thread {thread_id} already continued as {successor} — follow that instead"
+        ));
+    }
+    if !is_continuable(status) {
+        return Some(format!(
+            "thread {thread_id} is {status}; a follow-up can only continue a completed or failed turn"
+        ));
+    }
+    None
 }
 
 pub async fn handle(
@@ -67,17 +120,15 @@ pub async fn handle(
                 .map_err(|e| HandlerError::Internal(e.to_string()))?
                 .ok_or(HandlerError::NotFound)?;
             ctx.require_owner(detail.requested_by.as_deref())?;
-            if !is_settled(&detail.status) {
-                // Live run: runtime-command delivery is a service upgrade
-                // (attention-design); refuse honestly rather than queue
-                // silently.
+            if let Some(notice) = follow_up_refusal(
+                &detail.status,
+                detail.successor_thread_id.as_deref(),
+                &detail.thread_id,
+            ) {
                 return Ok(json!({
                     "thread_id": Value::Null,
                     "delivery": "refused",
-                    "notice": format!(
-                        "thread {} is {}; live delivery is not supported yet",
-                        detail.thread_id, detail.status
-                    ),
+                    "notice": notice,
                 }));
             }
             Some(detail)
@@ -162,6 +213,54 @@ mod tests {
         }
         for status in ["running", "accepted", "pending"] {
             assert!(!is_settled(status), "{status} should be live");
+        }
+    }
+
+    #[test]
+    fn continuable_set_matches_create_continuation() {
+        // Only completed/failed turns can be braided onto (mirrors
+        // StateStore::create_continuation). A follow-up to any other settled
+        // status must be refused synchronously, not launched.
+        for status in ["completed", "failed"] {
+            assert!(is_continuable(status), "{status} should be continuable");
+        }
+        for status in ["continued", "cancelled", "killed", "timed_out", "running"] {
+            assert!(!is_continuable(status), "{status} must not be continuable");
+        }
+    }
+
+    #[test]
+    fn continuable_predecessor_without_successor_proceeds() {
+        assert!(follow_up_refusal("completed", None, "T-1").is_none());
+        assert!(follow_up_refusal("failed", None, "T-1").is_none());
+    }
+
+    #[test]
+    fn already_continued_completed_source_is_refused_with_successor() {
+        // The bug: a completed predecessor that was already followed up keeps
+        // status `completed` (continuable), so it must be refused by the
+        // successor check, not launched into a duplicate the async guard rejects.
+        let notice = follow_up_refusal("completed", Some("T-succ"), "T-pred")
+            .expect("an already-continued source must be refused");
+        assert!(notice.contains("T-succ"), "notice should point at successor: {notice}");
+        assert!(notice.contains("already continued"), "got: {notice}");
+
+        // Same for a failed-then-continued predecessor.
+        assert!(follow_up_refusal("failed", Some("T-succ"), "T-pred").is_some());
+    }
+
+    #[test]
+    fn live_source_is_refused() {
+        let notice = follow_up_refusal("running", None, "T-1").expect("live run refused");
+        assert!(notice.contains("live delivery"), "got: {notice}");
+    }
+
+    #[test]
+    fn settled_non_continuable_source_is_refused() {
+        for status in ["cancelled", "killed", "timed_out"] {
+            let notice = follow_up_refusal(status, None, "T-1")
+                .unwrap_or_else(|| panic!("{status} must be refused"));
+            assert!(notice.contains("can only continue"), "got: {notice}");
         }
     }
 }

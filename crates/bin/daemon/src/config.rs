@@ -62,6 +62,17 @@ impl Cli {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum DaemonCommand {
+    /// Print build provenance and exit without loading daemon state.
+    BuildInfo {
+        /// Print only the baked git revision.
+        #[arg(long)]
+        revision: bool,
+
+        /// Print build provenance as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run a service handler in standalone mode (daemon must be stopped).
     RunService {
         /// Canonical service ref, e.g. service:system/status

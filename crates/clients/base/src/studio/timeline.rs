@@ -377,7 +377,11 @@ fn failure_reason(payload: Option<&Value>) -> Option<String> {
         // The structured error envelope (StructuredErrorPayload) carries its
         // human message in `error.error` (e.g. "missing required secret …") —
         // surface it rather than falling through to the terse outcome_code.
-        .or_else(|| p.get("error").and_then(|e| e.get("error")).and_then(Value::as_str))
+        .or_else(|| {
+            p.get("error")
+                .and_then(|e| e.get("error"))
+                .and_then(Value::as_str)
+        })
         .or_else(|| p.get("error").and_then(Value::as_str))
         .or_else(|| p.get("message").and_then(Value::as_str))
         .or_else(|| p.get("outcome_code").and_then(Value::as_str))

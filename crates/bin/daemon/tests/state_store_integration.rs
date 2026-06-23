@@ -368,6 +368,131 @@ mod integration_tests {
         assert_eq!(edges.len(), 1, "should have one edge from continuation");
         assert_eq!(edges[0].source_thread_id, "T-cont-1");
         assert_eq!(edges[0].target_thread_id, "T-cont-2");
+
+        // Read contract: the settled source advertises its successor so a graph
+        // reconciler / client can follow the continuation without scraping
+        // event payloads.
+        assert_eq!(
+            source_detail.successor_thread_id.as_deref(),
+            Some("T-cont-2"),
+            "continued source must expose successor_thread_id"
+        );
+    }
+
+    #[test]
+    fn continuation_onto_completed_source_preserves_its_result() {
+        // The operator follow-up path braids a successor onto an already-settled
+        // turn. That must NOT rewrite the predecessor's terminal snapshot (which
+        // would erase its result) — it stays `completed`, keeps its result, and
+        // still advertises the successor.
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-done-1", "T-done-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store
+            .mark_thread_running("T-done-1", None)
+            .expect("mark_thread_running");
+        store
+            .finalize_thread(
+                "T-done-1",
+                &FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(serde_json::json!({"answer": 4})),
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                },
+            )
+            .expect("finalize_thread");
+
+        // Braid a successor onto the completed turn.
+        let successor = make_thread("T-done-2", "T-done-1", "directive", "test/item", None);
+        store
+            .create_continuation(&successor, "T-done-1", "T-done-1", Some("follow-up"))
+            .expect("create_continuation onto completed source");
+
+        // Predecessor keeps its terminal status and result.
+        let source = store
+            .get_thread("T-done-1")
+            .expect("get_thread")
+            .expect("source exists");
+        assert_eq!(
+            source.status, "completed",
+            "an already-terminal source must not be rewritten to continued"
+        );
+        assert_eq!(
+            source.successor_thread_id.as_deref(),
+            Some("T-done-2"),
+            "settled source must still expose its successor"
+        );
+        let result = store
+            .get_thread_result("T-done-1")
+            .expect("get_thread_result")
+            .expect("result row preserved");
+        assert_eq!(result.result, Some(serde_json::json!({"answer": 4})));
+        assert_eq!(result.outcome_code.as_deref(), Some("success"));
+
+        // Successor inherits the chain and links upstream.
+        let succ = store
+            .get_thread("T-done-2")
+            .expect("get_thread")
+            .expect("successor exists");
+        assert_eq!(succ.chain_root_id, "T-done-1");
+        assert_eq!(succ.upstream_thread_id.as_deref(), Some("T-done-1"));
+    }
+
+    #[test]
+    fn continuation_is_single_successor_guarded() {
+        // A predecessor is continued at most once. A completed source stays
+        // continuable, so a second continuation is caught by the
+        // single-successor guard (not the terminal-status check) — proving a
+        // double-submit/race cannot mint sibling successors.
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-once-1", "T-once-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store
+            .mark_thread_running("T-once-1", None)
+            .expect("mark_thread_running");
+        store
+            .finalize_thread(
+                "T-once-1",
+                &FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(serde_json::json!({"a": 1})),
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                },
+            )
+            .expect("finalize_thread");
+
+        let first = make_thread("T-once-2", "T-once-1", "directive", "test/item", None);
+        store
+            .create_continuation(&first, "T-once-1", "T-once-1", Some("first"))
+            .expect("first continuation");
+
+        let dup = make_thread("T-once-3", "T-once-1", "directive", "test/item", None);
+        let err = store
+            .create_continuation(&dup, "T-once-1", "T-once-1", Some("second"))
+            .expect_err("second continuation of the same source must be refused");
+        assert!(
+            err.to_string().contains("already continued"),
+            "expected single-successor guard, got: {err}"
+        );
+
+        // The first successor remains the one exposed; no sibling was created.
+        let source = store
+            .get_thread("T-once-1")
+            .expect("get_thread")
+            .expect("source exists");
+        assert_eq!(source.successor_thread_id.as_deref(), Some("T-once-2"));
+        assert!(
+            store.get_thread("T-once-3").expect("get_thread").is_none(),
+            "the rejected duplicate successor must not have been persisted"
+        );
     }
 
     #[test]
