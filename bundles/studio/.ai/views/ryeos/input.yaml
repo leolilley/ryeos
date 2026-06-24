@@ -11,3 +11,8 @@ input:
     ref: service:commands/list
     collection: commands
   submit: route
+  # Semantic capability only (no physical keys): the central keymap maps
+  # Tab/Shift+Tab to cycling the route target over [new conversation] +
+  # open chains. Tab still completes slash-commands when one can be accepted.
+  target:
+    cycle: route_chains

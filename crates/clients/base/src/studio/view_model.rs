@@ -1056,13 +1056,15 @@ fn derived_target_label(
         }
         return format!("→ {affordance_id}");
     }
-    // `submit: route` — render the seat route truthfully.
+    // `submit: route` — render the seat route truthfully (the target the
+    // next submit lands on). No keybinding copy here: the label names the
+    // target only; an author overrides the whole strip via `target_label`.
     match (&route.invoke, &route.thread) {
         (None, _) => "no target — surface declares no route".to_string(),
-        (Some(_), Some(thread)) => format!("→ chained on {thread}"),
-        (Some(InvokeTemplate::Service { item_ref }), None) => format!("→ {item_ref} (new chain)"),
+        (Some(_), Some(thread)) => format!("→ continuing {thread}"),
+        (Some(InvokeTemplate::Service { .. }), None) => "→ new conversation".to_string(),
         (Some(InvokeTemplate::Command { tokens }), None) => {
-            format!("→ /{} (new chain)", tokens.join(" "))
+            format!("→ /{} (new)", tokens.join(" "))
         }
         (Some(InvokeTemplate::UiFacet { key }), None) => format!("→ {key}"),
     }

@@ -45,6 +45,15 @@ pub struct StudioKeyContext {
     /// (the chat convention) rather than activating a row — terminals
     /// can't reliably send Shift+Enter, so it can't be the only submit.
     pub input_has_text: bool,
+    /// The focused input declares a completion source.
+    pub input_has_completion: bool,
+    /// Completion would actually accept something right now for the focused
+    /// buffer (cursor at end, leading single `/`, and a matching record).
+    /// Cursor-aware so Tab never dispatches a no-op completion when it could
+    /// instead cycle the route target.
+    pub input_can_accept_completion: bool,
+    /// The focused input's declared targeting capability, if any.
+    pub input_target_cycle: Option<super::content::InputTargetCycle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,7 +146,29 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
             ui(StudioUiEvent::DeleteInputChar)
         }
-        StudioKey::Tab if context.input_visible && event.modifiers.none() => {
+        // Tab precedence (central interaction policy, capability + buffer
+        // state — never a per-view keybinding):
+        //   1. completion that can accept now (`/foo⇥`) wins;
+        //   2. else route-chain targeting cycles (Tab fwd, Shift+Tab back);
+        //   3. else a declared-but-not-acceptable completion is the fallback.
+        StudioKey::Tab if context.input_can_accept_completion && event.modifiers.none() => {
+            ui(StudioUiEvent::CompleteInput)
+        }
+        StudioKey::Tab
+            if context.input_target_cycle.is_some() && event.modifiers.none() =>
+        {
+            ui(StudioUiEvent::CycleInputTarget { forward: true })
+        }
+        StudioKey::Tab
+            if context.input_target_cycle.is_some() && event.modifiers.shift_only() =>
+        {
+            ui(StudioUiEvent::CycleInputTarget { forward: false })
+        }
+        StudioKey::Tab
+            if context.input_visible
+                && context.input_has_completion
+                && event.modifiers.none() =>
+        {
             ui(StudioUiEvent::CompleteInput)
         }
         StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
@@ -283,6 +314,9 @@ mod tests {
             launcher_open,
             input_visible,
             input_has_text: false,
+            input_has_completion: false,
+            input_can_accept_completion: false,
+            input_target_cycle: None,
         }
     }
 
@@ -291,6 +325,9 @@ mod tests {
             launcher_open: false,
             input_visible: true,
             input_has_text: true,
+            input_has_completion: false,
+            input_can_accept_completion: false,
+            input_target_cycle: None,
         }
     }
 
@@ -372,15 +409,104 @@ mod tests {
             }
         ));
         assert!(matches!(
-            studio_key_command(key(StudioKey::Tab), context(false, true)),
+            studio_key_command(key(StudioKey::Tab), context_target()),
             StudioKeyCommand::Ui {
-                event: StudioUiEvent::CompleteInput
+                event: StudioUiEvent::CycleInputTarget { forward: true }
+            }
+        ));
+        assert!(matches!(
+            studio_key_command(shift_tab(), context_target()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleInputTarget { forward: false }
             }
         ));
         assert!(matches!(
             studio_key_command(shift_enter(), context(false, true)),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::SubmitInput
+            }
+        ));
+    }
+
+    /// A context whose focused input declares route-chain targeting.
+    fn context_target() -> StudioKeyContext {
+        StudioKeyContext {
+            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
+            ..context(false, true)
+        }
+    }
+
+    fn shift_tab() -> StudioKeyEvent {
+        StudioKeyEvent {
+            key: StudioKey::Tab,
+            modifiers: StudioKeyModifiers {
+                shift: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn tab_precedence_completion_vs_targeting() {
+        // No target, has completion that can accept → Tab completes (1 & 4).
+        let complete_ctx = StudioKeyContext {
+            input_has_completion: true,
+            input_can_accept_completion: true,
+            ..context(false, true)
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), complete_ctx),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CompleteInput
+            }
+        ));
+
+        // BOTH completion and targeting, completion can accept (`/foo⇥`) →
+        // completion wins (4a).
+        let both_accept = StudioKeyContext {
+            input_has_completion: true,
+            input_can_accept_completion: true,
+            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
+            ..context(false, true)
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), both_accept),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CompleteInput
+            }
+        ));
+
+        // BOTH, but completion can't accept now (prose / cursor mid-line) →
+        // targeting cycles (4b & 4c).
+        let both_no_accept = StudioKeyContext {
+            input_has_completion: true,
+            input_can_accept_completion: false,
+            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
+            ..context(false, true)
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), both_no_accept.clone()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleInputTarget { forward: true }
+            }
+        ));
+        assert!(matches!(
+            studio_key_command(shift_tab(), both_no_accept),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleInputTarget { forward: false }
+            }
+        ));
+
+        // Launcher open beats everything (test 4).
+        let launcher_ctx = StudioKeyContext {
+            launcher_open: true,
+            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
+            ..context(true, true)
+        };
+        assert!(!matches!(
+            studio_key_command(key(StudioKey::Tab), launcher_ctx),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleInputTarget { .. }
             }
         ));
     }
