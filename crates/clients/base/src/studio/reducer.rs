@@ -730,12 +730,13 @@ impl StudioCore {
         };
 
         let mut route = self.seat.fold().input_route();
-        // `route_chains` only makes sense for a thread-yielding invoke;
-        // a missing or non-thread-capable invoke (e.g. UiFacet) can't be
-        // chained. Surface it (deduped), don't silently no-op.
-        if !route.invoke.as_ref().is_some_and(invoke_is_thread_capable) {
+        // The input declared route-chain targeting (the author's assertion
+        // that this route continues conversations). The only thing the engine
+        // can't paper over is a route with no invoke at all — there's nothing
+        // to submit onto. Surface that (deduped), don't silently no-op.
+        if route.invoke.is_none() {
             self.notice_deduped(
-                "This input can't target a conversation: its route doesn't start threads.",
+                "This input has no route to target a conversation on.",
                 StudioTone::Warn,
             );
             return Vec::new();
@@ -1429,20 +1430,28 @@ impl StudioCore {
                     // since issue) may notice but never retargets.
                     if let StudioEffectKind::Invoke { route_seq, .. } = &expected {
                         let fold = self.seat.fold();
+                        let targets = self.focused_input_target_cycle().is_some();
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
-                            // First turn of a conversation: the launched thread
-                            // IS the chain root (root == head). Continuations
-                            // (route already had a head) keep the root and only
-                            // advance the head — so the feed keeps showing the
-                            // whole braid while the next submit braids onto the
-                            // newest turn.
-                            if route.thread.is_none() {
-                                route.chain_root = Some(thread_id.clone());
-                            }
-                            route.thread = Some(thread_id.clone());
-                            if let Ok(value) = serde_json::to_value(&route) {
-                                self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+                            // Only ratchet a continuation target onto routes
+                            // whose input declares conversation targeting. A
+                            // fire-and-forget route that happens to produce a
+                            // thread_id must NOT be retargeted as "continuing" —
+                            // same declaration the cycle and the label key off.
+                            if targets {
+                                // First turn of a conversation: the launched
+                                // thread IS the chain root (root == head).
+                                // Continuations (route already had a head) keep
+                                // the root and only advance the head — so the
+                                // feed keeps showing the whole braid while the
+                                // next submit braids onto the newest turn.
+                                if route.thread.is_none() {
+                                    route.chain_root = Some(thread_id.clone());
+                                }
+                                route.thread = Some(thread_id.clone());
+                                if let Ok(value) = serde_json::to_value(&route) {
+                                    self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+                                }
                             }
                         } else {
                             self.notice(
@@ -1682,19 +1691,6 @@ enum TargetSlot {
     Chain { root: String, head: String },
 }
 
-/// Whether an invoke template accepts a continuation target — i.e. a submit
-/// actually braids onto `route.thread`. Conservatively this is ONLY
-/// `service:threads/input` today: it consumes the target thread and produces
-/// the successor chain. A generic `Service` may ignore `thread`;
-/// `commands/dispatch` hardcodes `previous_thread_id: None` (so a `Command`
-/// route would show "continuing T-…" while submit started something else);
-/// `UiFacet` yields no thread at all. Better-later: an explicit
-/// invoke-capability bit ("accepts continuation targeting") instead of a ref
-/// allowlist.
-fn invoke_is_thread_capable(invoke: &super::seat::InvokeTemplate) -> bool {
-    use super::seat::InvokeTemplate;
-    matches!(invoke, InvokeTemplate::Service { item_ref } if item_ref == "service:threads/input")
-}
 
 fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
     match arrange {
@@ -2835,61 +2831,6 @@ mod tests {
     }
 
     #[test]
-    fn cycle_input_target_notices_on_non_thread_capable_route() {
-        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-        seed_input_view(&mut core); // declares target
-        // A UiFacet invoke yields no thread, so it can't be chained.
-        core.seat.append_facet(
-            crate::studio::seat::KEY_INPUT_ROUTE,
-            serde_json::json!({ "invoke": { "type": "ui_facet", "key": "tile.x.filter" } }),
-        );
-        core.data.threads = Some(StudioThreadsDto {
-            threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
-        });
-        core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::CycleInputTarget { forward: true },
-        });
-        assert_eq!(
-            core.seat.fold().input_route().chain_root,
-            None,
-            "non-thread-capable route → no mutation"
-        );
-        let n = core.ui.notices.len();
-        assert!(n > 0, "surfaces a notice, not a silent no-op");
-        // Deduped: a second identical press doesn't add another notice.
-        core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::CycleInputTarget { forward: true },
-        });
-        assert_eq!(core.ui.notices.len(), n, "notice deduped on repeat press");
-    }
-
-    #[test]
-    fn cycle_input_target_rejects_non_threads_service_and_command_routes() {
-        // Only service:threads/input braids. A generic service may ignore the
-        // thread; commands/dispatch hardcodes previous_thread_id: None. Either
-        // must NOT claim braid support, or the input would show "continuing
-        // T-…" while submit did something else.
-        for invoke in [
-            serde_json::json!({ "type": "service", "ref": "service:other/thing" }),
-            serde_json::json!({ "type": "command", "tokens": ["do", "thing"] }),
-        ] {
-            let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-            seed_input_view(&mut core);
-            core.seat
-                .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, serde_json::json!({ "invoke": invoke }));
-            core.data.threads = Some(StudioThreadsDto {
-                threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
-            });
-            core.dispatch(StudioEvent::Ui {
-                event: StudioUiEvent::CycleInputTarget { forward: true },
-            });
-            let route = core.seat.fold().input_route();
-            assert_eq!(route.chain_root, None, "non-threads route must not braid: {route:?}");
-            assert!(!core.ui.notices.is_empty(), "surfaces a notice");
-        }
-    }
-
-    #[test]
     fn cycle_input_target_notices_when_route_has_no_invoke() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core);
@@ -2902,7 +2843,13 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::CycleInputTarget { forward: true },
         });
-        assert!(!core.ui.notices.is_empty(), "no invoke → notice, not silent");
+        let n = core.ui.notices.len();
+        assert!(n > 0, "no invoke → notice, not silent");
+        // Deduped: a repeat press doesn't spam an identical notice.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.ui.notices.len(), n, "notice deduped on repeat press");
     }
 
     #[test]
@@ -3105,6 +3052,42 @@ mod tests {
         assert_eq!(route.chain_root.as_deref(), Some("T-9"));
         // Pinned invocation survives the ratchet.
         assert!(route.has_target());
+    }
+
+    #[test]
+    fn launch_does_not_ratchet_a_non_targeting_input() {
+        // The ratchet keys off the input's `target` declaration, not the
+        // invoke ref: an input that does NOT declare conversation targeting is
+        // never retargeted onto the produced thread (no false "continuing").
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "route" }
+            }))
+            .unwrap(),
+        );
+        set_focused_input(&mut core, "go");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-9", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "non-targeting input is not retargeted");
+        assert_eq!(route.chain_root, None);
     }
 
     #[test]
