@@ -706,6 +706,10 @@ impl StudioCore {
         self.focused_input_instance()
             .and_then(|(_, view_ref)| self.views.get(&view_ref))
             .and_then(|binding| binding.input.as_ref())
+            // Defense-in-depth: targeting retargets the ROUTE, so it is only
+            // meaningful on a route-submit input. Content validation degrades
+            // a target on a non-route input, but don't rely on that alone.
+            .filter(|input| input.submits_to_route())
             .and_then(|input| input.target.as_ref())
             .map(|target| target.cycle)
     }
@@ -1678,11 +1682,18 @@ enum TargetSlot {
     Chain { root: String, head: String },
 }
 
-/// Whether an invoke template yields a thread that can be chained. Service
-/// and command launches produce a thread; a `UiFacet` write does not.
+/// Whether an invoke template accepts a continuation target — i.e. a submit
+/// actually braids onto `route.thread`. Conservatively this is ONLY
+/// `service:threads/input` today: it consumes the target thread and produces
+/// the successor chain. A generic `Service` may ignore `thread`;
+/// `commands/dispatch` hardcodes `previous_thread_id: None` (so a `Command`
+/// route would show "continuing T-…" while submit started something else);
+/// `UiFacet` yields no thread at all. Better-later: an explicit
+/// invoke-capability bit ("accepts continuation targeting") instead of a ref
+/// allowlist.
 fn invoke_is_thread_capable(invoke: &super::seat::InvokeTemplate) -> bool {
     use super::seat::InvokeTemplate;
-    matches!(invoke, InvokeTemplate::Service { .. } | InvokeTemplate::Command { .. })
+    matches!(invoke, InvokeTemplate::Service { item_ref } if item_ref == "service:threads/input")
 }
 
 fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
@@ -2853,6 +2864,48 @@ mod tests {
     }
 
     #[test]
+    fn cycle_input_target_rejects_non_threads_service_and_command_routes() {
+        // Only service:threads/input braids. A generic service may ignore the
+        // thread; commands/dispatch hardcodes previous_thread_id: None. Either
+        // must NOT claim braid support, or the input would show "continuing
+        // T-…" while submit did something else.
+        for invoke in [
+            serde_json::json!({ "type": "service", "ref": "service:other/thing" }),
+            serde_json::json!({ "type": "command", "tokens": ["do", "thing"] }),
+        ] {
+            let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+            seed_input_view(&mut core);
+            core.seat
+                .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, serde_json::json!({ "invoke": invoke }));
+            core.data.threads = Some(StudioThreadsDto {
+                threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
+            });
+            core.dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::CycleInputTarget { forward: true },
+            });
+            let route = core.seat.fold().input_route();
+            assert_eq!(route.chain_root, None, "non-threads route must not braid: {route:?}");
+            assert!(!core.ui.notices.is_empty(), "surfaces a notice");
+        }
+    }
+
+    #[test]
+    fn cycle_input_target_notices_when_route_has_no_invoke() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core);
+        // Route facet with no invoke template at all.
+        core.seat
+            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, serde_json::json!({ "thread": "T-x" }));
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert!(!core.ui.notices.is_empty(), "no invoke → notice, not silent");
+    }
+
+    #[test]
     fn cycle_input_target_dedupes_current_chain_and_prefers_fetched_head() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
@@ -2915,6 +2968,40 @@ mod tests {
             None,
             "synthetic current did not trap the cycle — moved to new conversation"
         );
+    }
+
+    #[test]
+    fn key_context_completion_is_cursor_aware() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core); // completion: service:commands/list + target
+        core.data.commands = Some(serde_json::json!({
+            "commands": [{ "tokens": ["deploy"], "description": "d" }]
+        }));
+
+        // Cursor at the end of "/de" with a matching record → can accept.
+        set_focused_input(&mut core, "/de");
+        let ctx = core.key_context();
+        assert!(
+            ctx.input_can_accept_completion,
+            "cursor at end + a match → completion can accept (Tab completes)"
+        );
+        assert!(ctx.input_target_cycle.is_some(), "targeting still exposed");
+
+        // Same text, cursor mid-line → completion would no-op, so it must NOT
+        // claim it can accept (Tab should cycle the target instead).
+        core.focused_input_buffer_mut()
+            .unwrap()
+            .set_text("/de".to_string(), 1);
+        assert!(
+            !core.key_context().input_can_accept_completion,
+            "cursor mid-line → cannot accept; Tab cycles, not a no-op completion"
+        );
+
+        // Prose (no leading slash) → cannot accept either.
+        core.focused_input_buffer_mut()
+            .unwrap()
+            .set_text("hello world".to_string(), 11);
+        assert!(!core.key_context().input_can_accept_completion);
     }
 
     #[test]

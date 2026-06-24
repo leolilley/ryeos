@@ -212,3 +212,27 @@ fn stored_cursor(core: &StudioCore) -> usize {
         _ => 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backtab_normalizes_to_shifted_tab() {
+        // crossterm sends Shift+Tab as a distinct BackTab code; the adapter
+        // must present it to the shared keymap as Tab + shift so Shift+Tab
+        // drives the backward target cycle.
+        let ev = terminal_studio_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+            .expect("BackTab maps to a studio key");
+        assert_eq!(ev.key, StudioKey::Tab);
+        assert!(ev.modifiers.shift, "BackTab carries shift");
+    }
+
+    #[test]
+    fn plain_tab_is_unshifted() {
+        let ev = terminal_studio_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("Tab maps to a studio key");
+        assert_eq!(ev.key, StudioKey::Tab);
+        assert!(!ev.modifiers.shift);
+    }
+}

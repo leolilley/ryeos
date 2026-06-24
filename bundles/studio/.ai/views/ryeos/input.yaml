@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T05:38:46Z:98935ec57ba09ff9bcd7d3dc08864a3e9170799b551ca2eef7601f35d46a7de9:rfp717kLsCQdO027Bb5me6VyxDwY1mMBZrztx3mJu5Z1NBba7W2j1X55ZRfNMM0QdUL3B8RspzUeNQjMBq7iCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T00:50:41Z:04ae3ee758e12d83e4019f0f145f6b564be2214759c11f783efcc254c8238740:XkOaRk3uT6Ij5n9zGeNVzvB9cGw7u1rLyrpHWsgNt+3CEPuAaAm07k0z33xbun394pf8AcgwGXxTwBGjYd6pAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: input
 version: "1.0.0"
 description: The studio chat box - an input buffer that dispatches through the engine route-fold

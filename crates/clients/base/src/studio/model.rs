@@ -891,7 +891,13 @@ impl StudioCore {
             input_has_text: !text.is_empty(),
             input_has_completion: input.is_some_and(|i| i.completion.is_some()),
             input_can_accept_completion,
-            input_target_cycle: input.and_then(|i| i.target.as_ref()).map(|t| t.cycle),
+            // Targeting retargets the route, so it's only exposed for a
+            // route-submit input (defense-in-depth; content validation also
+            // degrades a target on a non-route input).
+            input_target_cycle: input
+                .filter(|i| i.submits_to_route())
+                .and_then(|i| i.target.as_ref())
+                .map(|t| t.cycle),
         }
     }
 }
