@@ -174,6 +174,20 @@ pub struct ThreadDetail {
     pub runtime: RuntimeInfo,
 }
 
+/// Result of an idempotent operator continuation create-or-get.
+#[derive(Debug)]
+pub enum ContinuationOutcome {
+    /// A new successor was created with this request's fingerprint persisted on
+    /// its edge. The caller should launch it. Carries the persisted events.
+    Created(Vec<PersistedEventRecord>),
+    /// The source already has a successor whose recorded fingerprint MATCHES this
+    /// request — a duplicate submit. The caller returns this id WITHOUT
+    /// relaunching (the existing successor is already launching or done).
+    Existing { successor_thread_id: String },
+    /// The source is already continued by a request with a DIFFERENT fingerprint.
+    Conflict { successor_thread_id: String },
+}
+
 struct Inner {
     state_db: StateDb,
     runtime_db: runtime_db::RuntimeDb,
@@ -870,6 +884,367 @@ impl StateStore {
         Ok(all_events)
     }
 
+    /// Machine continuation handoff (limit cut-off) — the autonomous path.
+    ///
+    /// Unlike [`Self::create_continuation`] (the operator follow-up, which
+    /// accepts a terminal source and leaves it as-is), this enforces the machine
+    /// invariants atomically under the write permit + lock:
+    ///
+    /// - the source must be **exactly `running`** — a cut-off live run. Re-checked
+    ///   here, not just by the caller, so a source that goes terminal between the
+    ///   caller's check and this commit cannot mint a successor.
+    /// - the source must carry a captured `ResumeContext` (spawn-time launch
+    ///   identity) — a successor we cannot launch is worse than none.
+    /// - the successor's launch metadata is **seeded before the source is settled
+    ///   `continued`**, and the runtime-db writes (which can fail independently of
+    ///   the source's terminal snapshot) happen first — so any failure aborts the
+    ///   handoff with the source still `running` (the runner then fails terminal),
+    ///   never `continued` behind an unlaunchable successor.
+    pub fn create_machine_continuation(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let source_row = g
+            .state_db
+            .get_thread(source_thread_id)?
+            .ok_or_else(|| anyhow!("source thread not found: {source_thread_id}"))?;
+
+        // Machine handoff = cut-off of a still-running source. Re-checked under
+        // the lock to close the caller's check-then-commit race; a terminal
+        // source is the operator follow-up path, not this one.
+        if source_row.status != ThreadStatus::Running.as_str() {
+            bail!(
+                "machine continuation requires a running source; \
+                 thread {source_thread_id} is '{}'",
+                source_row.status
+            );
+        }
+
+        // Single-successor invariant (atomic under the held permit + lock).
+        if let Some(existing) =
+            queries::continuation_successor(g.state_db.projection(), source_thread_id)?
+        {
+            bail!("thread {source_thread_id} already continued as {existing}");
+        }
+
+        // Require the source's captured launch identity: the successor must be
+        // able to fold the chain, or the handoff is pointless.
+        let source_resume_context = g
+            .runtime_db
+            .get_runtime_info(source_thread_id)?
+            .and_then(|info| info.launch_metadata)
+            .and_then(|m| m.resume_context)
+            .ok_or_else(|| {
+                anyhow!(
+                    "source thread {source_thread_id} has no captured ResumeContext; \
+                     cannot create a launchable continuation successor"
+                )
+            })?;
+
+        let mut successor_with_upstream = successor.clone();
+        if successor_with_upstream.upstream_thread_id.is_none() {
+            successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
+        }
+
+        // Runtime-db writes FIRST: insert the successor runtime row and seed its
+        // launch identity before any state-db successor snapshot or source
+        // settle. If the seed fails, only an orphan runtime row exists — no
+        // state-db successor edge, source untouched and still running.
+        g.runtime_db
+            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+        let successor_meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_resume_context(source_resume_context);
+        g.runtime_db
+            .set_launch_metadata(&successor.thread_id, &successor_meta)?;
+
+        // State-db successor snapshot (creates the upstream edge).
+        let successor_snapshot = build_snapshot(&successor_with_upstream);
+        g.state_db
+            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+
+        // Settle the source to `continued` (running by the check above) in the
+        // same append as its `thread_continued` event — the final state change.
+        let now = lillux::time::iso8601_now();
+        let source_snapshot = ThreadSnapshot {
+            schema: ryeos_state::objects::SCHEMA_VERSION,
+            kind: "thread_snapshot".to_string(),
+            thread_id: source_row.thread_id.clone(),
+            chain_root_id: source_row.chain_root_id.clone(),
+            status: ThreadStatus::Continued,
+            kind_name: source_row.kind.clone(),
+            item_ref: source_row.item_ref.clone(),
+            executor_ref: source_row.executor_ref.clone(),
+            launch_mode: source_row.launch_mode.clone(),
+            current_site_id: source_row.current_site_id.clone(),
+            origin_site_id: source_row.origin_site_id.clone(),
+            upstream_thread_id: source_row.upstream_thread_id.clone(),
+            requested_by: source_row.requested_by.clone(),
+            base_project_snapshot_hash: None,
+            result_project_snapshot_hash: None,
+            created_at: source_row.created_at.clone(),
+            updated_at: now.clone(),
+            started_at: source_row.started_at.clone(),
+            finished_at: Some(now),
+            result: None,
+            outcome_code: Some("continued".to_string()),
+            error: None,
+            budget: None,
+            artifacts: vec![],
+            facets: Default::default(),
+            last_event_hash: None,
+            last_chain_seq: 0,
+            last_thread_seq: 0,
+        };
+        let source_event = NewEventRecord {
+            event_type: "thread_continued".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "successor_thread_id": &successor.thread_id,
+                "reason": reason,
+            }),
+        };
+        let ste = convert_events(
+            std::slice::from_ref(&source_event),
+            chain_root_id,
+            source_thread_id,
+        );
+        let source_result = g.state_db.append_events(
+            chain_root_id,
+            source_thread_id,
+            ste,
+            vec![SnapshotUpdate {
+                thread_id: source_thread_id.to_string(),
+                new_snapshot: source_snapshot,
+            }],
+            g.signer.as_ref(),
+        )?;
+
+        let successor_event = NewEventRecord {
+            event_type: "thread_created".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": &successor.kind,
+                "item_ref": &successor.item_ref,
+                "continuation_from": source_thread_id,
+            }),
+        };
+        let sste = convert_events(
+            std::slice::from_ref(&successor_event),
+            chain_root_id,
+            &successor.thread_id,
+        );
+        let successor_result = g.state_db.append_events(
+            chain_root_id,
+            &successor.thread_id,
+            sste,
+            vec![],
+            g.signer.as_ref(),
+        )?;
+
+        let mut all_events = persisted_from_append(&source_result, &[source_event]);
+        all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
+        Ok(all_events)
+    }
+
+    /// Operator follow-up continuation, made idempotent by a request fingerprint.
+    ///
+    /// Unlike [`Self::create_continuation`] (whose single-successor guard FAILS on
+    /// a second follow-up), this dedups: under the write permit + lock, if the
+    /// source already has a successor it compares the recorded
+    /// `successor_request_fingerprint` to this request's — a match returns the
+    /// existing successor (`Existing`, a double-submit), a mismatch is a
+    /// `Conflict`. Otherwise it creates the successor and persists the fingerprint
+    /// on the `thread_continued` edge in the SAME critical section, so dedup works
+    /// even if the daemon crashes before the runtime emits anything. A terminal
+    /// (completed/failed) source keeps its status; a running source is settled
+    /// `continued` (same as `create_continuation`).
+    pub fn create_or_get_continuation(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        reason: Option<&str>,
+        request_fingerprint: &str,
+        resume_context: Option<&crate::launch_metadata::ResumeContext>,
+    ) -> Result<ContinuationOutcome> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let source_row = g
+            .state_db
+            .get_thread(source_thread_id)?
+            .ok_or_else(|| anyhow!("source thread not found: {source_thread_id}"))?;
+
+        // The caller-supplied chain root must match the source's — a continuation
+        // stays in the predecessor's chain. Fail loud on a mismatch rather than
+        // braiding a successor into the wrong chain.
+        if chain_root_id != source_row.chain_root_id {
+            bail!(
+                "chain_root_id mismatch: caller passed '{chain_root_id}' but source \
+                 '{source_thread_id}' belongs to chain '{}'",
+                source_row.chain_root_id
+            );
+        }
+
+        if is_terminal_status(&source_row.status)
+            && source_row.status != "failed"
+            && source_row.status != "completed"
+        {
+            bail!(
+                "cannot continue thread in terminal status '{}'",
+                source_row.status
+            );
+        }
+
+        // Idempotent get-or-conflict: a source already continued is deduped by
+        // fingerprint instead of failing the single-successor guard.
+        if let Some(existing) =
+            queries::continuation_successor(g.state_db.projection(), source_thread_id)?
+        {
+            let existing_fp =
+                queries::continuation_fingerprint(g.state_db.projection(), source_thread_id)?;
+            return Ok(if existing_fp.as_deref() == Some(request_fingerprint) {
+                ContinuationOutcome::Existing {
+                    successor_thread_id: existing,
+                }
+            } else {
+                ContinuationOutcome::Conflict {
+                    successor_thread_id: existing,
+                }
+            });
+        }
+
+        // No successor yet — create it, persisting the fingerprint on the edge.
+        // (Body mirrors `create_continuation`.) A terminal source keeps its
+        // snapshot; a running source is settled `continued`.
+        let source_snapshot_updates = if is_terminal_status(&source_row.status) {
+            Vec::new()
+        } else {
+            let now = lillux::time::iso8601_now();
+            let source_snapshot = ThreadSnapshot {
+                schema: ryeos_state::objects::SCHEMA_VERSION,
+                kind: "thread_snapshot".to_string(),
+                thread_id: source_row.thread_id.clone(),
+                chain_root_id: source_row.chain_root_id.clone(),
+                status: ThreadStatus::Continued,
+                kind_name: source_row.kind.clone(),
+                item_ref: source_row.item_ref.clone(),
+                executor_ref: source_row.executor_ref.clone(),
+                launch_mode: source_row.launch_mode.clone(),
+                current_site_id: source_row.current_site_id.clone(),
+                origin_site_id: source_row.origin_site_id.clone(),
+                upstream_thread_id: source_row.upstream_thread_id.clone(),
+                requested_by: source_row.requested_by.clone(),
+                base_project_snapshot_hash: None,
+                result_project_snapshot_hash: None,
+                created_at: source_row.created_at.clone(),
+                updated_at: now.clone(),
+                started_at: source_row.started_at.clone(),
+                finished_at: Some(now),
+                result: None,
+                outcome_code: Some("continued".to_string()),
+                error: None,
+                budget: None,
+                artifacts: vec![],
+                facets: Default::default(),
+                last_event_hash: None,
+                last_chain_seq: 0,
+                last_thread_seq: 0,
+            };
+            vec![SnapshotUpdate {
+                thread_id: source_thread_id.to_string(),
+                new_snapshot: source_snapshot,
+            }]
+        };
+
+        let mut successor_with_upstream = successor.clone();
+        if successor_with_upstream.upstream_thread_id.is_none() {
+            successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
+        }
+        // Write order mirrors the machine path: runtime row + launch metadata
+        // FIRST, then the state-db successor snapshot, then the source edge last.
+        // A failure before the edge write leaves at most a runtime row + an
+        // unlinked successor snapshot (no authoritative continuation edge), never
+        // a `continued`/edge'd source pointing at a half-built successor.
+        g.runtime_db
+            .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
+
+        // Seed the operator launch context (a `ResumeContext`) on the successor so
+        // the row is relaunchable the instant it exists — a crash before the
+        // spawned launcher runs leaves a successor the operator can re-drive
+        // (idempotently, via the fingerprint) or reconcile can recover, rather
+        // than a stranded row with no launch information.
+        if let Some(rc) = resume_context {
+            let meta = crate::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_resume_context(rc.clone());
+            g.runtime_db
+                .set_launch_metadata(&successor.thread_id, &meta)?;
+        }
+
+        let successor_snapshot = build_snapshot(&successor_with_upstream);
+        g.state_db
+            .add_thread(chain_root_id, successor_snapshot, g.signer.as_ref())?;
+
+        let source_event = NewEventRecord {
+            event_type: "thread_continued".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "successor_thread_id": &successor.thread_id,
+                "reason": reason,
+                "successor_request_fingerprint": request_fingerprint,
+            }),
+        };
+        let ste = convert_events(
+            std::slice::from_ref(&source_event),
+            chain_root_id,
+            source_thread_id,
+        );
+        let source_result = g.state_db.append_events(
+            chain_root_id,
+            source_thread_id,
+            ste,
+            source_snapshot_updates,
+            g.signer.as_ref(),
+        )?;
+
+        let successor_event = NewEventRecord {
+            event_type: "thread_created".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": &successor.kind,
+                "item_ref": &successor.item_ref,
+                "continuation_from": source_thread_id,
+            }),
+        };
+        let sste = convert_events(
+            std::slice::from_ref(&successor_event),
+            chain_root_id,
+            &successor.thread_id,
+        );
+        let successor_result = g.state_db.append_events(
+            chain_root_id,
+            &successor.thread_id,
+            sste,
+            vec![],
+            g.signer.as_ref(),
+        )?;
+
+        let mut all_events = persisted_from_append(&source_result, &[source_event]);
+        all_events.extend(persisted_from_append(&successor_result, &[successor_event]));
+        Ok(ContinuationOutcome::Created(all_events))
+    }
+
+    /// The `successor_request_fingerprint` recorded on a source's
+    /// `thread_continued` edge, if any — used to dedup operator double-submits.
+    pub fn get_continuation_fingerprint(&self, thread_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        queries::continuation_fingerprint(g.state_db.projection(), thread_id)
+    }
+
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
         let g = self.lock()?;
         let thread_row = match g.state_db.get_thread(thread_id)? {
@@ -1227,6 +1602,30 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection())
     }
 
+    /// Read a thread's persisted launch metadata (resume context), if any.
+    pub fn get_launch_metadata(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<crate::launch_metadata::RuntimeLaunchMetadata>> {
+        let g = self.lock()?;
+        Ok(g.runtime_db
+            .get_runtime_info(thread_id)?
+            .and_then(|info| info.launch_metadata))
+    }
+
+    /// Seed a thread's launch identity (resume context / continuation spec) at
+    /// spawn time so a continuation successor can be relaunched later with no
+    /// live request. Metadata-only (does not touch pid/pgid); the
+    /// clobber-preserving attach keeps it against a later empty self-attach.
+    pub fn seed_launch_metadata(
+        &self,
+        thread_id: &str,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.set_launch_metadata(thread_id, launch_metadata)
+    }
+
     #[tracing::instrument(
         name = "state:attach_thread_process",
         skip(self, launch_metadata),
@@ -1269,6 +1668,41 @@ impl StateStore {
     pub fn bump_resume_attempts(&self, thread_id: &str) -> Result<u32> {
         let g = self.lock()?;
         g.runtime_db.bump_resume_attempts(thread_id)
+    }
+
+    /// Atomically claim the right to launch a thread. The sole authorization for
+    /// a spawn — see [`runtime_db::RuntimeDb::claim_thread_launch`].
+    pub fn claim_thread_launch(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        claimed_by: &str,
+        lease_ms: i64,
+    ) -> Result<runtime_db::LaunchClaimOutcome> {
+        let g = self.lock()?;
+        g.runtime_db
+            .claim_thread_launch(thread_id, claim_id, claimed_by, lease_ms)
+    }
+
+    /// Release a launch claim the caller owns (matched by `claim_id`).
+    pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.release_thread_launch_claim(thread_id, claim_id)
+    }
+
+    /// Read the current launch claim, if any — distinguishes an unlaunched
+    /// successor from one mid-launch for the reconciler.
+    pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<runtime_db::LaunchClaim>> {
+        let g = self.lock()?;
+        g.runtime_db.get_launch_claim(thread_id)
+    }
+
+    /// Delete all launch claims — startup cleanup so a stale claim from a crashed
+    /// daemon does not block a reconcile relaunch. See
+    /// [`runtime_db::RuntimeDb::clear_all_launch_claims`].
+    pub fn clear_all_launch_claims(&self) -> Result<usize> {
+        let g = self.lock()?;
+        g.runtime_db.clear_all_launch_claims()
     }
 
     #[tracing::instrument(

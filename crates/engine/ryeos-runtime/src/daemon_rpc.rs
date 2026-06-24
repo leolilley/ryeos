@@ -258,19 +258,6 @@ impl ThreadLifecycleClient {
             .await
     }
 
-    pub async fn request_continuation(
-        &self,
-        thread_id: &str,
-        prompt: &str,
-    ) -> Result<Value, RpcError> {
-        self.rpc
-            .request(
-                "threads.request_continuation",
-                serde_json::json!({"thread_id": thread_id, "prompt": prompt}),
-            )
-            .await
-    }
-
     pub async fn append_event(
         &self,
         thread_id: &str,

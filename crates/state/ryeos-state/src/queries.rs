@@ -572,6 +572,38 @@ pub fn continuation_successor(
         .map(|s| s.to_string()))
 }
 
+/// The `successor_request_fingerprint` recorded in the source's `thread_continued`
+/// payload, if any. Used to dedup operator double-submits: a follow-up whose
+/// fingerprint matches the recorded one resolves to the existing successor; a
+/// different fingerprint is a conflict. `None` when the source is not continued,
+/// or when its successor predates fingerprinting (e.g. a machine continuation,
+/// which records no operator fingerprint).
+pub fn continuation_fingerprint(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let payload: Option<Vec<u8>> = db
+        .connection()
+        .query_row(
+            "SELECT payload FROM events \
+             WHERE thread_id = ? AND event_type = 'thread_continued' \
+             ORDER BY chain_seq DESC LIMIT 1",
+            [thread_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .context("query continuation_fingerprint")?;
+    let Some(bytes) = payload else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
+    Ok(value
+        .get("successor_request_fingerprint")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
+}
+
 pub fn latest_thread_events(
     db: &ProjectionDb,
     thread_id: &str,

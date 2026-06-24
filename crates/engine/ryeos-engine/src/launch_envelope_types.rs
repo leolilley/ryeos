@@ -165,6 +165,7 @@ impl EnvelopeRequest {
             parent_thread_id: None,
             parent_capabilities: None,
             depth: 0,
+            suppress_stimulus: false,
         }
     }
 }
@@ -212,6 +213,13 @@ pub struct EnvelopeRequest {
     pub parent_capabilities: Option<Vec<String>>,
     #[serde(default)]
     pub depth: u32,
+    /// Machine continuation (limit cut-off): fold the chain and resume with NO
+    /// new stimulus — the run was cut off mid-task, nothing new is being asked.
+    /// An operator follow-up or a fresh launch leaves this `false`, injecting
+    /// `inputs` as the opening `cognition_in`. Only consulted on the resume
+    /// branch (`previous_thread_id` present); a fresh launch always injects.
+    #[serde(default)]
+    pub suppress_stimulus: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +330,7 @@ mod tests {
                 parent_thread_id: None,
                 parent_capabilities: None,
                 depth: 0,
+                suppress_stimulus: false,
             },
             policy: EnvelopePolicy {
                 effective_caps: vec!["ryeos.execute.tool.*".to_string()],

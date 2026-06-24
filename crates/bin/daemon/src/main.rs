@@ -562,6 +562,48 @@ async fn main() -> Result<()> {
         let st = app_state.clone();
         let threads = app_state.threads.clone();
         tokio::spawn(async move {
+            // Continuation successor (machine handoff stranded by a crash):
+            // `launch_successor` claims the lease, rebuilds from the captured
+            // ResumeContext, runs the existing row, and finalizes it itself on a
+            // pre-run defect — so it needs only the thread id, not a rebuilt
+            // ExecutionParams.
+            if intent.kind != reconcile::ResumeKind::NativeResume {
+                use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+                // Machine folds the chain (no stimulus); operator injects the
+                // seeded operator input. Both are claim-guarded — a duplicate with
+                // the live launch is a benign `Skipped`.
+                let outcome = match intent.kind {
+                    reconcile::ResumeKind::OperatorContinuation => {
+                        ryeos_executor::execution::launch::launch_operator_successor(
+                            st,
+                            &intent.thread_id,
+                        )
+                        .await
+                    }
+                    _ => {
+                        ryeos_executor::execution::launch::launch_successor(st, &intent.thread_id)
+                            .await
+                    }
+                };
+                match outcome {
+                    Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+                    Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                        tracing::debug!(
+                            thread_id = %intent.thread_id,
+                            reason,
+                            "reconcile: successor launch skipped"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            thread_id = %intent.thread_id,
+                            error = %err,
+                            "reconcile: successor launch failed"
+                        );
+                    }
+                }
+                return;
+            }
             let params =
                 match ryeos_executor::execution::runner::execution_params_from_resume_context(
                     &st,

@@ -402,6 +402,7 @@ mod tests {
                 parent_thread_id: None,
                 parent_capabilities: None,
                 depth: 0,
+                suppress_stimulus: false,
             },
             policy: EnvelopePolicy {
                 effective_caps: vec![],

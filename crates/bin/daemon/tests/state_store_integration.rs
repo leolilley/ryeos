@@ -496,6 +496,195 @@ mod integration_tests {
     }
 
     #[test]
+    fn machine_continuation_rejects_non_running_source() {
+        // The machine handoff is a CUT-OFF of a still-running source. A terminal
+        // source is the operator follow-up path; `create_machine_continuation`
+        // must refuse it under the lock and mint no successor.
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-mc-done-1", "T-mc-done-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store
+            .mark_thread_running("T-mc-done-1", None)
+            .expect("mark_thread_running");
+        store
+            .finalize_thread(
+                "T-mc-done-1",
+                &FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(serde_json::json!({"a": 1})),
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                },
+            )
+            .expect("finalize_thread");
+
+        let successor = make_thread("T-mc-done-2", "T-mc-done-1", "directive", "test/item", None);
+        let err = store
+            .create_machine_continuation(&successor, "T-mc-done-1", "T-mc-done-1", Some("limit"))
+            .expect_err("machine continuation must refuse a terminal source");
+        assert!(
+            err.to_string().contains("requires a running source"),
+            "expected running-source guard, got: {err}"
+        );
+
+        // No successor was minted; the source keeps its terminal result.
+        assert!(
+            store.get_thread("T-mc-done-2").expect("get_thread").is_none(),
+            "a refused machine continuation must not persist a successor"
+        );
+        let source = store
+            .get_thread("T-mc-done-1")
+            .expect("get_thread")
+            .expect("source exists");
+        assert_eq!(source.status, "completed");
+    }
+
+    #[test]
+    fn machine_continuation_requires_captured_resume_context() {
+        // A successor we cannot launch is worse than none. With no spawn-time
+        // `ResumeContext` seeded on the source, the handoff must fail and leave
+        // the source RUNNING (not `continued`) so the runner fails terminal.
+        let (_tmpdir, store) = setup_state_store();
+
+        let thread = make_thread("T-mc-run-1", "T-mc-run-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store
+            .mark_thread_running("T-mc-run-1", None)
+            .expect("mark_thread_running");
+        // Deliberately do NOT seed launch metadata.
+
+        let successor = make_thread("T-mc-run-2", "T-mc-run-1", "directive", "test/item", None);
+        let err = store
+            .create_machine_continuation(&successor, "T-mc-run-1", "T-mc-run-1", Some("limit"))
+            .expect_err("machine continuation must require a captured ResumeContext");
+        assert!(
+            err.to_string().contains("no captured ResumeContext"),
+            "expected ResumeContext guard, got: {err}"
+        );
+
+        // The source must remain running — never stranded as `continued` behind
+        // an unlaunchable successor.
+        let source = store
+            .get_thread("T-mc-run-1")
+            .expect("get_thread")
+            .expect("source exists");
+        assert_eq!(
+            source.status, "running",
+            "a failed handoff must leave the source running, not continued"
+        );
+        assert!(
+            store.get_thread("T-mc-run-2").expect("get_thread").is_none(),
+            "no successor should exist after a refused handoff"
+        );
+    }
+
+    #[test]
+    fn create_or_get_continuation_dedups_by_fingerprint() {
+        use ryeos_app::state_store::ContinuationOutcome;
+        let (_tmpdir, store) = setup_state_store();
+        let thread = make_thread("T-fp-1", "T-fp-1", "directive", "test/item", None);
+        store.create_thread(&thread).expect("create_thread");
+        store
+            .mark_thread_running("T-fp-1", None)
+            .expect("mark_thread_running");
+        store
+            .finalize_thread(
+                "T-fp-1",
+                &FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(serde_json::json!({"a": 1})),
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                },
+            )
+            .expect("finalize_thread");
+
+        // First follow-up: creates the successor + persists fingerprint fp-A.
+        let succ = make_thread("T-fp-2", "T-fp-1", "directive", "test/item", None);
+        let outcome = store
+            .create_or_get_continuation(
+                &succ,
+                "T-fp-1",
+                "T-fp-1",
+                Some("follow-up"),
+                "sha256:fp-A",
+                None,
+            )
+            .expect("first create_or_get");
+        assert!(
+            matches!(outcome, ContinuationOutcome::Created(_)),
+            "first submit creates a successor"
+        );
+        assert_eq!(
+            store
+                .get_thread("T-fp-1")
+                .unwrap()
+                .unwrap()
+                .successor_thread_id
+                .as_deref(),
+            Some("T-fp-2")
+        );
+        // The fingerprint is persisted on the edge (not re-derived), so dedup
+        // works even before/without any runtime-emitted input.
+        assert_eq!(
+            store.get_continuation_fingerprint("T-fp-1").unwrap().as_deref(),
+            Some("sha256:fp-A")
+        );
+
+        // Duplicate submit (same fingerprint, even a different candidate id) must
+        // return the EXISTING successor and mint no sibling.
+        let dup = make_thread("T-fp-3", "T-fp-1", "directive", "test/item", None);
+        let outcome = store
+            .create_or_get_continuation(
+                &dup,
+                "T-fp-1",
+                "T-fp-1",
+                Some("follow-up"),
+                "sha256:fp-A",
+                None,
+            )
+            .expect("duplicate create_or_get");
+        match outcome {
+            ContinuationOutcome::Existing { successor_thread_id } => {
+                assert_eq!(successor_thread_id, "T-fp-2")
+            }
+            other => panic!("expected Existing, got {other:?}"),
+        }
+        assert!(
+            store.get_thread("T-fp-3").unwrap().is_none(),
+            "duplicate submit must not mint a sibling successor"
+        );
+
+        // A DIFFERENT fingerprint onto the already-continued source is a conflict.
+        let conflicting = make_thread("T-fp-4", "T-fp-1", "directive", "test/item", None);
+        let outcome = store
+            .create_or_get_continuation(
+                &conflicting,
+                "T-fp-1",
+                "T-fp-1",
+                Some("follow-up"),
+                "sha256:fp-B",
+                None,
+            )
+            .expect("conflicting create_or_get");
+        match outcome {
+            ContinuationOutcome::Conflict { successor_thread_id } => {
+                assert_eq!(successor_thread_id, "T-fp-2")
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert!(
+            store.get_thread("T-fp-4").unwrap().is_none(),
+            "conflicting submit must not mint a sibling successor"
+        );
+    }
+
+    #[test]
     fn rebuild_recovers_edges_from_cas() {
         let (_tmpdir, store) = setup_state_store();
 
