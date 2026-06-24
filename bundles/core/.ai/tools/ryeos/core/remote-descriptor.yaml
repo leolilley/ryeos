@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:56Z:2e1d559c25b7788d1882a3453f0e45f8e48b926b7a927090c8b54826792ee39a:PzIu/VSIO0WDt3DYive2Lu2/wSGG3VnsgI5+aHQljzpLIq8/joESt/IixCP54fmg6sSKj/sOmr7ZKIhiZCRgDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T04:51:58Z:ff33995b4c77e86a408387f66eb07803c81a491bfc3c3cbd9277882a055a31e4:XXZzhb6hk4+chp+C3RbTJCZFfTI6k9i1BNhoP7/AG3pxjGq2sROmTuvYXgiIKmeRFbJrHJC8/o6iY0QoBox8Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
@@ -19,7 +19,7 @@ config_schema:
   properties:
     system_space_dir:
       type: string
-      description: "Node system space root. Defaults to RYEOS_SYSTEM_SPACE_DIR or the platform data dir."
+      description: "Node system space root. Defaults to RYEOS_APP_ROOT or the platform data dir."
     name:
       type: string
       description: "Remote name callers should use."

@@ -1,6 +1,5 @@
-# ryeos:signed:2026-06-07T05:18:54Z:ac0ba45385235be24e17aa5c55c7bd72467a764cf7e1ed8c10e60fab5c9a500e:XlyUfRf48rLGmp7+zSoaLNKPVrioKKvtnfwtqHywNfhePNf/G17TX+9UvapvppnBP7fIxQuTe/M9JO6XU0QMCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T02:55:29Z:c7ed80672e6cc96c3242a483e706d49b884d69e31c82a458fcebf51f3ee3da6c:/ld2WZa03AFOEica/E1GiHHfqx2Tta+JCg0DPI1ej5VyXjAz55tTiA/cSbFsOdT1ZQehwEyAJ2DszA9IfwDvBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # Execution config — system defaults
-# Override per-user: ~/.ryeos/.ai/config/execution/execution.yaml
 # Override per-project: .ai/config/execution/execution.yaml
 category: "execution"
 version: "1.0.0"
@@ -8,7 +7,7 @@ schema_version: "1.0.0"
 
 # Defaults applied to all tool executions
 defaults:
-  timeout: 300
+  timeout: 86400
   max_steps: 100
   max_concurrency: 10
   # Cancellation policy applied when the daemon kills a running tool.

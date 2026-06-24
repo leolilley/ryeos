@@ -1,17 +1,17 @@
-<!-- ryeos:signed:2026-06-19T05:40:59Z:76aad50488ccfd28739e55a79063b27127c965dab588257c0796a4c906a9ffda:kJL9Z3uG33wY7uiYay89Ls1Z+dqD2P4kbucDnTLAzZT7p9ok82AXEubNdmiyHJBKt1YfiMW2KcjF3J3dpVM2Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:9eef62c230a8c78ab399af15d1b83e1629f61179c452cb6027fa4c9ff5fd33d4:X+Umtw99fbufuxVvWygqU072J+GMaC3zNQMiHlQIs7Ulygq7m6UZcKU5ABjKKoqJ+OQZQPX/w6TlKX0f95aGAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # ryeos:signed:2026-06-07T05:37:38Z:31e05eb8a0b55e27535e2b575aa77476d56a869b845c84099f2a0860240b9706:VmlT8saN+g88+R/8uZ6XmTZQfy4wIMYDxc/dCyKaUq33gXWAflwolNeYdd2wzlDcjnKjpKROvkDE7gQEeglwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
 version: "1.0.0"
 description: >
-  The exact .ai/ directory layout — bundle structure, daemon state
-  directory, user space overlay, and how they relate.
+  The exact .ai/ directory layout — bundle structure and the daemon
+  state directory, and how they relate.
 ---
 
 # .ai/ Directory Layout
 
-Rye OS uses `.ai/` directories across three spaces. Each space has a
+Rye OS uses `.ai/` directories across two spaces. Each space has a
 different layout serving different purposes.
 
 ## Bundle Layout (Core)
@@ -83,11 +83,15 @@ kinds, composers, runtime binaries, model routing, and workflow services:
 ## Daemon State Directory
 
 Created by `ryeos init`. Lives in the system space
-(default `~/.local/share/ryeos/`):
+(default `~/.local/share/ryeos/`, overridable via `RYEOS_APP_ROOT`):
 
 ```
 <system_space_dir>/
 └── .ai/
+    ├── config/
+    │   └── keys/
+    │       ├── signing/private_key.pem  # operator Ed25519 signing key (0600)
+    │       └── trusted/<fp>.toml        # trusted publisher/operator/node keys
     ├── node/
     │   ├── config.yaml                  # daemon bind address, db_path, auth config
     │   ├── identity/
@@ -116,23 +120,6 @@ Created by `ryeos init`. Lives in the system space
         │   └── <schedule-id>/fires.jsonl
         ├── trace-events.ndjson          # structured trace events
         └── operator.lock                # exclusive daemon lock
-```
-
-## User Space Overlay
-
-Lives at `~/.ryeos/.ai/`. Used for cross-project personal items:
-
-```
-~/.ryeos/.ai/
-├── config/
-│   └── keys/
-│       ├── signing/
-│       │   └── private_key.pem         # operator signing key (persistent identity)
-│       └── trusted/
-│           └── <fingerprint>.toml      # trust documents for verifying items
-├── tools/                              # user-level tool overlays
-├── knowledge/                          # user-level knowledge overlays
-└── directives/                         # user-level directive overlays
 ```
 
 ## Kind-to-Directory Mapping

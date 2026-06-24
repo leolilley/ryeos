@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:56Z:1b5feba0e2072229b4d1baab5fd939ddd21a80e2e860137218be08cbdcf75440:pUNc1vxW3DNf81T5t7nUtHo49Soh06615hp4xx30YFt0oH+1PHvOXIQFXA+T/pQQjDh+1fUj1QH6OOpMgiH4Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T04:51:58Z:e9b815d7eb47f9be8739d66d87cfaa0ce87d3eea2a0143f6e1fee584684a6df6:mcdrhOL6UK2eNDL7BX++kpzCPoteCjHF5+4dFaBLwaTGxXVLgwFwb2WIjh+yI0tUtmDEif5w+p0j7U1sk8eZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/identity"
 name: "public_key"
 executor_id: "@subprocess"
@@ -18,7 +18,7 @@ config_schema:
   properties:
     system_space_dir:
       type: string
-      description: "System space root (parent of .ai/). Defaults to RYEOS_SYSTEM_SPACE_DIR env or XDG data dir / ryeos."
+      description: "System space root (parent of .ai/). Defaults to RYEOS_APP_ROOT env or XDG data dir / ryeos."
     project_path:
       type: string
       description: "Project root path. Injected by the engine; not used by this tool."

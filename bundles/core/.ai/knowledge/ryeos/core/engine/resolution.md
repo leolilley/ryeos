@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:a6c274a2893f72a7d46584d433e0f4dd77fc3ba1b621fae556abf66a027540c3:UUBH27weqpC9wYiBasf0iH4VBlIAAOzd/uMs1XIyhpS9U+CDofwsGMkdGKeL1Y5N6zn0Xt4JbZa410a8+6R3Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:6d03f4867932cd5814b75d68245a1be98c180f9ae2c4d40c4c56e2e71259e877:32JSpowXvSNph7wkNYEH/fy2MvNsKcvSt901fzV4nu8x0WMwqi8DAF2VUjtglpdtS3SkFK/Bbq7Ae6Lxgb8PAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/engine
 tags: [engine, resolution, canonical-refs, spaces, bundles]
@@ -9,7 +9,7 @@ description: >
 
 # Engine Resolution
 
-Invariant: a canonical ref resolves by kind-directed directory lookup, with project space overriding user space and installed bundles.
+Invariant: a canonical ref resolves by kind-directed directory lookup, with project space overriding installed bundles.
 
 ## Canonical refs
 

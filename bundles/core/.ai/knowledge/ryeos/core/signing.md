@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:1093e7d6b22272cd2cf3d3db30b86f2671e8604cfc7eb2c9aaaa28e329935ea9:ebmeBNGO4n4Ncjs8VloxpCsULu+pg3jADbx6IzVrmMEqagorfujsLIVsPZCFMatndJrgXRz864Ye+9uw/Iu/Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:eab0b7556498581c20f73c5f8b9cb61723ba652bd5ed2ad715b6164781791d49:oH+AJ9JB95v80FrnOa+8jMLkDbTAqBw9isfmLfhgj68Caf28Jn/6I7xb04inmgyFEn4jgniusVdPrE2pxqh5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -19,11 +19,11 @@ Every executable item must be signed before the daemon will run it.
 
 | Key | Purpose | Location |
 |-----|---------|----------|
-| **User key** | Operator identity — CLI auth, signing user/project items | `~/.ryeos/.ai/config/keys/signing/private_key.pem` |
+| **Operator key** | Operator identity — CLI auth, signing project items | `<system>/.ai/config/keys/signing/private_key.pem` |
 | **Node key** | Daemon identity — bundle registrations, node config | `<system>/.ai/node/identity/private_key.pem` |
-| **Publisher key** | Bundle author identity — signs items in published bundles | Pinned in `~/.ryeos/.ai/config/keys/trusted/` |
+| **Publisher key** | Bundle author identity — signs items in published bundles | Pinned in `<system>/.ai/config/keys/trusted/` |
 
-The user key and node key are generated at `ryeos init` time. The
+The operator key and node key are generated at `ryeos init` time. The
 publisher key is **hardcoded in the binary** and pinned during init
 without trusting any on-disk file. For development, `--trust-file`
 pins a dev publisher key instead.
@@ -102,7 +102,7 @@ message telling you exactly what to fix.
 
 ## Trust Store
 
-The trust store lives in `~/.ryeos/.ai/config/keys/trusted/` and contains
+The trust store lives in `<system>/.ai/config/keys/trusted/` and contains
 Ed25519 public keys indexed by SHA-256 fingerprint:
 
 ```toml
@@ -115,7 +115,7 @@ pem = "ed25519:MCowBQYDK2VwAyEA..."
 
 Each trust doc is self-signed (signed by the key it declares). During
 `ryeos init`, three entries are created:
-1. **User self-trust** — your own key
+1. **Operator self-trust** — your own key
 2. **Node self-trust** — the daemon's key
 3. **Publisher trust** — the hardcoded official publisher key (or dev key)
 
@@ -145,7 +145,7 @@ error listing every failed item.
 
 Bundle items (system space) cannot be signed with the node key — they
 carry the publisher's signature. If you need to customize a system item,
-copy it to project or user space first, then sign with your key.
+copy it to project space first, then sign with your key.
 
 ## Key Fingerprints
 
@@ -196,8 +196,8 @@ compiler, plus several that a compiler normally cannot provide.
 
 4. **It composes across trust levels** — The weakest-link trust fold
    across extends chains means an untrusted ancestor taints the entire
-   chain. A system-signed binary reached through a user-tier descriptor
-   is capped at TrustedUser. This is dependency trust transitivity,
+   chain. A bundle-signed binary reached through a project-tier descriptor
+   is capped at TrustedProject. This is dependency trust transitivity,
    computed dynamically per item.
 
 5. **It is incremental by design** — Content addressing means only

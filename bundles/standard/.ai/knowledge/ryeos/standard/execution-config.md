@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:06a10a23ee22eeff6c6e4663737aa44c7a914ee3ad1344bf3343232a7e1dcc07:Pwm93gOYTjzJ1QyhVGN3LO2Bt2l57dTBjlfFdVclsF380dOdu3B6wCr8DI/h0nZ9zDkmo7tixfE2QeHBnniRAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:944293ab7601be20449cc152de35b66c369041a81c11e17770d8b66966616e32:lizLZcqIH6m8QLU6907n6qMejyNQYoWq527MqAPRddAoUBfhWB1Z9JoHAyDZm0KqX13vM0VSL+1R+t5z1248CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -43,14 +43,13 @@ Timeouts are retried by default (`retry_on_timeout: true`).
 Execution config is resolved via `config_resolve: deep_merge`:
 
 1. **Base:** `config:ryeos-runtime/execution` (from standard bundle)
-2. **User override:** `~/.ryeos/.ai/config/ryeos-runtime/execution.yaml`
-3. **Project override:** `.ai/config/ryeos-runtime/execution.yaml`
+2. **Project override:** `.ai/config/ryeos-runtime/execution.yaml`
 
 Deep merge means you can override individual settings without
 repeating the entire config:
 
 ```yaml
-# ~/.ryeos/.ai/config/ryeos-runtime/execution.yaml
+# .ai/config/ryeos-runtime/execution.yaml
 retries: 5
 timeout_seconds: 600
 ```

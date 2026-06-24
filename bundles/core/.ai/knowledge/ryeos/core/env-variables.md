@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:1d6ee4cb8950769038f167cf05485ecbe30fcacb32ddadc2b6761df221dae194:9Z82php2jSSfHPlWz2gKKa6r4RKeEFysXruvCrR2u4QW5ibyrGL8P8MUmuaazWRb+WUnTNpOOFAdUVDH1OWXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:13dfa10650c09cab1273e40d3cb865e85a4e7ccd7b228aeb0b1c4358de902a77:zdI/s28yC4gNrRbBhETsrvVs/VORjd9WQ1x+GgjFnpxeLD7qxvnM92j3fMahtKPUZT4ReWc4QyXETHUrULSyCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -20,10 +20,8 @@ description: >
 
 | Variable | Default | Description |
 |---|---|---|
-| `RYEOS_SYSTEM_SPACE_DIR` | `$XDG_DATA_DIR/ryeos` | System space root. Equivalent to `--system-space-dir`. |
-| `USER_SPACE` | `~/.ryeos` via root resolver | User-space root override. |
+| `RYEOS_APP_ROOT` | `$XDG_DATA_DIR/ryeos` | App root — operator state, installed bundles, keys, and trust. Equivalent to `--app-root`. |
 | `XDG_RUNTIME_DIR` | `/tmp/ryeosd-<uid>` | Parent for default daemon UDS socket. |
-| `RYEOS_SIGNING_KEY_PATH` | derived from user root | Daemon config override for `user_signing_key_path`. |
 
 `ryeos init`, `start`, `stop`, and `status` ignore `RYEOSD_URL`.
 
@@ -31,8 +29,7 @@ description: >
 
 | Variable | Default | Description |
 |---|---|---|
-| `RYEOSD_URL` | discovered from `<system>/daemon.json` | Explicit daemon HTTP URL for normal dispatch; bypasses local lifecycle preflight. |
-| `RYEOS_CLI_KEY_PATH` | `<user>/.ai/config/keys/signing/private_key.pem` | Explicit CLI/user signing key path. |
+| `RYEOSD_URL` | discovered from `<app_root>/daemon.json` | Explicit daemon HTTP URL for normal dispatch; bypasses local lifecycle preflight. |
 
 When `RYEOSD_URL` is unset, normal daemon-backed dispatch first requires
 local lifecycle status `Running`, then reads `daemon.json` for bind.
@@ -45,7 +42,7 @@ startup and injects callback/runtime variables into subprocesses:
 `RYEOSD_PROJECT_PATH`, `RYEOS_THREAD_ID`, `RYEOS_CHAIN_ROOT_ID`,
 `RYEOS_ITEM_PATH`, `RYEOS_ITEM_KIND`, `RYEOS_ITEM_REF`,
 `RYEOS_PROJECT_ROOT`, `RYEOS_SITE_ID`, `RYEOS_ORIGIN_SITE_ID`,
-`USER_SPACE`, `RYEOS_SYSTEM_SPACE_DIR`, `RYEOS_CHECKPOINT_DIR`, and
+`RYEOS_APP_ROOT`, `RYEOS_CHECKPOINT_DIR`, and
 `RYEOS_RESUME`.
 
 ## Provider auth
@@ -56,5 +53,6 @@ as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
 ## Subprocess env allowlist
 
 The daemon propagates: `PATH`, `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`,
-`TZ`, `TMPDIR`, `USER_SPACE`, `RYEOS_SYSTEM_SPACE_DIR`, `RUST_LOG`,
-`RUST_BACKTRACE`, and `RYEOSD_TEST_STDERR_DIR`.
+`TZ`, `TMPDIR`, `RUST_LOG`, `RUST_BACKTRACE`, `RYEOSD_TEST_STDERR_DIR`,
+and the proxy/CA vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, and their lowercase forms).

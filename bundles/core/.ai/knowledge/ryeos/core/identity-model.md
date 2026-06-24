@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:49af727f7b38b647d5b68da0aa854dbd0ec4f81cf1c7ec27f417eccebfa49aeb:G6IwE8TsCU7aT4nxG8+ESD4FnxZvjawbgJuY8hDtzVz2STkP9TEi07M73SvLwarj5k4Ck1ZpTqx3j6TLt/tgAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:b2e2ea6a17abdf120882260d70c11bd8ff87a177044cc18e43aee277922bf8f3:hnxygOr0ujbHiqACvm+Rqi8+w5Vjm7lpFxzSZOoE0vzpep8puGKZNS3Iso0zVhnQ5SdTU7F0TbD6Yy8asqrwAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [identity, trust, keys, security, fundamentals]
@@ -39,7 +39,7 @@ to the node key.
 The node key signs outbound remote requests, signs authorized-key TOMLs,
 produces the node public identity document, and anchors the node
 self-trust doc. Daemon startup never auto-regenerates it, because doing
-so would invalidate user-space trust and remote authorizations.
+so would invalidate operator trust and remote authorizations.
 
 Remote operations authorize the caller's node key, not the user's CLI key:
 

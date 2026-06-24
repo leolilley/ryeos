@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:e4b0b0e7ced81f40e5d737d26a6780b66f23cc280ff479b5b88d328c6162d4d2:LpAXBPi14RiM+PGJCkBQsZRwOC/V/4fySy/w0feMfUaA4+/AXvCvaHToetl4zreGx1nDXV3EJR8It0XRWxOhCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:3174ecf0198184d78b692abc5b8aa1202ecda05e5ef654f8d593a332a53ea1d8:hcqGerafMtjFPdnQt3ikzGzaTgq92zxJa6FMsl1NuNkBsP6XVngkKo++yEbDYgzLU/aSjveGDScNyrqE2Zr7Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -128,7 +128,7 @@ ryeos vault put / list / remove / rewrap
 | CLI verbs            | kebab-case      | `bundle-install`, `thread-list`   |
 | CLI aliases          | single letter   | `s` → sign, `f` → fetch           |
 | Canonical ref paths  | lowercase + `/` | `ryeos/core/verify`               |
-| Environment vars     | UPPER_SNAKE     | `RYEOS_SYSTEM_SPACE_DIR`          |
+| Environment vars     | UPPER_SNAKE     | `RYEOS_APP_ROOT`                  |
 | Protocol names       | snake_case      | `tool_streaming_v1`, `runtime_v1` |
 | Model tiers          | snake_case      | `code_max`, `vision_fast`         |
 | Category values      | slash-separated | `ryeos/core`, `engine/kinds/tool` |
