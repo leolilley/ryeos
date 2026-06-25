@@ -616,6 +616,42 @@ impl ThreadLifecycleService {
         )?;
         self.publish_records(&persisted);
 
+        // Failure-gated stderr surfacing. A subprocess tool's real error
+        // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
+        // scheduled path the only live signal operators see is the daemon's
+        // tracing stream (deploy logs), so emit it there at ERROR level when
+        // the run failed. Healthy runs stay silent — no stderr in `error`.
+        if matches!(terminal_status, "failed" | "killed") {
+            if let Some(stderr_tail) = completion
+                .error
+                .as_ref()
+                .and_then(|e| e.get("stderr"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let exit_code = completion
+                    .error
+                    .as_ref()
+                    .and_then(|e| e.get("exit_code"))
+                    .and_then(Value::as_i64);
+                let soft_failure = completion
+                    .error
+                    .as_ref()
+                    .and_then(|e| e.get("soft_failure"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                tracing::error!(
+                    thread_id,
+                    outcome_code = outcome_code.as_deref().unwrap_or(""),
+                    exit_code,
+                    soft_failure,
+                    stderr_tail = %stderr_tail,
+                    "thread failed; tool stderr tail follows"
+                );
+            }
+        }
+
         self.update_scheduler_fire_on_thread_terminal(
             thread_id,
             terminal_status,
