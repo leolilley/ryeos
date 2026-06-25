@@ -227,20 +227,45 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
 /// blocks the durable snapshot already carries; replaced by the durable
 /// block once the snapshot catches up.
 pub(crate) fn append_live_delta(core: &StudioCore, entries: &mut Vec<StudioTimelineEntryVm>) {
-    let Some(buf) = core.data.live_delta.as_ref() else {
+    let Some(head) = core.seat.fold().input_route().thread else {
         return;
     };
-    if buf.text.is_empty() {
-        return;
+    // Streaming output for the head thread → render it with a trailing cursor.
+    if let Some(buf) = core.data.live_delta.as_ref() {
+        if !buf.text.is_empty() && buf.thread == head {
+            entries.push(StudioTimelineEntryVm::Block {
+                text: format!("{}▍", buf.text),
+                tone: StudioTone::Accent,
+            });
+            return;
+        }
     }
-    let head = core.seat.fold().input_route().thread;
-    if head.as_deref() != Some(buf.thread.as_str()) {
-        return;
+    // No streaming tail yet, but the head thread is still running → a quiet
+    // working indicator so the feed reads as alive (just launched and awaiting
+    // the first token, or running a tool that hasn't emitted prose).
+    if head_thread_running(core, &head) {
+        entries.push(StudioTimelineEntryVm::Line {
+            primary: "▍ working…".to_string(),
+            meta: None,
+            tone: StudioTone::Accent,
+            action: None,
+        });
     }
-    entries.push(StudioTimelineEntryVm::Block {
-        text: format!("{}▍", buf.text),
-        tone: StudioTone::Accent,
-    });
+}
+
+/// Whether the head thread is still executing, per the fetched thread
+/// projections (a non-terminal `status`). Drives the working indicator when
+/// there's no streaming tail to show.
+fn head_thread_running(core: &StudioCore, head: &str) -> bool {
+    core.data.threads.as_ref().is_some_and(|threads| {
+        threads.threads.iter().any(|row| {
+            row.get("thread_id").and_then(Value::as_str) == Some(head)
+                && row
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| matches!(s, "running" | "created" | "accepted" | "pending"))
+        })
+    })
 }
 
 fn flush_flow(

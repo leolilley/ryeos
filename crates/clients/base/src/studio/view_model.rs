@@ -1943,6 +1943,42 @@ mod tests {
     }
 
     #[test]
+    fn append_live_delta_shows_working_indicator_when_head_runs_silently() {
+        let mut core = StudioCore::default();
+        core.seat
+            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        // Head thread is running but has emitted no streaming text yet.
+        core.data.threads = Some(crate::studio::dto::StudioThreadsDto {
+            threads: vec![json!({ "thread_id": "T-1", "status": "running" })],
+        });
+
+        let mut entries = Vec::new();
+        append_live_delta(&core, &mut entries);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [StudioTimelineEntryVm::Line { primary, tone: StudioTone::Accent, .. }]
+                    if primary.contains("working")
+            ),
+            "running head with no tail → working indicator: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn append_live_delta_no_indicator_when_head_thread_settled() {
+        let mut core = StudioCore::default();
+        core.seat
+            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        core.data.threads = Some(crate::studio::dto::StudioThreadsDto {
+            threads: vec![json!({ "thread_id": "T-1", "status": "completed" })],
+        });
+
+        let mut entries = Vec::new();
+        append_live_delta(&core, &mut entries);
+        assert!(entries.is_empty(), "settled head → no working indicator");
+    }
+
+    #[test]
     fn timeline_entries_unknown_role_degrades_to_line() {
         let binding: super::super::content::ViewBinding = serde_json::from_value(json!({
             "widget": "timeline",
