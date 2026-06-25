@@ -281,6 +281,20 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     }
 }
 
+/// Forward-migrate an already-owned runtime.db to the current schema.
+///
+/// `SCHEMA_SQL` is entirely `CREATE ... IF NOT EXISTS`, so re-running it is
+/// idempotent: it adds any newly-introduced table/index and no-ops on what
+/// already exists, reconciling purely ADDITIVE schema growth. Non-additive
+/// drift (a changed column) is intentionally NOT papered over here — the
+/// `assert_owned` that runs next fails loud, forcing a real migration to be
+/// written (cf. the scheduler DB's `rebuild_*` precedent).
+fn migrate_owned_runtime_db(conn: &Connection) -> Result<()> {
+    conn.execute_batch(SCHEMA_SQL)
+        .context("failed to apply additive runtime.db schema migration")?;
+    Ok(())
+}
+
 pub struct RuntimeDb {
     conn: Connection,
 }
@@ -295,11 +309,7 @@ impl RuntimeDb {
             .with_context(|| format!("failed to open runtime db {}", path.display()))?;
 
         let spec = runtime_schema_spec();
-        if ryeos_state::sqlite_schema::is_empty_or_owned(&conn, spec.application_id)? {
-            ryeos_state::sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, path)?;
-        } else {
-            ryeos_state::sqlite_schema::assert_owned(&conn, &spec, path)?;
-        }
+        sqlite_schema::prepare_owned(&conn, &spec, SCHEMA_SQL, path, migrate_owned_runtime_db)?;
         Ok(Self { conn })
     }
 
@@ -788,6 +798,70 @@ mod tests {
         let path = tmp.path().join("runtime.db");
         let _ = RuntimeDb::open(&path).unwrap();
         let _ = RuntimeDb::open(&path).unwrap();
+    }
+
+    /// An owned runtime.db stamped by an earlier daemon that predates the
+    /// `thread_launch_claim` table must start cleanly: the open-time additive
+    /// migration creates the missing table rather than bailing on it.
+    #[test]
+    fn open_migrates_old_owned_db_missing_launch_claim() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+
+        // Build an OLD owned schema: thread_runtime + thread_commands and
+        // their index, stamped with our app_id, but NO thread_launch_claim.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE thread_runtime (
+                    thread_id TEXT PRIMARY KEY,
+                    chain_root_id TEXT NOT NULL,
+                    pid INTEGER,
+                    pgid INTEGER,
+                    metadata BLOB,
+                    launch_metadata TEXT,
+                    resume_attempts INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX idx_thread_runtime_chain_root
+                    ON thread_runtime(chain_root_id);
+                CREATE TABLE thread_commands (
+                    command_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL,
+                    command_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    requested_by TEXT,
+                    params BLOB,
+                    result BLOB,
+                    created_at TEXT NOT NULL,
+                    claimed_at TEXT,
+                    completed_at TEXT
+                );
+                CREATE INDEX idx_thread_commands_thread_status
+                    ON thread_commands(thread_id, status);
+                "#,
+            )
+            .unwrap();
+            conn.execute_batch(&format!("PRAGMA application_id = {};", RUNTIME_APP_ID))
+                .unwrap();
+            // Seed a runtime row so we also prove the migration preserves data.
+            conn.execute(
+                "INSERT INTO thread_runtime (thread_id, chain_root_id) VALUES (?1, ?2)",
+                params!["t-old", "c-old"],
+            )
+            .unwrap();
+        }
+
+        // Open must succeed (no "missing expected table" bail)…
+        let db = RuntimeDb::open(&path).unwrap();
+        // …the new table is now usable…
+        assert_eq!(
+            db.claim_thread_launch("t-old", "claim-1", "launcher", 60_000)
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        // …and pre-existing runtime state survived the migration.
+        assert!(db.get_runtime_info("t-old").unwrap().is_some());
     }
 
     #[test]

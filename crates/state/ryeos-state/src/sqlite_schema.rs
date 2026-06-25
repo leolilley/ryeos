@@ -398,6 +398,54 @@ pub fn init_owned(conn: &Connection, spec: &SchemaSpec, ddl: &str, path: &Path) 
     Ok(())
 }
 
+/// Open-time schema preparation for a daemon-owned SQLite DB whose data is
+/// the **source of truth** (NOT rebuildable) — `scheduler.db`, `runtime.db`.
+///
+/// Strategy: *migrate-forward, then exact-assert*.
+/// - **Already ours** (`application_id` matches): run `migrate` — an
+///   idempotent, **additive** forward migration (new tables/columns via
+///   `CREATE … IF NOT EXISTS` / `ALTER TABLE ADD COLUMN`, or an explicit
+///   table rebuild) — then [`assert_owned`] verifies the result is an exact
+///   match. So a daemon upgrade that *adds* schema starts cleanly against a
+///   pre-existing file, while any **non-additive drift** the migration can't
+///   reconcile still fails loud (forcing a real migration to be written).
+/// - **Empty/unstamped**: [`init_owned`] runs `ddl` and stamps the file.
+/// - **Foreign**: fails loud.
+///
+/// Rebuildable *derived* databases (projections of CAS) must NOT use this —
+/// they evolve via a schema epoch + reset/rebuild, which is cheaper and
+/// safer than migrating data that can simply be re-derived.
+pub fn prepare_owned<F>(
+    conn: &Connection,
+    spec: &SchemaSpec,
+    ddl: &str,
+    path: &Path,
+    migrate: F,
+) -> Result<()>
+where
+    F: FnOnce(&Connection) -> Result<()>,
+{
+    let app_id: i32 = conn
+        .query_row("PRAGMA application_id", [], |row| row.get(0))
+        .context("failed to read PRAGMA application_id")?;
+
+    if app_id == spec.application_id {
+        // Ours already — forward-migrate (additive) then verify exactly.
+        migrate(conn)?;
+        assert_owned(conn, spec, path)?;
+        return Ok(());
+    }
+
+    // Not stamped as ours: a verified-empty file inits; anything else is
+    // foreign and `is_empty_or_owned` bails loud.
+    if is_empty_or_owned(conn, spec.application_id)? {
+        init_owned(conn, spec, ddl, path)?;
+    } else {
+        assert_owned(conn, spec, path)?;
+    }
+    Ok(())
+}
+
 /// Check whether a database file is either empty (no user tables,
 /// no application_id stamp) or owned by the given application_id.
 /// Returns true if the stamp matches, false if the file has a
