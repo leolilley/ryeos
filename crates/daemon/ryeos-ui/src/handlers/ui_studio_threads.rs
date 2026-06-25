@@ -52,8 +52,10 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .unwrap_or_else(default_limit)
         .clamp(1, MAX_THREAD_LIST_LIMIT);
 
-    // Browser session = admin context: no owner filtering.
-    let threads = state.state_store.list_threads_filtered(limit, None)?;
+    // Browser session = admin context: no owner filtering. Route through the
+    // lifecycle layer so each row carries daemon-authored execution facts
+    // (`execution.supports_continuation`) the studio gates continuation on.
+    let threads = state.threads.list_thread_views_filtered(limit, None)?;
 
     Ok(serde_json::json!({
         "threads": threads,
@@ -84,7 +86,7 @@ pub async fn handle_inspect(
     let req: InspectRequest = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
 
-    let Some(thread) = state.state_store.get_thread(&req.thread_id)? else {
+    let Some(thread) = state.threads.get_thread_view(&req.thread_id)? else {
         return Err(HandlerError::NotFound.into());
     };
 

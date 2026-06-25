@@ -14,7 +14,8 @@ use crate::event_stream::ThreadEventHub;
 use crate::kind_profiles::KindProfileRegistry;
 use crate::state_store::{
     FinalizeThreadRecord, NewArtifactRecord, NewEventRecord, NewThreadRecord, PersistedEventRecord,
-    StateStore, ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadResultRecord,
+    StateStore, ThreadArtifactRecord, ThreadDetail, ThreadEdgeRecord, ThreadListItem,
+    ThreadResultRecord,
 };
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
@@ -107,8 +108,41 @@ pub struct ThreadGetParams {
 
 #[derive(Debug, Serialize)]
 pub struct ThreadChainResult {
-    pub threads: Vec<ThreadDetail>,
+    pub threads: Vec<ThreadView>,
     pub edges: Vec<ThreadEdgeRecord>,
+}
+
+/// Daemon-authored execution facts decorated onto a client-facing thread
+/// projection. These are kind-policy values (mirroring what lifecycle
+/// enforcement already consults), composed here in the lifecycle layer — the
+/// persistence module (`state_store`) stays free of kind-policy vocabulary. The
+/// client gates continuation affordances on `supports_continuation` rather than
+/// on a self-declared surface flag.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ExecutionFacts {
+    /// Whether this thread's kind can chain-fold a continuation successor.
+    pub supports_continuation: bool,
+}
+
+/// A `ThreadDetail` projection decorated with daemon-authored
+/// [`ExecutionFacts`]. The detail's fields serialize flat alongside an
+/// `execution` object, so a client gates the continuation affordance on
+/// `execution.supports_continuation` (substrate authority for the actual
+/// target thread) rather than a self-declared surface flag.
+#[derive(Debug, Serialize)]
+pub struct ThreadView {
+    #[serde(flatten)]
+    pub thread: ThreadDetail,
+    pub execution: ExecutionFacts,
+}
+
+/// A `ThreadListItem` projection decorated with daemon-authored
+/// [`ExecutionFacts`] — the list-row analogue of [`ThreadView`].
+#[derive(Debug, Serialize)]
+pub struct ThreadListView {
+    #[serde(flatten)]
+    pub item: ThreadListItem,
+    pub execution: ExecutionFacts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,8 +252,10 @@ pub enum OperatorContinuation {
     /// it; do not mint or launch a second.
     Existing(ThreadDetail),
     /// The source is already continued by a DIFFERENT request — refuse, pointing
-    /// at the existing successor.
-    Conflict { existing_successor_id: String },
+    /// at the existing successor. Carries the successor's detail (not just its
+    /// id) so the API decorates execution facts for the ACTUAL target object and
+    /// fails loud if that row is missing/corrupt.
+    Conflict(ThreadDetail),
 }
 
 #[derive(Debug, Clone)]
@@ -492,9 +528,12 @@ impl ThreadLifecycleService {
             }
             crate::state_store::ContinuationOutcome::Conflict {
                 successor_thread_id,
-            } => Ok(OperatorContinuation::Conflict {
-                existing_successor_id: successor_thread_id,
-            }),
+            } => {
+                let detail = self.get_thread(&successor_thread_id)?.ok_or_else(|| {
+                    anyhow!("conflicting continuation successor missing: {successor_thread_id}")
+                })?;
+                Ok(OperatorContinuation::Conflict(detail))
+            }
         }
     }
 
@@ -755,6 +794,43 @@ impl ThreadLifecycleService {
         self.state_store.get_thread(thread_id)
     }
 
+    /// Daemon-authored continuation authority for a thread kind: whether the
+    /// kind can chain-fold a continuation successor. This is the SAME policy
+    /// the lifecycle creation paths enforce (`create_continuation_with_id`,
+    /// `request_continuation`, …) — surfaced read-only so a client can gate the
+    /// continuation affordance up front instead of submitting and eating a
+    /// refusal. Unknown kinds fail closed.
+    pub fn supports_continuation_for_kind(&self, kind: &str) -> bool {
+        self.kind_profiles()
+            .get(kind)
+            .is_some_and(|p| p.supports_continuation)
+    }
+
+    fn execution_facts(&self, kind: &str) -> ExecutionFacts {
+        ExecutionFacts {
+            supports_continuation: self.supports_continuation_for_kind(kind),
+        }
+    }
+
+    /// Decorate a state-store thread projection with daemon-authored execution
+    /// facts. Kept here (not in `StateStore`) because kind policy is a daemon
+    /// concern, not state-store row data.
+    fn decorate_thread(&self, thread: ThreadDetail) -> ThreadView {
+        let execution = self.execution_facts(&thread.kind);
+        ThreadView { thread, execution }
+    }
+
+    fn decorate_list_item(&self, item: ThreadListItem) -> ThreadListView {
+        let execution = self.execution_facts(&item.kind);
+        ThreadListView { item, execution }
+    }
+
+    /// `get_thread` for client-facing callers: the projection plus its
+    /// daemon-authored execution facts.
+    pub fn get_thread_view(&self, thread_id: &str) -> Result<Option<ThreadView>> {
+        Ok(self.get_thread(thread_id)?.map(|t| self.decorate_thread(t)))
+    }
+
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
         self.state_store.get_thread_result(thread_id)
     }
@@ -884,30 +960,53 @@ impl ThreadLifecycleService {
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {
-        Ok(json!({
-            "threads": self.state_store.list_threads(limit)?,
-            "next_cursor": null,
-        }))
+        let threads: Vec<ThreadListView> = self
+            .state_store
+            .list_threads(limit)?
+            .into_iter()
+            .map(|item| self.decorate_list_item(item))
+            .collect();
+        Ok(json!({ "threads": threads, "next_cursor": null }))
     }
 
-    /// List threads with optional principal filtering.
+    /// List threads with optional principal filtering, each decorated with
+    /// daemon-authored execution facts. Typed counterpart to
+    /// [`Self::list_threads_filtered`] for callers that consume the rows
+    /// directly rather than the `threads.list` service envelope.
     ///
     /// When `filter_principal` is `Some(fp)`, only threads with
     /// `requested_by = fp` are returned. `None` returns all threads
     /// (internal callers that intentionally request an unfiltered view).
+    pub fn list_thread_views_filtered(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+    ) -> Result<Vec<ThreadListView>> {
+        Ok(self
+            .state_store
+            .list_threads_filtered(limit, filter_principal)?
+            .into_iter()
+            .map(|item| self.decorate_list_item(item))
+            .collect())
+    }
+
+    /// `threads.list` service envelope: the decorated rows plus a cursor.
     pub fn list_threads_filtered(
         &self,
         limit: usize,
         filter_principal: Option<&str>,
     ) -> Result<Value> {
-        Ok(json!({
-            "threads": self.state_store.list_threads_filtered(limit, filter_principal)?,
-            "next_cursor": null,
-        }))
+        let threads = self.list_thread_views_filtered(limit, filter_principal)?;
+        Ok(json!({ "threads": threads, "next_cursor": null }))
     }
 
-    pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {
-        self.state_store.list_thread_children(thread_id)
+    pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadView>> {
+        Ok(self
+            .state_store
+            .list_thread_children(thread_id)?
+            .into_iter()
+            .map(|thread| self.decorate_thread(thread))
+            .collect())
     }
 
     pub fn get_chain(&self, thread_id: &str) -> Result<Option<ThreadChainResult>> {
@@ -915,8 +1014,14 @@ impl ThreadLifecycleService {
             return Ok(None);
         };
 
+        let threads = self
+            .state_store
+            .list_chain_threads(&thread.chain_root_id)?
+            .into_iter()
+            .map(|thread| self.decorate_thread(thread))
+            .collect();
         Ok(Some(ThreadChainResult {
-            threads: self.state_store.list_chain_threads(&thread.chain_root_id)?,
+            threads,
             edges: self.state_store.list_chain_edges(&thread.chain_root_id)?,
         }))
     }
