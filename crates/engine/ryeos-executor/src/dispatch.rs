@@ -1860,6 +1860,10 @@ async fn dispatch_managed_subprocess(
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         executor_ref: &prepared.executor_ref,
+        // The serving runtime's canonical ref, captured so a continuation
+        // successor reattaches the same runtime identity (not just the kind's
+        // current default).
+        runtime_ref: Some(&runtime_ref),
         acting_principal,
         resolved: &prepared.resolved,
         project_path,

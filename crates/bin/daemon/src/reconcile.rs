@@ -504,6 +504,8 @@ mod tests {
             requested_by: principal(),
             execution_hints: ExecutionHints::default(),
             effective_caps: Vec::new(),
+            executor_ref: None,
+            runtime_ref: None,
         }
     }
 

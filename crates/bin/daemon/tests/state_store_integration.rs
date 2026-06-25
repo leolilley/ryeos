@@ -708,6 +708,8 @@ mod integration_tests {
             }),
             execution_hints: ExecutionHints::default(),
             effective_caps: vec![],
+            executor_ref: None,
+            runtime_ref: None,
         };
         // A machine continuation requires the source be RUNNING with a captured
         // ResumeContext, so make each successor continuable before extending.

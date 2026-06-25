@@ -213,6 +213,17 @@ pub async fn handle(
         usage_subject: None,
         usage_subject_asserted_by: None,
     };
+    // Inherit the predecessor's runtime identity so the successor reconstructs
+    // the same launch without a per-item executor_id (delegate kinds carry none).
+    // `executor_ref` comes straight off the predecessor row; `runtime_ref` from
+    // its captured launch metadata, when present.
+    let prior_runtime_ref = state
+        .state_store
+        .get_launch_metadata(&previous.thread_id)
+        .ok()
+        .flatten()
+        .and_then(|m| m.resume_context)
+        .and_then(|rc| rc.runtime_ref);
     // Operator launch context, seeded atomically with the edge so the row is
     // relaunchable the instant it exists. Caps left empty: the operator launch
     // re-derives them fresh (it is an explicit action, not a pinned relaunch).
@@ -233,6 +244,8 @@ pub async fn handle(
         }),
         execution_hints: Default::default(),
         effective_caps: Vec::new(),
+        executor_ref: Some(previous.executor_ref.clone()),
+        runtime_ref: prior_runtime_ref,
     };
     let project_path_str = project_path.as_path().to_string_lossy();
     let fingerprint = ryeos_app::thread_lifecycle::continuation_request_fingerprint(

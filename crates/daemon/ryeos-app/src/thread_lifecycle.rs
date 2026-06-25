@@ -1582,6 +1582,12 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),
                 execution_hints: resolved.plan_context.execution_hints.clone(),
+                // Subprocess (`spawn_item`) path: the executor identity is the
+                // tool's own `executor_ref`; there is no serving runtime, so
+                // `runtime_ref` stays `None`. (Runtime-registry launches capture
+                // both in `launch::run_claimed_thread_row`.)
+                executor_ref: Some(resolved.executor_ref.clone()),
+                runtime_ref: None,
                 // V5.5 P2: subprocess terminator has no permissions
                 // composition step, so resumed callbacks inherit the
                 // same deny-all posture the original spawn had. Native

@@ -1419,12 +1419,33 @@ pub fn execution_params_from_resume_context(
         .resolve(&plan_ctx, &canonical)
         .map_err(|e| anyhow::anyhow!("resume: resolve failed: {e}"))?;
 
-    let executor_ref = resolved_item.metadata.executor_id.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "resume: item {} does not declare an executor_id",
-            resume.item_ref
-        )
-    })?;
+    // Reconstruct the executor identity for the resumed launch. A normal item
+    // carries it as `metadata.executor_id`. A runtime-registry (delegate) kind —
+    // directive, graph — has NO item `executor_id`; its launch identity is the
+    // serving runtime's `native:<binary>` (computed in
+    // `dispatch::prepare_managed_launch`), captured into the resume context and
+    // reconstructed from the registry here as the fallback.
+    let executor_ref = resume
+        .executor_ref
+        .clone()
+        .or_else(|| resolved_item.metadata.executor_id.clone())
+        .or_else(|| {
+            state
+                .engine
+                .runtimes
+                .lookup_for(&resolved_item.kind)
+                .ok()
+                .and_then(|rt| crate::dispatch::strip_binary_ref_prefix(&rt.yaml.binary_ref).ok())
+                .map(|bare| format!("native:{bare}"))
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "resume: item {} has neither an executor_id nor a runtime-registry \
+                 entry for kind {}",
+                resume.item_ref,
+                resolved_item.kind,
+            )
+        })?;
 
     let resolved = ResolvedExecutionRequest {
         kind: resume.kind.clone(),

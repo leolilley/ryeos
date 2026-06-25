@@ -668,6 +668,11 @@ pub(crate) fn derive_effective_caps(
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
     pub executor_ref: &'a str,
+    /// The serving runtime's canonical ref (`runtime:<name>`) for a managed
+    /// runtime-registry launch (directive / graph); `None` for direct subprocess
+    /// launches. Persisted into the `ResumeContext` so a continuation successor
+    /// reattaches the same runtime identity rather than re-resolving the default.
+    pub runtime_ref: Option<&'a str>,
     pub acting_principal: &'a str,
     pub resolved: &'a ResolvedExecutionRequest,
     pub project_path: &'a Path,
@@ -768,6 +773,7 @@ async fn run_claimed_thread_row(
     let BuildAndLaunchParams {
         state,
         executor_ref,
+        runtime_ref,
         acting_principal,
         resolved,
         project_path,
@@ -1073,6 +1079,11 @@ async fn run_claimed_thread_row(
             requested_by: resolved.plan_context.requested_by.clone(),
             execution_hints: resolved.plan_context.execution_hints.clone(),
             effective_caps: effective_caps.clone(),
+            // Capture the actual launch identity so a continuation successor of a
+            // delegate kind (directive / graph) can reconstruct how to launch
+            // without a per-item `executor_id`.
+            executor_ref: Some(executor_ref.to_string()),
+            runtime_ref: runtime_ref.map(str::to_string),
         };
         let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
             .with_resume_context(resume_context);
@@ -1682,11 +1693,22 @@ async fn launch_claimed_successor(
     // its own kind, restores principal / hints / sites verbatim).
     let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
 
-    // Envelope-field requirements come from the successor kind's runtime entry.
-    let required_envelope_fields = state
-        .engine
-        .runtimes
-        .lookup_for(&params.resolved.resolved_item.kind)
+    // Envelope-field requirements come from the runtime entry. Prefer the
+    // predecessor's captured `runtime_ref` (by-ref) so a continued thread keeps
+    // the exact runtime it launched under, even if the kind's default changes;
+    // fall back to the kind's default runtime when no `runtime_ref` is captured.
+    let required_envelope_fields = resume
+        .runtime_ref
+        .as_deref()
+        .and_then(|r| ryeos_engine::canonical_ref::CanonicalRef::parse(r).ok())
+        .and_then(|canon| state.engine.runtimes.lookup_by_ref(&canon))
+        .or_else(|| {
+            state
+                .engine
+                .runtimes
+                .lookup_for(&params.resolved.resolved_item.kind)
+                .ok()
+        })
         .map(|runtime| runtime.yaml.required_envelope_fields.clone())
         .unwrap_or_default();
 
@@ -1703,6 +1725,9 @@ async fn launch_claimed_successor(
         BuildAndLaunchParams {
             state,
             executor_ref: &params.resolved.executor_ref,
+            // Propagate the predecessor's runtime identity so this successor
+            // re-seeds the same runtime for the NEXT continuation turn.
+            runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &params.acting_principal,
             resolved: &params.resolved,
             project_path: &project_path,
