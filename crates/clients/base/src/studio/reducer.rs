@@ -669,6 +669,29 @@ impl StudioCore {
     /// (most-recent first, as the daemon returns them). The head of a chain
     /// is the thread no other thread continues from (its `thread_id` is not
     /// any sibling's `upstream_thread_id`); a follow-up braids onto it.
+    /// The daemon-authored `execution.supports_continuation` for a thread, read
+    /// from the fetched thread projections (`threads` data carries it per row
+    /// via the thread-view layer). `None` = the thread isn't in the fetched
+    /// data (e.g. a just-launched thread before the list refresh) or carries no
+    /// execution facts — callers treat unknown optimistically, distrusting only
+    /// an explicit `Some(false)`. This is the substrate authority the cycle and
+    /// label gate on, replacing a self-declared surface flag.
+    pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
+        self.data
+            .threads
+            .as_ref()?
+            .threads
+            .iter()
+            .find(|row| {
+                row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+            })
+            .and_then(|row| {
+                row.get("execution")
+                    .and_then(|e| e.get("supports_continuation"))
+                    .and_then(serde_json::Value::as_bool)
+            })
+    }
+
     fn input_target_chains(&self) -> Vec<(String, String)> {
         let Some(threads) = self.data.threads.as_ref() else {
             return Vec::new();
@@ -695,6 +718,13 @@ impl StudioCore {
                 .filter_map(|x| x.get("thread_id").and_then(serde_json::Value::as_str))
                 .find(|id| !upstreams.contains(id))
                 .unwrap_or(root);
+            // Only offer chains whose head can actually be continued — gate on
+            // the substrate's `execution.supports_continuation`, not a surface
+            // flag. Distrust only an explicit `false`; unknown stays offered
+            // (the daemon refuses a real non-continuation submit anyway).
+            if self.thread_supports_continuation(head) == Some(false) {
+                continue;
+            }
             out.push((root.to_string(), head.to_string()));
         }
         out
@@ -2811,6 +2841,48 @@ mod tests {
         let route = core.seat.fold().input_route();
         assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
         assert_eq!(route.thread.as_deref(), Some("T-a2"));
+    }
+
+    #[test]
+    fn thread_supports_continuation_reads_execution_facts() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-a", "execution": { "supports_continuation": true } }),
+                serde_json::json!({ "thread_id": "T-b", "execution": { "supports_continuation": false } }),
+                serde_json::json!({ "thread_id": "T-c" }), // no execution facts
+            ],
+        });
+        assert_eq!(core.thread_supports_continuation("T-a"), Some(true));
+        assert_eq!(core.thread_supports_continuation("T-b"), Some(false));
+        assert_eq!(core.thread_supports_continuation("T-c"), None, "missing facts → unknown");
+        assert_eq!(core.thread_supports_continuation("T-missing"), None);
+    }
+
+    #[test]
+    fn cycle_input_target_excludes_non_continuation_chain() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Two single-thread chains: one continuation-capable, one not (per the
+        // substrate's execution facts). Only the capable one is a valid target.
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-yes", "chain_root_id": "T-yes",
+                    "execution": { "supports_continuation": true } }),
+                serde_json::json!({ "thread_id": "T-no", "chain_root_id": "T-no",
+                    "execution": { "supports_continuation": false } }),
+            ],
+        });
+        // New → the continuation-capable chain (T-no is never offered).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.seat.fold().input_route().chain_root.as_deref(), Some("T-yes"));
+        // Forward again → wraps straight back to "new conversation".
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.seat.fold().input_route().chain_root, None);
     }
 
     #[test]
