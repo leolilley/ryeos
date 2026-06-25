@@ -915,6 +915,19 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        // `operator_follow_up` is a DAEMON-OWNED edge marker (only the operator
+        // path writes it, alongside a request fingerprint). The machine handoff
+        // carries a free-form log reason, so strip the reserved value: a runtime
+        // must not be able to mint a machine edge that the chain-depth walk would
+        // mistake for an operator reset. (Belt-and-suspenders: the walk also
+        // requires the operator-only fingerprint before treating a link as a
+        // reset.)
+        let reason = if reason == Some(queries::ContinuationReasonMarker::OperatorFollowUp.as_str())
+        {
+            None
+        } else {
+            reason
+        };
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
@@ -938,6 +951,23 @@ impl StateStore {
             queries::continuation_successor(g.state_db.projection(), source_thread_id)?
         {
             bail!("thread {source_thread_id} already continued as {existing}");
+        }
+
+        // Chain-level ceiling: bound the length of an AUTONOMOUS continuation run.
+        // At the cap the cut-off thread does NOT continue — the chain terminates
+        // rather than spawning an unbounded successor chain. Operator follow-ups
+        // reset the count, so this never caps an operator conversation.
+        let machine_depth = queries::consecutive_machine_continuation_depth(
+            g.state_db.projection(),
+            source_thread_id,
+            crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH,
+        )?;
+        if machine_depth >= crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH {
+            bail!(
+                "continuation depth limit reached ({machine_depth}/{}); the autonomous \
+                 chain will not continue",
+                crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH
+            );
         }
 
         // Require the source's captured launch identity: the successor must be

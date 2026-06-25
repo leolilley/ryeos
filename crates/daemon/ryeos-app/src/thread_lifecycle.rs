@@ -183,6 +183,16 @@ pub struct ThreadFinalizeParams {
 /// this ceiling so a poisoned successor can't relaunch forever.
 pub const MAX_CONTINUATION_AUTO_ATTEMPTS: u32 = 3;
 
+/// The chain-level ceiling: the maximum length of an AUTONOMOUS (machine)
+/// continuation run. A directive cut off by its turn limit hands off to a
+/// successor that folds and continues; without a bound, a task that never
+/// completes would spawn an unbounded chain. At this many CONSECUTIVE machine
+/// continuations the cut-off thread does not continue — the chain terminates.
+/// An operator follow-up resets the count, so this never caps an operator
+/// conversation, only a runaway autonomous one. This bound is what makes
+/// autonomous machine continuation safe to be always-on (no env gate).
+pub const MAX_CONTINUATION_CHAIN_DEPTH: u32 = 12;
+
 /// Stable fingerprint of an OPERATOR follow-up request over its launch-significant
 /// boundary inputs. Two `threads/input` calls with the same fingerprint are the
 /// SAME logical request (a double-submit) and resolve to the same successor; a

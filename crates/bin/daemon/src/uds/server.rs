@@ -381,23 +381,16 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
 
 /// Auto-launch a machine continuation successor after a limit cut-off handoff.
 ///
-/// The successor row and the chain link are ALWAYS recorded by
-/// `request_continuation`; only the autonomous RELAUNCH is gated here. Without a
-/// chain-level budget ceiling (still to land) an unbounded task could spawn an
-/// infinite chain, so auto-launch is opt-in via `RYEOS_AUTO_MACHINE_CONTINUATION=1`.
-/// Default OFF leaves the successor `created` with its captured `ResumeContext`
-/// for reconcile or an operator to launch.
+/// Autonomous machine continuation is always-on: the chain-depth cap enforced at
+/// create time (`create_machine_continuation`) bounds an autonomous run, so an
+/// unbounded chain can no longer form and there is nothing to gate. The successor
+/// row + chain link are recorded by `request_continuation`; this fires the launch.
 ///
 /// Spawned daemon-side (NOT from the dying runtime — a lifecycle hazard) after
 /// the source is settled `continued` and the state-store write lock has dropped.
 /// `launch_successor` claims the launch lease, so a concurrent reconcile cannot
 /// double-launch the same successor.
 fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Value) {
-    // Same gate as reconcile — they must never disagree on whether autonomous
-    // launch is enabled.
-    if !crate::reconcile::auto_machine_continuation_enabled() {
-        return;
-    }
     let Some(successor_id) = result
         .get("successor_thread_id")
         .and_then(|v| v.as_str())

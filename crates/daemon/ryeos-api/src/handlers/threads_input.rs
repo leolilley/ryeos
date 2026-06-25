@@ -250,7 +250,7 @@ pub async fn handle(
         .create_or_get_operator_continuation(
             &successor_record,
             &previous.thread_id,
-            Some("operator_follow_up"),
+            Some(ryeos_state::queries::ContinuationReasonMarker::OperatorFollowUp.as_str()),
             &fingerprint,
             &resume_context,
         )

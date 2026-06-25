@@ -8,15 +8,6 @@ use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_state::objects::ThreadStatus;
 
-/// Whether autonomous machine continuation may LAUNCH (live dispatch or
-/// reconcile relaunch). The successor row + chain link are always recorded; this
-/// gates only the autonomous spawn, because without a chain-depth ceiling an
-/// unbounded task could spawn an infinite chain. Shared by the live UDS path and
-/// reconcile so they cannot disagree. Opt-in via `RYEOS_AUTO_MACHINE_CONTINUATION=1`.
-pub fn auto_machine_continuation_enabled() -> bool {
-    std::env::var("RYEOS_AUTO_MACHINE_CONTINUATION").as_deref() == Ok("1")
-}
-
 /// The structural shape of a continuation successor stranded `created`: never
 /// launched, links upstream, carries a captured `ResumeContext`, and is NOT a
 /// `native_resume` (checkpoint) thread. NECESSARY but not sufficient — an
@@ -283,18 +274,12 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     .expect("continuation_shape implies upstream is Some");
                 if let Ok(Some(src)) = state.threads.get_thread(upstream_id) {
                     if is_machine_successor(thread, &src) {
-                        // Autonomous launch is opt-in (no chain-depth cap yet). When
-                        // disabled, leave the stranded successor as `created` — do
-                        // NOT launch, finalize, or bump the budget.
-                        if !auto_machine_continuation_enabled() {
-                            tracing::debug!(
-                                thread_id = %thread.thread_id,
-                                "machine continuation successor stranded, but auto-launch disabled — leaving as created"
-                            );
-                            continue;
-                        }
-                        // Collect the intent only. `launch_successor` (post-listener)
-                        // owns the lease claim AND the attempt budget.
+                        // Autonomous continuation is always-on, bounded by the
+                        // chain-depth cap enforced at create time (an unbounded
+                        // chain can no longer form), so reconcile recovers a
+                        // stranded machine successor unconditionally. Collect the
+                        // intent only — `launch_successor` (post-listener) owns the
+                        // lease claim AND the attempt budget.
                         let resume_context = lm
                             .and_then(|m| m.resume_context.clone())
                             .expect("continuation_shape implies resume_context is Some");
@@ -649,16 +634,6 @@ mod tests {
         let completed = thread_detail("SRC", "completed", None, Some("S"), None);
         assert!(is_operator_successor(&succ, &completed));
         assert!(!is_machine_successor(&succ, &completed));
-    }
-
-    #[test]
-    fn auto_machine_continuation_gate_defaults_off() {
-        // Default (unset) must be OFF so autonomous relaunch never fires unless
-        // explicitly opted in. (Set-path not asserted here to avoid cross-test env
-        // races.)
-        if std::env::var_os("RYEOS_AUTO_MACHINE_CONTINUATION").is_none() {
-            assert!(!auto_machine_continuation_enabled());
-        }
     }
 
     #[test]
