@@ -76,6 +76,14 @@ pub enum StudioEffectKind {
         params: Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_seq: Option<u64>,
+        /// Whether a successful launch should ratchet the seat route onto the
+        /// produced thread (braid a conversation). Captured at ISSUE time from
+        /// the focused input's targeting capability — the result handler reads
+        /// this rather than recomputing from focus, which may have moved while
+        /// the async launch was in flight. `false` for non-routed/non-targeting
+        /// invocations (slash, affordances, steering).
+        #[serde(default)]
+        ratchet_on_thread_id: bool,
     },
     SetLocationHash {
         hash: String,

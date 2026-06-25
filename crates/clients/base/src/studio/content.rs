@@ -150,6 +150,31 @@ pub struct InputBlock {
     /// Enter behaviour: an affordance id, or the reserved `route` value.
     #[serde(default)]
     pub submit: Option<String>,
+    /// Optional targeting capability: the input can retarget where its
+    /// route-submit lands. Declares the *semantic capability* only — no
+    /// physical keys (the central keymap owns those). Valid only on
+    /// `submit: route` inputs (validated at binding parse).
+    #[serde(default)]
+    pub target: Option<InputTarget>,
+}
+
+/// The semantic targeting capability an input declares. Capability only —
+/// no physical key bindings, no author-controlled slot toggles (the slot
+/// set follows route semantics). `deny_unknown_fields` so that authoring
+/// `keys:` or `include_new:` here degrades loudly instead of being dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputTarget {
+    pub cycle: InputTargetCycle,
+}
+
+/// The vocabulary the engine cycles the route over. A generic substrate
+/// concept (like `rows`/`timeline` widget names), never a content ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTargetCycle {
+    /// Cycle the seat route over `[new conversation] + open chains`.
+    RouteChains,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -563,6 +588,23 @@ pub fn feeds_param_collision(binding: &ViewBinding) -> Option<String> {
     declares.then(|| feeds.param.clone())
 }
 
+/// Semantic validation: a `target:` declaration is only meaningful on an
+/// input that `submit: route` (the route is the thing it retargets).
+/// Returns a degradation reason when an input declares `target` without
+/// route submit — so the binding degrades visibly rather than declaring a
+/// capability that can never act. (Thread-capability of the route is a
+/// *runtime* property checked in the reducer, not here.)
+pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
+    let input = binding.input.as_ref()?;
+    if input.target.is_some() && !input.submits_to_route() {
+        return Some(format!(
+            "input '{}' declares target: but submit is not 'route'",
+            input.id
+        ));
+    }
+    None
+}
+
 /// A parsed affordance invocation — the closed grammar bound producers can
 /// trigger. `Ui` writes a seat facet (value replaces, merge folds into
 /// the existing facet value); `Rye` dispatches command tokens through
@@ -645,6 +687,8 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
                             "input feeds.param '{param}' collides with a declared source param"
                         ),
                     )
+                } else if let Some(reason) = target_without_route_error(&binding) {
+                    ViewBinding::degraded(view_ref, reason)
                 } else {
                     binding.view_ref = Some(view_ref.clone());
                     binding
@@ -722,6 +766,77 @@ mod tests {
                 .is_some_and(|m| m.contains("invalid view binding")),
             "degraded binding carries the parse reason"
         );
+    }
+
+    #[test]
+    fn valid_input_target_parses() {
+        let surface = json!({ "views": {
+            "view:ryeos/ok": { "widget": "text",
+                "input": { "id": "p", "submit": "route", "target": { "cycle": "route_chains" } } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/ok").expect("present");
+        assert!(b.degraded.is_none(), "valid target parses: {:?}", b.degraded);
+        assert_eq!(
+            b.input.as_ref().unwrap().target.as_ref().unwrap().cycle,
+            InputTargetCycle::RouteChains
+        );
+    }
+
+    #[test]
+    fn target_on_non_route_input_degrades() {
+        let surface = json!({ "views": {
+            "view:ryeos/bad": { "widget": "text",
+                "input": { "id": "p", "submit": "open_thing", "target": { "cycle": "route_chains" } } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/bad").expect("present");
+        assert!(
+            b.degraded.as_deref().is_some_and(|m| m.contains("target") && m.contains("route")),
+            "target without submit:route degrades visibly: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn unknown_target_cycle_vocabulary_degrades() {
+        let surface = json!({ "views": {
+            "view:ryeos/badcycle": { "widget": "text",
+                "input": { "id": "p", "submit": "route", "target": { "cycle": "galaxies" } } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/badcycle").expect("present");
+        assert!(
+            b.degraded.as_deref().is_some_and(|m| m.contains("invalid view binding")),
+            "unknown cycle vocabulary degrades, not silently ignored: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn target_physical_keys_field_degrades() {
+        // Physical keys do not belong in content — deny_unknown_fields.
+        let surface = json!({ "views": {
+            "view:ryeos/keys": { "widget": "text",
+                "input": { "id": "p", "submit": "route",
+                    "target": { "cycle": "route_chains", "keys": { "next": "Tab" } } } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/keys").expect("present");
+        assert!(b.degraded.is_some(), "keys: under target degrades, not dropped");
+    }
+
+    #[test]
+    fn target_include_new_field_degrades() {
+        // include_new is not author-controlled — deny_unknown_fields.
+        let surface = json!({ "views": {
+            "view:ryeos/incnew": { "widget": "text",
+                "input": { "id": "p", "submit": "route",
+                    "target": { "cycle": "route_chains", "include_new": true } } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/incnew").expect("present");
+        assert!(b.degraded.is_some(), "include_new: under target degrades, not dropped");
     }
 
     #[test]

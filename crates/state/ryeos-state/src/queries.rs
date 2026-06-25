@@ -604,6 +604,118 @@ pub fn continuation_fingerprint(
         .map(|s| s.to_string()))
 }
 
+/// Daemon-owned markers stored as the `reason` on a `thread_continued` edge.
+/// Centralizes the wire value so it is not a scattered string literal a runtime
+/// could typo or spoof. Machine continuations carry a free-form *log* reason
+/// (e.g. `turn_limit`); only this OPERATOR marker is daemon-reserved, and even
+/// then the request fingerprint is what actually proves an operator edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationReasonMarker {
+    /// An operator follow-up (the explicit-user-turn path).
+    OperatorFollowUp,
+}
+
+impl ContinuationReasonMarker {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OperatorFollowUp => "operator_follow_up",
+        }
+    }
+}
+
+/// The continuation EDGE on a source's `thread_continued` payload, if any:
+/// `(successor_thread_id, reason, request_fingerprint)`. The fingerprint is
+/// present only on OPERATOR follow-ups (`create_or_get_continuation` records it);
+/// a machine continuation never does, so it cannot spoof the operator marker by
+/// passing `reason == "operator_follow_up"`. Returns `None` when there is no
+/// `thread_continued` event or its payload names no successor.
+pub fn continuation_edge(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<(String, Option<String>, Option<String>)>> {
+    let payload: Option<Vec<u8>> = db
+        .connection()
+        .query_row(
+            "SELECT payload FROM events \
+             WHERE thread_id = ? AND event_type = 'thread_continued' \
+             ORDER BY chain_seq DESC LIMIT 1",
+            [thread_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .context("query continuation_edge")?;
+    let Some(bytes) = payload else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).context("parse thread_continued payload")?;
+    let Some(successor) = value
+        .get("successor_thread_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let reason = value
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let fingerprint = value
+        .get("successor_request_fingerprint")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Ok(Some((successor, reason, fingerprint)))
+}
+
+/// Count CONSECUTIVE MACHINE continuations ending at `thread_id`, walking
+/// `upstream_thread_id`. Each hop counts ONLY if it is a VERIFIED machine
+/// continuation edge:
+///
+/// - the `upstream` actually has a `thread_continued` edge whose
+///   `successor_thread_id` IS the current thread — a bare `upstream_thread_id`
+///   from a non-continuation parent/child relationship (e.g. a compose-context
+///   child) is not a continuation and stops the walk; and
+/// - it is not an OPERATOR follow-up — an operator link is `reason ==
+///   "operator_follow_up"` AND carries the operator-only request fingerprint, so
+///   a machine continuation cannot reset the cap by spoofing the reason. An
+///   operator follow-up RESETS the count (a long operator conversation is never
+///   capped).
+///
+/// Stops at `cap`, an operator link, a non-continuation edge, or the chain root —
+/// O(min(actual_depth, cap)) lookups. Bounds the length of an autonomous run.
+pub fn consecutive_machine_continuation_depth(
+    db: &ProjectionDb,
+    thread_id: &str,
+    cap: u32,
+) -> anyhow::Result<u32> {
+    let mut count = 0u32;
+    let mut current = thread_id.to_string();
+    while count < cap {
+        let Some(row) = get_thread(db, &current)? else {
+            break;
+        };
+        let Some(upstream) = row.upstream_thread_id else {
+            break; // chain root
+        };
+        // The edge that created `current` lives on `upstream`'s thread_continued.
+        let Some((successor, reason, fingerprint)) = continuation_edge(db, &upstream)? else {
+            break; // upstream has no continuation edge — `current`'s upstream link
+                   // is not a continuation (e.g. a compose-context child)
+        };
+        if successor != current {
+            break; // upstream continued to a DIFFERENT thread — not this one
+        }
+        if reason.as_deref() == Some(ContinuationReasonMarker::OperatorFollowUp.as_str())
+            && fingerprint.is_some()
+        {
+            break; // VERIFIED operator link resets the autonomous run
+        }
+        count += 1; // verified machine continuation link
+        current = upstream;
+    }
+    Ok(count)
+}
+
 pub fn latest_thread_events(
     db: &ProjectionDb,
     thread_id: &str,
@@ -868,6 +980,117 @@ mod tests {
             }))
             .build_with_ts(format!("2026-06-01T00:{chain_seq:02}:00Z"));
         project_event(db, &event).unwrap();
+    }
+
+    /// Project a `thread_continued` edge. `reason`/`fingerprint` are optional;
+    /// the OPERATOR path carries `Some("operator_follow_up")` + `Some(fp)`, a
+    /// MACHINE link carries a free-form reason + no fingerprint.
+    fn project_cont_edge(
+        db: &ProjectionDb,
+        chain_root_id: &str,
+        source_thread_id: &str,
+        successor_thread_id: &str,
+        chain_seq: u64,
+        reason: Option<&str>,
+        fingerprint: Option<&str>,
+    ) {
+        let mut payload = json!({ "successor_thread_id": successor_thread_id });
+        if let Some(r) = reason {
+            payload["reason"] = json!(r);
+        }
+        if let Some(fp) = fingerprint {
+            payload["successor_request_fingerprint"] = json!(fp);
+        }
+        let event = NewEvent::new(chain_root_id, source_thread_id, "thread_continued")
+            .chain_seq(chain_seq)
+            .thread_seq(chain_seq)
+            .payload(payload)
+            .build_with_ts(format!("2026-06-01T00:{chain_seq:02}:00Z"));
+        project_event(db, &event).unwrap();
+    }
+
+    #[test]
+    fn machine_depth_counts_verified_machine_links() {
+        // root → A → B → C, all MACHINE links (reason turn_limit, no fingerprint).
+        let db = test_db();
+        insert_thread(&db, "root", "K", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db, "A", "K", ThreadStatus::Continued, Some("root"));
+        insert_thread_with_upstream(&db, "B", "K", ThreadStatus::Continued, Some("A"));
+        insert_thread_with_upstream(&db, "C", "K", ThreadStatus::Created, Some("B"));
+        project_cont_edge(&db, "K", "root", "A", 1, Some("turn_limit"), None);
+        project_cont_edge(&db, "K", "A", "B", 2, Some("turn_limit"), None);
+        project_cont_edge(&db, "K", "B", "C", 3, Some("turn_limit"), None);
+        assert_eq!(consecutive_machine_continuation_depth(&db, "C", 100).unwrap(), 3);
+        // The cap bounds the walk.
+        assert_eq!(consecutive_machine_continuation_depth(&db, "C", 2).unwrap(), 2);
+        // A chain root (no upstream) has depth 0.
+        assert_eq!(consecutive_machine_continuation_depth(&db, "root", 100).unwrap(), 0);
+        // An old machine edge with a MISSING reason still counts as machine.
+        let db_m = test_db();
+        insert_thread(&db_m, "r", "Km", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db_m, "s", "Km", ThreadStatus::Created, Some("r"));
+        project_cont_edge(&db_m, "Km", "r", "s", 1, None, None);
+        assert_eq!(consecutive_machine_continuation_depth(&db_m, "s", 100).unwrap(), 1);
+    }
+
+    #[test]
+    fn machine_depth_ignores_non_continuation_upstream() {
+        // `upstream_thread_id` set with NO thread_continued edge (e.g. a
+        // compose-context child) must NOT count as a machine continuation.
+        let db = test_db();
+        insert_thread(&db, "parent", "K", ThreadStatus::Running);
+        insert_thread_with_upstream(&db, "child", "K", ThreadStatus::Created, Some("parent"));
+        // no continuation edge projected for parent
+        assert_eq!(consecutive_machine_continuation_depth(&db, "child", 100).unwrap(), 0);
+
+        // An upstream that continued to a DIFFERENT successor must not count for
+        // this thread.
+        let db2 = test_db();
+        insert_thread(&db2, "p", "K2", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db2, "x", "K2", ThreadStatus::Created, Some("p"));
+        project_cont_edge(&db2, "K2", "p", "OTHER", 1, Some("turn_limit"), None); // p → OTHER, not x
+        assert_eq!(consecutive_machine_continuation_depth(&db2, "x", 100).unwrap(), 0);
+    }
+
+    #[test]
+    fn machine_depth_operator_reset_requires_fingerprint() {
+        // A VERIFIED operator link (reason + fingerprint) resets the run.
+        let db = test_db();
+        insert_thread(&db, "r", "K", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db, "a", "K", ThreadStatus::Completed, Some("r"));
+        insert_thread_with_upstream(&db, "c", "K", ThreadStatus::Created, Some("a"));
+        project_cont_edge(
+            &db,
+            "K",
+            "r",
+            "a",
+            1,
+            Some(ContinuationReasonMarker::OperatorFollowUp.as_str()),
+            Some("sha256:fp"),
+        );
+        project_cont_edge(&db, "K", "a", "c", 2, Some("turn_limit"), None);
+        // from c: c←a machine (1); a←r operator (verified) → stop. depth 1.
+        assert_eq!(consecutive_machine_continuation_depth(&db, "c", 100).unwrap(), 1);
+
+        // A machine link SPOOFING reason "operator_follow_up" WITHOUT a fingerprint
+        // must NOT reset — it counts as machine, so the cap cannot be bypassed.
+        let db2 = test_db();
+        insert_thread(&db2, "r", "K2", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db2, "a", "K2", ThreadStatus::Continued, Some("r"));
+        insert_thread_with_upstream(&db2, "c", "K2", ThreadStatus::Created, Some("a"));
+        // spoofed marker, NO fingerprint
+        project_cont_edge(
+            &db2,
+            "K2",
+            "r",
+            "a",
+            1,
+            Some(ContinuationReasonMarker::OperatorFollowUp.as_str()),
+            None,
+        );
+        project_cont_edge(&db2, "K2", "a", "c", 2, Some("turn_limit"), None);
+        // from c: c←a machine (1); a←r spoofed-operator-no-fp → counts machine (2).
+        assert_eq!(consecutive_machine_continuation_depth(&db2, "c", 100).unwrap(), 2);
     }
 
     fn project_usage_event(

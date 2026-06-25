@@ -14,10 +14,7 @@ ryeos-cli = { workspace = true }
 lillux = { workspace = true }
 ed25519-dalek = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-util", "net", "time", "sync"] }
-hyper = { workspace = true, features = ["client", "http1"] }
-hyper-util = { workspace = true, features = ["http1", "tokio"] }
-http-body-util = { workspace = true }
-bytes = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 eventsource-stream = "0.2"
 futures-util = { workspace = true }
 crossterm = { version = "0.29", features = ["event-stream"] }

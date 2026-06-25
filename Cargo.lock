@@ -1494,7 +1494,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "base64",
@@ -2478,19 +2478,16 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "base64",
- "bytes",
  "clap",
  "dirs",
  "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
  "lillux",
  "rand 0.8.5",
+ "reqwest",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
@@ -2679,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2741,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-tools"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "base64",
@@ -2808,17 +2805,14 @@ dependencies = [
 name = "ryeos-ui-terminal"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "crossterm",
  "dirs",
  "ed25519-dalek",
  "eventsource-stream",
  "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
  "lillux",
  "notify",
+ "reqwest",
  "ryeos-cli",
  "ryeos-client-base",
  "serde",
@@ -2886,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "anyhow",
  "arc-swap",

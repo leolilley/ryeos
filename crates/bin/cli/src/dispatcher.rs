@@ -703,13 +703,15 @@ async fn post_to_daemon(
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
 
-    // Discover the daemon's principal_id for audience binding.
-    let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
+    // Discover the daemon's principal_id (audience) and the effective base URL
+    // after any redirects. Signed dispatch targets that base directly — never
+    // a redirect, which could downgrade the POST and break the signature.
+    let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
+    let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
 
-    let url = format!("{}{}", daemon_url, route_path);
+    let url = format!("{}{}", discovered.effective_base_url, route_path);
     let payload = crate::transport::http::post_json(&url, &headers, &body_bytes).await?;
     Ok(payload)
 }
@@ -727,12 +729,12 @@ async fn post_to_daemon_streaming(
     lifecycle_preflight(app_root).await?;
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
     let signer = crate::transport::signing::Signer::resolve(app_root)?;
-    let audience = crate::transport::discovery::discover_audience(&daemon_url).await?;
+    let discovered = crate::transport::discovery::discover_audience(&daemon_url).await?;
 
     let route_path = "/execute/stream";
     let body_bytes = serde_json::to_vec(body).expect("infallible: Value serialization");
-    let headers = signer.sign("POST", route_path, &body_bytes, &audience)?;
-    let url = format!("{daemon_url}{route_path}");
+    let headers = signer.sign("POST", route_path, &body_bytes, &discovered.principal_id)?;
+    let url = format!("{}{route_path}", discovered.effective_base_url);
 
     // Track the explicit terminal outcome: `Some(Ok)` success, `Some(Err)`
     // failure, `None` means the stream ended without any terminal event.
@@ -777,8 +779,8 @@ async fn post_to_daemon_streaming(
         detail: "execute stream completed but stream_started carried no thread_id".into(),
     })?;
     let result_path = format!("/threads/{tid}");
-    let headers = signer.sign("GET", &result_path, &[], &audience)?;
-    let url = format!("{daemon_url}{result_path}");
+    let headers = signer.sign("GET", &result_path, &[], &discovered.principal_id)?;
+    let url = format!("{}{result_path}", discovered.effective_base_url);
     let payload = crate::transport::http::get_json(&url, &headers)
         .await
         .map_err(|e| CliError::Local {

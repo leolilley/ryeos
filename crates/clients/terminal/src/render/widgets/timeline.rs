@@ -18,6 +18,31 @@ struct FeedLine {
     text: String,
     style: Style,
     entry: Option<usize>,
+    /// Typeset inline markdown (`` `code` ``, `**bold**`) at draw time. Off for
+    /// verbatim code lines and structural rows, where markers are literal.
+    inline: bool,
+}
+
+impl FeedLine {
+    /// A prose line — inline markdown is typeset when drawn.
+    fn prose(text: String, style: Style, entry: Option<usize>) -> Self {
+        Self {
+            text,
+            style,
+            entry,
+            inline: true,
+        }
+    }
+
+    /// A line rendered literally (verbatim code, structural rows, blanks).
+    fn plain(text: String, style: Style, entry: Option<usize>) -> Self {
+        Self {
+            text,
+            style,
+            entry,
+            inline: false,
+        }
+    }
 }
 
 pub fn draw_timeline(
@@ -57,35 +82,31 @@ pub fn draw_timeline(
         } else {
             line.style
         };
-        surface.draw_text(rect.x as usize, y, &truncate(&line.text, width), style);
+        if line.inline {
+            draw_inline(surface, rect.x as usize, y, width, &line.text, style);
+        } else {
+            surface.draw_text(rect.x as usize, y, &truncate(&line.text, width), style);
+        }
     }
 }
 
 fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntryVm], width: usize) {
     if entries.is_empty() {
-        lines.push(FeedLine {
-            text: "no timeline events loaded".to_string(),
-            style: style_muted(),
-            entry: None,
-        });
+        lines.push(FeedLine::plain(
+            "no timeline events loaded".to_string(),
+            style_muted(),
+            None,
+        ));
         return;
     }
     for (index, entry) in entries.iter().enumerate() {
         match entry {
             StudioTimelineEntryVm::Block { text, tone } => {
-                for wrapped in wrap_words(text, width) {
-                    lines.push(FeedLine {
-                        text: wrapped,
-                        style: tone_style(*tone),
-                        entry: Some(index),
-                    });
-                }
+                // The braid stores the raw cognition prose; the lens typesets
+                // it (block-level markdown). Inline spans are a later pass.
+                push_markdown_block(lines, text, *tone, width, index);
                 // Padding between blocks — not part of the entry's point.
-                lines.push(FeedLine {
-                    text: String::new(),
-                    style: style_fg(),
-                    entry: None,
-                });
+                lines.push(FeedLine::plain(String::new(), style_fg(), None));
             }
             StudioTimelineEntryVm::Line {
                 primary,
@@ -93,11 +114,11 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
                 tone,
                 ..
             } => {
-                lines.push(FeedLine {
-                    text: join_with_right_meta(tone_glyph(*tone), primary, meta.as_deref(), width),
-                    style: tone_style(*tone),
-                    entry: Some(index),
-                });
+                lines.push(FeedLine::plain(
+                    join_with_right_meta(tone_glyph(*tone), primary, meta.as_deref(), width),
+                    tone_style(*tone),
+                    Some(index),
+                ));
             }
             StudioTimelineEntryVm::Pair {
                 summary,
@@ -117,22 +138,22 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
                 } else {
                     tone_style(*tone)
                 };
-                lines.push(FeedLine {
-                    text: join_with_right_meta(glyph, summary, meta.as_deref(), width),
+                lines.push(FeedLine::plain(
+                    join_with_right_meta(glyph, summary, meta.as_deref(), width),
                     style,
-                    entry: Some(index),
-                });
+                    Some(index),
+                ));
             }
             StudioTimelineEntryVm::Separator { label } => {
                 let label = format!(" {label} ");
                 let rule_len = width.saturating_sub(display_width(&label));
                 let left = rule_len / 2;
                 let right = rule_len.saturating_sub(left);
-                lines.push(FeedLine {
-                    text: format!("{}{}{}", "─".repeat(left), label, "─".repeat(right)),
-                    style: style_muted(),
-                    entry: Some(index),
-                });
+                lines.push(FeedLine::plain(
+                    format!("{}{}{}", "─".repeat(left), label, "─".repeat(right)),
+                    style_muted(),
+                    Some(index),
+                ));
             }
         }
     }
@@ -141,6 +162,194 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
         .is_some_and(|line| line.text.is_empty() && line.entry.is_none())
     {
         lines.pop();
+    }
+}
+
+/// Typeset a cognition prose block as light, block-level markdown:
+/// - fenced ``` code blocks render verbatim (no reflow) on a panel bg so they
+///   stand apart;
+/// - ATX headings (`#`/`##`/`###`) render bold;
+/// - bullet lists (`-`/`*`/`+`) get a glyph and a hanging indent;
+/// - plain paragraphs reflow to width as before.
+///
+/// Prose/heading/bullet lines are marked `inline` so their inline markdown
+/// (`` `code` ``, `**bold**`) is typeset at draw time (`draw_inline`); code
+/// lines are verbatim. The braid keeps the raw text; this is purely the lens's
+/// rendering of it.
+fn push_markdown_block(
+    lines: &mut Vec<FeedLine>,
+    text: &str,
+    tone: StudioTone,
+    width: usize,
+    index: usize,
+) {
+    let mut para = String::new();
+    let mut in_code = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            // Verbatim, with a two-column gutter + panel bg as the code frame.
+            lines.push(FeedLine::plain(
+                format!("  {raw}"),
+                style_muted().bg(PANEL),
+                Some(index),
+            ));
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            lines.push(FeedLine::plain(String::new(), style_fg(), Some(index)));
+            continue;
+        }
+        if let Some(heading) = heading_text(trimmed) {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            lines.push(FeedLine::prose(
+                heading.to_string(),
+                tone_style(tone).bold(),
+                Some(index),
+            ));
+            continue;
+        }
+        if let Some(item) = bullet_item(trimmed) {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            let inner = width.saturating_sub(2).max(1);
+            for (i, wrapped) in wrap_words(item, inner).into_iter().enumerate() {
+                let prefix = if i == 0 { "• " } else { "  " };
+                lines.push(FeedLine::prose(
+                    format!("{prefix}{wrapped}"),
+                    tone_style(tone),
+                    Some(index),
+                ));
+            }
+            continue;
+        }
+        // Prose: accumulate soft-wrapped lines into one paragraph to reflow.
+        if !para.is_empty() {
+            para.push(' ');
+        }
+        para.push_str(trimmed);
+    }
+    flush_paragraph(lines, &mut para, tone, width, index);
+}
+
+/// Wrap the accumulated paragraph to `width` and clear it.
+fn flush_paragraph(
+    lines: &mut Vec<FeedLine>,
+    para: &mut String,
+    tone: StudioTone,
+    width: usize,
+    index: usize,
+) {
+    let trimmed = para.trim();
+    if !trimmed.is_empty() {
+        for wrapped in wrap_words(trimmed, width) {
+            lines.push(FeedLine::prose(wrapped, tone_style(tone), Some(index)));
+        }
+    }
+    para.clear();
+}
+
+/// The text of an ATX heading line (`# `/`## `/`### `), without the marker.
+fn heading_text(line: &str) -> Option<&str> {
+    for marker in ["### ", "## ", "# "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// The text of a bullet-list item (`- `/`* `/`+ `), without the marker.
+fn bullet_item(line: &str) -> Option<&str> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// Inline markdown emphasis recognized within a prose line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Emphasis {
+    None,
+    Code,
+    Bold,
+}
+
+/// Split a prose line into styled runs at inline `` ` `` (code) and `**` (bold)
+/// markers, stripping the markers. Non-nested; an unterminated marker styles the
+/// rest of the line (graceful — inline markers rarely cross a wrap boundary).
+fn parse_inline(text: &str) -> Vec<(String, Emphasis)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut runs: Vec<(String, Emphasis)> = Vec::new();
+    let mut cur = String::new();
+    let mut emph = Emphasis::None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' && emph != Emphasis::Bold {
+            if !cur.is_empty() {
+                runs.push((std::mem::take(&mut cur), emph));
+            }
+            emph = if emph == Emphasis::Code {
+                Emphasis::None
+            } else {
+                Emphasis::Code
+            };
+            i += 1;
+            continue;
+        }
+        if c == '*' && emph != Emphasis::Code && i + 1 < chars.len() && chars[i + 1] == '*' {
+            if !cur.is_empty() {
+                runs.push((std::mem::take(&mut cur), emph));
+            }
+            emph = if emph == Emphasis::Bold {
+                Emphasis::None
+            } else {
+                Emphasis::Bold
+            };
+            i += 2;
+            continue;
+        }
+        cur.push(c);
+        i += 1;
+    }
+    if !cur.is_empty() {
+        runs.push((cur, emph));
+    }
+    runs
+}
+
+/// Draw a prose line, typesetting inline `` `code` `` (panel bg) and
+/// `**bold**` runs and stripping their markers. Stops at `width`.
+fn draw_inline(
+    surface: &mut TextSurface,
+    x0: usize,
+    y: usize,
+    width: usize,
+    text: &str,
+    base: Style,
+) {
+    let max_x = x0 + width;
+    let mut x = x0;
+    for (segment, emph) in parse_inline(text) {
+        if x >= max_x {
+            break;
+        }
+        let style = match emph {
+            Emphasis::None => base,
+            Emphasis::Code => base.bg(PANEL),
+            Emphasis::Bold => base.bold(),
+        };
+        let shown = truncate(&segment, max_x - x);
+        surface.draw_text(x, y, &shown, style);
+        x += display_width(&shown);
     }
 }
 
@@ -155,6 +364,68 @@ mod tests {
             tone: StudioTone::Neutral,
             action: None,
         }
+    }
+
+    #[test]
+    fn markdown_block_typesets_code_heading_and_bullets() {
+        let mut lines = Vec::new();
+        let text = "# Title\n\npara one\nwith soft wrap\n\n- first\n- second\n\n```\ncode  spaced\n```";
+        push_markdown_block(&mut lines, text, StudioTone::Neutral, 60, 0);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+
+        // ATX heading: marker stripped, rendered bold.
+        assert!(texts.iter().any(|t| *t == "Title"), "heading: {texts:?}");
+        // Soft-wrapped prose reflows into one paragraph line.
+        assert!(
+            texts.iter().any(|t| *t == "para one with soft wrap"),
+            "prose reflow: {texts:?}"
+        );
+        // Bullets get a glyph.
+        assert!(texts.iter().any(|t| *t == "• first"), "bullet: {texts:?}");
+        assert!(texts.iter().any(|t| *t == "• second"));
+        // Fenced code renders verbatim (whitespace preserved) with a gutter,
+        // and the ``` fences themselves are not emitted.
+        assert!(
+            texts.iter().any(|t| *t == "  code  spaced"),
+            "verbatim code: {texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("```")), "fences hidden");
+    }
+
+    #[test]
+    fn parse_inline_splits_code_and_bold_runs_stripping_markers() {
+        let runs = parse_inline("use `foo()` and **bold** text");
+        assert_eq!(
+            runs,
+            vec![
+                ("use ".to_string(), Emphasis::None),
+                ("foo()".to_string(), Emphasis::Code),
+                (" and ".to_string(), Emphasis::None),
+                ("bold".to_string(), Emphasis::Bold),
+                (" text".to_string(), Emphasis::None),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_inline_unterminated_marker_styles_the_rest() {
+        // No closing backtick: the tail renders as code (graceful), markers gone.
+        let runs = parse_inline("see `here");
+        assert_eq!(
+            runs,
+            vec![
+                ("see ".to_string(), Emphasis::None),
+                ("here".to_string(), Emphasis::Code),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_inline_plain_text_is_one_none_run() {
+        assert_eq!(
+            parse_inline("just words"),
+            vec![("just words".to_string(), Emphasis::None)]
+        );
     }
 
     fn row_text(surface: &TextSurface, w: usize, y: usize) -> String {

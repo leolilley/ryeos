@@ -134,6 +134,14 @@ pub struct ThreadListItem {
     pub launch_mode: String,
     pub current_site_id: String,
     pub origin_site_id: String,
+    /// The predecessor this thread continues, if any. Lets the client identify
+    /// chain heads from authoritative edges instead of inferring them.
+    pub upstream_thread_id: Option<String>,
+    /// The continuation successor this thread handed off to, if any. A thread
+    /// with no successor is the current chain head — the only place a follow-up
+    /// can braid onto. Derived from the `thread_continued` event, terminal
+    /// threads only (mirrors `ThreadDetail`).
+    pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -907,6 +915,19 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        // `operator_follow_up` is a DAEMON-OWNED edge marker (only the operator
+        // path writes it, alongside a request fingerprint). The machine handoff
+        // carries a free-form log reason, so strip the reserved value: a runtime
+        // must not be able to mint a machine edge that the chain-depth walk would
+        // mistake for an operator reset. (Belt-and-suspenders: the walk also
+        // requires the operator-only fingerprint before treating a link as a
+        // reset.)
+        let reason = if reason == Some(queries::ContinuationReasonMarker::OperatorFollowUp.as_str())
+        {
+            None
+        } else {
+            reason
+        };
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
@@ -930,6 +951,23 @@ impl StateStore {
             queries::continuation_successor(g.state_db.projection(), source_thread_id)?
         {
             bail!("thread {source_thread_id} already continued as {existing}");
+        }
+
+        // Chain-level ceiling: bound the length of an AUTONOMOUS continuation run.
+        // At the cap the cut-off thread does NOT continue — the chain terminates
+        // rather than spawning an unbounded successor chain. Operator follow-ups
+        // reset the count, so this never caps an operator conversation.
+        let machine_depth = queries::consecutive_machine_continuation_depth(
+            g.state_db.projection(),
+            source_thread_id,
+            crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH,
+        )?;
+        if machine_depth >= crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH {
+            bail!(
+                "continuation depth limit reached ({machine_depth}/{}); the autonomous \
+                 chain will not continue",
+                crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH
+            );
         }
 
         // Require the source's captured launch identity: the successor must be
@@ -1408,22 +1446,7 @@ impl StateStore {
     pub fn list_threads(&self, limit: usize) -> Result<Vec<ThreadListItem>> {
         let g = self.lock()?;
         let thread_rows = queries::list_threads(g.state_db.projection(), limit)?;
-        Ok(thread_rows
-            .into_iter()
-            .map(|row| ThreadListItem {
-                thread_id: row.thread_id,
-                chain_root_id: row.chain_root_id,
-                kind: row.kind,
-                status: row.status,
-                item_ref: row.item_ref,
-                launch_mode: row.launch_mode,
-                current_site_id: row.current_site_id,
-                origin_site_id: row.origin_site_id,
-                requested_by: row.requested_by,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-            .collect())
+        Self::rows_to_list_items(&g, thread_rows)
     }
 
     /// List threads with optional principal filtering.
@@ -1439,9 +1462,25 @@ impl StateStore {
         let g = self.lock()?;
         let thread_rows =
             queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
-        Ok(thread_rows
-            .into_iter()
-            .map(|row| ThreadListItem {
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
+    /// Project thread rows into `ThreadListItem`s, resolving each terminal
+    /// thread's continuation successor so the client can identify chain heads
+    /// (a head has no successor). Shared by the filtered and unfiltered list
+    /// paths.
+    fn rows_to_list_items(
+        g: &Inner,
+        rows: Vec<queries::ThreadRow>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let successor_thread_id = if is_terminal_status(&row.status) {
+                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
+            } else {
+                None
+            };
+            items.push(ThreadListItem {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
                 kind: row.kind,
@@ -1450,11 +1489,14 @@ impl StateStore {
                 launch_mode: row.launch_mode,
                 current_site_id: row.current_site_id,
                 origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id,
                 requested_by: row.requested_by,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
-            })
-            .collect())
+            });
+        }
+        Ok(items)
     }
 
     pub fn summarize_usage_by_subject(

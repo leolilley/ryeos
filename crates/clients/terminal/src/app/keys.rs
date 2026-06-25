@@ -80,29 +80,27 @@ fn terminal_studio_key_event(key: KeyEvent) -> Option<StudioKeyEvent> {
         KeyCode::Esc => StudioKey::Escape,
         KeyCode::Backspace => StudioKey::Backspace,
         KeyCode::Tab => StudioKey::Tab,
+        // Shift+Tab arrives as a distinct BackTab code; normalize it to a
+        // shifted Tab so the shared keymap sees one key with a modifier.
+        KeyCode::BackTab => StudioKey::Tab,
         _ => return None,
     };
+    let force_shift = matches!(key.code, KeyCode::BackTab);
     Some(StudioKeyEvent {
         key: studio_key,
         modifiers: StudioKeyModifiers {
             ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
             alt: key.modifiers.contains(KeyModifiers::ALT),
-            shift: key.modifiers.contains(KeyModifiers::SHIFT),
+            shift: force_shift || key.modifiers.contains(KeyModifiers::SHIFT),
             meta: key.modifiers.contains(KeyModifiers::SUPER),
         },
     })
 }
 
 fn key_context(core: &StudioCore) -> StudioKeyContext {
-    StudioKeyContext {
-        launcher_open: core.ui.launcher.open,
-        // Input follows the focused view instance: printable keys edit a
-        // buffer only when the focused instance declares `input`.
-        input_visible: core.has_focused_input(),
-        input_has_text: core
-            .focused_input_buffer()
-            .is_some_and(|buf| !buf.text.is_empty()),
-    }
+    // Capability resolution is shared (base) so terminal and web agree;
+    // this adapter only translates crossterm events.
+    core.key_context()
 }
 
 fn move_focused_row(core: &mut StudioCore, delta: i32) -> (bool, Vec<StudioEffect>) {
@@ -212,5 +210,29 @@ fn stored_cursor(core: &StudioCore) -> usize {
     {
         Some(ViewLocalState::GenericList { cursor, .. }) => *cursor,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backtab_normalizes_to_shifted_tab() {
+        // crossterm sends Shift+Tab as a distinct BackTab code; the adapter
+        // must present it to the shared keymap as Tab + shift so Shift+Tab
+        // drives the backward target cycle.
+        let ev = terminal_studio_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))
+            .expect("BackTab maps to a studio key");
+        assert_eq!(ev.key, StudioKey::Tab);
+        assert!(ev.modifiers.shift, "BackTab carries shift");
+    }
+
+    #[test]
+    fn plain_tab_is_unshifted() {
+        let ev = terminal_studio_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .expect("Tab maps to a studio key");
+        assert_eq!(ev.key, StudioKey::Tab);
+        assert!(!ev.modifiers.shift);
     }
 }

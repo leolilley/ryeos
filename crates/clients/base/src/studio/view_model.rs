@@ -582,6 +582,45 @@ fn presentation_activity_level(
         .clamp(0.0, 1.0)
 }
 
+/// Cumulative token usage for the loaded conversation: the sum of
+/// `thread_usage` input/output tokens across the braid events in any fetched
+/// source. Only the chain-replay (timeline) source carries `thread_usage`, so
+/// summing across sources yields the conversation total; `(0, 0)` when none.
+fn conversation_usage(core: &StudioCore) -> (u64, u64) {
+    let mut input = 0u64;
+    let mut output = 0u64;
+    for source in core.data.sources.values() {
+        let Some(events) = source.get("events").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for event in events {
+            if event.get("event_type").and_then(serde_json::Value::as_str) != Some("thread_usage") {
+                continue;
+            }
+            if let Some(payload) = event.get("payload") {
+                input += payload
+                    .get("input_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                output += payload
+                    .get("output_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+            }
+        }
+    }
+    (input, output)
+}
+
+/// Compact a token count for the status strip (`1234` → `1.2k`).
+fn compact_count(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 fn status_bar_vm(
     session: &StudioSessionVm,
     chrome: &StudioChromeVm,
@@ -601,6 +640,7 @@ fn status_bar_vm(
         .as_ref()
         .map(|threads| threads.threads.len())
         .unwrap_or_default();
+    let (usage_in, usage_out) = conversation_usage(core);
     StudioStatusBarVm {
         visible: core.ui.bottom_status_visible,
         segments: vec![
@@ -650,6 +690,15 @@ fn status_bar_vm(
                 id: "threads".to_string(),
                 label: Some("threads".to_string()),
                 value: thread_count.to_string(),
+                tone: StudioTone::Neutral,
+                grow: false,
+            },
+            // Always-visible budget: the conversation's cumulative tokens
+            // (input/output) summed from the braid's thread_usage events.
+            StudioStatusSegmentVm {
+                id: "usage".to_string(),
+                label: Some("tokens".to_string()),
+                value: format!("{}/{}", compact_count(usage_in), compact_count(usage_out)),
                 tone: StudioTone::Neutral,
                 grow: false,
             },
@@ -834,6 +883,17 @@ fn bound_view_vm_keyed(
     let response = core.data.sources.get(source_key);
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
     match (binding.widget.as_str(), response) {
+        // A feed with no chain root is empty, not loading — it would spin
+        // forever on a fetch that never resolves (no chain root to replay).
+        // The feed follows `chain_root` (the whole braid), so key the empty
+        // state off that, not the moving head. Show an honest
+        // start-a-conversation state instead.
+        ("timeline", None) if core.seat.fold().input_route().chain_root.is_none() => {
+            StudioViewVm::Placeholder {
+                title,
+                message: "No conversation yet — type below to start one.".to_string(),
+            }
+        }
         (_, None) => StudioViewVm::Placeholder {
             title,
             message: format!(
@@ -1045,15 +1105,26 @@ fn derived_target_label(
         }
         return format!("→ {affordance_id}");
     }
-    // `submit: route` — render the seat route truthfully.
+    // `submit: route` — render the seat route truthfully (the target the
+    // next submit lands on). "continuing" only when the input declares
+    // conversation targeting AND the targeted thread actually supports
+    // continuation per the substrate (`execution.supports_continuation` from
+    // the fetched projections — distrust only an explicit `false`, so a
+    // just-launched thread not yet in the list still reads as continuing). A
+    // route with a stray `thread` on a non-targeting or non-continuation
+    // thread is not a conversation. No keybinding copy here; an author
+    // overrides the whole strip via `target_label`.
     match (&route.invoke, &route.thread) {
         (None, _) => "no target — surface declares no route".to_string(),
-        (Some(_), Some(thread)) => format!("→ chained on {thread}"),
-        (Some(InvokeTemplate::Service { item_ref }), None) => format!("→ {item_ref} (new chain)"),
-        (Some(InvokeTemplate::Command { tokens }), None) => {
-            format!("→ /{} (new chain)", tokens.join(" "))
+        (Some(_), Some(thread))
+            if input.target.is_some()
+                && core.thread_supports_continuation(thread) != Some(false) =>
+        {
+            format!("→ continuing {thread}")
         }
-        (Some(InvokeTemplate::UiFacet { key }), None) => format!("→ {key}"),
+        (Some(InvokeTemplate::Service { .. }), _) => "→ new conversation".to_string(),
+        (Some(InvokeTemplate::Command { tokens }), _) => format!("→ /{} (new)", tokens.join(" ")),
+        (Some(InvokeTemplate::UiFacet { key }), _) => format!("→ {key}"),
     }
 }
 
@@ -1918,6 +1989,68 @@ mod tests {
         let mut entries = Vec::new();
         append_live_delta(&core, &mut entries);
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn append_live_delta_shows_working_indicator_when_head_runs_silently() {
+        let mut core = StudioCore::default();
+        core.seat
+            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        // Head thread is running but has emitted no streaming text yet.
+        core.data.threads = Some(crate::studio::dto::StudioThreadsDto {
+            threads: vec![json!({ "thread_id": "T-1", "status": "running" })],
+        });
+
+        let mut entries = Vec::new();
+        append_live_delta(&core, &mut entries);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [StudioTimelineEntryVm::Line { primary, tone: StudioTone::Accent, .. }]
+                    if primary.contains("working")
+            ),
+            "running head with no tail → working indicator: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn append_live_delta_no_indicator_when_head_thread_settled() {
+        let mut core = StudioCore::default();
+        core.seat
+            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        core.data.threads = Some(crate::studio::dto::StudioThreadsDto {
+            threads: vec![json!({ "thread_id": "T-1", "status": "completed" })],
+        });
+
+        let mut entries = Vec::new();
+        append_live_delta(&core, &mut entries);
+        assert!(entries.is_empty(), "settled head → no working indicator");
+    }
+
+    #[test]
+    fn conversation_usage_sums_thread_usage_across_braid_sources() {
+        let mut core = StudioCore::default();
+        core.data.sources.insert(
+            "timeline".to_string(),
+            json!({ "events": [
+                { "event_type": "thread_usage", "payload": { "input_tokens": 100, "output_tokens": 20 } },
+                { "event_type": "cognition_out", "payload": { "content": "hi" } },
+                { "event_type": "thread_usage", "payload": { "input_tokens": 5, "output_tokens": 3 } },
+            ]}),
+        );
+        assert_eq!(conversation_usage(&core), (105, 23));
+    }
+
+    #[test]
+    fn conversation_usage_is_zero_without_usage_events() {
+        assert_eq!(conversation_usage(&StudioCore::default()), (0, 0));
+    }
+
+    #[test]
+    fn compact_count_abbreviates_thousands() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(999), "999");
+        assert_eq!(compact_count(1234), "1.2k");
     }
 
     #[test]

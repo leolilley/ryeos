@@ -142,6 +142,13 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
     let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
 
     for record in records {
+        // Plumbing/stream lifecycle events are the substrate's bookkeeping,
+        // not conversation — drop them so the feed reads as a chat. Outcomes
+        // (completed/failed/cancelled) and usage still render via
+        // execution_entry; cognition and tool calls still render via roles.
+        if is_plumbing_event(&record) {
+            continue;
+        }
         // Execution milestones (lifecycle, usage, forks) read as an
         // execution, not as bare default-projection lines.
         if let Some(entry) = execution_entry(&record) {
@@ -220,20 +227,30 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
 /// blocks the durable snapshot already carries; replaced by the durable
 /// block once the snapshot catches up.
 pub(crate) fn append_live_delta(core: &StudioCore, entries: &mut Vec<StudioTimelineEntryVm>) {
-    let Some(buf) = core.data.live_delta.as_ref() else {
+    let Some(head) = core.seat.fold().input_route().thread else {
         return;
     };
-    if buf.text.is_empty() {
-        return;
+    // Streaming output for the head thread → render it with a trailing cursor.
+    if let Some(buf) = core.data.live_delta.as_ref() {
+        if !buf.text.is_empty() && buf.thread == head {
+            entries.push(StudioTimelineEntryVm::Block {
+                text: format!("{}▍", buf.text),
+                tone: StudioTone::Accent,
+            });
+            return;
+        }
     }
-    let head = core.seat.fold().input_route().thread;
-    if head.as_deref() != Some(buf.thread.as_str()) {
-        return;
+    // No streaming tail yet, but the head thread is still running → a quiet
+    // working indicator so the feed reads as alive (just launched and awaiting
+    // the first token, or running a tool that hasn't emitted prose).
+    if core.head_thread_running(&head) {
+        entries.push(StudioTimelineEntryVm::Line {
+            primary: "▍ working…".to_string(),
+            meta: None,
+            tone: StudioTone::Accent,
+            action: None,
+        });
     }
-    entries.push(StudioTimelineEntryVm::Block {
-        text: format!("{}▍", buf.text),
-        tone: StudioTone::Accent,
-    });
 }
 
 fn flush_flow(
@@ -252,6 +269,26 @@ fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
         tone: tone_from_name(record.tone.as_deref()),
         action: None,
     }
+}
+
+/// Substrate bookkeeping that is noise in a conversation view: thread/stream
+/// lifecycle and ephemeral progress. Dropped from the feed entirely — the
+/// outcome (`thread_completed`/`failed`/`cancelled`), usage, cognition, and
+/// tool calls carry the meaning. Mirrors the live tail's ignored set in
+/// `apply_thread_tail`, so replay and live agree on what's hidden.
+fn is_plumbing_event(record: &ProjectedRecord) -> bool {
+    matches!(
+        record.raw.get("event_type").and_then(Value::as_str),
+        Some(
+            "thread_created"
+                | "thread_started"
+                | "stream_opened"
+                | "stream_closed"
+                | "stream_snapshot"
+                | "cognition_reasoning"
+                | "graph_foreach_iteration"
+        )
+    )
 }
 
 /// Build a legible entry for thread-execution milestone events (lifecycle,
@@ -530,6 +567,26 @@ mod tests {
         assert!(execution_entry(&raw_record(json!({ "event_type": "cognition_out" }))).is_none());
         // A record with no event_type (e.g. the test `record` helper shape).
         assert!(execution_entry(&raw_record(json!({ "primary": "x" }))).is_none());
+    }
+
+    #[test]
+    fn timeline_entries_drop_plumbing_lifecycle_events() {
+        // The feed reads as a conversation: thread/stream bookkeeping is
+        // dropped, but the outcome (completed/failed) still renders.
+        let entries = timeline_entries(vec![
+            raw_record(json!({ "event_type": "thread_created" })),
+            raw_record(json!({ "event_type": "thread_started" })),
+            raw_record(json!({ "event_type": "stream_opened" })),
+            raw_record(json!({ "event_type": "stream_closed" })),
+            raw_record(json!({ "event_type": "thread_completed" })),
+        ]);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [StudioTimelineEntryVm::Line { primary, .. }] if primary == "completed"
+            ),
+            "only the completion outcome survives; lifecycle plumbing is dropped: {entries:?}"
+        );
     }
 
     fn block(text: &str) -> StudioTimelineEntryVm {

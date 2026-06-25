@@ -121,6 +121,23 @@ pub async fn handle(
                     "notice": notice,
                 }));
             }
+            // Daemon-authored continuation authority, enforced at the API
+            // boundary: a source whose KIND cannot chain-fold (e.g. graph) is an
+            // EXPECTED refusal, not a server fault. The lifecycle guard would
+            // also reject it, but that surfaces as a 500; refuse cleanly here so
+            // a stale/third-party client that skipped the client-side gate gets
+            // a structured `refused` with authoritative execution facts.
+            if !state.threads.supports_continuation_for_kind(&detail.kind) {
+                return Ok(json!({
+                    "thread_id": Value::Null,
+                    "delivery": "refused",
+                    "notice": format!(
+                        "thread {} is kind '{}', which does not support continuation",
+                        detail.thread_id, detail.kind
+                    ),
+                    "execution": { "supports_continuation": false },
+                }));
+            }
             Some(detail)
         }
     };
@@ -148,6 +165,12 @@ pub async fn handle(
 
     // Fresh chain (no prior turn): the existing accepted-launch path — spawn the
     // dispatch, drop the handle, return immediately.
+    //
+    // No `execution` key here: the thread is created ASYNCHRONOUSLY, so its kind
+    // (hence continuation authority) is not yet known synchronously. The client
+    // treats the absence as "unknown yet" — NOT `false` — and fetches the
+    // enriched `threads.get`/`threads.list` once the thread materializes before
+    // ratcheting `route.thread`.
     let Some(previous) = previous else {
         let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&directive)
             .map_err(|e| HandlerError::BadRequest(format!("directive ref: {e}")))?;
@@ -227,7 +250,7 @@ pub async fn handle(
         .create_or_get_operator_continuation(
             &successor_record,
             &previous.thread_id,
-            Some("operator_follow_up"),
+            Some(ryeos_state::queries::ContinuationReasonMarker::OperatorFollowUp.as_str()),
             &fingerprint,
             &resume_context,
         )
@@ -251,6 +274,13 @@ pub async fn handle(
         });
     };
 
+    // Daemon-authored continuation authority for the actual successor the
+    // client will ratchet `route.thread` to — computed from that successor's
+    // own kind in every arm.
+    let successor_supports_continuation = |kind: &str| {
+        json!({ "supports_continuation": state.threads.supports_continuation_for_kind(kind) })
+    };
+
     use ryeos_app::thread_lifecycle::OperatorContinuation;
     match outcome {
         OperatorContinuation::Created(detail) => {
@@ -259,6 +289,7 @@ pub async fn handle(
                 "thread_id": detail.thread_id,
                 "delivery": "launched",
                 "notice": Value::Null,
+                "execution": successor_supports_continuation(&detail.kind),
             }))
         }
         OperatorContinuation::Existing(detail) => {
@@ -271,18 +302,18 @@ pub async fn handle(
                 "thread_id": detail.thread_id,
                 "delivery": "launched",
                 "notice": Value::Null,
+                "execution": successor_supports_continuation(&detail.kind),
             }))
         }
-        OperatorContinuation::Conflict {
-            existing_successor_id,
-        } => Ok(json!({
-            "thread_id": existing_successor_id,
+        OperatorContinuation::Conflict(detail) => Ok(json!({
+            "thread_id": detail.thread_id,
             "delivery": "refused",
             "notice": format!(
-                "thread {} already continued as {existing_successor_id} by a different input; \
+                "thread {} already continued as {} by a different input; \
                  follow that thread or start a new chain",
-                previous.thread_id
+                previous.thread_id, detail.thread_id
             ),
+            "execution": successor_supports_continuation(&detail.kind),
         })),
     }
 }

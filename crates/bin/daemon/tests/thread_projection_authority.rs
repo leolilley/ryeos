@@ -1,0 +1,158 @@
+//! Continuation-authority projection against the REAL signed standard bundle.
+//!
+//! The lighter `server.rs` unit tests build `KindProfileRegistry::build(None)`
+//! (only internal, non-continuable profiles), so they can pin the projection
+//! WIRING but always observe `supports_continuation: false`. This integration
+//! test loads the actual shipped kind schemas — where `directive_run`
+//! (`supports_continuation: true`) and `graph_run` (`supports_continuation:
+//! false`) live — and asserts the daemon-authored `execution.supports_continuation`
+//! reflects the true/false contrast through `threads.get` and `threads.list`.
+//!
+//! This is the honest form of the contrast: it asserts the values the bundle
+//! actually ships, not a synthetic profile injected by a test constructor.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ryeos_app::event_store_service::EventStoreService;
+use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+use ryeos_app::identity::NodeIdentity;
+use ryeos_app::kind_profiles::KindProfileRegistry;
+use ryeos_app::state_store::{NodeIdentitySigner, StateStore};
+use ryeos_app::thread_lifecycle::{ThreadCreateParams, ThreadLifecycleService};
+use ryeos_app::write_barrier::WriteBarrier;
+use ryeos_engine::kind_registry::KindRegistry;
+use ryeos_engine::trust::TrustStore;
+use tempfile::TempDir;
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|p| p.join("bundles").is_dir())
+        .expect("workspace root with bundles/ directory")
+        .to_path_buf()
+}
+
+/// A `ThreadLifecycleService` whose `KindProfileRegistry` is derived from the
+/// REAL signed `core` + `standard` bundle kind schemas (so `directive_run` /
+/// `graph_run` and their continuation flags are present), backed by a temp
+/// state store. The temp dir is returned so it outlives the service.
+fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
+    std::env::set_var("HOSTNAME", "testhost");
+    let tmp = TempDir::new().unwrap();
+
+    let trust_dir =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trusted_signers");
+    let trust_store = TrustStore::load_from_dir(&trust_dir).expect("load fixture trust store");
+
+    let root = workspace_root();
+    let kinds = KindRegistry::load_base(
+        &[
+            root.join("bundles/core/.ai/node/engine/kinds"),
+            root.join("bundles/standard/.ai/node/engine/kinds"),
+        ],
+        &trust_store,
+    )
+    .expect("load live core + standard kind schemas");
+    let kind_profiles = Arc::new(KindProfileRegistry::build(Some(&kinds)));
+
+    let identity =
+        NodeIdentity::create(&tmp.path().join("identity").join("node-key.pem")).unwrap();
+    let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
+    let state_store = Arc::new(
+        StateStore::new(
+            tmp.path().join(".ai").join("state"),
+            tmp.path().join("runtime.sqlite3"),
+            signer,
+            WriteBarrier::new(),
+        )
+        .unwrap(),
+    );
+    let events = Arc::new(EventStoreService::new(state_store.clone()));
+    let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
+    let threads = Arc::new(
+        ThreadLifecycleService::new(state_store, kind_profiles, events, event_streams).unwrap(),
+    );
+    (tmp, threads)
+}
+
+fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
+    ThreadCreateParams {
+        thread_id: thread_id.to_string(),
+        chain_root_id: thread_id.to_string(),
+        kind: kind.to_string(),
+        item_ref: "test/item".to_string(),
+        executor_ref: "test/executor".to_string(),
+        launch_mode: "inline".to_string(),
+        current_site_id: "site:test".to_string(),
+        origin_site_id: "site:test".to_string(),
+        upstream_thread_id: None,
+        requested_by: Some("user:test".to_string()),
+        usage_subject: None,
+        usage_subject_asserted_by: None,
+    }
+}
+
+#[test]
+fn get_thread_view_reflects_real_kind_continuation_authority() {
+    let (_tmp, threads) = lifecycle_with_real_kinds();
+
+    // directive_run ships `supports_continuation: true`.
+    threads
+        .create_thread(&create_params("T-dir", "directive_run"))
+        .unwrap();
+    let dir = serde_json::to_value(
+        threads
+            .get_thread_view("T-dir")
+            .unwrap()
+            .expect("directive thread"),
+    )
+    .unwrap();
+    assert_eq!(dir["kind"], "directive_run");
+    assert_eq!(
+        dir["execution"]["supports_continuation"], true,
+        "directive_run is continuable in the standard bundle: {dir:#?}"
+    );
+
+    // graph_run ships `supports_continuation: false` (chain-fold would corrupt
+    // its frontier), so it must NOT advertise continuation.
+    threads
+        .create_thread(&create_params("T-graph", "graph_run"))
+        .unwrap();
+    let graph = serde_json::to_value(
+        threads
+            .get_thread_view("T-graph")
+            .unwrap()
+            .expect("graph thread"),
+    )
+    .unwrap();
+    assert_eq!(graph["kind"], "graph_run");
+    assert_eq!(
+        graph["execution"]["supports_continuation"], false,
+        "graph_run must not advertise continuation: {graph:#?}"
+    );
+}
+
+#[test]
+fn thread_list_reflects_real_kind_continuation_authority() {
+    let (_tmp, threads) = lifecycle_with_real_kinds();
+    threads
+        .create_thread(&create_params("T-dir", "directive_run"))
+        .unwrap();
+    threads
+        .create_thread(&create_params("T-graph", "graph_run"))
+        .unwrap();
+
+    let listing = threads.list_threads_filtered(100, None).unwrap();
+    let rows = listing["threads"].as_array().expect("threads array");
+    let supports = |id: &str| {
+        rows.iter()
+            .find(|r| r["thread_id"] == id)
+            .unwrap_or_else(|| panic!("row {id} missing from list: {listing:#?}"))["execution"]
+            ["supports_continuation"]
+            .clone()
+    };
+
+    assert_eq!(supports("T-dir"), true, "directive_run row continuable");
+    assert_eq!(supports("T-graph"), false, "graph_run row not continuable");
+}

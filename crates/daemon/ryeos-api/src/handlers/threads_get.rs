@@ -26,13 +26,13 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     let thread = state
-        .state_store
-        .get_thread(&req.thread_id)
+        .threads
+        .get_thread_view(&req.thread_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     match thread {
-        Some(detail) => {
-            ctx.require_owner(detail.requested_by.as_deref())?;
+        Some(view) => {
+            ctx.require_owner(view.thread.requested_by.as_deref())?;
 
             let facets = state
                 .state_store
@@ -52,7 +52,7 @@ pub async fn handle(
                 .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
             serde_json::to_value(serde_json::json!({
-                "thread": detail,
+                "thread": view,
                 "result": result,
                 "artifacts": artifacts,
                 "facets": facets_map,
