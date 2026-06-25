@@ -243,7 +243,7 @@ pub(crate) fn append_live_delta(core: &StudioCore, entries: &mut Vec<StudioTimel
     // No streaming tail yet, but the head thread is still running → a quiet
     // working indicator so the feed reads as alive (just launched and awaiting
     // the first token, or running a tool that hasn't emitted prose).
-    if head_thread_running(core, &head) {
+    if core.head_thread_running(&head) {
         entries.push(StudioTimelineEntryVm::Line {
             primary: "▍ working…".to_string(),
             meta: None,
@@ -251,21 +251,6 @@ pub(crate) fn append_live_delta(core: &StudioCore, entries: &mut Vec<StudioTimel
             action: None,
         });
     }
-}
-
-/// Whether the head thread is still executing, per the fetched thread
-/// projections (a non-terminal `status`). Drives the working indicator when
-/// there's no streaming tail to show.
-fn head_thread_running(core: &StudioCore, head: &str) -> bool {
-    core.data.threads.as_ref().is_some_and(|threads| {
-        threads.threads.iter().any(|row| {
-            row.get("thread_id").and_then(Value::as_str) == Some(head)
-                && row
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| matches!(s, "running" | "created" | "accepted" | "pending"))
-        })
-    })
 }
 
 fn flush_flow(

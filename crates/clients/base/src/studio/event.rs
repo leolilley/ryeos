@@ -183,6 +183,9 @@ pub enum StudioUiEvent {
     CycleInputTarget {
         forward: bool,
     },
+    /// Interrupt the running head thread (esc while it works) — cancels it
+    /// through the thread-control channel. No-op when the head isn't running.
+    InterruptHead,
     SubmitInput,
     MoveLauncherSelection {
         delta: i32,

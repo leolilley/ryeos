@@ -898,7 +898,32 @@ impl StudioCore {
                 .filter(|i| i.submits_to_route())
                 .and_then(|i| i.target.as_ref())
                 .map(|t| t.cycle),
+            // The head thread is mid-execution → esc interrupts it.
+            head_thread_running: self
+                .seat
+                .fold()
+                .input_route()
+                .thread
+                .as_deref()
+                .is_some_and(|head| self.head_thread_running(head)),
         }
+    }
+
+    /// Whether the given thread is still executing per the fetched thread
+    /// projections (a non-terminal status). Drives the feed's working
+    /// indicator and the esc-interrupt binding.
+    pub(crate) fn head_thread_running(&self, head: &str) -> bool {
+        self.data.threads.as_ref().is_some_and(|threads| {
+            threads.threads.iter().any(|row| {
+                row.get("thread_id").and_then(serde_json::Value::as_str) == Some(head)
+                    && row
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|s| {
+                            matches!(s, "running" | "created" | "accepted" | "pending")
+                        })
+            })
+        })
     }
 }
 

@@ -261,6 +261,18 @@ impl StudioCore {
                 Vec::new()
             }
             StudioUiEvent::CycleInputTarget { forward } => self.cycle_input_target(forward),
+            StudioUiEvent::InterruptHead => {
+                // Esc while the head thread works → cancel it through the
+                // thread-control channel (reuses the read-only + dedup guards).
+                // No-op if there's no running head.
+                let Some(head) = self.seat.fold().input_route().thread else {
+                    return Vec::new();
+                };
+                if !self.head_thread_running(&head) {
+                    return Vec::new();
+                }
+                self.dispatch_action(StudioAction::CancelThread { thread_id: head })
+            }
             StudioUiEvent::SubmitInput => self.submit_focused_input(),
             StudioUiEvent::MoveLauncherSelection { delta } => {
                 let len = filtered_launcher_items(self).len();
@@ -3729,6 +3741,44 @@ mod tests {
             effects.first().map(|effect| &effect.kind),
             Some(StudioEffectKind::CancelThread { thread_id }) if thread_id == "T-demo"
         ));
+    }
+
+    #[test]
+    fn interrupt_head_cancels_a_running_head_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-run" }),
+        );
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
+        });
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InterruptHead,
+        });
+        assert!(
+            effects.iter().any(|e| matches!(
+                &e.kind,
+                StudioEffectKind::CancelThread { thread_id } if thread_id == "T-run"
+            )),
+            "running head → cancel effect: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn interrupt_head_is_noop_when_head_settled() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-done" }),
+        );
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-done", "status": "completed" })],
+        });
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InterruptHead,
+        });
+        assert!(effects.is_empty(), "settled head → no interrupt");
     }
 
     #[test]
