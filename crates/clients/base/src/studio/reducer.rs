@@ -1457,6 +1457,19 @@ impl StudioCore {
                         return Vec::new();
                     }
                     self.clear_focused_input();
+                    // A refused delivery (non-continuation target, settled
+                    // status, or a duplicate-submit conflict) created nothing:
+                    // surface the daemon's reason and do NOT ratchet or claim a
+                    // launch. `thread_id` may be null or an existing id.
+                    if data.get("delivery").and_then(serde_json::Value::as_str) == Some("refused") {
+                        let reason = data
+                            .get("notice")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("Continuation refused.");
+                        self.notice(reason, StudioTone::Warn);
+                        self.bump_generation();
+                        return Vec::new();
+                    }
                     let thread_id = data
                         .get("thread_id")
                         .and_then(serde_json::Value::as_str)
@@ -1479,8 +1492,16 @@ impl StudioCore {
                         let fold = self.seat.fold();
                         // Eligibility was decided at issue time (see submit_route)
                         // — read it, don't recompute from current focus, which
-                        // may have moved while the launch was in flight.
-                        let targets = *ratchet_on_thread_id;
+                        // may have moved while the launch was in flight. AND in
+                        // the produced thread's substrate facts when the result
+                        // carries them (an operator continuation does; a fresh
+                        // async launch doesn't — unknown stays eligible, and the
+                        // daemon refuses a real non-continuation continue).
+                        let result_supports = data
+                            .get("execution")
+                            .and_then(|e| e.get("supports_continuation"))
+                            .and_then(serde_json::Value::as_bool);
+                        let targets = *ratchet_on_thread_id && result_supports != Some(false);
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
                             // Only ratchet a continuation target onto routes
@@ -3230,6 +3251,43 @@ mod tests {
             "ratcheted on the issue-time decision, not the moved focus"
         );
         assert_eq!(route.chain_root.as_deref(), Some("T-9"));
+    }
+
+    #[test]
+    fn refused_delivery_surfaces_reason_and_does_not_ratchet() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core); // targeting input → ratchet would be eligible
+        set_focused_input(&mut core, "go");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        // Daemon refuses (e.g. non-continuation target / duplicate conflict).
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({
+                    "thread_id": serde_json::Value::Null,
+                    "delivery": "refused",
+                    "notice": "thread is not continuation-capable"
+                })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "refused → no ratchet");
+        assert_eq!(route.chain_root, None);
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|n| n.message.contains("not continuation-capable")),
+            "surfaces the daemon's refusal reason, not a generic success"
+        );
     }
 
     #[test]
