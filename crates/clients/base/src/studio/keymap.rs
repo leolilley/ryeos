@@ -54,6 +54,9 @@ pub struct StudioKeyContext {
     pub input_can_accept_completion: bool,
     /// The focused input's declared targeting capability, if any.
     pub input_target_cycle: Option<super::content::InputTargetCycle>,
+    /// The head thread is mid-execution — esc interrupts it instead of
+    /// closing the focused tile.
+    pub head_thread_running: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +120,11 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         }
         StudioKey::ArrowRight if event.modifiers.ctrl_only() => {
             cycle_tab(StudioStackMoveDirection::Down)
+        }
+        // Esc interrupts a running head thread (chat convention); otherwise it
+        // closes the focused tile.
+        StudioKey::Escape if event.modifiers.none() && context.head_thread_running => {
+            ui(StudioUiEvent::InterruptHead)
         }
         StudioKey::Escape if event.modifiers.none() => action(StudioAction::CloseFocused),
         // Plain Enter submits when you're typing in the input (chat
@@ -317,6 +325,7 @@ mod tests {
             input_has_completion: false,
             input_can_accept_completion: false,
             input_target_cycle: None,
+            head_thread_running: false,
         }
     }
 
@@ -328,6 +337,7 @@ mod tests {
             input_has_completion: false,
             input_can_accept_completion: false,
             input_target_cycle: None,
+            head_thread_running: false,
         }
     }
 
@@ -444,6 +454,28 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn esc_interrupts_running_head_else_falls_through() {
+        // Head thread running → esc interrupts it.
+        let running = StudioKeyContext {
+            head_thread_running: true,
+            ..context(false, true)
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Escape), running),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::InterruptHead
+            }
+        ));
+        // Idle (no running head) → esc does NOT interrupt (existing behavior).
+        assert!(!matches!(
+            studio_key_command(key(StudioKey::Escape), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::InterruptHead
+            }
+        ));
     }
 
     #[test]
