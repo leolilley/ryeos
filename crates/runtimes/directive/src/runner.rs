@@ -16,6 +16,12 @@ use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::RuntimeResult;
 use ryeos_runtime::TerminalCompletion;
 
+/// Free-form breadcrumb passed to `request_continuation` for logs only.
+/// Continuation is autonomous by construction — this is NOT a typed reason the
+/// substrate keys off; `State::Continued` has exactly one cause (the per-thread
+/// turn limit), so it is a fixed string, not an enum.
+const CONTINUATION_LOG_REASON: &str = "turn_limit";
+
 #[derive(Debug)]
 pub enum State {
     Init,
@@ -1144,16 +1150,36 @@ impl Runner {
                 }
 
                 State::Continued => {
-                    // Request continuation chain from daemon
-                    let reason = "context limit reached, continuation needed";
-                    if let Err(e) = self.callback.request_continuation(reason).await {
-                        warnings.push(format!("callback request_continuation failed: {e}"));
+                    // Cut off by a limit mid-task: hand off to a chain-fold
+                    // successor. Continuation is autonomous by construction — no
+                    // reason/gate/mode, only an optional free-form string for logs.
+                    //
+                    // Do NOT swallow: a failed handoff must not settle the thread
+                    // `continued` with no recorded successor. Surface as terminal
+                    // `failed`.
+                    if let Err(e) = self
+                        .callback
+                        .request_continuation(Some(CONTINUATION_LOG_REASON))
+                        .await
+                    {
+                        let runtime_result = RuntimeResult {
+                            success: false,
+                            status: "failed".to_string(),
+                            thread_id: self.thread_id.clone(),
+                            result: Some(json!(format!("continuation handoff failed: {e}"))),
+                            outputs: json!({}),
+                            cost: Some(self.budget.cost()),
+                            warnings: Vec::new(),
+                        };
+                        guard.finalized = true;
+                        return Self::attach_warnings(runtime_result, &mut warnings);
                     }
+
                     let runtime_result = RuntimeResult {
                         success: false,
                         status: "continued".to_string(),
                         thread_id: self.thread_id.clone(),
-                        result: Some(json!(reason)),
+                        result: None,
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
                         warnings: Vec::new(),

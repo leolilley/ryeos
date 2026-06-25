@@ -678,6 +678,20 @@ pub struct BuildAndLaunchParams<'a> {
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
+    /// Machine continuation: fold the chain and resume with NO new stimulus.
+    /// `false` for fresh launches and operator follow-ups (which inject their
+    /// `parameters` as the opening stimulus); `true` only for an autonomous
+    /// limit-cutoff successor, whose `parameters` are the source's originals and
+    /// are already in the folded chain.
+    pub suppress_stimulus: bool,
+    /// `Some` only for a continuation successor: the `effective_caps` the
+    /// PREDECESSOR captured at spawn. The run-half re-resolves the item against
+    /// the *live* tree, which could yield a different capability set if the item
+    /// changed — a silent privilege change. When present, the recomputed caps
+    /// MUST match this captured set exactly, else the launch is refused (until
+    /// snapshot-pinned continuation resolves against the captured version).
+    /// `None` for fresh launches, which use the freshly-resolved caps.
+    pub captured_effective_caps: Option<&'a [String]>,
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -707,6 +721,50 @@ impl Drop for FinalizeFailedOnDrop<'_> {
 pub async fn build_and_launch(
     params: BuildAndLaunchParams<'_>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    // 1. Create DB thread (status = created). A chained-resume turn
+    //    (`previous_thread_id` present) braids a successor onto the source's
+    //    chain — lineage persisted at spawn — instead of a fresh root. All the
+    //    row-creation inputs are `Copy` references, so `params` is untouched and
+    //    flows whole into the run-half.
+    let thread = match (params.pre_minted_thread_id, params.previous_thread_id) {
+        (Some(id), Some(source)) => params.state.threads.create_continuation_with_id(
+            id,
+            source,
+            params.resolved,
+            Some("chained_resume"),
+        )?,
+        (Some(id), None) => params
+            .state
+            .threads
+            .create_root_thread_with_id(id, params.resolved)?,
+        (None, Some(source)) => {
+            let id = ryeos_app::thread_lifecycle::new_thread_id();
+            params.state.threads.create_continuation_with_id(
+                &id,
+                source,
+                params.resolved,
+                Some("chained_resume"),
+            )?
+        }
+        (None, None) => params.state.threads.create_root_thread(params.resolved)?,
+    };
+    run_claimed_thread_row(params, thread).await
+}
+
+/// Run an already-created `created` thread row to completion: resolve, spawn its
+/// runtime subprocess, wait, and finalize.
+///
+/// Split out of `build_and_launch` (which now only mints the row first) so a
+/// **continuation successor** — an existing `created` row carrying a captured
+/// launch identity — can be launched through the SAME path. The successor is
+/// re-resolved as **its own kind** (from `resolved.resolved_item.kind`, never
+/// assumed directive), and `previous_thread_id` is carried in the envelope so
+/// the runtime folds the chain. Behavior-preserving for fresh launches: the
+/// body is the original run-half verbatim.
+async fn run_claimed_thread_row(
+    params: BuildAndLaunchParams<'_>,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
         state,
         executor_ref,
@@ -717,8 +775,10 @@ pub async fn build_and_launch(
         parameters,
         metadata_required_secrets,
         required_envelope_fields,
-        pre_minted_thread_id,
+        pre_minted_thread_id: _,
         previous_thread_id,
+        suppress_stimulus,
+        captured_effective_caps,
     } = params;
     let engine = provenance.request_engine();
     tracing::info!(
@@ -729,27 +789,6 @@ pub async fn build_and_launch(
         required_secret_count = metadata_required_secrets.len(),
         "launching native runtime"
     );
-    // 1. Create DB thread (status = created). A chained-resume turn
-    //    (`previous_thread_id` present) braids a successor onto the source's
-    //    chain — lineage persisted at spawn — instead of a fresh root.
-    let thread = match (pre_minted_thread_id, previous_thread_id) {
-        (Some(id), Some(source)) => {
-            state
-                .threads
-                .create_continuation_with_id(id, source, resolved, Some("chained_resume"))?
-        }
-        (Some(id), None) => state.threads.create_root_thread_with_id(id, resolved)?,
-        (None, Some(source)) => {
-            let id = ryeos_app::thread_lifecycle::new_thread_id();
-            state.threads.create_continuation_with_id(
-                &id,
-                source,
-                resolved,
-                Some("chained_resume"),
-            )?
-        }
-        (None, None) => state.threads.create_root_thread(resolved)?,
-    };
     let thread_id = thread.thread_id.clone();
 
     // Arm the persistence-first guard: any post-create failure below finalizes
@@ -987,6 +1026,65 @@ pub async fn build_and_launch(
         .into_iter()
         .collect();
 
+    // Continuation capability pin: a successor must run with EXACTLY the
+    // authority its predecessor captured. We re-resolved against the live tree
+    // above, so if the item changed (caps widened OR narrowed) the recomputed
+    // set differs — refuse rather than silently grant/strip authority. Identity
+    // means no drift; snapshot-pinned continuation (future) resolves against the
+    // captured version and so always matches. Fresh launches pass `None`.
+    if let Some(captured) = captured_effective_caps {
+        let recomputed: BTreeSet<&str> = effective_caps.iter().map(String::as_str).collect();
+        let captured_set: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
+        if recomputed != captured_set {
+            return Err(BuildAndLaunchError::CapabilityRejected {
+                reason: format!(
+                    "continuation capability drift for `{}`: the live item resolves to a \
+                     different capability set than the predecessor captured — refusing to launch \
+                     the successor with changed authority (snapshot-pinned continuation not yet \
+                     implemented)",
+                    resolved.item_ref
+                ),
+            });
+        }
+    }
+
+    // Seed THIS thread's launch identity so a continuation successor of it can be
+    // relaunched later (machine handoff / reconciler) with no live request. Only
+    // for continuation-capable kinds; uses the REAL composed `effective_caps`
+    // (unlike `spawn_item`, which captures empty caps). Warn-not-fail: a fresh
+    // launch still works, and the continuation path fails loudly later if the
+    // identity is absent. The clobber-preserving attach keeps this against the
+    // runtime's later empty self-attach.
+    if state
+        .threads
+        .kind_profiles()
+        .get(&resolved.kind)
+        .is_some_and(|p| p.supports_continuation)
+    {
+        let resume_context = ryeos_app::launch_metadata::ResumeContext {
+            kind: resolved.kind.clone(),
+            item_ref: resolved.item_ref.clone(),
+            launch_mode: resolved.launch_mode.clone(),
+            parameters: parameters.clone(),
+            project_context: resolved.plan_context.project_context.clone(),
+            original_snapshot_hash: None,
+            current_site_id: resolved.current_site_id.clone(),
+            origin_site_id: resolved.origin_site_id.clone(),
+            requested_by: resolved.plan_context.requested_by.clone(),
+            execution_hints: resolved.plan_context.execution_hints.clone(),
+            effective_caps: effective_caps.clone(),
+        };
+        let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_resume_context(resume_context);
+        if let Err(e) = state.state_store.seed_launch_metadata(&thread_id, &metadata) {
+            tracing::warn!(
+                thread_id = %thread_id,
+                error = %e,
+                "failed to seed continuation launch identity"
+            );
+        }
+    }
+
     // The launching kind schema (e.g. `directive`, `graph`) drives
     // inventory build below; it does NOT carry the subprocess
     // terminator — those kinds run in-process inside a runtime.
@@ -1144,6 +1242,7 @@ pub async fn build_and_launch(
             parent_thread_id: None,
             parent_capabilities: None,
             depth: 0,
+            suppress_stimulus,
         },
         EnvelopePolicy {
             effective_caps,
@@ -1355,6 +1454,270 @@ pub async fn build_and_launch(
             "warnings": runtime_result.warnings,
         }),
     })
+}
+
+/// Lease duration for a successor launch claim. Generous enough to cover the
+/// create→`running` window (the subprocess marks running early in its run); the
+/// thread's own status is the authoritative guard against relaunching a live
+/// successor — the claim just prevents two launchers racing the same `created`
+/// row and lets a crashed launcher's claim be reclaimed after it expires.
+const SUCCESSOR_LAUNCH_LEASE_MS: i64 = 300_000;
+
+/// Outcome of a successor launch attempt.
+///
+/// `Launched` ran the successor to terminal. `Skipped` is a **benign no-op** —
+/// another launcher owns the claim (`already_claimed`), the row is no longer
+/// `created` (`not_created`), or the per-successor attempt budget was exhausted
+/// and the row finalized (`budget_exhausted`). Callers log `Skipped` at debug,
+/// not error. A real launch defect is still `Err`.
+pub enum SuccessorLaunchOutcome {
+    Launched(NativeLaunchResult),
+    Skipped(&'static str),
+}
+
+/// Which kind of successor launch this is — they share the claim/run machinery
+/// but differ on stimulus and capability/budget policy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuccessorMode {
+    /// Autonomous limit cut-off: fold the chain, inject NO new stimulus, pin
+    /// authority to the predecessor's captured caps, and enforce the per-successor
+    /// auto-launch attempt budget.
+    Machine,
+    /// Explicit operator follow-up: inject the operator's input as the opening
+    /// stimulus, re-derive caps fresh (no pin), and skip the auto-launch budget
+    /// (an operator action is not an autonomous relaunch).
+    Operator,
+}
+
+/// Launch a continuation successor: an existing `created` thread row carrying a
+/// captured `ResumeContext` and an `upstream_thread_id`.
+///
+/// Claims the launch lease (so only one launcher acts, and a dead launcher's
+/// claim is reclaimable), reconstructs the execution from the captured identity
+/// — re-resolved as the successor's OWN kind, never assumed directive — and runs
+/// it through [`run_claimed_thread_row`] with `previous_thread_id` set so the
+/// runtime folds the chain. A MACHINE continuation injects no new stimulus.
+///
+/// Fire-and-forget from the daemon: the machine path `tokio::spawn`s this after
+/// the source is settled `continued`, and reconcile calls it for crash recovery.
+/// Takes `state` by value so the spawned task can own it. Blocks until the
+/// successor reaches terminal (inside its detached task).
+pub async fn launch_successor(
+    state: AppState,
+    successor_id: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    launch_successor_inner(state, successor_id, SuccessorMode::Machine).await
+}
+
+/// Launch a pre-created OPERATOR follow-up successor (an existing `created` row
+/// with a seeded `ResumeContext`). Claim-guarded like [`launch_successor`] but
+/// injects the operator's input as the opening stimulus and does not pin caps or
+/// consume the auto-launch budget. Used by the `threads/input` path after a
+/// synchronous create-or-get, and to "ensure launch" a stranded `created`
+/// operator successor on a duplicate submit.
+pub async fn launch_operator_successor(
+    state: AppState,
+    successor_id: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    launch_successor_inner(state, successor_id, SuccessorMode::Operator).await
+}
+
+async fn launch_successor_inner(
+    state: AppState,
+    successor_id: &str,
+    mode: SuccessorMode,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    // Claim the launch FIRST — the sole authorization to spawn, and the
+    // serialization point for the status + budget guards below.
+    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let claimed_by = format!("daemon:{}", std::process::id());
+    match state.state_store.claim_thread_launch(
+        successor_id,
+        &claim_id,
+        &claimed_by,
+        SUCCESSOR_LAUNCH_LEASE_MS,
+    )? {
+        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
+        // Another launcher (live dispatch or a concurrent reconcile) owns the
+        // window. Benign no-op — must NOT burn the attempt budget or finalize.
+        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+        }
+    }
+
+    // Status guard under the claim: ONLY a `created` row is launchable. A
+    // successor already `running`/terminal (a duplicate trigger, or a stale-lease
+    // reclaim of a still-live launch) must never be relaunched — release the
+    // claim and skip WITHOUT finalizing (the row is fine, just not ours to run).
+    let successor = match state.threads.get_thread(successor_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(successor_id, &claim_id);
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "launch_successor: thread not found: {successor_id}"
+            )));
+        }
+        Err(e) => {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(successor_id, &claim_id);
+            return Err(e.into());
+        }
+    };
+    if successor.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
+        let _ = state
+            .state_store
+            .release_thread_launch_claim(successor_id, &claim_id);
+        return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
+    }
+
+    // Attempt budget — MACHINE path only. Enforced HERE, after a successful claim
+    // and the `created` check, so a lost claim (`AlreadyClaimed`) or a
+    // non-launchable row never burns it. Bounds the TOTAL auto-launch attempts per
+    // successor (live + reconcile combined); on exhaustion the successor is
+    // finalized rather than relaunched forever. This is a per-successor relaunch
+    // cap, NOT a chain-depth cap (a separate, open concern, which is why auto
+    // machine continuation stays opt-in). The OPERATOR path skips this: an
+    // operator follow-up is an explicit user action, not an autonomous relaunch.
+    if mode == SuccessorMode::Machine {
+        let attempts = match state.state_store.get_resume_attempts(successor_id) {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = state
+                    .state_store
+                    .release_thread_launch_claim(successor_id, &claim_id);
+                return Err(e.into());
+            }
+        };
+        let max = ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS;
+        if attempts >= max {
+            crate::dispatch::finalize_method_thread_if_needed(
+                &state,
+                successor_id,
+                "failed",
+                Some(json!({
+                    "error": format!("continuation auto-launch budget exhausted ({attempts}/{max})")
+                })),
+            );
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(successor_id, &claim_id);
+            return Ok(SuccessorLaunchOutcome::Skipped("budget_exhausted"));
+        }
+        if let Err(e) = state.state_store.bump_resume_attempts(successor_id) {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(successor_id, &claim_id);
+            return Err(e.into());
+        }
+    }
+
+    // Rebuild + run under the held claim; always release it afterwards.
+    let result = launch_claimed_successor(&state, successor, mode).await;
+    let _ = state
+        .state_store
+        .release_thread_launch_claim(successor_id, &claim_id);
+
+    match result {
+        Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
+        Err(e) => {
+            // A pre-run launch DEFECT (absent ResumeContext, snapshot-pinned
+            // source, capability drift, envelope rebuild) would otherwise leave
+            // the successor stuck at `created`. `run_claimed_thread_row` already
+            // finalizes in-run failures, and finalize-if-needed is idempotent, so
+            // finalizing here covers the pre-run case too without double-finalizing.
+            crate::dispatch::finalize_method_thread_if_needed(
+                &state,
+                successor_id,
+                "failed",
+                Some(json!({ "error": e.to_string() })),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Inner half of the successor launch, run once the claim is held and the
+/// successor is confirmed `created`: rebuild the execution from the seeded
+/// `ResumeContext` and run the existing row. `mode` selects stimulus + caps
+/// policy (machine folds with no stimulus + caps pin; operator injects input +
+/// fresh caps).
+async fn launch_claimed_successor(
+    state: &AppState,
+    successor: ryeos_app::state_store::ThreadDetail,
+    mode: SuccessorMode,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let successor_id = successor.thread_id.clone();
+    // A continuation successor must link upstream (chain-fold) and carry the
+    // predecessor's captured launch identity (the create path guarantees both;
+    // absence is a hard defect, not a silent skip).
+    let previous_thread_id = successor.upstream_thread_id.clone().ok_or_else(|| {
+        anyhow::anyhow!("launch_successor: {successor_id} has no upstream_thread_id")
+    })?;
+    let resume = state
+        .state_store
+        .get_launch_metadata(&successor_id)?
+        .and_then(|m| m.resume_context)
+        .ok_or_else(|| {
+            anyhow::anyhow!("launch_successor: {successor_id} has no captured ResumeContext")
+        })?;
+
+    // Snapshot guard FIRST — before reconstruction — so a snapshot-pinned source
+    // fails with an explicit unsupported error rather than a generic resolution
+    // error downstream. This slice folds against a live working tree; a
+    // `SnapshotHash` source needs a CAS checkout that is out of scope here.
+    let project_path = match &resume.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
+        other => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "launch_successor: snapshot-pinned continuation not supported yet \
+                 (project_context = {other:?})"
+            )));
+        }
+    };
+
+    // Rebuild ExecutionParams from the captured identity (re-resolves the item as
+    // its own kind, restores principal / hints / sites verbatim).
+    let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
+
+    // Envelope-field requirements come from the successor kind's runtime entry.
+    let required_envelope_fields = state
+        .engine
+        .runtimes
+        .lookup_for(&params.resolved.resolved_item.kind)
+        .map(|runtime| runtime.yaml.required_envelope_fields.clone())
+        .unwrap_or_default();
+
+    // Machine: fold the chain with NO new stimulus, and pin authority to the
+    // predecessor's captured caps. Operator: inject the seeded input as the
+    // opening stimulus, and re-derive caps fresh (an explicit launch, not a
+    // relaunch of the same authority).
+    let (suppress_stimulus, captured_effective_caps) = match mode {
+        SuccessorMode::Machine => (true, Some(resume.effective_caps.as_slice())),
+        SuccessorMode::Operator => (false, None),
+    };
+
+    run_claimed_thread_row(
+        BuildAndLaunchParams {
+            state,
+            executor_ref: &params.resolved.executor_ref,
+            acting_principal: &params.acting_principal,
+            resolved: &params.resolved,
+            project_path: &project_path,
+            provenance: &params.provenance,
+            parameters: &params.parameters,
+            metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
+            required_envelope_fields: &required_envelope_fields,
+            pre_minted_thread_id: None,
+            previous_thread_id: Some(&previous_thread_id),
+            suppress_stimulus,
+            captured_effective_caps,
+        },
+        successor,
+    )
+    .await
 }
 
 struct SpawnRuntimeParams<'a> {

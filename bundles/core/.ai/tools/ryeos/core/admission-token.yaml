@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:56Z:a5af217ecbaeec4e497e2b048e9f7c4cc4fa627029b614736c5486f181702208:kai6LNHzRTR7f1WyhyLRluUC3yZbfrtM1m3STU2jvAr91KQ8/7XtwJKVsqn7Xudvfjo8dZIcqOrro4hnYDDICA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T04:51:58Z:5448ebe928e5bf17972ba094a3cb0ad1cc35a34bf5d9d411ebc368d012173f54:i9YzZOCg83hrukCK8Yl7af03eHGtYk/dYtEOTdkDNFIEF9fROuMrJFRijkR0FF0sjttr+J1sCKhUuNZLqHNbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
@@ -19,7 +19,7 @@ config_schema:
   properties:
     system_space_dir:
       type: string
-      description: "Target node system space root. Defaults to RYEOS_SYSTEM_SPACE_DIR."
+      description: "Target node system space root. Defaults to RYEOS_APP_ROOT."
     scopes:
       type: string
       description: "Comma-separated scopes this token may grant."

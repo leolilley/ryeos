@@ -196,12 +196,10 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
 
     let hooks = bootstrap_output.config.hooks.clone();
 
-    // The stimulus that opens this run, shared by both paths.
-    let rendered_prompt = render_stimulus(
-        &bootstrap_output.config.user_prompt,
-        &envelope.request.inputs,
-    )?;
-
+    // The opening stimulus is rendered only where it is actually injected (fresh
+    // launch, or operator follow-up). A MACHINE continuation suppresses it
+    // entirely and never renders — a changed/broken prompt template must not be
+    // able to abort a cut-off task that asks for nothing new.
     let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
         let mut resume_state = resume::load_resume_state(&callback, resume_id).await?;
 
@@ -234,18 +232,29 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             );
         }
 
-        // Emit the new stimulus as a `cognition_in` AFTER folding the chain (so
-        // the replay does not double-count it), then seed it as the live
-        // provider message this run answers. `role` here is the provider-wire
-        // mapping, not a substrate concept.
-        callback.emit_stimulus(&rendered_prompt).await?;
-        resume_state.messages.push(directive::ProviderMessage {
-            role: "user".to_string(),
-            content: Some(json!(rendered_prompt)),
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-        });
+        // Operator follow-up: emit the new stimulus as a `cognition_in` AFTER
+        // folding the chain (so the replay does not double-count it), then seed
+        // it as the live provider message this run answers. `role` here is the
+        // provider-wire mapping, not a substrate concept.
+        //
+        // A MACHINE continuation (limit cut-off) suppresses this: it folds the
+        // chain and resumes the cut-off task with nothing new asked — `inputs`
+        // are the source's originals, already present in the folded chain, so
+        // re-injecting them would double the opening stimulus.
+        if !envelope.request.suppress_stimulus {
+            let rendered_prompt = render_stimulus(
+                &bootstrap_output.config.user_prompt,
+                &envelope.request.inputs,
+            )?;
+            callback.emit_stimulus(&rendered_prompt).await?;
+            resume_state.messages.push(directive::ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!(rendered_prompt)),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
 
         runner::Runner::from_resume(
             resume_state,
@@ -270,8 +279,12 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             },
         )
     } else {
-        // Emit the stimulus (rendered above) as a `cognition_in` so a later turn
-        // can fold it from the chain.
+        // Fresh launch: render and emit the opening stimulus as a `cognition_in`
+        // so a later turn can fold it from the chain.
+        let rendered_prompt = render_stimulus(
+            &bootstrap_output.config.user_prompt,
+            &envelope.request.inputs,
+        )?;
         callback.emit_stimulus(&rendered_prompt).await?;
 
         let mut messages = Vec::new();

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:13:18Z:325755fab420fcf15a2743f3e34cc019c9ca961189c59322a85a512349393019:Qa1Sduw98j9sXnU/lc/3Ag1Ysfe5wsKWYXPGrnTja7JvnrteiN1alap51rB9RaX2RTABXfdIq/0zVaAWtHzOBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:435f4b883248d1b439c99eed46c4f5155eed98f3aadc98cc7f7380552358c34a:os4FLs8xJZG1gWdCEjAiRf4UE7uhyXXYBW0iKu5edyBg5XI7r1+Z7B+5q5JNyT8Vc5gI/3lzQAj7sRFaiVRHAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -6,9 +6,8 @@ version: "3.5.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
-  Covers the per-request engine overlay, user-space sync, hybrid binary
-  resolution, symmetric pull-back, single-flight cache builds, and
-  live bundle roots.
+  Covers the per-request engine, hybrid binary resolution, project
+  pull-back, single-flight cache builds, and live bundle roots.
 ---
 
 # Remote Operations
@@ -20,7 +19,7 @@ See also:
 
 - [Remote Command Reference](remote-command-reference.md) for command syntax, examples, capabilities, scopes, routes, and failure modes.
 - [Identity Model](../identity-model.md) for the four trust layers and request authentication flow.
-- [Spaces](../spaces.md) for project/user/system resolution.
+- [Spaces](../spaces.md) for project/system resolution.
 - [Execution Provenance](../execution/provenance.md) for local vs pushed-head execution source invariants.
 - [HTTP API](../node/http-api.md) and [Services: remote](../services/remote.md) for route/service mappings.
 
@@ -242,14 +241,14 @@ keys must enumerate their capabilities explicitly.
 When a node's signing key is compromised or needs rotation, treat it as a
 break-glass operation. The daemon no longer has an `--init-only` path and
 will not auto-regenerate the node key, because doing so would invalidate
-the node trust doc pinned in user space.
+the node trust doc pinned in the operator trust store.
 
 Safe rotation requires explicit operator action:
 
 1. Stop the daemon.
 2. Replace/regenerate the node signing key under
    `<system>/.ai/node/identity/private_key.pem`.
-3. Recreate and pin the matching node trust doc in user space.
+3. Recreate and pin the matching node trust doc in the operator trust store.
 4. Re-sign or recreate node-signed local config items as needed.
 5. Reissue every remotely granted authorized key.
 
@@ -360,24 +359,21 @@ echo '{"public_key":"ed25519:abc","label":"test","scopes":["cap1","cap2"]}' | \
 
 When `remote execute` pushes a snapshot, the remote daemon builds a
 **per-request engine** that resolves items against the caller's pushed
-content rather than the remote operator's own user space.
+content rather than the remote operator's own local workspace.
 
 ### How it works
 
-1. The caller pushes a **project manifest** (project files) and
-   optionally a **user manifest** (user-space items from `~/.ryeos/.ai/`).
+1. The caller pushes a **project manifest** (project files). Legacy
+   snapshots carrying a `user_manifest_hash` are rejected — re-push the
+   project.
 2. The remote daemon checks the **engine cache** keyed by
    `(system_install_generation, snapshot_hash)`. On a miss, it:
-   - Materialises the user overlay into a temp directory.
-   - Loads any pushed trust pins into an in-memory overlay.
    - Reads the live signed bundle registry with
      `BootstrapLoader::load_bundle_section()`.
    - Builds a fresh `Engine` against registered bundle roots + the
-     project checkout + the user overlay.
+     project checkout.
 3. The project checkout is **per-request** (each request gets its own
-   directory, cleaned up when the request completes). The user overlay
-   temp dir is **shared** across concurrent requests on the same
-   snapshot and lives as long as the cache entry.
+   directory, cleaned up when the request completes).
 4. All dispatch paths — top-level routes, scheduler, callbacks, and
    resume — construct a single type-state `ExecutionProvenance` value
    at the entry point. Its four variants encode the legal combinations
@@ -423,10 +419,10 @@ content rather than the remote operator's own user space.
 
 ### Isolation guarantee
 
-A `pushed_head` request NEVER resolves against the remote operator's
-user space. If the pushed snapshot has no user manifest, user-tier
-resolution returns "not found" rather than falling through to the
-operator's `~/.ryeos/.ai/`.
+A `pushed_head` request resolves only against the pushed project
+checkout plus the remote's registered bundle roots. There is no
+operator user space to fall through to — user-tier resolution does not
+exist in the single-app-root model.
 
 ### Borrowed workspace for callbacks
 
@@ -454,78 +450,31 @@ tracked separately; the resume path falls back to the daemon engine.
 Detached children from callbacks are disallowed at the callback
 dispatcher (inline only).
 
-## User-Space Sync
+## Pull-Back
 
-### User root: `~/.ryeos/`
+After remote execution, the pull phase applies changes to the local
+project: it diffs the pre-push manifest against the remote's result
+snapshot and applies updated/deleted files to the local project
+directory.
 
-The user-space root is `~/.ryeos/`. All user-tier items (directives,
-tools, knowledge, trust pins) live under `~/.ryeos/.ai/`.
-
-### Allow-list for user-space push
-
-Only these subdirectories under `~/.ryeos/.ai/` are ingested during a
-remote push:
-
-| Directory | Contents |
-|---|---|
-| `directives/` | User-authored directive YAMLs |
-| `tools/` | User-authored tool YAMLs + binaries |
-| `knowledge/` | User knowledge entries |
-| `config/` | User config items (including `config/keys/trusted/`) |
-
-All other content under `~/.ryeos/` is ignored by the push pipeline.
-
-### Symlink protection
-
-User-space ingest **skips all symlinks** — a symlink at
-`~/.ryeos/.ai/directives/exfil.md` pointing at `~/.ssh/id_rsa` will
-NOT be followed, read, hashed, or uploaded. Project-space ingest
-does not have this restriction (operators own their project data).
-
-### `--no-project` mode
-
-When the caller passes `--no-project`, only user-space content is
-pushed. The snapshot's `project_manifest_hash` is set to a sentinel
-empty manifest. User-space sync still happens normally.
-
-### Trust-pin overlay semantics
-
-Pushed trust pins (from the user manifest's `config/keys/trusted/`
-section) are loaded into an in-memory overlay and unioned with the
-remote's persistent trust store for **that request only**. They are
-never written to the remote's persistent trust directory.
-
-## Symmetric Pull-Back
-
-After remote execution, the pull phase applies changes to **both** the
-local project and the local user space:
-
-- **Project pull-back**: diffs the pre-push manifest against the
-  remote's result snapshot, applies updated/deleted files to the
-  local project directory.
-- **User pull-back**: diffs the pre-push user manifest against the
-  result's user manifest, applies updated/deleted files to the
-  local `~/.ryeos/.ai/`.
-
-The JSON response from `remote execute` includes both:
+The JSON response from `remote execute` reports the counts:
 
 ```json
 {
   "pull": {
     "files_updated": 3,
-    "files_deleted": 1,
-    "user_files_updated": 2,
-    "user_files_deleted": 0
+    "files_deleted": 1
   }
 }
 ```
 
-On a fresh node where `~/.ryeos/.ai/` does not exist, the pull-back
-creates it automatically.
+The response also carries `user_files_updated` and `user_files_deleted`,
+retained in the wire contract as always-`0` in the single-app-root
+model — there is no user-space pull-back.
 
 ## Hybrid Binary Resolution
 
-When a pushed user-tier handler descriptor references a binary that is
+When a pushed handler descriptor references a binary that is
 not installed on the remote node, the handler is recorded as
 `VerifiedHandler::Unresolved`. `build_engine_for_roots` logs a warning
 and proceeds.

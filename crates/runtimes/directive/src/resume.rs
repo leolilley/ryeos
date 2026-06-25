@@ -301,7 +301,7 @@ mod tests {
             // thread detail before paging the chain.
             Ok(json!({"thread": {"chain_root_id": "C-test-chain"}}))
         }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
@@ -543,7 +543,7 @@ mod tests {
             let upstream = if thread_id == "T2" { Some("T1") } else { None };
             Ok(json!({"thread": {"chain_root_id": "T1", "upstream_thread_id": upstream}}))
         }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {

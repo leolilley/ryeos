@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:ab23a0973ebdb205c1ffe5328b14b24137f87c7897d87e1a818c52e449afe2e6:J7FI2Fd91GE4bVMvOndpS+ItCkQFoGZmdFk8o14GM9XLSrU1O11GV3NBy43Ld6X6V9ILDRV2V4i2+ADUAoyvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:9c7cc3b735deb05f65e49c9bb5752da1b8fbad7f0b19335428fae5a55b4bb718:Ag0W+870bzY4I2oosAYFwzqFXq43p4zM/mcr4wcLJll2LzIA++p+iiUpV33tWBktEMTvs7mcxopPMI65akjtAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
@@ -56,7 +56,9 @@ Only these OS-level vars are passed to every subprocess:
 
 ```
 PATH, HOME, LANG, LC_ALL, LC_CTYPE, TZ, TMPDIR,
-USER_SPACE, RYEOS_SYSTEM_SPACE_DIR, RUST_LOG, RUST_BACKTRACE
+RUST_LOG, RUST_BACKTRACE, RYEOSD_TEST_STDERR_DIR,
+HTTP_PROXY, HTTPS_PROXY, NO_PROXY, SSL_CERT_FILE, SSL_CERT_DIR
+(and lowercase proxy forms)
 ```
 
 ### Daemon-injected vars
@@ -76,7 +78,7 @@ These are set automatically by the protocol builder:
 | `RYEOS_ITEM_REF` | Canonical item reference |
 | `RYEOS_PROJECT_ROOT` | Materialized project root |
 | `RYEOS_SITE_ID` / `RYEOS_ORIGIN_SITE_ID` | Site identifiers |
-| `USER_SPACE` | User-space root path |
+| `RYEOS_APP_ROOT` | App root path |
 | `RYEOS_CHECKPOINT_DIR` | Per-thread checkpoint directory |
 | `RYEOS_RESUME` | Set to `1` on resume re-spawns |
 

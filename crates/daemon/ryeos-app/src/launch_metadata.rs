@@ -192,6 +192,17 @@ impl RuntimeLaunchMetadata {
         }
     }
 
+    /// True when this carries no spawn-time metadata — i.e. a wire caller (a UDS
+    /// `runtime.attach_process` self-attach, which sends only thread/pid) let the
+    /// fields default. `attach_process` uses this to avoid clobbering metadata
+    /// already seeded on the row at spawn (resume context).
+    pub fn is_empty(&self) -> bool {
+        self.cancellation_mode.is_none()
+            && self.native_resume.is_none()
+            && self.checkpoint_dir.is_none()
+            && self.resume_context.is_none()
+    }
+
     /// Set the daemon-allocated checkpoint directory.
     pub fn with_checkpoint_dir(mut self, dir: PathBuf) -> Self {
         self.checkpoint_dir = Some(dir);

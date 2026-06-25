@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:c41e8e8cde0945022e68abea938d73f0d79a0e1d1836eeaa24d5ca2852862ec9:PEGKI+bMsOxd9QbrwKlb8Xh+Tz1ofAXIs4coFh4f159rESwkiSE1JYI3Qze7dts5ta2luU9iwmUcLLgTHRo/CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:46a8ee775b507363a7cb3682f36d18cf5bcf3fe2d6e8077239d2865e0a935b77:6vsOhIiJb69ZARmH/rJIokRq0nPXUDrlfF47mfDveYUcGRe5OS2LC8/4UAzEUNWaC2gVDRvJwStpBYbUa+9ZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -19,9 +19,9 @@ Terminology:
 - **Project root**: a directory containing `.ai/` for project-specific
   directives, tools, graphs, knowledge, and config.
 - **System space**: the local Rye installation state, usually
-  `~/.local/share/ryeos`. It contains installed bundles, node identity,
+  `~/.local/share/ryeos` (overridable via `RYEOS_APP_ROOT`). It contains
+  installed bundles, node identity, operator signing keys and trust,
   config, vault state, and daemon state.
-- **User space**: user-level `.ai/` content and signing keys.
 - **Bundle**: an installed `.ai/` tree such as `core` or `standard`.
 - **Canonical ref**: `kind:path`, for example
   `tool:apps/demo/echo`, `directive:apps/demo/chat`,
@@ -47,13 +47,13 @@ ryeos init \
   --trust-file /path/to/ryeos/bundles/standard/PUBLISHER_TRUST.toml
 ```
 
-Custom system space:
+Custom app root:
 
 ```bash
-ryeos init --system-space-dir /tmp/ryeos-state --source /path/to/bundles
+ryeos init --app-root /tmp/ryeos-state --source /path/to/bundles
 ```
 
-The init result reports the system-space path, user key fingerprint,
+The init result reports the app-root path, operator key fingerprint,
 node key fingerprint, vault fingerprint, and installed bundle names.
 
 ## 2. Start, stop, and inspect the local daemon
@@ -74,7 +74,7 @@ ryeos stop
 If the daemon is managed outside `ryeos start`, run it directly:
 
 ```bash
-ryeosd --system-space-dir ~/.local/share/ryeos --bind 127.0.0.1:7400
+ryeosd --app-root ~/.local/share/ryeos --bind 127.0.0.1:7400
 ```
 
 Useful rules for agents:

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-08T03:48:08Z:f7309f20adc56346a05e988637dea0ed4df778ac6a13ade4833c79761629009e:u+R1Lei1MzsRfH50ay/QtV9y6ZQNu9i3a99pZI/7tZvAdMqwe7KTnxPHGrPwQwwqfWVWZp4fZGnkcz7KXGqsCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:10f3079809382a2ce0fc9f2a82a7a40be7a33d92022b51d5efe427dc9953f54c:rG5yFAaYOWkZQBCANlbS9p4eyS0h9LNwt63QtO7v6x6xUz/c39dk+cBM2fz6g74scfo4c5TI+kL+8ZQS/9oZAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -39,16 +39,15 @@ graph workflows run through `runtime:graph-runtime` in the standard bundle.
 
 All runtimes inherit defaults from `config:execution/execution`:
 
-| Setting                  | Default  |
-|--------------------------|----------|
-| `timeout`                | 300s     |
-| `max_steps`              | 100      |
-| `max_concurrency`        | 10       |
-| `cancellation_mode`      | graceful |
-| `cancellation_grace_secs`| 5        |
+| Setting                  | Default       |
+|--------------------------|---------------|
+| `timeout`                | 86400s (1 day)|
+| `max_steps`              | 100           |
+| `max_concurrency`        | 10            |
+| `cancellation_mode`      | graceful      |
+| `cancellation_grace_secs`| 5             |
 
-Override at project level in `.ai/config/execution/execution.yaml`
-or user level in `~/.ryeos/.ai/config/execution/execution.yaml`.
+Override at project level in `.ai/config/execution/execution.yaml`.
 
 ## The `@subprocess` Alias
 

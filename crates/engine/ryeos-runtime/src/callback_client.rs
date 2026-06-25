@@ -224,15 +224,20 @@ impl CallbackClient {
         Ok(())
     }
 
-    /// Advisory: warn-and-continue OK when disconnected.
-    pub async fn request_continuation(&self, prompt: &str) -> Result<Value> {
-        match &self.inner {
-            Some(client) => Ok(client
-                .request_continuation(&self.thread_id, prompt)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?),
-            None => Ok(Value::Null),
-        }
+    /// Resume-critical: a handoff MUST reach the daemon. NOT advisory — a missing
+    /// UDS client (disconnected) is a hard error, never a silent `Ok(null)` that
+    /// would settle the thread `continued` with no successor.
+    pub async fn request_continuation(&self, log_reason: Option<&str>) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback request_continuation called without an inner UDS client \
+                 (socket missing); the handoff cannot be recorded"
+            )
+        })?;
+        client
+            .request_continuation(&self.thread_id, log_reason)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Advisory: warn-and-continue OK when disconnected.
@@ -709,7 +714,7 @@ mod tests {
         async fn request_continuation(
             &self,
             _thread_id: &str,
-            _prompt: &str,
+            _log_reason: Option<&str>,
         ) -> Result<Value, CallbackError> {
             Ok(Value::Null)
         }
@@ -1197,7 +1202,7 @@ mod tests {
         async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn finalize_thread(&self, _: &str, _: TerminalCompletion) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
+        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> { Ok(Value::Null) }
         async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {

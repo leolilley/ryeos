@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T04:23:12Z:44221fa7daabd49b15c85a591fa212b5647c0b3e36193fb80092e35436fe195e:axYvu8KVAcCE1fxUNOAKoOdEfJamVEmF1xs+8kGpVYHBaJOhw524Kv5G+zGdP31Q/i5pogrtjNSyw5yILj+6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:5e69c3282aecb5dc45d341d6a134aecd211cd68941cb591142d1f9226c4a73aa:/NzeFJzSYisqjCHRvRvM1kMKHUZsWPjE/JDNuPQZ4JqJIR5v7rB10QHW/nR7G00PmLPPjffZqCQp7maV2Q30DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, architecture, overview]
@@ -43,7 +43,7 @@ Every `.ai/` file is an **item**. Items have a *kind* (directive, tool,
 knowledge, config, etc.) that determines how they are parsed, composed,
 and executed. Items live in directories determined by their kind schema
 (`location.directory`). The actual layout varies by space (bundle vs
-daemon state vs user overlay). See `knowledge:ryeos/core/ai-directory`
+daemon state). See `knowledge:ryeos/core/ai-directory`
 for the full tree. The conceptual directory mapping:
 
 | Directory      | Kind(s)          | What Lives Here                     |
@@ -81,17 +81,16 @@ Examples:
 The kind prefix determines which directory to look in. The path is
 slash-separated, without file extension.
 
-### Three-Tier Space Resolution
-Items resolve **project → user → system** (first match wins):
+### Two-Tier Space Resolution
+Items resolve **project → system** (first match wins):
 
 | Space   | Location                 | Purpose                      |
 |---------|--------------------------|------------------------------|
 | Project | `.ai/`                   | Project-specific items       |
-| User    | `~/.ryeos/.ai/`                 | Cross-project personal items |
 | System  | Bundle `.ai/` directories | Immutable standard library   |
 
 When you `fetch` or `execute` an item, the engine checks project first,
-then user, then all installed bundles.
+then all installed bundles.
 
 ### Bundles
 A **bundle** is a signed, self-contained `.ai/` tree. Two bundles ship

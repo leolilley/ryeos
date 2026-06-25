@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-22T02:50:09Z:695e06ea86da0fd6b7a6b2d9aae398992f5e30f4e6e54eca91f7162d8690f713:IBF5elRgsQ0wXerhGCCGUhsnTCW566EcTpIuuBGA3BmofHf1TXRHmx/lh4yG23COSWIrt9slBNqdASxX8dPPBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T02:11:52Z:09c5447358ec7aaf4160aeaaef30c6db4f97197a58bc31a0879685d7bdaf24df:6l7iP73IeUnqht7U1E408QHgx9Ig+JuZqyksMR9Hieaoht9jwOyYmJg9tDC5qIDOqwH+Qgl75f+AAmq9+KrSDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -19,7 +19,11 @@ execution:
     name: graph_run
     root_executable: true
     supports_interrupt: true
-    supports_continuation: true
+    # A graph does NOT continue itself: continuation is a chain-fold of a
+    # conversation-shaped kind (the directive). Graph *follow* — a graph driving
+    # and polling a CHILD's continuation to terminal — is a separate capability
+    # and grants the parent no self-continuation.
+    supports_continuation: false
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-11T22:51:46Z:7d91bc8a9b8c6119d115530271b843cb8889b419ccc16de9194709092d7eada7:5PJetAQF6LPoC/9xJuD6JVtsLfH1x6+fw4syAiOnvzfHJuVdUHZ7NaJqBiRO9bGKt/tvgSj6H5a5P7rYktwfDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T04:51:58Z:fd5b6acd4d4038c3740079708ad7db11d33cef9be21dcecb3a66bca298a8e7bb:tKb7oLNSPGfrK3CbEzfP7tMwgRlt1QRo7j0GeyNoo26V2agRKz2xuMfQGyBVhTB7gccBp1Dpy09iocFhJYXhBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: studio/recent/list
 version: "1.0.0"
-description: List rebuildable Studio recent project state from user-space state.
+description: List rebuildable Studio recent project state from per-principal state.
 endpoint: ui.studio.recent.list
 availability: daemon_only

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:1311da3860593050b2afb30919e367c62fa2ed479d042324c0a37d408343cb9f:cpbuCIQ6xcdFUWX3Zv0hpUK3C6hwX+vnWYQDXK25uVodRWZEAYbN/KB1WjH6r5Aa2YJ2XN2bkby59BUqMGE0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:d7cce1ea3f8ae2bc2a97eb9c5e85d9dd01174c007333a2d5063cbab1fe1dc3aa:0kbujKEJ/SX7xLzr1otzGrTd8d6bpnizMHPKdzpoCo4YnEdaEDnSHDBWekBlXPCxMgoOhhETZhtTNKcU1xAVAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
@@ -29,7 +29,7 @@ initialization has been verified:
 5. Initialize tracing/file sink only after init verification and state
    lock acquisition.
 6. `bootstrap::repair_daemon_local` — repair only daemon-local artifacts
-   and fail when user-space init artifacts are missing.
+   and fail when operator init artifacts are missing.
 7. Remove stale configured socket and ensure runtime paths.
 8. Two-phase node-config bootstrap, engine construction, service
    self-check, route table build, listeners, scheduler, and metadata
