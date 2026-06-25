@@ -565,6 +565,7 @@ impl StudioCore {
                             "command_type": command,
                         }),
                         route_seq: None,
+                        ratchet_on_thread_id: false,
                     })]
                 } else {
                     self.notice(format!("No active thread to {command}."), StudioTone::Warn);
@@ -839,9 +840,16 @@ impl StudioCore {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: serde_json::json!({}),
                     route_seq: None,
+                    ratchet_on_thread_id: false,
                 })]
             }
             super::tokenize::InputLine::Plain(plain) => {
+                // Capture ratchet eligibility NOW (issue time), not at result
+                // time: the focused input declares conversation targeting, so a
+                // successful launch should braid the route onto the produced
+                // thread. Computed once here so a focus change while the async
+                // launch is in flight can't corrupt the ratchet decision.
+                let ratchet_on_thread_id = self.focused_input_target_cycle().is_some();
                 let fold = self.seat.fold();
                 let route = fold.input_route();
                 let route_seq = fold.seq_of(super::seat::KEY_INPUT_ROUTE);
@@ -869,6 +877,7 @@ impl StudioCore {
                             target: super::effect::InvokeRef::Ref { item_ref },
                             params,
                             route_seq,
+                            ratchet_on_thread_id,
                         })]
                     }
                     super::seat::InvokeTemplate::Command { mut tokens } => {
@@ -877,6 +886,7 @@ impl StudioCore {
                             target: super::effect::InvokeRef::Tokens { tokens },
                             params: serde_json::json!({}),
                             route_seq,
+                            ratchet_on_thread_id,
                         })]
                     }
                     super::seat::InvokeTemplate::UiFacet { key } => {
@@ -930,6 +940,7 @@ impl StudioCore {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: args,
                     route_seq: None,
+                    ratchet_on_thread_id: false,
                 })]
             }
             None => {
@@ -1229,6 +1240,7 @@ impl StudioCore {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: args,
                     route_seq: None,
+                    ratchet_on_thread_id: false,
                 })]
             }
             None => Vec::new(),
@@ -1428,9 +1440,17 @@ impl StudioCore {
                     // the input at the produced thread so the next submit
                     // continues the chain. A stale result (route changed
                     // since issue) may notice but never retargets.
-                    if let StudioEffectKind::Invoke { route_seq, .. } = &expected {
+                    if let StudioEffectKind::Invoke {
+                        route_seq,
+                        ratchet_on_thread_id,
+                        ..
+                    } = &expected
+                    {
                         let fold = self.seat.fold();
-                        let targets = self.focused_input_target_cycle().is_some();
+                        // Eligibility was decided at issue time (see submit_route)
+                        // — read it, don't recompute from current focus, which
+                        // may have moved while the launch was in flight.
+                        let targets = *ratchet_on_thread_id;
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
                             // Only ratchet a continuation target onto routes
@@ -2166,6 +2186,7 @@ mod tests {
                 target: super::super::effect::InvokeRef::Tokens { tokens },
                 params,
                 route_seq: None,
+                ..
             }) if tokens == &vec!["thread".to_string(), "cancel".to_string()]
                 && params["thread_id"] == "T-demo"
         ));
@@ -2968,6 +2989,7 @@ mod tests {
                 target: crate::studio::effect::InvokeRef::Ref { item_ref },
                 params,
                 route_seq: Some(_),
+                ..
             }) if item_ref == "service:threads/input"
                 && params["input"] == "run this"
                 && params["directive"] == "directive:demo/base"
@@ -3088,6 +3110,54 @@ mod tests {
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread, None, "non-targeting input is not retargeted");
         assert_eq!(route.chain_root, None);
+    }
+
+    #[test]
+    fn ratchet_eligibility_is_captured_at_issue_time_not_result_time() {
+        // A targeting input submits → eligibility captured TRUE on the effect.
+        // Focus then moves to a non-targeting input before the async result
+        // lands. The launch must STILL ratchet (issue-time decision), proving
+        // the result handler doesn't recompute from current focus.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core); // targeting input focused
+        set_focused_input(&mut core, "hi");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+
+        // Focus moves to a NON-targeting input while the launch is in flight.
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "route" }
+            }))
+            .unwrap(),
+        );
+        assert!(
+            core.focused_input_target_cycle().is_none(),
+            "focus now resolves a non-targeting input"
+        );
+
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-9", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(
+            route.thread.as_deref(),
+            Some("T-9"),
+            "ratcheted on the issue-time decision, not the moved focus"
+        );
+        assert_eq!(route.chain_root.as_deref(), Some("T-9"));
     }
 
     #[test]
@@ -3315,6 +3385,7 @@ mod tests {
                 target: super::super::effect::InvokeRef::Tokens { tokens },
                 params,
                 route_seq: None,
+                ..
             }) if tokens == &vec!["thread".to_string(), "input".to_string()]
                 && params["line"] == "do the thing"
         ));
