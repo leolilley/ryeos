@@ -685,6 +685,81 @@ mod integration_tests {
     }
 
     #[test]
+    fn machine_continuation_chain_depth_cap() {
+        use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+        use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+        let (_tmpdir, store) = setup_state_store();
+        let max = ryeos_app::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH;
+
+        let resume_ctx = || ResumeContext {
+            kind: "directive".into(),
+            item_ref: "test/item".into(),
+            launch_mode: "inline".into(),
+            parameters: serde_json::json!({}),
+            project_context: ProjectContext::LocalPath {
+                path: std::path::PathBuf::from("/tmp/p"),
+            },
+            original_snapshot_hash: None,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp".into(),
+                scopes: vec![],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: vec![],
+        };
+        // A machine continuation requires the source be RUNNING with a captured
+        // ResumeContext, so make each successor continuable before extending.
+        let make_continuable = |id: &str| {
+            store.mark_thread_running(id, None).expect("mark_thread_running");
+            store
+                .seed_launch_metadata(
+                    id,
+                    &RuntimeLaunchMetadata::default().with_resume_context(resume_ctx()),
+                )
+                .expect("seed launch metadata");
+        };
+
+        let root = make_thread("D0", "D0", "directive", "test/item", None);
+        store.create_thread(&root).expect("create root");
+        make_continuable("D0");
+
+        // `max` consecutive machine continuations — all allowed (links #1..#max).
+        let mut source = "D0".to_string();
+        for i in 1..=max {
+            let id = format!("D{i}");
+            let succ = make_thread(&id, "D0", "directive", "test/item", Some(&source));
+            store
+                .create_machine_continuation(&succ, &source, "D0", Some("turn_limit"))
+                .unwrap_or_else(|e| panic!("machine link #{i} must be allowed: {e}"));
+            make_continuable(&id);
+            source = id;
+        }
+
+        // The next machine continuation (link #max+1) is refused — the chain is at
+        // the cap. No successor is persisted; the source stays running so the
+        // runtime fails terminal.
+        let over = make_thread("D-over", "D0", "directive", "test/item", Some(&source));
+        let err = store
+            .create_machine_continuation(&over, &source, "D0", Some("turn_limit"))
+            .expect_err("continuation past the cap must be refused");
+        assert!(
+            err.to_string().contains("continuation depth limit reached"),
+            "got: {err}"
+        );
+        assert!(
+            store.get_thread("D-over").unwrap().is_none(),
+            "the refused successor must not be persisted"
+        );
+        assert_eq!(
+            store.get_thread(&source).unwrap().unwrap().status,
+            "running",
+            "the source stays running for terminal-fail, not continued"
+        );
+    }
+
+    #[test]
     fn rebuild_recovers_edges_from_cas() {
         let (_tmpdir, store) = setup_state_store();
 
