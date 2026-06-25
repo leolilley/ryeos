@@ -73,13 +73,9 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
     for (index, entry) in entries.iter().enumerate() {
         match entry {
             StudioTimelineEntryVm::Block { text, tone } => {
-                for wrapped in wrap_words(text, width) {
-                    lines.push(FeedLine {
-                        text: wrapped,
-                        style: tone_style(*tone),
-                        entry: Some(index),
-                    });
-                }
+                // The braid stores the raw cognition prose; the lens typesets
+                // it (block-level markdown). Inline spans are a later pass.
+                push_markdown_block(lines, text, *tone, width, index);
                 // Padding between blocks — not part of the entry's point.
                 lines.push(FeedLine {
                     text: String::new(),
@@ -144,6 +140,122 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
     }
 }
 
+/// Typeset a cognition prose block as light, block-level markdown:
+/// - fenced ``` code blocks render verbatim (no reflow) on a panel bg so they
+///   stand apart;
+/// - ATX headings (`#`/`##`/`###`) render bold;
+/// - bullet lists (`-`/`*`/`+`) get a glyph and a hanging indent;
+/// - plain paragraphs reflow to width as before.
+///
+/// Inline emphasis (`code`, **bold**) needs per-span cell styling and is a
+/// later pass — this is block structure only. The braid keeps the raw text;
+/// this is purely the lens's rendering of it.
+fn push_markdown_block(
+    lines: &mut Vec<FeedLine>,
+    text: &str,
+    tone: StudioTone,
+    width: usize,
+    index: usize,
+) {
+    let mut para = String::new();
+    let mut in_code = false;
+    for raw in text.lines() {
+        let trimmed = raw.trim_start();
+        if trimmed.starts_with("```") {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            // Verbatim, with a two-column gutter + panel bg as the code frame.
+            lines.push(FeedLine {
+                text: format!("  {raw}"),
+                style: style_muted().bg(PANEL),
+                entry: Some(index),
+            });
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            lines.push(FeedLine {
+                text: String::new(),
+                style: style_fg(),
+                entry: Some(index),
+            });
+            continue;
+        }
+        if let Some(heading) = heading_text(trimmed) {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            lines.push(FeedLine {
+                text: heading.to_string(),
+                style: tone_style(tone).bold(),
+                entry: Some(index),
+            });
+            continue;
+        }
+        if let Some(item) = bullet_item(trimmed) {
+            flush_paragraph(lines, &mut para, tone, width, index);
+            let inner = width.saturating_sub(2).max(1);
+            for (i, wrapped) in wrap_words(item, inner).into_iter().enumerate() {
+                let prefix = if i == 0 { "• " } else { "  " };
+                lines.push(FeedLine {
+                    text: format!("{prefix}{wrapped}"),
+                    style: tone_style(tone),
+                    entry: Some(index),
+                });
+            }
+            continue;
+        }
+        // Prose: accumulate soft-wrapped lines into one paragraph to reflow.
+        if !para.is_empty() {
+            para.push(' ');
+        }
+        para.push_str(trimmed);
+    }
+    flush_paragraph(lines, &mut para, tone, width, index);
+}
+
+/// Wrap the accumulated paragraph to `width` and clear it.
+fn flush_paragraph(
+    lines: &mut Vec<FeedLine>,
+    para: &mut String,
+    tone: StudioTone,
+    width: usize,
+    index: usize,
+) {
+    let trimmed = para.trim();
+    if !trimmed.is_empty() {
+        for wrapped in wrap_words(trimmed, width) {
+            lines.push(FeedLine {
+                text: wrapped,
+                style: tone_style(tone),
+                entry: Some(index),
+            });
+        }
+    }
+    para.clear();
+}
+
+/// The text of an ATX heading line (`# `/`## `/`### `), without the marker.
+fn heading_text(line: &str) -> Option<&str> {
+    for marker in ["### ", "## ", "# "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// The text of a bullet-list item (`- `/`* `/`+ `), without the marker.
+fn bullet_item(line: &str) -> Option<&str> {
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +267,32 @@ mod tests {
             tone: StudioTone::Neutral,
             action: None,
         }
+    }
+
+    #[test]
+    fn markdown_block_typesets_code_heading_and_bullets() {
+        let mut lines = Vec::new();
+        let text = "# Title\n\npara one\nwith soft wrap\n\n- first\n- second\n\n```\ncode  spaced\n```";
+        push_markdown_block(&mut lines, text, StudioTone::Neutral, 60, 0);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+
+        // ATX heading: marker stripped, rendered bold.
+        assert!(texts.iter().any(|t| *t == "Title"), "heading: {texts:?}");
+        // Soft-wrapped prose reflows into one paragraph line.
+        assert!(
+            texts.iter().any(|t| *t == "para one with soft wrap"),
+            "prose reflow: {texts:?}"
+        );
+        // Bullets get a glyph.
+        assert!(texts.iter().any(|t| *t == "• first"), "bullet: {texts:?}");
+        assert!(texts.iter().any(|t| *t == "• second"));
+        // Fenced code renders verbatim (whitespace preserved) with a gutter,
+        // and the ``` fences themselves are not emitted.
+        assert!(
+            texts.iter().any(|t| *t == "  code  spaced"),
+            "verbatim code: {texts:?}"
+        );
+        assert!(!texts.iter().any(|t| t.contains("```")), "fences hidden");
     }
 
     fn row_text(surface: &TextSurface, w: usize, y: usize) -> String {
