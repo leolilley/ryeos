@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_ref::CanonicalRef;
+use crate::contracts::NativeResumeSpec;
 use crate::error::EngineError;
 use crate::kind_registry::{KindRegistry, TerminatorDecl};
 use crate::resolution::TrustClass;
@@ -61,6 +62,30 @@ pub struct RuntimeYaml {
     pub description: Option<String>,
     #[serde(default)]
     pub schema: Option<RuntimeSchema>,
+    /// Replay-aware resume policy for this runtime. Presence ⇒ this runtime
+    /// owns its own checkpoint/resume: the daemon allocates a per-thread
+    /// checkpoint dir and injects `RYEOS_CHECKPOINT_DIR` for runtime-registry
+    /// launches of the kinds it serves (and `RYEOS_RESUME=1` on resume).
+    /// Accepts `native_resume: true` or the rich object form; `false` is
+    /// rejected — omit the field to disable. Shares
+    /// [`NativeResumeSpec::parse_declaration`] with the engine's chain-element
+    /// `native_resume` handler so both accept identical shapes.
+    #[serde(default, deserialize_with = "deserialize_native_resume")]
+    pub native_resume: Option<NativeResumeSpec>,
+}
+
+/// `deserialize_with` for `RuntimeYaml::native_resume`: route the present value
+/// (a bool or a mapping) through the shared [`NativeResumeSpec::parse_declaration`]
+/// so the runtime-registry YAML accepts the same `true` / object / rejected-`false`
+/// shapes as the engine handler. Absent ⇒ `None` via `#[serde(default)]`.
+fn deserialize_native_resume<'de, D>(de: D) -> Result<Option<NativeResumeSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(de)?;
+    NativeResumeSpec::parse_declaration(&value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -407,11 +432,89 @@ mod tests {
             required_envelope_fields: vec![],
             description: None,
             schema: None,
+            native_resume: None,
         }
     }
 
     fn test_path() -> PathBuf {
         PathBuf::from("/tmp/test-runtime.yaml")
+    }
+
+    /// Minimal valid runtime YAML body; callers append a `native_resume:` line.
+    const BASE_YAML: &str =
+        "kind: runtime\nserves: test_kind\nbinary_ref: bin/test\nabi_version: v1\n";
+
+    #[test]
+    fn native_resume_absent_is_none() {
+        let yaml: RuntimeYaml = serde_yaml::from_str(BASE_YAML).unwrap();
+        assert!(yaml.native_resume.is_none());
+    }
+
+    #[test]
+    fn native_resume_true_is_default_spec() {
+        let body = format!("{BASE_YAML}native_resume: true\n");
+        let yaml: RuntimeYaml = serde_yaml::from_str(&body).unwrap();
+        assert_eq!(yaml.native_resume, Some(NativeResumeSpec::default()));
+    }
+
+    #[test]
+    fn native_resume_object_form_parses_fields() {
+        let body = format!(
+            "{BASE_YAML}native_resume:\n  checkpoint_interval_secs: 5\n  max_auto_resume_attempts: 3\n"
+        );
+        let yaml: RuntimeYaml = serde_yaml::from_str(&body).unwrap();
+        assert_eq!(
+            yaml.native_resume,
+            Some(NativeResumeSpec {
+                checkpoint_interval_secs: 5,
+                max_auto_resume_attempts: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn native_resume_object_form_defaults_missing_fields() {
+        let body = format!("{BASE_YAML}native_resume:\n  checkpoint_interval_secs: 5\n");
+        let yaml: RuntimeYaml = serde_yaml::from_str(&body).unwrap();
+        // max_auto_resume_attempts defaults to the NativeResumeSpec default (1).
+        assert_eq!(
+            yaml.native_resume,
+            Some(NativeResumeSpec {
+                checkpoint_interval_secs: 5,
+                max_auto_resume_attempts: NativeResumeSpec::default().max_auto_resume_attempts,
+            })
+        );
+    }
+
+    #[test]
+    fn native_resume_false_is_rejected() {
+        let body = format!("{BASE_YAML}native_resume: false\n");
+        let err = serde_yaml::from_str::<RuntimeYaml>(&body).unwrap_err();
+        assert!(
+            err.to_string().contains("native_resume: false"),
+            "error should explain the false rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn native_resume_empty_object_is_all_defaults() {
+        // `native_resume: {}` ⇒ the rich form with every field defaulted,
+        // i.e. the same as `native_resume: true`.
+        let body = format!("{BASE_YAML}native_resume: {{}}\n");
+        let yaml: RuntimeYaml = serde_yaml::from_str(&body).unwrap();
+        assert_eq!(yaml.native_resume, Some(NativeResumeSpec::default()));
+    }
+
+    #[test]
+    fn native_resume_unknown_field_is_rejected() {
+        let body = format!("{BASE_YAML}native_resume:\n  bogus: 1\n");
+        let err = serde_yaml::from_str::<RuntimeYaml>(&body)
+            .expect_err("unknown native_resume field must be rejected (deny_unknown_fields)");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") && msg.contains("native_resume"),
+            "error should name the unknown field and the native_resume context: {msg}"
+        );
     }
 
     #[test]

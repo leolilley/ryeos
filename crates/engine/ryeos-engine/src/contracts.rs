@@ -3145,6 +3145,50 @@ impl Default for NativeResumeSpec {
     }
 }
 
+impl NativeResumeSpec {
+    /// Parse a `native_resume` declaration from its YAML/JSON value. Shared by
+    /// the engine `native_resume` runtime handler (chain-element specs) and the
+    /// runtime-registry `RuntimeYaml`, so both accept the identical shapes:
+    ///   * `true` ⇒ defaults;
+    ///   * an object ⇒ the rich form (each field defaults individually);
+    ///   * `false` ⇒ rejected — omit the block to disable.
+    ///
+    /// Returns a plain `String` reason on error so each caller can wrap it in
+    /// its own error type (engine `InvalidRuntimeConfig`, serde, …).
+    pub fn parse_declaration(value: &Value) -> Result<Self, String> {
+        match value {
+            Value::Bool(true) => Ok(Self::default()),
+            Value::Bool(false) => {
+                Err("`native_resume: false` is not supported — omit the block to disable".to_string())
+            }
+            other => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct RichForm {
+                    #[serde(default = "default_checkpoint_interval_secs")]
+                    checkpoint_interval_secs: u64,
+                    #[serde(default = "default_max_auto_resume_attempts")]
+                    max_auto_resume_attempts: u32,
+                }
+                let rich: RichForm = serde_json::from_value(other.clone())
+                    .map_err(|e| format!("invalid native_resume block: {e}"))?;
+                Ok(Self {
+                    checkpoint_interval_secs: rich.checkpoint_interval_secs,
+                    max_auto_resume_attempts: rich.max_auto_resume_attempts,
+                })
+            }
+        }
+    }
+}
+
+fn default_checkpoint_interval_secs() -> u64 {
+    NativeResumeSpec::default().checkpoint_interval_secs
+}
+
+fn default_max_auto_resume_attempts() -> u32 {
+    NativeResumeSpec::default().max_auto_resume_attempts
+}
+
 /// Cancellation + streaming policy declared by the `native_async`
 /// runtime handler. Presence in the spec ⇒ this tool drives its own
 /// event stream (the runner injects `RYEOS_NATIVE_ASYNC=1`) and the
