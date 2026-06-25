@@ -72,6 +72,18 @@ struct MintResponse {
     token: String,
 }
 
+/// The daemon route the launcher mints against. Used for BOTH the signed
+/// canonical path and the request URL so they can never drift — the signature
+/// is path-bound, so a mismatch would silently fail verification.
+const MINT_PATH: &str = "/ui/api/launch/mint";
+
+/// Connect timeout for daemon HTTP calls. Without it a dead or filtered host
+/// hangs the launcher for the OS connect timeout (minutes). Mirrors the CLI.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total-request cap for the control-plane discovery + mint calls.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -90,8 +102,11 @@ async fn main() -> Result<()> {
     let app_root = discover_app_root()?;
     let signer = WebSigner::resolve(&app_root)?;
 
-    // Discover daemon audience (public key fingerprint).
-    let audience = discover_audience(&daemon_url).await?;
+    // Discover the daemon audience (principal_id) and the effective base URL
+    // after any http→https edge redirect. The signed request targets that base
+    // directly — a redirected POST would be downgraded to GET and break the
+    // signature.
+    let discovered = discover_audience(&daemon_url).await?;
 
     let project_path = cli.project.or_else(project_from_cli_env);
 
@@ -106,16 +121,21 @@ async fn main() -> Result<()> {
 
     let body = serde_json::to_vec(&mint_req).context("serialize mint request")?;
 
-    // Sign the request.
-    let sign_headers = signer.sign("POST", "/ui/api/launch/mint", &body, &audience)?;
+    // Sign the request. `MINT_PATH` drives BOTH the signed canonical path and
+    // the URL below, so the path the signature is bound to can never drift.
+    let sign_headers = signer.sign("POST", MINT_PATH, &body, &discovered.principal_id)?;
 
-    // Send the mint request.
-    let client = reqwest::Client::new();
+    // Send the mint request with a client that does NOT auto-follow redirects:
+    // a 3xx on a signed POST must fail loud, never be silently downgraded to a
+    // GET (which would invalidate the method/path/body-bound signature).
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build signed HTTP client")?;
     let resp = client
-        .post(format!(
-            "{}/ui/api/launch/mint",
-            daemon_url.trim_end_matches('/')
-        ))
+        .post(format!("{}{}", discovered.effective_base_url, MINT_PATH))
         .header("Content-Type", "application/json")
         .header("x-ryeos-key-id", &sign_headers.key_id)
         .header("x-ryeos-timestamp", &sign_headers.timestamp)
@@ -289,23 +309,68 @@ fn canonicalize_path(path_and_query: &str) -> String {
 
 // ── Audience discovery ─────────────────────────────────────────────────
 
-async fn discover_audience(daemon_url: &str) -> Result<String> {
-    let client = reqwest::Client::new();
+/// Result of audience discovery: the signing audience plus the effective base
+/// URL the daemon answered on after any redirects.
+struct Discovered {
+    principal_id: String,
+    effective_base_url: String,
+}
+
+async fn discover_audience(daemon_url: &str) -> Result<Discovered> {
+    // Discovery is an UNSIGNED GET, so it may safely follow an http→https edge
+    // redirect; the client follows redirects (default policy) and negotiates TLS.
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .context("build discovery HTTP client")?;
     let resp = client
         .get(format!("{}/public-key", daemon_url.trim_end_matches('/')))
         .send()
         .await
         .context("fetch daemon public key")?;
 
+    // The origin the daemon answered on, post-redirect, minus the /public-key
+    // probe path — so the signed mint POST targets it directly.
+    let effective_base_url = effective_base_from_public_key_url(resp.url().as_str())?;
+
     if !resp.status().is_success() {
         bail!("failed to fetch daemon public key: {}", resp.status());
     }
 
     let v: serde_json::Value = resp.json().await.context("parse public-key response")?;
-    v.get("principal_id")
+    let principal_id = v
+        .get("principal_id")
         .and_then(|f| f.as_str())
         .map(|s| s.to_string())
-        .context("public-key response missing 'principal_id'")
+        .context("public-key response missing 'principal_id'")?;
+    Ok(Discovered {
+        principal_id,
+        effective_base_url,
+    })
+}
+
+/// Derive the effective base URL from the (post-redirect) `/public-key` URL:
+/// drop query/fragment, strip a trailing slash and the `/public-key` probe
+/// path, preserving any host path prefix and explicit port. Fails closed when
+/// the resolved path is not `/public-key` (an unexpected redirect target),
+/// rather than letting a signed request dispatch under a wrong base.
+fn effective_base_from_public_key_url(public_key_url: &str) -> Result<String> {
+    let without_fragment = public_key_url.split('#').next().unwrap_or(public_key_url);
+    let path_part = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let trimmed = path_part.trim_end_matches('/');
+    trimmed
+        .strip_suffix("/public-key")
+        .map(str::to_string)
+        .with_context(|| {
+            format!(
+                "discovery resolved to an unexpected URL whose path is not \
+                 /public-key: {public_key_url}"
+            )
+        })
 }
 
 fn project_from_cli_env() -> Option<PathBuf> {
@@ -335,6 +400,28 @@ fn open_browser(url: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_base_strips_public_key_and_preserves_prefix_port() {
+        let base = effective_base_from_public_key_url;
+        assert_eq!(
+            base("https://node.example.com/public-key").unwrap(),
+            "https://node.example.com"
+        );
+        assert_eq!(base("https://host/prefix/public-key").unwrap(), "https://host/prefix");
+        assert_eq!(
+            base("http://127.0.0.1:7400/public-key").unwrap(),
+            "http://127.0.0.1:7400"
+        );
+        assert_eq!(base("https://host/public-key/").unwrap(), "https://host");
+        assert_eq!(base("https://host/public-key?x=1").unwrap(), "https://host");
+    }
+
+    #[test]
+    fn effective_base_rejects_unexpected_target() {
+        assert!(effective_base_from_public_key_url("https://host/login").is_err());
+        assert!(effective_base_from_public_key_url("https://host/%70ublic-key").is_err());
+    }
 
     #[test]
     fn canonicalize_path_no_query() {
