@@ -96,10 +96,14 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
     async fn get_thread(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
+    /// Machine continuation handoff: the running source was cut off by a limit
+    /// mid-task and asks the daemon to spawn + launch a chain-fold successor.
+    /// Autonomous by construction — carries no reason/gate/mode, only an
+    /// optional free-form string for logs.
     async fn request_continuation(
         &self,
         thread_id: &str,
-        prompt: &str,
+        log_reason: Option<&str>,
     ) -> Result<Value, CallbackError>;
 
     async fn append_event(

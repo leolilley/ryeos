@@ -37,6 +37,31 @@ pub struct NewCommandRecord {
     pub params: Option<Value>,
 }
 
+/// Outcome of attempting to claim the right to launch a thread.
+///
+/// The launch claim is the ONLY thing that authorizes a spawn and the only way
+/// to distinguish an **unlaunched** successor (no claim / expired claim) from one
+/// **mid-launch** (a live claim held by some launcher). It is keyed on
+/// `thread_id`, so at most one launcher owns a thread's launch window at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchClaimOutcome {
+    /// The caller now owns this thread's launch window (fresh claim, or a stale
+    /// lease reclaimed). The caller's `claim_id` is recorded.
+    Claimed,
+    /// Another launcher holds an unexpired claim — back off, do not spawn.
+    AlreadyClaimed,
+}
+
+/// A live launch claim, as read back for reconcile/inspection.
+#[derive(Debug, Clone)]
+pub struct LaunchClaim {
+    pub thread_id: String,
+    pub claim_id: String,
+    pub claimed_at_ms: i64,
+    pub lease_expires_at_ms: i64,
+    pub claimed_by: String,
+}
+
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -69,6 +94,14 @@ CREATE TABLE IF NOT EXISTS thread_commands (
 
 CREATE INDEX IF NOT EXISTS idx_thread_commands_thread_status
     ON thread_commands(thread_id, status);
+
+CREATE TABLE IF NOT EXISTS thread_launch_claim (
+    thread_id TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL,
+    claimed_at_ms INTEGER NOT NULL,
+    lease_expires_at_ms INTEGER NOT NULL,
+    claimed_by TEXT NOT NULL
+);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -195,6 +228,41 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "thread_launch_claim",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "claim_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "claimed_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lease_expires_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "claimed_by",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -256,6 +324,20 @@ impl RuntimeDb {
         pgid: i64,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
+        // Preserve seeded launch metadata. A self-attach over UDS sends only
+        // thread/pid, so its `launch_metadata` is the serde default (empty); do
+        // NOT let that clobber metadata already seeded on the row at spawn
+        // (resume context / continuation spec). Update only pid/pgid in that case.
+        if launch_metadata.is_empty() {
+            let updated = self.conn.execute(
+                "UPDATE thread_runtime SET pid = ?2, pgid = ?3 WHERE thread_id = ?1",
+                params![thread_id, pid, pgid],
+            )?;
+            if updated == 0 {
+                bail!("thread_runtime row missing for thread_id: {thread_id}");
+            }
+            return Ok(());
+        }
         let lm_json =
             serde_json::to_string(launch_metadata).context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
@@ -263,6 +345,28 @@ impl RuntimeDb {
                 SET pid = ?2, pgid = ?3, launch_metadata = ?4
               WHERE thread_id = ?1",
             params![thread_id, pid, pgid, lm_json],
+        )?;
+        if updated == 0 {
+            bail!("thread_runtime row missing for thread_id: {thread_id}");
+        }
+        Ok(())
+    }
+
+    /// Seed/overwrite a thread's launch metadata WITHOUT touching pid/pgid. Used
+    /// at spawn time to persist the launch identity (resume context /
+    /// continuation spec) before the process self-attaches; the
+    /// clobber-preserving [`Self::attach_process`] keeps it against a later empty
+    /// self-attach.
+    pub fn set_launch_metadata(
+        &self,
+        thread_id: &str,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        let lm_json =
+            serde_json::to_string(launch_metadata).context("failed to encode launch_metadata")?;
+        let updated = self.conn.execute(
+            "UPDATE thread_runtime SET launch_metadata = ?2 WHERE thread_id = ?1",
+            params![thread_id, lm_json],
         )?;
         if updated == 0 {
             bail!("thread_runtime row missing for thread_id: {thread_id}");
@@ -384,6 +488,98 @@ impl RuntimeDb {
             bail!("thread_runtime row missing for thread_id: {thread_id}");
         }
         self.get_resume_attempts(thread_id)
+    }
+
+    /// Atomically claim the right to launch `thread_id`, returning whether the
+    /// caller won the claim.
+    ///
+    /// This is the sole authorization for a spawn. A fresh thread takes the
+    /// claim; a thread already mid-launch (a live, unexpired claim) returns
+    /// [`LaunchClaimOutcome::AlreadyClaimed`]. A **stale** claim — one whose
+    /// lease has expired, meaning the prior launcher died mid-launch (e.g. a
+    /// daemon crash between create and spawn) — is reclaimed so the successor is
+    /// not stranded. Lease expiry is the liveness proxy: a crashed daemon cannot
+    /// renew, and a different daemon instance only reclaims after expiry.
+    ///
+    /// The whole decision is one `INSERT … ON CONFLICT DO UPDATE … WHERE expired`
+    /// statement, so it is atomic against a concurrent claimer with no
+    /// read-then-write race. `lease_ms` bounds how long this claim blocks a
+    /// reclaim if the caller dies before releasing.
+    pub fn claim_thread_launch(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        claimed_by: &str,
+        lease_ms: i64,
+    ) -> Result<LaunchClaimOutcome> {
+        let now_ms = lillux::time::timestamp_millis();
+        let expires_ms = now_ms.saturating_add(lease_ms);
+        // Insert if absent; on conflict, reclaim ONLY when the existing lease has
+        // already expired (`lease_expires_at_ms <= now`). A live claim leaves the
+        // row untouched → 0 rows changed → AlreadyClaimed.
+        let changed = self.conn.execute(
+            "INSERT INTO thread_launch_claim
+                 (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(thread_id) DO UPDATE SET
+                 claim_id = excluded.claim_id,
+                 claimed_at_ms = excluded.claimed_at_ms,
+                 lease_expires_at_ms = excluded.lease_expires_at_ms,
+                 claimed_by = excluded.claimed_by
+             WHERE thread_launch_claim.lease_expires_at_ms <= excluded.claimed_at_ms",
+            params![thread_id, claim_id, now_ms, expires_ms, claimed_by],
+        )?;
+        Ok(if changed == 1 {
+            LaunchClaimOutcome::Claimed
+        } else {
+            LaunchClaimOutcome::AlreadyClaimed
+        })
+    }
+
+    /// Release a launch claim the caller owns (matched by `claim_id`), e.g. when
+    /// the launch failed and the thread should become reclaimable immediately
+    /// rather than waiting out the lease. Returns true if a row was removed.
+    /// A mismatched `claim_id` (another launcher reclaimed in the meantime) is a
+    /// no-op, never a cross-owner delete.
+    pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
+        let removed = self.conn.execute(
+            "DELETE FROM thread_launch_claim WHERE thread_id = ?1 AND claim_id = ?2",
+            params![thread_id, claim_id],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Delete ALL launch claims. Called once at daemon startup (before reconcile
+    /// dispatches): a restart proves every prior in-process launcher is gone, so
+    /// any surviving claim is stale and would otherwise block a reconcile relaunch
+    /// of a `created` successor until the lease expired. Returns the count removed.
+    pub fn clear_all_launch_claims(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM thread_launch_claim", [])?)
+    }
+
+    /// Read the current launch claim for a thread, if any. The reconciler uses
+    /// this to tell an unlaunched successor (no claim, or expired) from one
+    /// mid-launch (live claim) without attempting to claim.
+    pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<LaunchClaim>> {
+        self.conn
+            .query_row(
+                "SELECT thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by
+                   FROM thread_launch_claim WHERE thread_id = ?1",
+                params![thread_id],
+                |row| {
+                    Ok(LaunchClaim {
+                        thread_id: row.get(0)?,
+                        claim_id: row.get(1)?,
+                        claimed_at_ms: row.get(2)?,
+                        lease_expires_at_ms: row.get(3)?,
+                        claimed_by: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn submit_command(&self, cmd: &NewCommandRecord) -> Result<CommandRecord> {
@@ -543,6 +739,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_attach_preserves_seeded_launch_metadata() {
+        // Spawn seeds real metadata; a later UDS self-attach sends only pid/pgid
+        // (empty metadata) and must NOT clobber it.
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("t1", "c1").unwrap();
+        let seeded = RuntimeLaunchMetadata {
+            cancellation_mode: Some(CancellationMode::Graceful { grace_secs: 9 }),
+            ..Default::default()
+        };
+        db.attach_process("t1", 1234, 5678, &seeded).unwrap();
+
+        // Self-attach with default (empty) metadata, new pid/pgid.
+        db.attach_process("t1", 4321, 8765, &RuntimeLaunchMetadata::default())
+            .unwrap();
+
+        let info = db.get_runtime_info("t1").unwrap().unwrap();
+        assert_eq!(info.pid, Some(4321), "pid still updated");
+        assert_eq!(info.pgid, Some(8765), "pgid still updated");
+        assert_eq!(
+            info.launch_metadata
+                .expect("seeded metadata preserved")
+                .cancellation_mode,
+            seeded.cancellation_mode,
+            "empty attach must not clobber seeded metadata"
+        );
+    }
+
+    #[test]
     fn attach_with_hard_cancellation_roundtrip() {
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
@@ -659,6 +883,69 @@ mod tests {
         assert!(
             err.to_string().contains("schema_version mismatch"),
             "expected schema mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn launch_claim_first_caller_wins_second_blocked() {
+        let (_tmp, db) = fresh_db();
+        // Fresh thread: first claim with a long lease wins.
+        assert_eq!(
+            db.claim_thread_launch("t1", "c1", "daemon-a", 60_000)
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        // A second launcher cannot claim while the lease is live.
+        assert_eq!(
+            db.claim_thread_launch("t1", "c2", "daemon-b", 60_000)
+                .unwrap(),
+            LaunchClaimOutcome::AlreadyClaimed
+        );
+        // The live claim still belongs to the first caller.
+        let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
+        assert_eq!(claim.claim_id, "c1");
+        assert_eq!(claim.claimed_by, "daemon-a");
+    }
+
+    #[test]
+    fn launch_claim_stale_lease_is_reclaimed() {
+        let (_tmp, db) = fresh_db();
+        // A claim whose lease is already in the past (prior launcher died
+        // mid-launch) must be reclaimable.
+        assert_eq!(
+            db.claim_thread_launch("t1", "c1", "daemon-a", -1_000)
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        assert_eq!(
+            db.claim_thread_launch("t1", "c2", "daemon-b", 60_000)
+                .unwrap(),
+            LaunchClaimOutcome::Claimed,
+            "expired lease must be reclaimed by a new launcher"
+        );
+        let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
+        assert_eq!(claim.claim_id, "c2", "reclaim overwrites the owner");
+        assert_eq!(claim.claimed_by, "daemon-b");
+    }
+
+    #[test]
+    fn launch_claim_release_frees_for_reclaim() {
+        let (_tmp, db) = fresh_db();
+        assert_eq!(
+            db.claim_thread_launch("t1", "c1", "daemon-a", 60_000)
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
+        );
+        // A mismatched claim_id must not delete another owner's claim.
+        assert!(!db.release_thread_launch_claim("t1", "other").unwrap());
+        assert!(db.get_launch_claim("t1").unwrap().is_some());
+        // The owner releases; the thread becomes immediately reclaimable.
+        assert!(db.release_thread_launch_claim("t1", "c1").unwrap());
+        assert!(db.get_launch_claim("t1").unwrap().is_none());
+        assert_eq!(
+            db.claim_thread_launch("t1", "c2", "daemon-b", 60_000)
+                .unwrap(),
+            LaunchClaimOutcome::Claimed
         );
     }
 }

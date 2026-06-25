@@ -141,9 +141,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
     async fn request_continuation(
         &self,
         thread_id: &str,
-        prompt: &str,
+        log_reason: Option<&str>,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "reason": prompt});
+        let mut params = json!({
+            "thread_id": thread_id,
+            "reason": log_reason,
+        });
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.request_continuation", params)

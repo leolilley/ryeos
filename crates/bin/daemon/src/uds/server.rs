@@ -202,7 +202,11 @@ pub async fn dispatch_runtime_method(
         }
         "runtime.finalize_thread" => handle_finalize(&clean_params, state),
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
-        "runtime.request_continuation" => handle_request_continuation(&clean_params, state),
+        "runtime.request_continuation" => {
+            let result = handle_request_continuation(&clean_params, state)?;
+            spawn_machine_continuation_launch(state, &result);
+            Ok(result)
+        }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
@@ -375,14 +379,64 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
     }
 }
 
+/// Auto-launch a machine continuation successor after a limit cut-off handoff.
+///
+/// The successor row and the chain link are ALWAYS recorded by
+/// `request_continuation`; only the autonomous RELAUNCH is gated here. Without a
+/// chain-level budget ceiling (still to land) an unbounded task could spawn an
+/// infinite chain, so auto-launch is opt-in via `RYEOS_AUTO_MACHINE_CONTINUATION=1`.
+/// Default OFF leaves the successor `created` with its captured `ResumeContext`
+/// for reconcile or an operator to launch.
+///
+/// Spawned daemon-side (NOT from the dying runtime — a lifecycle hazard) after
+/// the source is settled `continued` and the state-store write lock has dropped.
+/// `launch_successor` claims the launch lease, so a concurrent reconcile cannot
+/// double-launch the same successor.
+fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Value) {
+    // Same gate as reconcile — they must never disagree on whether autonomous
+    // launch is enabled.
+    if !crate::reconcile::auto_machine_continuation_enabled() {
+        return;
+    }
+    let Some(successor_id) = result
+        .get("successor_thread_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        tracing::warn!("machine continuation: result missing successor_thread_id; not launching");
+        return;
+    };
+    let st = state.clone();
+    tokio::spawn(async move {
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        match ryeos_executor::execution::launch::launch_successor(st, &successor_id).await {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                tracing::debug!(
+                    successor_id = %successor_id,
+                    reason,
+                    "machine continuation: successor launch skipped"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    successor_id = %successor_id,
+                    error = %err,
+                    "machine continuation: successor launch failed"
+                );
+            }
+        }
+    });
+}
+
 fn handle_request_continuation(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
     let params: ThreadContinuationParams = serde_json::from_value(params.clone())
-        .context("invalid threads.request_continuation params")?;
+        .context("invalid runtime.request_continuation params")?;
     serde_json::to_value(state.threads.request_continuation(&params)?)
-        .context("failed to encode threads.request_continuation result")
+        .context("failed to encode runtime.request_continuation result")
 }
 
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
