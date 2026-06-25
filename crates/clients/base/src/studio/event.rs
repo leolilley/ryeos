@@ -174,6 +174,15 @@ pub enum StudioUiEvent {
         cursor: usize,
     },
     CompleteInput,
+    /// Cycle the input's submit target through `[new conversation, …open
+    /// chains]`: a directive with no `thread` (spawns a new chain) or an
+    /// existing chain's head (a follow-up braids onto it). `forward` walks
+    /// toward more-recent chains; the reverse walks back. The chosen target
+    /// is written to the seat route (head + chain_root) and shown in the
+    /// input border.
+    CycleInputTarget {
+        forward: bool,
+    },
     SubmitInput,
     MoveLauncherSelection {
         delta: i32,

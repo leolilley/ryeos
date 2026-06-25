@@ -751,6 +751,22 @@ impl StudioCore {
         self.bump_generation();
     }
 
+    /// Like `notice`, but skips when the most recent notice carries the same
+    /// message — for repeatable actions (e.g. Tab on an untargetable route)
+    /// that must surface the reason once without spamming it on every press.
+    pub fn notice_deduped(&mut self, message: impl Into<String>, tone: StudioTone) {
+        let message = message.into();
+        if self
+            .ui
+            .notices
+            .last()
+            .is_some_and(|last| last.message == message)
+        {
+            return;
+        }
+        self.notice(message, tone);
+    }
+
     pub fn envelope(&self, effects: Vec<StudioEffect>) -> StudioEnvelope {
         StudioEnvelope {
             schema_version: "ryeos.studio.envelope.v1".to_string(),
@@ -832,6 +848,57 @@ impl StudioCore {
     pub fn focused_input_buffer_mut(&mut self) -> Option<&mut StudioInputState> {
         let (key, _) = self.focused_input_instance()?;
         Some(self.ui.input_buffers.entry(key.storage_key()).or_default())
+    }
+
+    /// Resolve the focused-context capabilities the shared keymap needs.
+    /// One base helper so terminal and web build the same context and don't
+    /// drift — physical key mapping lives in `studio_key_command`, capability
+    /// resolution lives here.
+    pub fn key_context(&self) -> super::keymap::StudioKeyContext {
+        let focused = self.focused_input_instance();
+        let (text, cursor) = focused
+            .as_ref()
+            .and_then(|(key, _)| self.ui.input_buffers.get(&key.storage_key()))
+            .map(|buf| (buf.text.clone(), buf.cursor))
+            .unwrap_or_default();
+        let input = focused
+            .as_ref()
+            .and_then(|(_, view_ref)| self.views.get(view_ref))
+            .and_then(|binding| binding.input.as_ref());
+
+        // Completion can accept now iff the focused input declares the
+        // commands completion AND `accept_slash_completion` would produce a
+        // result (cursor at end, leading single `/`, a matching record) —
+        // the same predicate `CompleteInput` acts on, so Tab never dispatches
+        // a no-op completion when it could cycle the target instead.
+        let input_can_accept_completion = input
+            .and_then(|i| i.completion.as_ref())
+            .filter(|c| c.item_ref == "service:commands/list")
+            .and_then(|_| {
+                self.data
+                    .commands
+                    .as_ref()
+                    .and_then(|d| d.get("commands"))
+                    .and_then(serde_json::Value::as_array)
+            })
+            .is_some_and(|records| {
+                super::tokenize::accept_slash_completion(records, &text, cursor).is_some()
+            });
+
+        super::keymap::StudioKeyContext {
+            launcher_open: self.ui.launcher.open,
+            input_visible: focused.is_some(),
+            input_has_text: !text.is_empty(),
+            input_has_completion: input.is_some_and(|i| i.completion.is_some()),
+            input_can_accept_completion,
+            // Targeting retargets the route, so it's only exposed for a
+            // route-submit input (defense-in-depth; content validation also
+            // degrades a target on a non-route input).
+            input_target_cycle: input
+                .filter(|i| i.submits_to_route())
+                .and_then(|i| i.target.as_ref())
+                .map(|t| t.cycle),
+        }
     }
 }
 

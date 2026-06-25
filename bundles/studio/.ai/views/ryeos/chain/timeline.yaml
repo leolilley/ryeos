@@ -7,7 +7,7 @@ widget: timeline
 source:
   ref: service:events/chain_replay
   params:
-    chain_root_id: "@facet:input.route.thread"
+    chain_root_id: "@facet:input.route.chain_root"
   collection: events
 projections:
   event_kinds:

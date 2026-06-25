@@ -184,10 +184,10 @@ fn draw_dock_tile(
 pub fn draw_tile(
     surface: &mut TextSurface,
     rect: Rect,
-    tile_id: &str,
+    _tile_id: &str,
     focused: bool,
     title: &str,
-    action_count: usize,
+    _action_count: usize,
     view: &StudioViewVm,
     input: Option<&StudioInputVm>,
     border: Option<Border>,
@@ -197,92 +197,60 @@ pub fn draw_tile(
     if w == 0 || h == 0 {
         return;
     }
-    // Tiles sit on the page background, separated by their border. The
-    // focused accent stays colour-only; the glyph set follows the
-    // surface-declared border style. No shadow — border weight does it.
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    // The tile reads like the input box: a bordered frame on the page
+    // background, with its label in the TOP border and provenance in the
+    // BOTTOM border — no separate title bar, rule, corner marks, tile id, or
+    // action count. Border weight/colour carries focus.
     let border_style = if focused {
         Style::new().fg(ACCENT).bg(BG)
     } else {
         Style::new().fg(MUTED).bg(BG)
     };
     fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
-    if w >= 2 && h >= 2 {
-        if let Some(border) = border {
-            surface.draw_box(
-                rect.x as usize,
-                rect.y as usize,
-                rect.x as usize + w - 1,
-                rect.y as usize + h - 1,
-                border,
-                border_style,
-            );
-        }
-        if h > 3 {
-            for x in (rect.x as usize + 1)..(rect.x as usize + w.saturating_sub(1)) {
-                surface.draw_char(x, rect.y as usize + 2, '─', Style::new().fg(MUTED).bg(BG));
-            }
-        }
-        let action_hint = if action_count > 0 {
-            format!("  {action_count} actions")
-        } else {
-            String::new()
-        };
-        let label = format!(" {title} #{tile_id}{action_hint} ");
-        surface.draw_text(
-            rect.x as usize + 2,
-            rect.y as usize + 1,
-            &truncate(&label, w.saturating_sub(4)),
-            if focused {
-                Style::new().fg(ACCENT).bg(BG).bold()
-            } else {
-                Style::new().fg(MUTED).bg(BG)
-            },
-        );
-        if focused {
-            draw_corner_marks(surface, rect);
-        }
+    if w < 2 || h < 2 {
+        super::draw_view(surface, rect, view);
+        return;
     }
-    let footer = view_chrome(view);
-    if h > 5 {
-        let footer_y = rect.y as usize + h - 2;
-        fill_line(
-            surface,
-            rect.x as usize + 1,
-            footer_y,
-            w.saturating_sub(2),
-            Style::new().fg(MUTED).bg(BG),
-        );
-        if let Some((provenance, affordances)) = footer {
+    if let Some(border) = border {
+        surface.draw_box(x, y, x + w - 1, y + h - 1, border, border_style);
+    }
+    // Label in the top border (authored title only).
+    if w > 6 {
+        let label = format!(" {title} ");
+        let title_style = if focused {
+            Style::new().fg(ACCENT).bg(BG).bold()
+        } else {
+            style_muted()
+        };
+        surface.draw_text(x + 2, y, &truncate(&label, w.saturating_sub(4)), title_style);
+    }
+    // Provenance (left) + affordance hints (right) in the bottom border.
+    if w > 6 {
+        if let Some((provenance, affordances)) = view_chrome(view) {
+            let by = y + h - 1;
             surface.draw_text(
-                rect.x as usize + 2,
-                footer_y,
-                &truncate(provenance, w.saturating_sub(4)),
+                x + 2,
+                by,
+                &truncate(&format!(" {provenance} "), w.saturating_sub(4)),
                 style_muted(),
             );
-            if !affordances.is_empty() && w > 10 {
-                let right = affordances.join(" · ");
-                let right = truncate(&right, w.saturating_sub(4));
+            if !affordances.is_empty() && w > 16 {
+                let right = format!(" {} ", affordances.join(" · "));
+                let right = truncate(&right, w / 2);
                 let right_w = display_width(&right);
-                let x = rect.x as usize + w.saturating_sub(right_w + 2);
-                surface.draw_text(x, footer_y, &right, style_muted());
+                surface.draw_text(x + w.saturating_sub(right_w + 2), by, &right, style_muted());
             }
         }
     }
-    let inner = if rect.h > 4 {
-        Rect::new(
-            rect.x + 1,
-            rect.y + 3,
-            rect.w.saturating_sub(2),
-            rect.h.saturating_sub(if h > 5 { 5 } else { 4 }),
-        )
-    } else {
-        Rect::new(
-            rect.x + 1,
-            rect.y + 1,
-            rect.w.saturating_sub(2),
-            rect.h.saturating_sub(2),
-        )
-    };
+    // Content fills the interior between the top and bottom borders.
+    let inner = Rect::new(
+        rect.x + 1,
+        rect.y + 1,
+        rect.w.saturating_sub(2),
+        rect.h.saturating_sub(2),
+    );
     // An instance that declares `input` renders as the prompt — buffer +
     // cursor only; the tile already owns the border/chrome.
     if let Some(input) = input {
@@ -308,21 +276,6 @@ fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
             .map(|provenance| (provenance, affordance_hints.as_slice())),
         _ => None,
     }
-}
-
-fn draw_corner_marks(surface: &mut TextSurface, rect: Rect) {
-    let x = rect.x as usize;
-    let y = rect.y as usize;
-    let w = rect.w as usize;
-    let h = rect.h as usize;
-    if w < 2 || h < 2 {
-        return;
-    }
-    let style = Style::new().fg(ACCENT).bg(BG).bold();
-    surface.draw_char(x, y, '╔', style);
-    surface.draw_char(x + w - 1, y, '╗', style);
-    surface.draw_char(x, y + h - 1, '╚', style);
-    surface.draw_char(x + w - 1, y + h - 1, '╝', style);
 }
 
 #[cfg(test)]

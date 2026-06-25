@@ -260,6 +260,7 @@ impl StudioCore {
                 }
                 Vec::new()
             }
+            StudioUiEvent::CycleInputTarget { forward } => self.cycle_input_target(forward),
             StudioUiEvent::SubmitInput => self.submit_focused_input(),
             StudioUiEvent::MoveLauncherSelection { delta } => {
                 let len = filtered_launcher_items(self).len();
@@ -564,6 +565,7 @@ impl StudioCore {
                             "command_type": command,
                         }),
                         route_seq: None,
+                        ratchet_on_thread_id: false,
                     })]
                 } else {
                     self.notice(format!("No active thread to {command}."), StudioTone::Warn);
@@ -662,6 +664,149 @@ impl StudioCore {
         self.submit_route(&text)
     }
 
+    /// The open conversation chains the input can target, as
+    /// `(chain_root_id, head_thread_id)` in the thread list's order
+    /// (most-recent first, as the daemon returns them). The head of a chain
+    /// is the thread no other thread continues from (its `thread_id` is not
+    /// any sibling's `upstream_thread_id`); a follow-up braids onto it.
+    fn input_target_chains(&self) -> Vec<(String, String)> {
+        let Some(threads) = self.data.threads.as_ref() else {
+            return Vec::new();
+        };
+        let rows = &threads.threads;
+        let upstreams: std::collections::HashSet<&str> = rows
+            .iter()
+            .filter_map(|t| t.get("upstream_thread_id").and_then(serde_json::Value::as_str))
+            .collect();
+        let mut out: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for row in rows {
+            let Some(root) = row.get("chain_root_id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if !seen.insert(root) {
+                continue;
+            }
+            // Head = the chain member nothing continues from; fall back to
+            // the root if the list is partial.
+            let head = rows
+                .iter()
+                .filter(|x| x.get("chain_root_id").and_then(serde_json::Value::as_str) == Some(root))
+                .filter_map(|x| x.get("thread_id").and_then(serde_json::Value::as_str))
+                .find(|id| !upstreams.contains(id))
+                .unwrap_or(root);
+            out.push((root.to_string(), head.to_string()));
+        }
+        out
+    }
+
+    /// The focused input's declared targeting capability, if any. The cycle
+    /// only acts when the FOCUSED input owns a `target` — the capability is
+    /// content-declared, never assumed for every route-input.
+    fn focused_input_target_cycle(&self) -> Option<super::content::InputTargetCycle> {
+        self.focused_input_instance()
+            .and_then(|(_, view_ref)| self.views.get(&view_ref))
+            .and_then(|binding| binding.input.as_ref())
+            // Defense-in-depth: targeting retargets the ROUTE, so it is only
+            // meaningful on a route-submit input. Content validation degrades
+            // a target on a non-route input, but don't rely on that alone.
+            .filter(|input| input.submits_to_route())
+            .and_then(|input| input.target.as_ref())
+            .map(|target| target.cycle)
+    }
+
+    /// Cycle the input's route target through `[new conversation]
+    /// + [synthetic current if not yet fetched] + [fetched chain heads]`.
+    /// New = no `thread`/`chain_root` (spawns a fresh chain); a chain slot
+    /// retargets the head so the next submit braids onto it. Gated on the
+    /// focused input declaring `target.cycle: route_chains`.
+    fn cycle_input_target(&mut self, forward: bool) -> Vec<StudioEffect> {
+        // Capability gate (decision: content-declared). The keymap shouldn't
+        // emit this without a declaration; if a direct/stale event arrives
+        // anyway, no-op silently (no mutation, no user notice) rather than
+        // panic — the reducer never trusts the caller was correct.
+        let Some(super::content::InputTargetCycle::RouteChains) = self.focused_input_target_cycle()
+        else {
+            return Vec::new();
+        };
+
+        let mut route = self.seat.fold().input_route();
+        // The input declared route-chain targeting (the author's assertion
+        // that this route continues conversations). The only thing the engine
+        // can't paper over is a route with no invoke at all — there's nothing
+        // to submit onto. Surface that (deduped), don't silently no-op.
+        if route.invoke.is_none() {
+            self.notice_deduped(
+                "This input has no route to target a conversation on.",
+                StudioTone::Warn,
+            );
+            return Vec::new();
+        }
+
+        let slots = self.route_chain_slots(&route);
+        // Only "new conversation" → nothing to cycle (not an error).
+        if slots.len() <= 1 {
+            return Vec::new();
+        }
+        let current = slots
+            .iter()
+            .position(|slot| match (slot, &route.chain_root) {
+                (TargetSlot::NewConversation, None) => true,
+                (TargetSlot::Chain { root, .. }, Some(cr)) => root == cr,
+                _ => false,
+            })
+            .unwrap_or(0);
+        let len = slots.len();
+        let next = if forward {
+            (current + 1) % len
+        } else {
+            (current + len - 1) % len
+        };
+        match &slots[next] {
+            TargetSlot::NewConversation => {
+                route.thread = None;
+                route.chain_root = None;
+            }
+            TargetSlot::Chain { root, head } => {
+                route.thread = Some(head.clone());
+                route.chain_root = Some(root.clone());
+            }
+        }
+        // A non-serializable InputRoute is a bug, not a runtime branch.
+        let value = serde_json::to_value(&route).expect("InputRoute serializes");
+        self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+        self.bump_generation();
+        let mut effects = self.effects_for_facet(super::seat::KEY_INPUT_ROUTE);
+        effects.extend(self.effects_for_hint("thread"));
+        effects
+    }
+
+    /// Build the ordered target slots for route-chain cycling:
+    /// `[NewConversation] + [synthetic current if its root isn't fetched]
+    /// + [fetched chain heads]`, deduped by `chain_root` (preferring the
+    /// fetched head when the current chain is also present in fetched data).
+    fn route_chain_slots(&self, route: &super::seat::InputRoute) -> Vec<TargetSlot> {
+        let fetched = self.input_target_chains();
+        let mut slots = vec![TargetSlot::NewConversation];
+
+        // Synthetic current: the route points at a chain not yet in the
+        // fetched list (async refresh hasn't landed) — keep it cyclable.
+        if let Some(root) = route.chain_root.as_ref() {
+            let in_fetched = fetched.iter().any(|(r, _)| r == root);
+            if !in_fetched {
+                slots.push(TargetSlot::Chain {
+                    root: root.clone(),
+                    head: route.thread.clone().unwrap_or_else(|| root.clone()),
+                });
+            }
+        }
+
+        for (root, head) in fetched {
+            slots.push(TargetSlot::Chain { root, head });
+        }
+        slots
+    }
+
     /// `submit: route` — classify the line and dispatch through the engine
     /// route-fold. Behaviour (slash/plain, route_seq, read-only/empty) is
     /// unchanged; it is now reached through the `input` grammar instead of
@@ -695,9 +840,16 @@ impl StudioCore {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: serde_json::json!({}),
                     route_seq: None,
+                    ratchet_on_thread_id: false,
                 })]
             }
             super::tokenize::InputLine::Plain(plain) => {
+                // Capture ratchet eligibility NOW (issue time), not at result
+                // time: the focused input declares conversation targeting, so a
+                // successful launch should braid the route onto the produced
+                // thread. Computed once here so a focus change while the async
+                // launch is in flight can't corrupt the ratchet decision.
+                let ratchet_on_thread_id = self.focused_input_target_cycle().is_some();
                 let fold = self.seat.fold();
                 let route = fold.input_route();
                 let route_seq = fold.seq_of(super::seat::KEY_INPUT_ROUTE);
@@ -725,6 +877,7 @@ impl StudioCore {
                             target: super::effect::InvokeRef::Ref { item_ref },
                             params,
                             route_seq,
+                            ratchet_on_thread_id,
                         })]
                     }
                     super::seat::InvokeTemplate::Command { mut tokens } => {
@@ -733,6 +886,7 @@ impl StudioCore {
                             target: super::effect::InvokeRef::Tokens { tokens },
                             params: serde_json::json!({}),
                             route_seq,
+                            ratchet_on_thread_id,
                         })]
                     }
                     super::seat::InvokeTemplate::UiFacet { key } => {
@@ -786,6 +940,7 @@ impl StudioCore {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: args,
                     route_seq: None,
+                    ratchet_on_thread_id: false,
                 })]
             }
             None => {
@@ -1085,6 +1240,7 @@ impl StudioCore {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: args,
                     route_seq: None,
+                    ratchet_on_thread_id: false,
                 })]
             }
             None => Vec::new(),
@@ -1284,13 +1440,38 @@ impl StudioCore {
                     // the input at the produced thread so the next submit
                     // continues the chain. A stale result (route changed
                     // since issue) may notice but never retargets.
-                    if let StudioEffectKind::Invoke { route_seq, .. } = &expected {
+                    if let StudioEffectKind::Invoke {
+                        route_seq,
+                        ratchet_on_thread_id,
+                        ..
+                    } = &expected
+                    {
                         let fold = self.seat.fold();
+                        // Eligibility was decided at issue time (see submit_route)
+                        // — read it, don't recompute from current focus, which
+                        // may have moved while the launch was in flight.
+                        let targets = *ratchet_on_thread_id;
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
-                            route.thread = Some(thread_id.clone());
-                            if let Ok(value) = serde_json::to_value(&route) {
-                                self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+                            // Only ratchet a continuation target onto routes
+                            // whose input declares conversation targeting. A
+                            // fire-and-forget route that happens to produce a
+                            // thread_id must NOT be retargeted as "continuing" —
+                            // same declaration the cycle and the label key off.
+                            if targets {
+                                // First turn of a conversation: the launched
+                                // thread IS the chain root (root == head).
+                                // Continuations (route already had a head) keep
+                                // the root and only advance the head — so the
+                                // feed keeps showing the whole braid while the
+                                // next submit braids onto the newest turn.
+                                if route.thread.is_none() {
+                                    route.chain_root = Some(thread_id.clone());
+                                }
+                                route.thread = Some(thread_id.clone());
+                                if let Ok(value) = serde_json::to_value(&route) {
+                                    self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+                                }
                             }
                         } else {
                             self.notice(
@@ -1519,6 +1700,17 @@ impl StudioCore {
 fn parse_tile_id(tile_id: &str) -> Option<crate::ids::TileId> {
     tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)
 }
+
+/// A route-chain target the input can cycle onto.
+#[derive(Debug, Clone, PartialEq)]
+enum TargetSlot {
+    /// No target thread/root — a submit starts a fresh chain.
+    NewConversation,
+    /// Braid onto an existing chain: `head` is the turn the next submit
+    /// continues, `root` is the conversation identity the feed follows.
+    Chain { root: String, head: String },
+}
+
 
 fn arrange_axis_vm(arrange: ArrangeSpec) -> StudioSplitAxisVm {
     match arrange {
@@ -1994,6 +2186,7 @@ mod tests {
                 target: super::super::effect::InvokeRef::Tokens { tokens },
                 params,
                 route_seq: None,
+                ..
             }) if tokens == &vec!["thread".to_string(), "cancel".to_string()]
                 && params["thread_id"] == "T-demo"
         ));
@@ -2532,7 +2725,8 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "widget": "text",
                 "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route",
-                           "completion": { "ref": "service:commands/list", "collection": "commands" } }
+                           "completion": { "ref": "service:commands/list", "collection": "commands" },
+                           "target": { "cycle": "route_chains" } }
             }))
             .unwrap(),
         );
@@ -2565,6 +2759,220 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycles_input_target_through_new_then_chains() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Two conversations in list order (most-recent first): chain B is a
+        // single thread; chain A has a follow-up (head T-a2 braids on T-a1).
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-b1", "chain_root_id": "T-b1" }),
+                serde_json::json!({
+                    "thread_id": "T-a2", "chain_root_id": "T-a1",
+                    "upstream_thread_id": "T-a1"
+                }),
+                serde_json::json!({ "thread_id": "T-a1", "chain_root_id": "T-a1" }),
+            ],
+        });
+
+        // Starts on "new conversation" — no target thread, no chain root.
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None);
+        assert_eq!(route.chain_root, None);
+
+        // Tab → first chain (B, a single thread: head == root).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.chain_root.as_deref(), Some("T-b1"));
+        assert_eq!(route.thread.as_deref(), Some("T-b1"));
+
+        // Tab → chain A, targeting its HEAD (T-a2, the turn nothing continues).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
+        assert_eq!(route.thread.as_deref(), Some("T-a2"));
+
+        // Tab → wraps back to "new conversation".
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None);
+        assert_eq!(route.chain_root, None);
+
+        // Shift+Tab from "new" wraps backward to the last chain (A).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: false },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
+        assert_eq!(route.thread.as_deref(), Some("T-a2"));
+    }
+
+    #[test]
+    fn cycle_input_target_is_noop_with_no_chains() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // No threads fetched yet → only "new conversation" exists.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None);
+        assert_eq!(route.chain_root, None);
+    }
+
+    #[test]
+    fn cycle_input_target_noop_without_declaration() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Replace the input with one that does NOT declare targeting.
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "route" }
+            }))
+            .unwrap(),
+        );
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "no declaration → no mutation");
+        assert_eq!(route.chain_root, None);
+        assert!(core.ui.notices.is_empty(), "no declaration → silent (no notice)");
+    }
+
+    #[test]
+    fn cycle_input_target_notices_when_route_has_no_invoke() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core);
+        // Route facet with no invoke template at all.
+        core.seat
+            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, serde_json::json!({ "thread": "T-x" }));
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let n = core.ui.notices.len();
+        assert!(n > 0, "no invoke → notice, not silent");
+        // Deduped: a repeat press doesn't spam an identical notice.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.ui.notices.len(), n, "notice deduped on repeat press");
+    }
+
+    #[test]
+    fn cycle_input_target_dedupes_current_chain_and_prefers_fetched_head() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Route already on chain A with a stale head (T-a1).
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({
+                "invoke": { "type": "service", "ref": "service:threads/input" },
+                "thread": "T-a1", "chain_root": "T-a1"
+            }),
+        );
+        // Fetched data shows chain A advanced to head T-a2.
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-a2", "chain_root_id": "T-a1", "upstream_thread_id": "T-a1" }),
+                serde_json::json!({ "thread_id": "T-a1", "chain_root_id": "T-a1" }),
+            ],
+        });
+        // Slots = [New, Chain(A)] — A appears once. Current is A → forward → New.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.seat.fold().input_route().chain_root, None);
+        // Forward again → chain A using the FETCHED head, not the stale T-a1.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
+        assert_eq!(route.thread.as_deref(), Some("T-a2"), "prefers fetched head");
+    }
+
+    #[test]
+    fn cycle_input_target_keeps_synthetic_current_before_refresh() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Route aimed at a freshly-launched chain not yet in the thread list.
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({
+                "invoke": { "type": "service", "ref": "service:threads/input" },
+                "thread": "T-new", "chain_root": "T-new"
+            }),
+        );
+        core.data.threads = Some(StudioThreadsDto { threads: vec![] }); // refresh not landed
+        // Slots = [New, SyntheticChain(T-new)]. The guarantee: you can move
+        // AWAY from the unfetched current chain before the refresh lands —
+        // forward from the synthetic current reaches "new conversation".
+        // (Returning to it relies on the refresh, which lands quickly.)
+        assert_eq!(
+            core.seat.fold().input_route().chain_root.as_deref(),
+            Some("T-new"),
+            "starts on the unfetched current chain"
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(
+            core.seat.fold().input_route().chain_root,
+            None,
+            "synthetic current did not trap the cycle — moved to new conversation"
+        );
+    }
+
+    #[test]
+    fn key_context_completion_is_cursor_aware() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core); // completion: service:commands/list + target
+        core.data.commands = Some(serde_json::json!({
+            "commands": [{ "tokens": ["deploy"], "description": "d" }]
+        }));
+
+        // Cursor at the end of "/de" with a matching record → can accept.
+        set_focused_input(&mut core, "/de");
+        let ctx = core.key_context();
+        assert!(
+            ctx.input_can_accept_completion,
+            "cursor at end + a match → completion can accept (Tab completes)"
+        );
+        assert!(ctx.input_target_cycle.is_some(), "targeting still exposed");
+
+        // Same text, cursor mid-line → completion would no-op, so it must NOT
+        // claim it can accept (Tab should cycle the target instead).
+        core.focused_input_buffer_mut()
+            .unwrap()
+            .set_text("/de".to_string(), 1);
+        assert!(
+            !core.key_context().input_can_accept_completion,
+            "cursor mid-line → cannot accept; Tab cycles, not a no-op completion"
+        );
+
+        // Prose (no leading slash) → cannot accept either.
+        core.focused_input_buffer_mut()
+            .unwrap()
+            .set_text("hello world".to_string(), 11);
+        assert!(!core.key_context().input_can_accept_completion);
+    }
+
+    #[test]
     fn writable_input_submit_emits_invoke_with_text_bound_whole() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
@@ -2581,6 +2989,7 @@ mod tests {
                 target: crate::studio::effect::InvokeRef::Ref { item_ref },
                 params,
                 route_seq: Some(_),
+                ..
             }) if item_ref == "service:threads/input"
                 && params["input"] == "run this"
                 && params["directive"] == "directive:demo/base"
@@ -2660,8 +3069,145 @@ mod tests {
         assert!(focused_input_text(&core).is_empty());
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread.as_deref(), Some("T-9"));
+        // First turn of a conversation: the launched thread is the chain root
+        // (root == head), so the feed (which follows chain_root) shows it.
+        assert_eq!(route.chain_root.as_deref(), Some("T-9"));
         // Pinned invocation survives the ratchet.
         assert!(route.has_target());
+    }
+
+    #[test]
+    fn launch_does_not_ratchet_a_non_targeting_input() {
+        // The ratchet keys off the input's `target` declaration, not the
+        // invoke ref: an input that does NOT declare conversation targeting is
+        // never retargeted onto the produced thread (no false "continuing").
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "route" }
+            }))
+            .unwrap(),
+        );
+        set_focused_input(&mut core, "go");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-9", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "non-targeting input is not retargeted");
+        assert_eq!(route.chain_root, None);
+    }
+
+    #[test]
+    fn ratchet_eligibility_is_captured_at_issue_time_not_result_time() {
+        // A targeting input submits → eligibility captured TRUE on the effect.
+        // Focus then moves to a non-targeting input before the async result
+        // lands. The launch must STILL ratchet (issue-time decision), proving
+        // the result handler doesn't recompute from current focus.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core); // targeting input focused
+        set_focused_input(&mut core, "hi");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+
+        // Focus moves to a NON-targeting input while the launch is in flight.
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": { "id": "line", "submit": "route" }
+            }))
+            .unwrap(),
+        );
+        assert!(
+            core.focused_input_target_cycle().is_none(),
+            "focus now resolves a non-targeting input"
+        );
+
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-9", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(
+            route.thread.as_deref(),
+            Some("T-9"),
+            "ratcheted on the issue-time decision, not the moved focus"
+        );
+        assert_eq!(route.chain_root.as_deref(), Some("T-9"));
+    }
+
+    #[test]
+    fn continuation_advances_head_but_preserves_chain_root() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+
+        // Turn 1: starts the conversation. root == head == T-1.
+        set_focused_input(&mut core, "hello");
+        let e1 = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: e1.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-1", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread.as_deref(), Some("T-1"));
+        assert_eq!(route.chain_root.as_deref(), Some("T-1"));
+
+        // Turn 2: a follow-up braids onto T-1 → new head T-2, same root.
+        set_focused_input(&mut core, "and again");
+        let e2 = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: e2.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-2", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        // Head advanced to the new turn; the next submit braids onto it.
+        assert_eq!(route.thread.as_deref(), Some("T-2"));
+        // Root unchanged — the feed keeps showing the whole conversation.
+        assert_eq!(route.chain_root.as_deref(), Some("T-1"));
     }
 
     #[test]
@@ -2839,6 +3385,7 @@ mod tests {
                 target: super::super::effect::InvokeRef::Tokens { tokens },
                 params,
                 route_seq: None,
+                ..
             }) if tokens == &vec!["thread".to_string(), "input".to_string()]
                 && params["line"] == "do the thing"
         ));

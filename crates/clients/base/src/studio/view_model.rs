@@ -834,6 +834,17 @@ fn bound_view_vm_keyed(
     let response = core.data.sources.get(source_key);
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
     match (binding.widget.as_str(), response) {
+        // A feed with no chain root is empty, not loading — it would spin
+        // forever on a fetch that never resolves (no chain root to replay).
+        // The feed follows `chain_root` (the whole braid), so key the empty
+        // state off that, not the moving head. Show an honest
+        // start-a-conversation state instead.
+        ("timeline", None) if core.seat.fold().input_route().chain_root.is_none() => {
+            StudioViewVm::Placeholder {
+                title,
+                message: "No conversation yet — type below to start one.".to_string(),
+            }
+        }
         (_, None) => StudioViewVm::Placeholder {
             title,
             message: format!(
@@ -1045,15 +1056,18 @@ fn derived_target_label(
         }
         return format!("→ {affordance_id}");
     }
-    // `submit: route` — render the seat route truthfully.
+    // `submit: route` — render the seat route truthfully (the target the
+    // next submit lands on). "continuing" only when the input declares
+    // conversation targeting (same signal the cycle and ratchet use) — a
+    // route with a stray `thread` on a non-targeting input is not a
+    // conversation. No keybinding copy here; an author overrides the whole
+    // strip via `target_label`.
     match (&route.invoke, &route.thread) {
         (None, _) => "no target — surface declares no route".to_string(),
-        (Some(_), Some(thread)) => format!("→ chained on {thread}"),
-        (Some(InvokeTemplate::Service { item_ref }), None) => format!("→ {item_ref} (new chain)"),
-        (Some(InvokeTemplate::Command { tokens }), None) => {
-            format!("→ /{} (new chain)", tokens.join(" "))
-        }
-        (Some(InvokeTemplate::UiFacet { key }), None) => format!("→ {key}"),
+        (Some(_), Some(thread)) if input.target.is_some() => format!("→ continuing {thread}"),
+        (Some(InvokeTemplate::Service { .. }), _) => "→ new conversation".to_string(),
+        (Some(InvokeTemplate::Command { tokens }), _) => format!("→ /{} (new)", tokens.join(" ")),
+        (Some(InvokeTemplate::UiFacet { key }), _) => format!("→ {key}"),
     }
 }
 
