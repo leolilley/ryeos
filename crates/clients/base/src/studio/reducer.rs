@@ -677,19 +677,21 @@ impl StudioCore {
     /// an explicit `Some(false)`. This is the substrate authority the cycle and
     /// label gate on, replacing a self-declared surface flag.
     pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
-        self.data
+        let row = self
+            .data
             .threads
             .as_ref()?
             .threads
             .iter()
             .find(|row| {
                 row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
-            })
-            .and_then(|row| {
-                row.get("execution")
-                    .and_then(|e| e.get("supports_continuation"))
-                    .and_then(serde_json::Value::as_bool)
-            })
+            })?;
+        // Typed execution facts (no `supports_continuation` string literal).
+        // `None` = no execution object on the row (unknown), distinct from an
+        // explicit `Some(false)`.
+        let facts: super::dto::ExecutionFacts =
+            serde_json::from_value(row.get("execution")?.clone()).ok()?;
+        Some(facts.supports_continuation)
     }
 
     fn input_target_chains(&self) -> Vec<(String, String)> {
@@ -1438,43 +1440,24 @@ impl StudioCore {
                     return effects;
                 }
                 StudioEffectResultKind::Invoked => {
-                    // Submit result contract: { thread_id?, delivery, notice? }.
-                    let delivery = data
-                        .get("delivery")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("launched");
-                    let notice_text = data
-                        .get("notice")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
-                    if delivery == "refused" {
-                        // Keep the buffer: the operator's text was not
-                        // delivered.
+                    // Typed submit result: { thread_id?, delivery, notice?, execution? }.
+                    let outcome: super::dto::LaunchOutcome =
+                        serde_json::from_value(data.clone()).unwrap_or_default();
+                    if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
+                        // A refused delivery (non-continuation target, settled
+                        // status, or duplicate-submit conflict) delivered
+                        // nothing: KEEP the buffer so the operator's text isn't
+                        // lost, surface the daemon's reason, and do NOT ratchet
+                        // or claim a launch. (`thread_id` may be null or an
+                        // existing id; either way nothing new was created.)
                         self.notice(
-                            notice_text.unwrap_or_else(|| "Delivery refused.".to_string()),
+                            outcome.notice.unwrap_or_else(|| REFUSED_NOTICE.to_string()),
                             StudioTone::Warn,
                         );
                         return Vec::new();
                     }
                     self.clear_focused_input();
-                    // A refused delivery (non-continuation target, settled
-                    // status, or a duplicate-submit conflict) created nothing:
-                    // surface the daemon's reason and do NOT ratchet or claim a
-                    // launch. `thread_id` may be null or an existing id.
-                    if data.get("delivery").and_then(serde_json::Value::as_str) == Some("refused") {
-                        let reason = data
-                            .get("notice")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("Continuation refused.");
-                        self.notice(reason, StudioTone::Warn);
-                        self.bump_generation();
-                        return Vec::new();
-                    }
-                    let thread_id = data
-                        .get("thread_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
-                    let Some(thread_id) = thread_id else {
+                    let Some(thread_id) = outcome.thread_id.clone() else {
                         self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
                         self.bump_generation();
                         return Vec::new();
@@ -1497,10 +1480,7 @@ impl StudioCore {
                         // carries them (an operator continuation does; a fresh
                         // async launch doesn't — unknown stays eligible, and the
                         // daemon refuses a real non-continuation continue).
-                        let result_supports = data
-                            .get("execution")
-                            .and_then(|e| e.get("supports_continuation"))
-                            .and_then(serde_json::Value::as_bool);
+                        let result_supports = outcome.execution.map(|e| e.supports_continuation);
                         let targets = *ratchet_on_thread_id && result_supports != Some(false);
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
@@ -1751,6 +1731,9 @@ impl StudioCore {
 fn parse_tile_id(tile_id: &str) -> Option<crate::ids::TileId> {
     tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)
 }
+
+/// Fallback notice when a refused delivery carries no reason from the daemon.
+const REFUSED_NOTICE: &str = "Delivery refused.";
 
 /// A route-chain target the input can cycle onto.
 #[derive(Debug, Clone, PartialEq)]
