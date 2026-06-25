@@ -1,159 +1,104 @@
-use bytes::Bytes;
-use http_body_util::BodyExt;
-use http_body_util::Full;
-use hyper::body::Incoming;
-use hyper::Request;
 use serde_json::Value;
 
 use crate::error::{CliDispatchError, CliTransportError};
 use crate::transport::signing::SignHeaders;
 
-/// POST JSON to the daemon and return the response body as `Value`.
+/// Cap on establishing a TCP/TLS connection. Without it a dead or filtered
+/// host hangs the CLI for the OS connect timeout (minutes).
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Total-request cap for control-plane calls (signed GETs). Deliberately NOT
+/// applied to `/execute` POSTs, which may legitimately run far longer and are
+/// bounded by the connect timeout plus server-side limits — mirrors
+/// `ryeos-api`'s `RemoteClient`.
+const CONTROL_PLANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Build the shared client for **signed** requests. `reqwest` honors the URL
+/// scheme, so an `https://` node negotiates TLS on 443 — the prior hand-rolled
+/// hyper client could not. Shared by the CLI dispatch helpers below and the
+/// terminal client, so both speak one TLS-capable transport.
 ///
-/// `url` is a full URL like `http://127.0.0.1:7400/execute`.
-pub async fn post_json(
-    url: &str,
-    headers: &SignHeaders,
-    body: &[u8],
-) -> Result<Value, CliDispatchError> {
-    let uri: hyper::Uri = url.parse().map_err(|e| CliTransportError::Unreachable {
-        bind: url.to_string(),
-        detail: format!("invalid URL: {e}"),
-    })?;
-
-    let host = uri.host().unwrap_or("127.0.0.1");
-    let port = uri.port_u16().unwrap_or(80);
-    let bind = format!("{host}:{port}");
-
-    let req = Request::builder()
-        .method("POST")
-        .uri(uri.to_string())
-        .header("content-type", "application/json")
-        .header("host", &bind)
-        .header("x-ryeos-key-id", &headers.key_id)
-        .header("x-ryeos-timestamp", &headers.timestamp)
-        .header("x-ryeos-nonce", &headers.nonce)
-        .header("x-ryeos-signature", &headers.signature)
-        .body(Full::new(Bytes::from(body.to_vec())))
+/// Redirects are deliberately DISABLED here: a signature is bound to
+/// method/path/body, and reqwest may downgrade a redirected POST to GET
+/// (301/302/303), which would silently invalidate the signature. With
+/// redirects off, a 3xx instead surfaces as an error (via the caller's status
+/// check), failing loud. The canonical https origin is reached in one hop
+/// because callers target discovery's post-redirect `effective_base_url`.
+pub fn signed_client() -> Result<reqwest::Client, CliTransportError> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
         .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("failed to build request: {e}"),
-        })?;
-
-    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
-        CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: e.to_string(),
-        }
-    })?;
-
-    let io = hyper_util::rt::TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("HTTP handshake: {e}"),
-        })?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::warn!("connection task error: {e}");
-        }
-    });
-
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("request send: {e}"),
-        })?;
-
-    let status = resp.status();
-    let body_bytes = collect_body(resp.into_body()).await?;
-
-    if !status.is_success() {
-        let body_str = String::from_utf8_lossy(&body_bytes);
-        return Err(CliTransportError::HttpError {
-            status: status.as_u16(),
-            body: body_str.into_owned(),
-        }
-        .into());
-    }
-
-    let value: Value =
-        serde_json::from_slice(&body_bytes).map_err(|e| CliTransportError::BodyDecode {
-            detail: format!("{e}"),
-        })?;
-
-    Ok(value)
+            bind: "<http client>".to_string(),
+            detail: format!("client build: {e}"),
+        })
 }
 
-/// Signed GET to the daemon, returning the response body as `Value`.
-pub async fn get_json(url: &str, headers: &SignHeaders) -> Result<Value, CliDispatchError> {
-    let uri: hyper::Uri = url.parse().map_err(|e| CliTransportError::Unreachable {
-        bind: url.to_string(),
-        detail: format!("invalid URL: {e}"),
-    })?;
-    let host = uri.host().unwrap_or("127.0.0.1");
-    let port = uri.port_u16().unwrap_or(80);
-    let bind = format!("{host}:{port}");
-
-    let req = Request::builder()
-        .method("GET")
-        .uri(uri.to_string())
-        .header("host", &bind)
-        .header("x-ryeos-key-id", &headers.key_id)
-        .header("x-ryeos-timestamp", &headers.timestamp)
-        .header("x-ryeos-nonce", &headers.nonce)
-        .header("x-ryeos-signature", &headers.signature)
-        .body(Full::new(Bytes::new()))
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("failed to build request: {e}"),
-        })?;
-
-    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
-        CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: e.to_string(),
-        }
-    })?;
-    let io = hyper_util::rt::TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-        .await
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("HTTP handshake: {e}"),
-        })?;
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::warn!("connection task error: {e}");
-        }
-    });
-
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("request send: {e}"),
-        })?;
+/// Read a response body, mapping a non-2xx status to a typed `HttpError` and a
+/// 2xx body to parsed JSON.
+async fn read_json(resp: reqwest::Response) -> Result<Value, CliDispatchError> {
     let status = resp.status();
-    let body_bytes = collect_body(resp.into_body()).await?;
+    let body = resp.text().await.map_err(|e| CliTransportError::BodyDecode {
+        detail: format!("read body: {e}"),
+    })?;
     if !status.is_success() {
         return Err(CliTransportError::HttpError {
             status: status.as_u16(),
-            body: String::from_utf8_lossy(&body_bytes).into_owned(),
+            body,
         }
         .into());
     }
-    serde_json::from_slice(&body_bytes).map_err(|e| {
+    serde_json::from_str(&body).map_err(|e| {
         CliTransportError::BodyDecode {
             detail: format!("{e}"),
         }
         .into()
     })
+}
+
+/// POST JSON to the daemon and return the response body as `Value`.
+///
+/// `url` is a full URL like `http://127.0.0.1:7400/execute` or
+/// `https://node.example.com/execute`.
+pub async fn post_json(
+    url: &str,
+    headers: &SignHeaders,
+    body: &[u8],
+) -> Result<Value, CliDispatchError> {
+    let resp = signed_client()?
+        .post(url)
+        .header("content-type", "application/json")
+        .header("x-ryeos-key-id", &headers.key_id)
+        .header("x-ryeos-timestamp", &headers.timestamp)
+        .header("x-ryeos-nonce", &headers.nonce)
+        .header("x-ryeos-signature", &headers.signature)
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: url.to_string(),
+            detail: format!("request send: {e}"),
+        })?;
+    read_json(resp).await
+}
+
+/// Signed GET to the daemon, returning the response body as `Value`.
+pub async fn get_json(url: &str, headers: &SignHeaders) -> Result<Value, CliDispatchError> {
+    let resp = signed_client()?
+        .get(url)
+        .timeout(CONTROL_PLANE_TIMEOUT)
+        .header("x-ryeos-key-id", &headers.key_id)
+        .header("x-ryeos-timestamp", &headers.timestamp)
+        .header("x-ryeos-nonce", &headers.nonce)
+        .header("x-ryeos-signature", &headers.signature)
+        .send()
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: url.to_string(),
+            detail: format!("request send: {e}"),
+        })?;
+    read_json(resp).await
 }
 
 /// One parsed Server-Sent Event.
@@ -174,94 +119,52 @@ pub async fn post_json_streaming(
     body: &[u8],
     mut on_event: impl FnMut(&SseEvent) -> bool,
 ) -> Result<(), CliDispatchError> {
-    let uri: hyper::Uri = url.parse().map_err(|e| CliTransportError::Unreachable {
-        bind: url.to_string(),
-        detail: format!("invalid URL: {e}"),
-    })?;
-    let host = uri.host().unwrap_or("127.0.0.1");
-    let port = uri.port_u16().unwrap_or(80);
-    let bind = format!("{host}:{port}");
-
-    let req = Request::builder()
-        .method("POST")
-        .uri(uri.to_string())
+    let mut resp = signed_client()?
+        .post(url)
         .header("content-type", "application/json")
         .header("accept", "text/event-stream")
-        .header("host", &bind)
         .header("x-ryeos-key-id", &headers.key_id)
         .header("x-ryeos-timestamp", &headers.timestamp)
         .header("x-ryeos-nonce", &headers.nonce)
         .header("x-ryeos-signature", &headers.signature)
-        .body(Full::new(Bytes::from(body.to_vec())))
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("failed to build request: {e}"),
-        })?;
-
-    let stream = tokio::net::TcpStream::connect(&bind).await.map_err(|e| {
-        CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: e.to_string(),
-        }
-    })?;
-    let io = hyper_util::rt::TokioIo::new(stream);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+        .body(body.to_vec())
+        .send()
         .await
         .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
-            detail: format!("HTTP handshake: {e}"),
-        })?;
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::warn!("connection task error: {e}");
-        }
-    });
-
-    let resp = sender
-        .send_request(req)
-        .await
-        .map_err(|e| CliTransportError::Unreachable {
-            bind: bind.clone(),
+            bind: url.to_string(),
             detail: format!("request send: {e}"),
         })?;
+
     let status = resp.status();
     let is_event_stream = resp
         .headers()
-        .get(hyper::header::CONTENT_TYPE)
+        .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|ct| ct.starts_with("text/event-stream"))
         .unwrap_or(false);
     if !status.is_success() {
-        let body_bytes = collect_body(resp.into_body()).await?;
+        let body = resp.text().await.unwrap_or_default();
         return Err(CliTransportError::HttpError {
             status: status.as_u16(),
-            body: String::from_utf8_lossy(&body_bytes).into_owned(),
+            body,
         }
         .into());
     }
     // A 2xx that is not an event stream (e.g. a JSON error body) would otherwise
     // be consumed with zero frames and exit success — surface it instead.
     if !is_event_stream {
-        let body_bytes = collect_body(resp.into_body()).await?;
+        let body = resp.text().await.unwrap_or_default();
         return Err(CliTransportError::BodyDecode {
-            detail: format!(
-                "expected text/event-stream, got non-SSE 2xx response: {}",
-                String::from_utf8_lossy(&body_bytes)
-            ),
+            detail: format!("expected text/event-stream, got non-SSE 2xx response: {body}"),
         }
         .into());
     }
 
-    let mut body = resp.into_body();
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| CliTransportError::BodyDecode {
-            detail: format!("stream frame: {e}"),
-        })?;
-        let Some(data) = frame.data_ref() else {
-            continue;
-        };
-        buf.extend_from_slice(data);
+    while let Some(chunk) = resp.chunk().await.map_err(|e| CliTransportError::BodyDecode {
+        detail: format!("stream frame: {e}"),
+    })? {
+        buf.extend_from_slice(&chunk);
         // Drain every complete event (terminated by a blank line, LF or CRLF)
         // from the front of the buffer, leaving any partial tail for the next
         // frame.
@@ -337,20 +240,6 @@ fn parse_sse_block(block: &[u8]) -> Option<SseEvent> {
     }
     ev.data = data_lines.join("\n");
     Some(ev)
-}
-
-async fn collect_body(body: Incoming) -> Result<Vec<u8>, CliTransportError> {
-    let mut bufs = Vec::new();
-    let mut body = body;
-    while let Some(chunk) = body.frame().await {
-        let frame = chunk.map_err(|e| CliTransportError::BodyDecode {
-            detail: format!("stream frame: {e}"),
-        })?;
-        if let Some(data) = frame.data_ref() {
-            bufs.extend_from_slice(data);
-        }
-    }
-    Ok(bufs)
 }
 
 /// Resolve the daemon URL. Priority:

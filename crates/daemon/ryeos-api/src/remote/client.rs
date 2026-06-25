@@ -118,10 +118,22 @@ impl RemoteClient {
             audience: audience.to_string(),
             http: reqwest::Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
+                // Signed requests must never auto-follow redirects: a
+                // 301/302/303 can downgrade a POST to GET, but the signature is
+                // bound to method/path/body. With redirects off a 3xx surfaces
+                // as an error instead. Same invariant as the CLI/terminal
+                // `signed_client`.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
-                // Builder only fails on TLS backend init; fall back to
-                // the default client rather than panicking the daemon.
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                // Builder only fails on TLS backend init; fall back rather than
+                // panicking the daemon. The fallback also disables redirects so
+                // the no-auto-redirect invariant holds for signed requests.
+                .unwrap_or_else(|_| {
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new())
+                }),
             identity,
         }
     }
