@@ -434,9 +434,8 @@ impl StudioCore {
                 );
                 self.bump_generation();
                 shown_view
-                    .and_then(|view_ref| self.emit_fetch_source_keyed(key, &view_ref))
-                    .into_iter()
-                    .collect()
+                    .map(|view_ref| self.emit_fetch_source_keyed(key, &view_ref))
+                    .unwrap_or_default()
             }
             StudioAction::ResizeFocused { direction } => {
                 if self.workspace.resize_master(direction) {
@@ -1349,7 +1348,7 @@ impl StudioCore {
             .collect();
         targets
             .into_iter()
-            .filter_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
             .collect()
     }
 
@@ -2584,6 +2583,89 @@ mod tests {
                 assert_eq!(rows[0].meta.as_deref(), Some("directive:demo/chat"));
             }
             other => panic!("expected bound rows dock view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sections_view_assembles_one_group_per_section_from_its_own_source() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.docks.left.as_mut().unwrap().visible = true;
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "sections",
+                "sections": [
+                    {
+                        "title": "Threads",
+                        "source": { "ref": "service:ui/studio/threads", "collection": "rows" },
+                        "projection": { "primary": "thread_id", "meta": "status" }
+                    },
+                    {
+                        "title": "Bundles",
+                        "source": { "ref": "service:ui/studio/bundles", "collection": "rows" },
+                        "projection": { "primary": "name", "meta": "version" }
+                    }
+                ]
+            }),
+        );
+        // Each section's response lands under its own per-section key.
+        core.data.sources.insert(
+            crate::studio::content::section_source_key("dock:left", 0),
+            serde_json::json!({ "rows": [
+                { "thread_id": "T-ab", "status": "running" },
+                { "thread_id": "T-cd", "status": "done" }
+            ]}),
+        );
+        core.data.sources.insert(
+            crate::studio::content::section_source_key("dock:left", 1),
+            serde_json::json!({ "rows": [ { "name": "studio", "version": "v1.0.0" } ]}),
+        );
+
+        let vm = build_view_model(&core);
+        let dock = vm.workspace.docks.left.expect("left dock");
+        match dock.view {
+            crate::studio::view_model::StudioViewVm::Sections { sections, .. } => {
+                assert_eq!(sections.len(), 2);
+                assert_eq!(sections[0].title, "Threads");
+                assert_eq!(sections[0].count, 2);
+                assert_eq!(sections[0].rows[0].primary, "T-ab");
+                assert_eq!(sections[0].rows[0].meta.as_deref(), Some("running"));
+                assert_eq!(sections[1].title, "Bundles");
+                assert_eq!(sections[1].count, 1);
+                assert_eq!(sections[1].rows[0].primary, "studio");
+                assert_eq!(sections[1].rows[0].meta.as_deref(), Some("v1.0.0"));
+            }
+            other => panic!("expected bound sections dock view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sections_view_without_a_loaded_source_shows_an_empty_group() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.docks.left.as_mut().unwrap().visible = true;
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "sections",
+                "sections": [{
+                    "title": "Threads",
+                    "source": { "ref": "service:ui/studio/threads", "collection": "rows" },
+                    "projection": { "primary": "thread_id" }
+                }]
+            }),
+        );
+        // No source seeded → the section is present but empty (count 0), not a
+        // placeholder: the surface is up, the data just hasn't arrived.
+        let vm = build_view_model(&core);
+        match vm.workspace.docks.left.expect("left dock").view {
+            crate::studio::view_model::StudioViewVm::Sections { sections, .. } => {
+                assert_eq!(sections.len(), 1);
+                assert_eq!(sections[0].count, 0);
+                assert!(sections[0].rows.is_empty());
+            }
+            other => panic!("expected sections dock view, got {other:?}"),
         }
     }
 

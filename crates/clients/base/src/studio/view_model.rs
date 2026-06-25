@@ -900,6 +900,55 @@ fn bound_view_vm_keyed(
                 scene: build_scene_model(core, atlas, None, None),
             };
         }
+        "sections" => {
+            // A sections view reads one source per section (keyed by
+            // section_source_key), not the single per-tile response below — so
+            // it assembles here, ahead of the source-required arms.
+            let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
+            if binding.sections.is_empty() {
+                return StudioViewVm::Placeholder {
+                    title,
+                    message: "sections view declares no sections".to_string(),
+                };
+            }
+            let sections = binding
+                .sections
+                .iter()
+                .enumerate()
+                .map(|(index, section)| {
+                    let key = super::content::section_source_key(source_key, index);
+                    let rows: Vec<StudioRowVm> = core
+                        .data
+                        .sources
+                        .get(&key)
+                        .map(|response| super::content::project_section(section, response))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(row_index, record)| StudioRowVm {
+                            id: format!("{view_ref}#{index}#{row_index}"),
+                            primary: record.primary,
+                            secondary: None,
+                            meta: record.meta,
+                            kind: None,
+                            // Per-row activation is wired in a later increment.
+                            action: None,
+                            tone: tone_from_name(record.tone.as_deref()),
+                            selected: false,
+                        })
+                        .collect();
+                    StudioSectionVm {
+                        title: section.title.clone(),
+                        count: rows.len(),
+                        // Fold interaction lands with selection support; for now
+                        // sections render expanded.
+                        collapsed: false,
+                        rows,
+                    }
+                })
+                .collect();
+            return StudioViewVm::Sections { title, sections };
+        }
         _ => {}
     }
     let response = core.data.sources.get(source_key);

@@ -78,6 +78,11 @@ pub struct ViewBinding {
     pub input: Option<InputBlock>,
     #[serde(default)]
     pub affordances: Vec<Value>,
+    /// Sections for the `sections` widget: each a titled group with its own
+    /// source + projection, fetched and projected independently. Empty for
+    /// every non-sections widget.
+    #[serde(default)]
+    pub sections: Vec<SectionBinding>,
     #[serde(default)]
     pub refresh: Value,
     /// The view item's canonical ref (provenance chrome).
@@ -225,6 +230,28 @@ pub struct SourceBinding {
     pub collection: Option<String>,
 }
 
+/// One section of a `sections` view: a titled group with its own source and
+/// single projection, fetched and projected independently of its siblings.
+/// Sections share the host view's `affordances`; `activate` names which one a
+/// row in this section fires (wired in a later increment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectionBinding {
+    pub title: String,
+    pub source: SourceBinding,
+    #[serde(default)]
+    pub projection: Value,
+    #[serde(default)]
+    pub activate: Option<String>,
+}
+
+/// The per-section source key for a `sections` view: the host key (tile id or
+/// dock key) plus the section index. Each section's source response lands
+/// under its own key so the resolver reads them back independently. Both the
+/// fetch emitter and the resolver derive section keys through this one helper.
+pub fn section_source_key(base: &str, index: usize) -> String {
+    format!("{base}#section{index}")
+}
+
 /// Flat field path lookup: `payload.delta` walks objects, never arrays.
 pub fn field_path<'v>(record: &'v Value, path: &str) -> Option<&'v Value> {
     let mut current = record;
@@ -348,6 +375,24 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
                 .unwrap_or(&default_projection);
             project_record(record, projection)
         })
+        .collect()
+}
+
+/// Project one section's source response into records: pull the section's
+/// collection, apply its single projection. The rows-shaped sibling of
+/// `project_records` — sections carry no per-event-kind blocks.
+pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    let records: &[Value] = section
+        .source
+        .collection
+        .as_deref()
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    records
+        .iter()
+        .map(|record| project_record(record, &section.projection))
         .collect()
 }
 
