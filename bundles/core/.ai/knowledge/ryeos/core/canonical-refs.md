@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T04:23:12Z:4698b75c21c895f6410cc75525b0adf24d2fe8d10512746b95703ea561125963:r1o7THHzxkkIPAZF/BskKSN7xd4ge1+zueJMZ9YixKSaBZHktNbVuasFgAZdYj5Kk8Oqlns8eqA13Dy8ajPsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:cb8ce53ccf8e5e76a71db97b246b6c93186cc2e7a9729a8c78cc98bd2047fe4e:pA4UMz7siRYQH3xRjXaa6v0aPBgFvOJ+Hk7WL3mpTcSWh2WfsEV76kpVR/BtNt8Nz361o2MNanes9ee0JsOLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, addressing, refs]
@@ -47,12 +47,11 @@ the kind by searching directories in kind priority order.
 
 ## Resolution Algorithm
 
-When resolving `kind:path/to/item`, the engine searches three spaces
+When resolving `kind:path/to/item`, the engine searches two spaces
 in order:
 
 1. **Project** — `<project_root>/.ai/<kind_dir>/path/to/item.*`
-2. **User** — `~/.ryeos/.ai/<kind_dir>/path/to/item.*`
-3. **System** — Each installed bundle's `.ai/<kind_dir>/path/to/item.*`
+2. **System** — Each installed bundle's `.ai/<kind_dir>/path/to/item.*`
 
 First match wins. If no match is found, the engine returns a
 resolution error.

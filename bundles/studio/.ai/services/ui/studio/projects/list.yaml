@@ -1,7 +1,7 @@
-# ryeos:signed:2026-06-11T22:51:46Z:88a0399f7518ca5c3079413726162f7b90d89af6f00971f69df401fa48a0b0a7:1y95nx+VeiM3QY9+tu1dQeCAw1BoR6nPV5+vvBkWy6nYivBeWelUlHBYgpZ8lHG3iXkZ6geB3hFfnW79g5zgBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-24T04:51:58Z:66a081202684b992d2920ab16a05e2abbfe590df9ce9f821d9d404fa95af0ed3:WlAhZ5eahSYi5JXHXtJr38KG9e67Z1KEbjFUsULKWXFgGzAjAqlEq8MJzWBBWVJAHJ3YuI7i7ZWfiOg5CNFMAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: studio/projects/list
 version: "1.0.0"
-description: List the local user-space Studio project registry.
+description: List the local per-principal Studio project registry.
 endpoint: ui.studio.projects.list
 availability: daemon_only

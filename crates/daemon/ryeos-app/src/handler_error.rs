@@ -28,6 +28,14 @@ pub enum HandlerError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// State conflict — the request collides with existing state the caller
+    /// cannot override, but is nonetheless entitled to be told about (unlike
+    /// `NotFound`, which hides existence). Use this — not `NotFound` — when the
+    /// caller has already proven knowledge of the resource (e.g. a deploy
+    /// reconcile over the caller's own snapshot). Maps to 409.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// Internal server error. Maps to 500.
     #[error("internal: {0}")]
     Internal(String),

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:71d59deaab20211d0fd8f5737244c3d651ad112c788378da757b2a18d09eca50:flfrCEZn8xR9soJhTdB4hM7P3H5psipk51rbu9wScYcXQ4UbPknmlWW+92BVypl0wZ8cB9wnhqHWG1kFO9ZfDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:67f333649222ad020009f0b69922e18a3319a97fb291a224e1950ca833c57b02:5/Lq15+5vjgZ11k0V3oSPsTEYVPQcA7lp3iQPt+hrjuwLYe2LwjsRAv+4+ImJ2r2jNHOv+U7D/mjyRKkYU74Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, state, cas, sqlite, vault, locks, ownership]
@@ -10,17 +10,17 @@ description: >
 
 # Daemon State Directory
 
-Daemon-owned state lives under the configured system space, not inside
-ephemeral execution working directories. Operator-owned user state lives
-under the user root.
+Daemon-owned state and operator-owned state both live under the
+configured system space (the app root), not inside ephemeral execution
+working directories.
 
 ## Ownership split
 
-User-space artifacts owned by `ryeos init`:
+Operator artifacts owned by `ryeos init`:
 
-- `<user>/.ai/config/keys/signing/private_key.pem` — user/CLI key.
-- `<user>/.ai/config/keys/trusted/<fp>.toml` — publisher, user, and node
-  trust docs.
+- `<system>/.ai/config/keys/signing/private_key.pem` — operator/CLI key.
+- `<system>/.ai/config/keys/trusted/<fp>.toml` — publisher, operator, and
+  node trust docs.
 
 System-space artifacts installed or registered by `ryeos init`:
 

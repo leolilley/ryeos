@@ -183,50 +183,119 @@ fn translate_result(result: lillux::SubprocessResult) -> ExecutionCompletion {
         };
     }
 
-    let result_value = if result.success {
-        let parsed = match serde_json::from_str::<Value>(&result.stdout) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::trace!(
-                    stdout_len = result.stdout.len(),
-                    "subprocess stdout is not valid JSON, wrapping as string: {e}"
-                );
-                None
-            }
+    // Process-level failure (non-zero exit). stdout+stderr ride in `error`.
+    if !result.success {
+        return ExecutionCompletion {
+            status: ThreadTerminalStatus::Failed,
+            outcome_code: Some(format!("exit:{}", result.exit_code)),
+            result: None,
+            error: Some(serde_json::json!({
+                "exit_code": result.exit_code,
+                "stdout": truncate_for_error(&result.stdout, 2000),
+                "stderr": truncate_for_error(&result.stderr, 2000),
+            })),
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: Some(base_metadata(&result)),
         };
-        Some(parsed.unwrap_or(Value::String(result.stdout.clone())))
-    } else {
-        None
-    };
+    }
 
-    let error_value = if !result.success {
-        Some(serde_json::json!({
-            "exit_code": result.exit_code,
-            "stdout": truncate_for_error(&result.stdout, 2000),
-            "stderr": truncate_for_error(&result.stderr, 2000),
-        }))
-    } else {
-        None
+    // Process exited 0. Parse stdout as the tool result JSON — but a
+    // catch-and-report tool may still signal failure *inside* that JSON
+    // while the process exits clean.
+    let parsed = match serde_json::from_str::<Value>(&result.stdout) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::trace!(
+                stdout_len = result.stdout.len(),
+                "subprocess stdout is not valid JSON, wrapping as string: {e}"
+            );
+            None
+        }
     };
+    let result_value = parsed
+        .clone()
+        .unwrap_or_else(|| Value::String(result.stdout.clone()));
 
+    // Soft failure: exit 0, but the result shape reports the tool failed.
+    // The tool's real error (Python traceback, `logger.error(...)`) was
+    // written to stderr — captured by lillux, but dropped on the success
+    // path. Retain a bounded TAIL of stderr (where the error lands) in
+    // `error`, which IS persisted into the run record; `metadata` is not.
+    // Flipping to Failed also lines up with the graph runtime, which keys
+    // subprocess-leaf failure off `error` being non-null.
+    if parsed.as_ref().is_some_and(result_reports_failure) {
+        return ExecutionCompletion {
+            status: ThreadTerminalStatus::Failed,
+            outcome_code: Some(format!("exit:{}", result.exit_code)),
+            result: Some(result_value),
+            error: Some(serde_json::json!({
+                "exit_code": result.exit_code,
+                "soft_failure": true,
+                "stdout": truncate_for_error(&result.stdout, 2000),
+                "stderr": truncate_tail_for_error(&result.stderr, STDERR_TAIL_CAP),
+            })),
+            artifacts: Vec::new(),
+            final_cost: None,
+            continuation_request: None,
+            metadata: Some(base_metadata(&result)),
+        };
+    }
+
+    // Genuine success. Keep stderr OUT of the durable record so healthy
+    // runs don't spam logs — `base_metadata` notes only its byte count.
     ExecutionCompletion {
-        status: if result.success {
-            ThreadTerminalStatus::Completed
-        } else {
-            ThreadTerminalStatus::Failed
-        },
+        status: ThreadTerminalStatus::Completed,
         outcome_code: Some(format!("exit:{}", result.exit_code)),
-        result: result_value,
-        error: error_value,
+        result: Some(result_value),
+        error: None,
         artifacts: Vec::new(),
         final_cost: None,
         continuation_request: None,
-        metadata: Some(serde_json::json!({
-            "duration_ms": result.duration_ms,
-            "exit_code": result.exit_code,
-            "pid": result.pid,
-        })),
+        metadata: Some(base_metadata(&result)),
     }
+}
+
+/// Max bytes of the stderr tail retained on a soft-failure completion.
+/// A tool's real error lands at the *end* of stderr, so we keep the tail.
+const STDERR_TAIL_CAP: usize = 8 * 1024;
+
+/// Standard completion metadata for a process that ran to exit (not timed
+/// out). Notes `stderr_bytes` when stderr is non-empty so a healthy run's
+/// stray diagnostics are visible interactively without persisting the body.
+fn base_metadata(result: &lillux::SubprocessResult) -> Value {
+    let mut meta = serde_json::Map::new();
+    meta.insert("duration_ms".to_owned(), serde_json::json!(result.duration_ms));
+    meta.insert("exit_code".to_owned(), serde_json::json!(result.exit_code));
+    meta.insert("pid".to_owned(), serde_json::json!(result.pid));
+    if !result.stderr.is_empty() {
+        meta.insert(
+            "stderr_bytes".to_owned(),
+            serde_json::json!(result.stderr.len()),
+        );
+    }
+    Value::Object(meta)
+}
+
+/// Does this parsed tool result *itself* report failure, despite the
+/// process exiting 0? The catch-and-report convention: a JSON object that
+/// sets `success: false`, carries a non-null `error`, or a non-empty
+/// `errors` array. Mirrors the graph runtime's subprocess-leaf failure
+/// signal (a non-null `error`).
+fn result_reports_failure(parsed: &Value) -> bool {
+    let Some(obj) = parsed.as_object() else {
+        return false;
+    };
+    if obj.get("success").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    if obj.get("error").is_some_and(|e| !e.is_null()) {
+        return true;
+    }
+    obj.get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
 }
 
 /// A spawned but not-yet-completed execution.
@@ -511,6 +580,147 @@ mod tests {
         assert!(completion.error.is_some());
     }
 
+    /// A tool that logs its real error to stderr and returns
+    /// `{"success": false}` while EXITING 0 (the catch-and-report pattern)
+    /// must produce a Failed completion whose `error` carries the stderr
+    /// tail — otherwise the error is undebuggable on the scheduled path.
+    #[test]
+    fn dispatch_soft_failure_surfaces_stderr_tail() {
+        let dir = tempdir();
+        let script = dir.join("soft_fail.py");
+        fs::write(
+            &script,
+            "import sys, json\n\
+             sys.stderr.write('UPSERT_MARKER: Upsert failed (500): boom body\\n')\n\
+             print(json.dumps({'success': False, \
+             'error_summary': {'store_or_schedule_failed: RuntimeError': 3}}))\n",
+        )
+        .unwrap();
+
+        let plan = make_plan(vec![
+            PlanNode::DispatchSubprocess {
+                id: PlanNodeId("entry:test".into()),
+                spec: PlanSubprocessSpec {
+                    cmd: "python3".into(),
+                    args: vec![script.to_string_lossy().to_string()],
+                    cwd: Some(dir),
+                    env: HashMap::new(),
+                    env_sources: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                    execution: Default::default(),
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
+            },
+            PlanNode::Complete {
+                id: PlanNodeId("complete:test".into()),
+            },
+        ]);
+
+        let ctx = test_engine_context();
+        let completion = execute_plan(&plan, &ctx).unwrap();
+
+        // Exit 0 but the result says it failed → marked Failed.
+        assert_eq!(completion.status, ThreadTerminalStatus::Failed);
+        let error = completion.error.as_ref().expect("soft failure carries error");
+        assert_eq!(error["soft_failure"], true);
+        assert_eq!(error["exit_code"], 0);
+        // The tool's real error — only ever written to stderr — is retained.
+        assert!(
+            error["stderr"].as_str().unwrap().contains("UPSERT_MARKER"),
+            "stderr tail must carry the tool's logged error: {error}"
+        );
+        // The tool's structured result is still preserved for diagnosis.
+        let result = completion.result.as_ref().expect("result preserved");
+        assert_eq!(result["success"], false);
+    }
+
+    /// A clean tool (exit 0, no failure signal in its result) stays
+    /// Completed and keeps stderr OUT of the durable `error` — only its
+    /// byte count is noted in metadata.
+    #[test]
+    fn dispatch_clean_success_does_not_persist_stderr() {
+        let dir = tempdir();
+        let script = dir.join("noisy_ok.py");
+        fs::write(
+            &script,
+            "import sys, json\n\
+             sys.stderr.write('NOISE: progress 1/3\\n')\n\
+             print(json.dumps({'success': True, 'rows': 10}))\n",
+        )
+        .unwrap();
+
+        let plan = make_plan(vec![
+            PlanNode::DispatchSubprocess {
+                id: PlanNodeId("entry:test".into()),
+                spec: PlanSubprocessSpec {
+                    cmd: "python3".into(),
+                    args: vec![script.to_string_lossy().to_string()],
+                    cwd: Some(dir),
+                    env: HashMap::new(),
+                    env_sources: HashMap::new(),
+                    stdin_data: None,
+                    timeout_secs: 300,
+                    execution: Default::default(),
+                },
+                tool_path: None,
+                executor_chain: Vec::new(),
+            },
+            PlanNode::Complete {
+                id: PlanNodeId("complete:test".into()),
+            },
+        ]);
+
+        let ctx = test_engine_context();
+        let completion = execute_plan(&plan, &ctx).unwrap();
+        assert_eq!(completion.status, ThreadTerminalStatus::Completed);
+        assert!(completion.error.is_none(), "clean run must not set error");
+        // stderr body is not persisted, but its size is noted.
+        let meta = completion.metadata.as_ref().unwrap();
+        assert!(meta["stderr_bytes"].as_u64().unwrap() > 0);
+        assert!(
+            !meta.to_string().contains("NOISE"),
+            "clean-run stderr body must not be retained: {meta}"
+        );
+    }
+
+    #[test]
+    fn result_reports_failure_predicate() {
+        assert!(result_reports_failure(&serde_json::json!({"success": false})));
+        assert!(result_reports_failure(
+            &serde_json::json!({"error": "boom"})
+        ));
+        assert!(result_reports_failure(
+            &serde_json::json!({"errors": ["a"]})
+        ));
+        // Healthy / absent / null-error shapes are NOT failures.
+        assert!(!result_reports_failure(&serde_json::json!({"success": true})));
+        assert!(!result_reports_failure(
+            &serde_json::json!({"error": null, "errors": []})
+        ));
+        assert!(!result_reports_failure(&serde_json::json!({"rows": 10})));
+        // Non-object results never trip the predicate.
+        assert!(!result_reports_failure(&serde_json::json!("ok")));
+        assert!(!result_reports_failure(&serde_json::json!([1, 2, 3])));
+    }
+
+    #[test]
+    fn truncate_tail_keeps_the_end() {
+        let s = "abcdefghij"; // 10 bytes
+        // Short input is returned whole.
+        assert_eq!(truncate_tail_for_error(s, 100), s);
+        // Long input keeps the LAST max_len bytes plus a marker.
+        let out = truncate_tail_for_error(s, 4);
+        assert!(out.ends_with("ghij"), "tail must be the end: {out}");
+        assert!(out.contains("truncated, 10 bytes total"));
+        // Multi-byte boundary: cutting through a 'é' (2 bytes) must not panic
+        // and must yield valid UTF-8.
+        let multi = "ααααα"; // 10 bytes, 5 chars
+        let out = truncate_tail_for_error(multi, 5);
+        assert!(out.is_char_boundary(out.len()));
+    }
+
     #[test]
     fn dispatch_env_bindings() {
         let dir = tempdir();
@@ -629,6 +839,30 @@ fn truncate_for_error(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_owned()
     } else {
-        format!("{}… (truncated, {} bytes total)", &s[..max_len], s.len())
+        // Walk back to a char boundary so we never slice mid-codepoint.
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}… (truncated, {} bytes total)", &s[..end], s.len())
     }
+}
+
+/// Retain the LAST `max_len` bytes of `s` (the tail), where a tool's real
+/// error — a Python traceback, a final `logger.error(...)` — usually
+/// lands. Char-boundary safe; prefixes a marker when bytes were dropped.
+fn truncate_tail_for_error(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_owned();
+    }
+    // Walk forward to a char boundary so we never slice mid-codepoint.
+    let mut start = s.len() - max_len;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "… (truncated, {} bytes total)\n{}",
+        s.len(),
+        &s[start..]
+    )
 }

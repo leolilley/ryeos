@@ -220,6 +220,12 @@ pub enum DispatchError {
     /// authorised to know it exists. Maps to 404.
     #[error("not found")]
     NotFound,
+    /// State conflict — the request collides with existing state the caller
+    /// cannot override but is entitled to be told about (e.g. a deploy
+    /// reconcile touching a schedule owned by another principal). The
+    /// `Display` is the bare actionable message. Maps to 409.
+    #[error("{0}")]
+    Conflict(String),
     // ── Target-site forwarding errors ────────────────────────────
     /// The requested target site is not configured as a remote.
     #[error("unknown target site '{target_site_id}'; configured sites: [{known_sites}]")]
@@ -306,7 +312,9 @@ impl DispatchError {
                 StatusCode::NOT_IMPLEMENTED
             }
             // State-conflict: push-first, checkout race, etc.
-            Self::ProjectSource(_) | Self::ProjectSourcePushFirst(_) => StatusCode::CONFLICT,
+            Self::ProjectSource(_) | Self::ProjectSourcePushFirst(_) | Self::Conflict(_) => {
+                StatusCode::CONFLICT
+            }
             // Bad gateway: the daemon reached out to a subsystem
             // (service handler, runtime binary, CAS) and it was
             // missing, unavailable, or returned an error.
@@ -363,6 +371,7 @@ impl DispatchError {
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
             Self::MissingCap { .. } => "missing_cap",
             Self::NotFound => "not_found",
+            Self::Conflict(_) => "conflict",
             Self::UnknownMethod { .. } => "unknown_method",
             Self::MethodInvalidArg { .. } => "method_invalid_arg",
             Self::MethodFailed { .. } => "method_failed",
@@ -433,6 +442,18 @@ mod tests {
             }],
             warnings: vec![],
         }
+    }
+
+    #[test]
+    fn conflict_maps_to_409_with_code() {
+        let e = DispatchError::Conflict(
+            "schedule 'snap-track-feed' in this project is registered by a different \
+             principal; deregister it on the remote or run the sync as its owner"
+                .to_string(),
+        );
+        assert_eq!(e.http_status(), StatusCode::CONFLICT);
+        assert_eq!(e.code(), "conflict");
+        assert!(e.to_string().contains("snap-track-feed"));
     }
 
     #[test]

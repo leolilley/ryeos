@@ -144,10 +144,56 @@ pub struct ThreadFinalizeParams {
     pub summary_json: Option<Value>,
 }
 
+/// Default auto-launch attempt budget for a machine continuation successor. The
+/// reconciler/launcher reuses the runtime-db resume-attempts counter against
+/// this ceiling so a poisoned successor can't relaunch forever.
+pub const MAX_CONTINUATION_AUTO_ATTEMPTS: u32 = 3;
+
+/// Stable fingerprint of an OPERATOR follow-up request over its launch-significant
+/// boundary inputs. Two `threads/input` calls with the same fingerprint are the
+/// SAME logical request (a double-submit) and resolve to the same successor; a
+/// different fingerprint onto an already-continued source is a conflict.
+///
+/// Covers the item ref, project, principal + scopes, launch mode, the predecessor
+/// thread id, and the raw parameters — everything that distinguishes one launch
+/// from another. The dedup must work BEFORE the runtime launches (a crash between
+/// create and launch must still dedup), so this is persisted on the successor's
+/// `thread_continued` edge, not re-derived from runtime-emitted input. Not
+/// canonical JSON: identical requests serialize identically, which is all dedup
+/// needs; scopes are sorted so ordering is not significant.
+pub fn continuation_request_fingerprint(
+    item_ref: &str,
+    project_path: &str,
+    principal_fingerprint: &str,
+    scopes: &[String],
+    launch_mode: &str,
+    previous_thread_id: &str,
+    parameters: &Value,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut scopes_sorted: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    scopes_sorted.sort_unstable();
+    let canonical = json!({
+        "item_ref": item_ref,
+        "project_path": project_path,
+        "principal": principal_fingerprint,
+        "scopes": scopes_sorted,
+        "launch_mode": launch_mode,
+        "previous_thread_id": previous_thread_id,
+        "parameters": parameters,
+    });
+    let bytes = serde_json::to_vec(&canonical).expect("fingerprint input is serializable");
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadContinuationParams {
     pub thread_id: String,
+    /// Optional free-form string from the runtime for logs only. Continuation is
+    /// autonomous by construction — it carries no reason/gate/mode.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -158,6 +204,22 @@ pub struct ThreadContinuationResult {
     pub successor_thread_id: String,
     pub chain_root_id: String,
     pub successor: ThreadDetail,
+}
+
+/// Outcome of an idempotent operator follow-up (see
+/// [`ThreadLifecycleService::create_or_get_operator_continuation`]). The handler
+/// returns the successor's real id in every non-conflict case, so a double-submit
+/// never acknowledges a phantom id.
+#[derive(Debug)]
+pub enum OperatorContinuation {
+    /// A new successor was created — the caller should launch it.
+    Created(ThreadDetail),
+    /// A same-fingerprint successor already exists (a duplicate submit) — return
+    /// it; do not mint or launch a second.
+    Existing(ThreadDetail),
+    /// The source is already continued by a DIFFERENT request — refuse, pointing
+    /// at the existing successor.
+    Conflict { existing_successor_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +350,154 @@ impl ThreadLifecycleService {
             .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
     }
 
+    /// Create a chain successor for `source_thread_id` with a pre-minted id and
+    /// a launch-ready `request`, then return it. Mirrors
+    /// `create_root_thread_with_id` but braids onto the source's chain: the
+    /// successor inherits `chain_root_id` and links via `upstream_thread_id`,
+    /// and the source records the handoff transactionally (a `thread_continued`
+    /// event; the source is settled to `continued` only when it was still
+    /// running). The operator follow-up path runs this so lineage is
+    /// daemon-persisted at spawn, independent of whether the runtime rehydrates.
+    #[tracing::instrument(
+        level = "debug",
+        name = "thread:create_continuation",
+        skip(self, request),
+        fields(
+            thread_id = %successor_thread_id,
+            source_thread_id = %source_thread_id,
+            item_ref = %request.item_ref,
+        )
+    )]
+    pub fn create_continuation_with_id(
+        &self,
+        successor_thread_id: &str,
+        source_thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        reason: Option<&str>,
+    ) -> Result<ThreadDetail> {
+        validate_kind(&request.kind, self.kind_profiles())?;
+        validate_thread_id_format(successor_thread_id)?;
+
+        let source = self
+            .get_thread(source_thread_id)?
+            .ok_or_else(|| anyhow!("continuation source thread not found: {source_thread_id}"))?;
+
+        let profile = self.kind_profiles().get(&source.kind);
+        if !profile.is_some_and(|p| p.supports_continuation) {
+            bail!("continuation is not supported for kind '{}'", source.kind);
+        }
+
+        let successor_record = NewThreadRecord {
+            thread_id: successor_thread_id.to_string(),
+            chain_root_id: source.chain_root_id.clone(),
+            kind: request.kind.clone(),
+            item_ref: request.item_ref.clone(),
+            executor_ref: request.executor_ref.clone(),
+            launch_mode: request.launch_mode.clone(),
+            current_site_id: request.current_site_id.clone(),
+            origin_site_id: request.origin_site_id.clone(),
+            upstream_thread_id: Some(source.thread_id.clone()),
+            requested_by: request.requested_by.clone(),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+        };
+
+        let persisted = self.state_store.create_continuation(
+            &successor_record,
+            &source.thread_id,
+            &source.chain_root_id,
+            reason,
+        )?;
+        self.publish_records(&persisted);
+
+        self.get_thread(successor_thread_id)?.ok_or_else(|| {
+            anyhow!("created continuation successor missing from database: {successor_thread_id}")
+        })
+    }
+
+    /// Operator follow-up continuation, idempotent by request fingerprint.
+    ///
+    /// The lifecycle-layer wrapper over [`StateStore::create_or_get_continuation`]:
+    /// it enforces the source-kind `supports_continuation` policy (which the raw
+    /// state-store method cannot, having no kind registry), drives the chain root
+    /// from the source (never trusting the caller), publishes the persisted events
+    /// for a freshly created successor, and returns handler-friendly
+    /// `ThreadDetail`s. Same-fingerprint double-submits return `Existing`; a
+    /// different fingerprint onto an already-continued source is `Conflict`.
+    pub fn create_or_get_operator_continuation(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        reason: Option<&str>,
+        request_fingerprint: &str,
+        resume_context: &crate::launch_metadata::ResumeContext,
+    ) -> Result<OperatorContinuation> {
+        validate_kind(&successor.kind, self.kind_profiles())?;
+
+        let source = self
+            .get_thread(source_thread_id)?
+            .ok_or_else(|| anyhow!("continuation source thread not found: {source_thread_id}"))?;
+
+        let profile = self.kind_profiles().get(&source.kind);
+        if !profile.is_some_and(|p| p.supports_continuation) {
+            bail!("continuation is not supported for kind '{}'", source.kind);
+        }
+
+        // An operator follow-up braids onto a SETTLED turn (completed/failed) and
+        // PRESERVES that status. Reject any other source here so this wrapper
+        // cannot mint an illegal operator continuation: on a running source the
+        // store would settle it to `continued` with an operator fingerprint, which
+        // reconcile would then misclassify as a machine continuation.
+        if source.status != ryeos_state::objects::ThreadStatus::Completed.as_str()
+            && source.status != ryeos_state::objects::ThreadStatus::Failed.as_str()
+        {
+            bail!(
+                "operator continuation requires a completed or failed source; \
+                 thread '{source_thread_id}' is '{}'",
+                source.status
+            );
+        }
+
+        // An operator successor MUST carry a launch context — without it the row is
+        // unrelaunchable (a stranded `created` thread reconcile/resubmit cannot
+        // recover). The wrapper requires it; the raw state-store method's `Option`
+        // is for the machine/test paths that seed metadata elsewhere.
+        let outcome = self.state_store.create_or_get_continuation(
+            successor,
+            &source.thread_id,
+            &source.chain_root_id,
+            reason,
+            request_fingerprint,
+            Some(resume_context),
+        )?;
+
+        match outcome {
+            crate::state_store::ContinuationOutcome::Created(events) => {
+                self.publish_records(&events);
+                let detail = self.get_thread(&successor.thread_id)?.ok_or_else(|| {
+                    anyhow!(
+                        "created continuation successor missing from database: {}",
+                        successor.thread_id
+                    )
+                })?;
+                Ok(OperatorContinuation::Created(detail))
+            }
+            crate::state_store::ContinuationOutcome::Existing {
+                successor_thread_id,
+            } => {
+                let detail = self.get_thread(&successor_thread_id)?.ok_or_else(|| {
+                    anyhow!("existing continuation successor missing: {successor_thread_id}")
+                })?;
+                Ok(OperatorContinuation::Existing(detail))
+            }
+            crate::state_store::ContinuationOutcome::Conflict {
+                successor_thread_id,
+            } => Ok(OperatorContinuation::Conflict {
+                existing_successor_id: successor_thread_id,
+            }),
+        }
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "thread:create",
@@ -406,6 +616,42 @@ impl ThreadLifecycleService {
         )?;
         self.publish_records(&persisted);
 
+        // Failure-gated stderr surfacing. A subprocess tool's real error
+        // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
+        // scheduled path the only live signal operators see is the daemon's
+        // tracing stream (deploy logs), so emit it there at ERROR level when
+        // the run failed. Healthy runs stay silent — no stderr in `error`.
+        if matches!(terminal_status, "failed" | "killed") {
+            if let Some(stderr_tail) = completion
+                .error
+                .as_ref()
+                .and_then(|e| e.get("stderr"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let exit_code = completion
+                    .error
+                    .as_ref()
+                    .and_then(|e| e.get("exit_code"))
+                    .and_then(Value::as_i64);
+                let soft_failure = completion
+                    .error
+                    .as_ref()
+                    .and_then(|e| e.get("soft_failure"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                tracing::error!(
+                    thread_id,
+                    outcome_code = outcome_code.as_deref().unwrap_or(""),
+                    exit_code,
+                    soft_failure,
+                    stderr_tail = %stderr_tail,
+                    "thread failed; tool stderr tail follows"
+                );
+            }
+        }
+
         self.update_scheduler_fire_on_thread_terminal(
             thread_id,
             terminal_status,
@@ -417,30 +663,10 @@ impl ThreadLifecycleService {
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {thread_id}"))?;
 
-        // Handle continuation request from runtime
-        if let Some(cr) = &completion.continuation_request {
-            if terminal_status == "completed" {
-                match self.request_continuation(&ThreadContinuationParams {
-                    thread_id: thread_id.to_string(),
-                    reason: Some(cr.reason.clone()),
-                }) {
-                    Ok(_continuation) => {
-                        // Source thread is now "continued", return updated state
-                        return self.get_thread(thread_id)?.ok_or_else(|| {
-                            anyhow!("thread not found after continuation: {thread_id}")
-                        });
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            thread_id = %thread_id,
-                            error = %err,
-                            "continuation request failed"
-                        );
-                        // Fall through — thread stays in its finalized state
-                    }
-                }
-            }
-        }
+        // A continuation is a *cut-off* handoff from a RUNNING source (the live
+        // `request_continuation` UDS handler), never a terminal-completion edge:
+        // a thread that completes — with or without a question — takes the
+        // operator follow-up path. So finalize does NOT spawn a successor here.
 
         Ok(finalized)
     }
@@ -598,13 +824,10 @@ impl ThreadLifecycleService {
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("source thread not found: {}", params.thread_id))?;
 
-        if source.status != "running" && source.status != "completed" && source.status != "failed" {
-            bail!(
-                "cannot continue thread in status '{}' (must be running, completed, or failed)",
-                source.status
-            );
-        }
-
+        // Kind policy (a daemon concern, not state-store): only a
+        // `supports_continuation` kind can chain-fold. The running-source and
+        // captured-`ResumeContext` invariants are enforced authoritatively under
+        // the write permit + lock by `create_machine_continuation`.
         let profile = self.kind_profiles().get(&source.kind);
         if !profile.is_some_and(|p| p.supports_continuation) {
             bail!("continuation is not supported for kind '{}'", source.kind);
@@ -627,8 +850,13 @@ impl ThreadLifecycleService {
             usage_subject_asserted_by: None,
         };
 
-        // Create successor, write continued edge, finalize source — all in one transaction
-        let persisted = self.state_store.create_continuation(
+        // One atomic op under the state store's write permit + lock: re-verify the
+        // source is still `running`, require its captured `ResumeContext`, create
+        // the successor, seed the successor's launch identity (runtime-db writes
+        // first), then settle the source `continued`. A race or seed failure
+        // aborts with the source still running — never `continued` behind an
+        // unlaunchable successor.
+        let persisted = self.state_store.create_machine_continuation(
             &successor_record,
             &source.thread_id,
             &source.chain_root_id,

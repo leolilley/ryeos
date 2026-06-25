@@ -1699,6 +1699,82 @@ fn service_declares_project_path(verified: &ryeos_engine::contracts::VerifiedIte
         .is_some_and(|schema| schema.contains_key("project_path"))
 }
 
+/// Resolution + routing outputs for a managed subprocess launch — the "prepare"
+/// half of the managed-subprocess dispatch, with no side effects (no row, no
+/// spawn). Separating prepare from launch lets the operator follow-up path
+/// resolve synchronously, create-or-get the canonical successor row, THEN launch
+/// the pre-created row — instead of pre-minting an id before the row exists.
+pub struct PreparedManagedLaunch {
+    pub resolved: ResolvedExecutionRequest,
+    pub executor_ref: String,
+    pub required_envelope_fields: Vec<String>,
+    pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    pub acting_principal: String,
+    pub project_path: std::path::PathBuf,
+}
+
+/// Resolve a managed subprocess launch to a [`PreparedManagedLaunch`] — the
+/// runtime's executor ref, the resolved item (re-resolved if the subject was not
+/// pre-verified by the hop), and the full `ResolvedExecutionRequest`. Pure: walks
+/// the same subject the dispatch hop chain produced and performs no side effects.
+fn prepare_managed_launch(
+    verified_runtime: &ryeos_engine::runtime_registry::VerifiedRuntime,
+    root_subject: Option<RootSubject>,
+    hop_thread_profile: &str,
+    hop_verified: Option<&ryeos_engine::contracts::VerifiedItem>,
+    runtime_ref: &str,
+    ctx: &ExecutionContext,
+    request: &DispatchRequest<'_>,
+) -> Result<PreparedManagedLaunch, DispatchError> {
+    let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
+    let executor_ref = format!("native:{bare}");
+
+    let subject = root_subject.unwrap_or_else(|| RootSubject {
+        item_ref: runtime_ref.to_string(),
+        thread_profile: hop_thread_profile.to_string(),
+        verified: hop_verified.cloned(),
+    });
+
+    let resolved_item: ResolvedItem = match subject.verified {
+        Some(v) => v.resolved,
+        None => {
+            let canonical = CanonicalRef::parse(&subject.item_ref)
+                .map_err(|e| DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string()))?;
+            ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
+                DispatchError::SchemaMisconfigured {
+                    kind: canonical.kind.clone(),
+                    detail: format!("subject resolution failed for '{}': {e}", subject.item_ref),
+                }
+            })?
+        }
+    };
+
+    let resolved = ResolvedExecutionRequest {
+        kind: subject.thread_profile.clone(),
+        item_ref: subject.item_ref.clone(),
+        executor_ref: executor_ref.clone(),
+        launch_mode: "inline".to_string(),
+        current_site_id: ctx.plan_ctx.current_site_id.clone(),
+        origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+        target_site_id: None,
+        requested_by: Some(request.acting_principal.to_string()),
+        usage_subject: request.usage_subject.clone(),
+        usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+        parameters: request.params.clone(),
+        resolved_item,
+        plan_context: ctx.plan_ctx.clone(),
+    };
+
+    Ok(PreparedManagedLaunch {
+        resolved,
+        executor_ref,
+        required_envelope_fields: verified_runtime.yaml.required_envelope_fields.clone(),
+        provenance: request.provenance.clone(),
+        acting_principal: request.acting_principal.to_string(),
+        project_path: request.project_path.to_path_buf(),
+    })
+}
+
 async fn dispatch_managed_subprocess(
     sctx: SubprocessDispatchContext<'_>,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
@@ -1767,44 +1843,15 @@ async fn dispatch_managed_subprocess(
         )?;
     }
 
-    let bare = strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
-    let executor_ref = format!("native:{bare}");
-
-    let subject = root_subject.unwrap_or_else(|| RootSubject {
-        item_ref: runtime_ref.clone(),
-        thread_profile: hop_thread_profile.to_string(),
-        verified: hop_verified.cloned(),
-    });
-
-    let resolved_item: ResolvedItem = match subject.verified {
-        Some(v) => v.resolved,
-        None => {
-            let canonical = CanonicalRef::parse(&subject.item_ref)
-                .map_err(|e| DispatchError::InvalidRef(subject.item_ref.clone(), e.to_string()))?;
-            ctx.engine.resolve(&ctx.plan_ctx, &canonical).map_err(|e| {
-                DispatchError::SchemaMisconfigured {
-                    kind: canonical.kind.clone(),
-                    detail: format!("subject resolution failed for '{}': {e}", subject.item_ref),
-                }
-            })?
-        }
-    };
-
-    let resolved = ResolvedExecutionRequest {
-        kind: subject.thread_profile.clone(),
-        item_ref: subject.item_ref.clone(),
-        executor_ref: executor_ref.clone(),
-        launch_mode: "inline".to_string(),
-        current_site_id: ctx.plan_ctx.current_site_id.clone(),
-        origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-        target_site_id: None,
-        requested_by: Some(acting_principal.to_string()),
-        usage_subject: request.usage_subject.clone(),
-        usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-        parameters: params.clone(),
-        resolved_item,
-        plan_context: ctx.plan_ctx.clone(),
-    };
+    let prepared = prepare_managed_launch(
+        &verified_runtime,
+        root_subject,
+        hop_thread_profile,
+        hop_verified,
+        &runtime_ref,
+        ctx,
+        request,
+    )?;
 
     // Runtime callback caps (bundle-events / runtime-vault) are minted inside
     // `build_and_launch` from the *composed* `requires` block — after the
@@ -1812,16 +1859,21 @@ async fn dispatch_managed_subprocess(
     // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
-        executor_ref: &executor_ref,
+        executor_ref: &prepared.executor_ref,
         acting_principal,
-        resolved: &resolved,
+        resolved: &prepared.resolved,
         project_path,
         provenance: &request.provenance,
         parameters: &params,
-        metadata_required_secrets: &resolved.resolved_item.metadata.required_secrets,
-        required_envelope_fields: &verified_runtime.yaml.required_envelope_fields,
+        metadata_required_secrets: &prepared.resolved.resolved_item.metadata.required_secrets,
+        required_envelope_fields: &prepared.required_envelope_fields,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
+        // Fresh launches and operator follow-ups inject their inputs as the
+        // opening stimulus; only an autonomous machine continuation suppresses it.
+        suppress_stimulus: false,
+        // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
+        captured_effective_caps: None,
     })
     .await
     .map_err(|e| match &e {
@@ -1851,7 +1903,7 @@ async fn dispatch_managed_subprocess(
                 || msg.contains("arch check")
             {
                 DispatchError::RuntimeMaterializationFailed {
-                    executor_ref: executor_ref.clone(),
+                    executor_ref: prepared.executor_ref.clone(),
                     detail: msg,
                 }
             } else {

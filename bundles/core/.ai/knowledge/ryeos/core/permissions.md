@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T04:23:12Z:b0a6bf5eaa4597b19e7ee64d5fc48f74ca844b8ad983d66059c6e2de8c2ffa53:o90Pm3X9RNoBqNAblQhiHpHiSptb+79jj0S1+smUssIepBtTb2PYpQBr7URor3S+fuUNzNk1CzFpRQgIbP6FCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:51d5a8484a83838fb425ac18295140c864c9c706f860f5338bf609f62acc1f78:uTUyqrOTS/iqHBByaBWw3rmpeT04O03hOTZ/JreSs4AkUwo0k1c13Gg0D5MfMUKaIOVvCn6M2+9p8G6tGl1sCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -212,9 +212,9 @@ A child directive's permissions must be a subset of its parent's
 effective permissions. This is enforced by the
 `narrow_against_parent_effective` merge strategy.
 
-The source space matters for trust level: a system-signed binary
-reached through a user-tier descriptor is capped at TrustedUser, not
-TrustedSystem. A single untrusted ancestor taints the entire chain.
+The source space matters for trust level: a bundle-signed binary
+reached through a project-tier descriptor is capped at TrustedProject,
+not TrustedBundle. A single untrusted ancestor taints the entire chain.
 
 ## Empty = Deny-All
 

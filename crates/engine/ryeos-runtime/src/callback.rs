@@ -6,17 +6,24 @@ use serde_json::Value;
 /// without each taking a direct `ryeos-engine` dependency.
 pub use ryeos_engine::method_call::MethodCall;
 
+/// One replayed event as the runtime consumes it. The daemon's persisted record
+/// carries more columns (chain/thread sequence, hashes, storage class); only the
+/// transcript-relevant fields are deserialized — the rest are ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReplayedEventRecord {
     pub event_type: String,
     pub payload: Value,
 }
 
+/// A page of replayed events. `next_cursor` is the `after_chain_seq` to pass on
+/// the next call when the chain has more events than the page limit; `None` when
+/// the page is the last.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplayResponse {
     pub events: Vec<ReplayedEventRecord>,
+    #[serde(default)]
+    pub next_cursor: Option<i64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -89,10 +96,14 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
     async fn get_thread(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
+    /// Machine continuation handoff: the running source was cut off by a limit
+    /// mid-task and asks the daemon to spawn + launch a chain-fold successor.
+    /// Autonomous by construction — carries no reason/gate/mode, only an
+    /// optional free-form string for logs.
     async fn request_continuation(
         &self,
         thread_id: &str,
-        prompt: &str,
+        log_reason: Option<&str>,
     ) -> Result<Value, CallbackError>;
 
     async fn append_event(
@@ -109,7 +120,12 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         events: Vec<Value>,
     ) -> Result<Value, CallbackError>;
 
-    async fn replay_events(&self, thread_id: &str) -> Result<Value, CallbackError>;
+    /// Replay events for a thread or a whole chain. `params` carries
+    /// `{ thread_id? , chain_root_id? , after_chain_seq? , limit? }` — a
+    /// chain-scoped read (chain_root_id, no thread_id) folds every turn; a
+    /// thread-scoped read filters to one thread. The daemon authorizes the
+    /// target against the caller's chain.
+    async fn replay_events(&self, params: Value) -> Result<Value, CallbackError>;
 
     async fn bundle_events_append(
         &self,

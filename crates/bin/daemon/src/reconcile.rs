@@ -4,7 +4,56 @@ use serde_json::json;
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::process::pgid_alive;
 use ryeos_app::state::AppState;
+use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+use ryeos_state::objects::ThreadStatus;
+
+/// Whether autonomous machine continuation may LAUNCH (live dispatch or
+/// reconcile relaunch). The successor row + chain link are always recorded; this
+/// gates only the autonomous spawn, because without a chain-depth ceiling an
+/// unbounded task could spawn an infinite chain. Shared by the live UDS path and
+/// reconcile so they cannot disagree. Opt-in via `RYEOS_AUTO_MACHINE_CONTINUATION=1`.
+pub fn auto_machine_continuation_enabled() -> bool {
+    std::env::var("RYEOS_AUTO_MACHINE_CONTINUATION").as_deref() == Ok("1")
+}
+
+/// The structural shape of a continuation successor stranded `created`: never
+/// launched, links upstream, carries a captured `ResumeContext`, and is NOT a
+/// `native_resume` (checkpoint) thread. NECESSARY but not sufficient — an
+/// operator follow-up successor can share this shape, so [`is_machine_successor`]
+/// is the machine-only proof applied on top.
+fn continuation_shape(thread: &ThreadDetail) -> bool {
+    thread.status == ThreadStatus::Created.as_str()
+        && thread.upstream_thread_id.is_some()
+        && thread
+            .runtime
+            .launch_metadata
+            .as_ref()
+            .is_some_and(|m| m.resume_context.is_some() && !m.declares_native_resume())
+}
+
+/// Machine-only proof that `successor` is an autonomous MACHINE continuation of
+/// `upstream` (not an operator follow-up): the source was settled `continued` and
+/// points back at this successor. A machine handoff settles the source to
+/// `continued`; an operator follow-up PRESERVES the source's completed/failed
+/// status — so this never matches an operator turn, preventing reconcile from
+/// relaunching one via `launch_successor` (which sets `suppress_stimulus=true`
+/// and would silently drop the operator's input).
+fn is_machine_successor(successor: &ThreadDetail, upstream: &ThreadDetail) -> bool {
+    upstream.status == ThreadStatus::Continued.as_str()
+        && upstream.successor_thread_id.as_deref() == Some(successor.thread_id.as_str())
+}
+
+/// Pure proof that `successor` is an OPERATOR follow-up of `upstream` (not a
+/// machine continuation): the source is a terminal `completed`/`failed` turn
+/// (operator follow-up PRESERVES the source status) that points back at this
+/// successor. The caller additionally confirms the persisted request fingerprint
+/// before recovering — only operator `create_or_get` records one.
+fn is_operator_successor(successor: &ThreadDetail, upstream: &ThreadDetail) -> bool {
+    (upstream.status == ThreadStatus::Completed.as_str()
+        || upstream.status == ThreadStatus::Failed.as_str())
+        && upstream.successor_thread_id.as_deref() == Some(successor.thread_id.as_str())
+}
 
 /// Decision the reconciler makes for a single dead thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,9 +104,28 @@ pub fn decide_resume(
     }
 }
 
+/// What re-dispatch a `ResumeIntent` represents — the two take different launch
+/// paths once the daemon's listeners are bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeKind {
+    /// Checkpoint resume of a `native_resume` thread: re-run the SAME thread from
+    /// its checkpoint via `run_existing_detached`.
+    NativeResume,
+    /// MACHINE continuation successor stranded `created` by a crash between create
+    /// and live launch: launch via `launch_successor` (folds the chain, no
+    /// stimulus). Gated by the auto-machine-continuation flag.
+    Continuation,
+    /// OPERATOR follow-up successor stranded `created` by a crash between
+    /// create-or-get and the spawned launch: launch via `launch_operator_successor`
+    /// (injects the seeded operator input as stimulus). NOT gated — accepted
+    /// operator work must be recovered, not finalized as failed and lost.
+    OperatorContinuation,
+}
+
 /// A thread that the reconciler decided to auto-resume. The dispatcher
 /// (in `main.rs`, AFTER the daemon's listeners are bound) consumes
-/// this and calls `runner::run_existing_detached`.
+/// this and calls `runner::run_existing_detached` (native resume) or
+/// `launch::launch_successor` (continuation), per `kind`.
 #[derive(Debug, Clone)]
 pub struct ResumeIntent {
     pub thread_id: String,
@@ -68,6 +136,8 @@ pub struct ResumeIntent {
     /// the new spawn — `created` rows have never been transitioned,
     /// and `drain_running_threads` only sees `running` rows.
     pub prior_status: String,
+    /// Which launch path to take post-listener.
+    pub kind: ResumeKind,
 }
 
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
@@ -149,6 +219,17 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         Ok::<_, anyhow::Error>(())
     })?;
 
+    // Clear stale launch claims BEFORE collecting intents: a restart proves every
+    // prior in-process launcher is gone, so any surviving (even unexpired) claim is
+    // stale. Without this, a `created` successor whose launcher crashed after
+    // claiming but before `mark_running` would have its reconcile relaunch blocked
+    // by `AlreadyClaimed` until the lease expired — stranding accepted work.
+    match state.state_store.clear_all_launch_claims() {
+        Ok(n) if n > 0 => tracing::info!(cleared = n, "cleared stale launch claims at startup"),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = %err, "failed to clear stale launch claims at startup"),
+    }
+
     // Orphan thread cleanup.
     let running_threads = state
         .state_store
@@ -185,6 +266,85 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         }
 
         let interrupted_spawn = pgid.is_none();
+
+        // Continuation successor safety net: a `created` thread that links upstream
+        // and carries a captured `ResumeContext` but is NOT a `native_resume`
+        // (checkpoint) thread. A crash between create and the spawned launch strands
+        // it here. Both MACHINE (source settled `continued`) and OPERATOR (source
+        // preserved completed/failed) variants are recovered here, BEFORE
+        // `decide_resume` — which would otherwise see no native_resume policy and
+        // (the lost-input bug) finalize the stranded successor as failed.
+        {
+            let lm = thread.runtime.launch_metadata.as_ref();
+            if continuation_shape(thread) {
+                let upstream_id = thread
+                    .upstream_thread_id
+                    .as_deref()
+                    .expect("continuation_shape implies upstream is Some");
+                if let Ok(Some(src)) = state.threads.get_thread(upstream_id) {
+                    if is_machine_successor(thread, &src) {
+                        // Autonomous launch is opt-in (no chain-depth cap yet). When
+                        // disabled, leave the stranded successor as `created` — do
+                        // NOT launch, finalize, or bump the budget.
+                        if !auto_machine_continuation_enabled() {
+                            tracing::debug!(
+                                thread_id = %thread.thread_id,
+                                "machine continuation successor stranded, but auto-launch disabled — leaving as created"
+                            );
+                            continue;
+                        }
+                        // Collect the intent only. `launch_successor` (post-listener)
+                        // owns the lease claim AND the attempt budget.
+                        let resume_context = lm
+                            .and_then(|m| m.resume_context.clone())
+                            .expect("continuation_shape implies resume_context is Some");
+                        tracing::info!(
+                            thread_id = %thread.thread_id,
+                            "machine continuation successor stranded by crash — collecting launch intent"
+                        );
+                        intents.push(ResumeIntent {
+                            thread_id: thread.thread_id.clone(),
+                            chain_root_id: thread.chain_root_id.clone(),
+                            resume_context,
+                            prior_status: thread.status.clone(),
+                            kind: ResumeKind::Continuation,
+                        });
+                        reconciled += 1;
+                        continue;
+                    }
+                    // OPERATOR follow-up stranded by a crash before its launch task
+                    // ran. NOT gated — accepted operator work must be recovered, not
+                    // lost. Confirm via the persisted request fingerprint (only
+                    // operator `create_or_get` records one) so we never mistake some
+                    // other completed→created lineage for a follow-up.
+                    if is_operator_successor(thread, &src)
+                        && state
+                            .state_store
+                            .get_continuation_fingerprint(upstream_id)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    {
+                        let resume_context = lm
+                            .and_then(|m| m.resume_context.clone())
+                            .expect("continuation_shape implies resume_context is Some");
+                        tracing::info!(
+                            thread_id = %thread.thread_id,
+                            "operator follow-up successor stranded by crash — collecting launch intent"
+                        );
+                        intents.push(ResumeIntent {
+                            thread_id: thread.thread_id.clone(),
+                            chain_root_id: thread.chain_root_id.clone(),
+                            resume_context,
+                            prior_status: thread.status.clone(),
+                            kind: ResumeKind::OperatorContinuation,
+                        });
+                        reconciled += 1;
+                        continue;
+                    }
+                }
+            }
+        }
 
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
@@ -313,6 +473,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     chain_root_id: thread.chain_root_id.clone(),
                     resume_context,
                     prior_status: thread.status.clone(),
+                    kind: ResumeKind::NativeResume,
                 });
                 reconciled += 1;
             }
@@ -358,6 +519,145 @@ mod tests {
             requested_by: principal(),
             execution_hints: ExecutionHints::default(),
             effective_caps: Vec::new(),
+        }
+    }
+
+    fn thread_detail(
+        thread_id: &str,
+        status: &str,
+        upstream: Option<&str>,
+        successor: Option<&str>,
+        lm: Option<RuntimeLaunchMetadata>,
+    ) -> ThreadDetail {
+        ThreadDetail {
+            thread_id: thread_id.into(),
+            chain_root_id: "C".into(),
+            kind: "directive".into(),
+            status: status.into(),
+            item_ref: "ns/foo".into(),
+            executor_ref: "ex".into(),
+            launch_mode: "detached".into(),
+            current_site_id: "site:a".into(),
+            origin_site_id: "site:a".into(),
+            upstream_thread_id: upstream.map(Into::into),
+            successor_thread_id: successor.map(Into::into),
+            requested_by: None,
+            created_at: "t".into(),
+            updated_at: "t".into(),
+            started_at: None,
+            finished_at: None,
+            runtime: ryeos_app::state_store::RuntimeInfo {
+                pid: None,
+                pgid: None,
+                launch_metadata: lm,
+            },
+        }
+    }
+
+    fn native_resume_lm() -> RuntimeLaunchMetadata {
+        RuntimeLaunchMetadata {
+            native_resume: Some(NativeResumeSpec {
+                checkpoint_interval_secs: 30,
+                max_auto_resume_attempts: 1,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn continuation_shape_matches_created_upstream_with_resume_context() {
+        let lm = RuntimeLaunchMetadata::default().with_resume_context(ctx());
+        let t = thread_detail("S", "created", Some("SRC"), None, Some(lm));
+        assert!(continuation_shape(&t));
+    }
+
+    #[test]
+    fn continuation_shape_rejects_running_or_missing_pieces() {
+        let lm = || RuntimeLaunchMetadata::default().with_resume_context(ctx());
+        // Already launched (running) — not a stranded `created` successor.
+        assert!(!continuation_shape(&thread_detail(
+            "S", "running", Some("SRC"), None, Some(lm())
+        )));
+        // No upstream link — a fresh root, not a continuation.
+        assert!(!continuation_shape(&thread_detail(
+            "S", "created", None, None, Some(lm())
+        )));
+        // No captured ResumeContext — not launchable as a continuation.
+        assert!(!continuation_shape(&thread_detail(
+            "S",
+            "created",
+            Some("SRC"),
+            None,
+            Some(RuntimeLaunchMetadata::default())
+        )));
+        // native_resume (checkpoint) thread — the decide_resume path owns it.
+        let nr = native_resume_lm().with_resume_context(ctx());
+        assert!(!continuation_shape(&thread_detail(
+            "S", "created", Some("SRC"), None, Some(nr)
+        )));
+    }
+
+    #[test]
+    fn is_machine_successor_true_when_source_continued_and_points_back() {
+        let succ = thread_detail("S", "created", Some("SRC"), None, None);
+        let src = thread_detail("SRC", "continued", None, Some("S"), None);
+        assert!(is_machine_successor(&succ, &src));
+    }
+
+    #[test]
+    fn is_machine_successor_false_for_operator_followup() {
+        // An operator follow-up PRESERVES its source's completed/failed status, so
+        // a same-shaped stranded operator successor is NOT a machine continuation
+        // and must not be relaunched with suppressed stimulus.
+        let succ = thread_detail("S", "created", Some("SRC"), None, None);
+        let completed_src = thread_detail("SRC", "completed", None, Some("S"), None);
+        assert!(!is_machine_successor(&succ, &completed_src));
+        let failed_src = thread_detail("SRC", "failed", None, Some("S"), None);
+        assert!(!is_machine_successor(&succ, &failed_src));
+    }
+
+    #[test]
+    fn is_machine_successor_false_when_source_points_elsewhere() {
+        // A `continued` source that links to a DIFFERENT successor is not proof
+        // for this one (stale/mismatched lineage).
+        let succ = thread_detail("S", "created", Some("SRC"), None, None);
+        let src = thread_detail("SRC", "continued", None, Some("OTHER"), None);
+        assert!(!is_machine_successor(&succ, &src));
+    }
+
+    #[test]
+    fn is_operator_successor_true_for_terminal_source_pointing_back() {
+        // An operator follow-up PRESERVES its source's completed/failed status.
+        let succ = thread_detail("S", "created", Some("SRC"), None, None);
+        for status in ["completed", "failed"] {
+            let src = thread_detail("SRC", status, None, Some("S"), None);
+            assert!(is_operator_successor(&succ, &src), "source {status}");
+        }
+        // Points at a different successor → not proof for this one.
+        let other = thread_detail("SRC", "completed", None, Some("OTHER"), None);
+        assert!(!is_operator_successor(&succ, &other));
+    }
+
+    #[test]
+    fn machine_and_operator_classification_are_mutually_exclusive() {
+        // The two recovery paths key off the SOURCE status: `continued` ⇒ machine,
+        // `completed`/`failed` ⇒ operator. A given source can only be one.
+        let succ = thread_detail("S", "created", Some("SRC"), None, None);
+        let continued = thread_detail("SRC", "continued", None, Some("S"), None);
+        assert!(is_machine_successor(&succ, &continued));
+        assert!(!is_operator_successor(&succ, &continued));
+        let completed = thread_detail("SRC", "completed", None, Some("S"), None);
+        assert!(is_operator_successor(&succ, &completed));
+        assert!(!is_machine_successor(&succ, &completed));
+    }
+
+    #[test]
+    fn auto_machine_continuation_gate_defaults_off() {
+        // Default (unset) must be OFF so autonomous relaunch never fires unless
+        // explicitly opted in. (Set-path not asserted here to avoid cross-test env
+        // races.)
+        if std::env::var_os("RYEOS_AUTO_MACHINE_CONTINUATION").is_none() {
+            assert!(!auto_machine_continuation_enabled());
         }
     }
 

@@ -1,17 +1,17 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:cf21b20d027b4590d5bb865ea623d529976390deacd32ef9d9588090787a1fef:Y7XdejSJObrzvSnnNGQ+EC2rw0Cw5ffv0P9INP1SnVZBI2MPx3SfbfVcufrKirPBlBQFeZXBRq3g4rxtYmuACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:ad447c109707950094c63a209fdd44f28c7eaa739f2303976420418296c3b27d:XdYwjE7Xul5LdNbMZqT1mbs4KHNn66nUBHegqWnFJsA+/fw+SaW92kKHUg/g0bub3LENHMwYazoc7PeqPIprDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
 version: "2.0.0"
 description: >
-  The three-tier space resolution system — project, user, and system
-  (bundle) spaces, how bundles are installed, and how items are found.
+  The two-tier space resolution system — project and system (bundle)
+  spaces, how bundles are installed, and how items are found.
 ---
 
 # Spaces
 
-Rye OS resolves items across three tiers: **project**, **user**, and
-**system**. The first match wins.
+Rye OS resolves items across two tiers: **project** and **system**.
+The first match wins.
 
 ## Project Space
 
@@ -31,43 +31,24 @@ Examples:
 Project space items are signed by the operator's local key. They are
 typically tracked in git (or at least `.ai/knowledge/` is).
 
-## User Space
-
-```
-~/.ryeos/.ai/
-```
-
-Cross-project personal items. Shared across all projects on the same
-machine. Good for personal directives, aliases, or knowledge that
-applies everywhere.
-
-User space also holds the operator's signing key and trust store:
-
-```
-~/.ryeos/.ai/
-├── config/keys/
-│   ├── signing/private_key.pem      ← your Ed25519 identity
-│   └── trusted/
-│       ├── <publisher-fp>.toml      ← trusted publisher keys
-│       ├── <user-fp>.toml           ← self-trust
-│       └── <node-fp>.toml           ← daemon trust
-├── tools/                           ← personal tools
-├── directives/                      ← personal directives
-└── knowledge/                       ← personal knowledge
-```
-
 ## System Space
 
 ```
 <system_space_dir>/.ai/
 ```
 
-The daemon's runtime state and installed bundles. Defaults to the XDG
-data directory (`~/.local/share/ryeos/` on Linux). Created by
-`ryeos init`.
+The daemon's runtime state, operator keys/trust, and installed bundles.
+Defaults to the XDG data directory (`~/.local/share/ryeos/` on Linux),
+overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 
 ```
 <system_space_dir>/.ai/
+├── config/keys/
+│   ├── signing/private_key.pem      ← operator's Ed25519 identity
+│   └── trusted/
+│       ├── <publisher-fp>.toml      ← trusted publisher keys
+│       ├── <operator-fp>.toml       ← operator self-trust
+│       └── <node-fp>.toml           ← daemon trust
 ├── node/
 │   ├── identity/private_key.pem     ← daemon's Ed25519 signing key
 │   ├── vault/{private_key,public_key}.pem  ← X25519 sealed secrets
@@ -87,16 +68,13 @@ data directory (`~/.local/share/ryeos/` on Linux). Created by
 
 Items installed via bundles are signed by the publisher's key and
 verified during install. System space items are **immutable** — you
-cannot edit them directly. To customize, copy to project or user
-space first:
+cannot edit them directly. To customize, copy to project space first:
 
 ```
 ryeos fetch tool:ryeos/core/sign --to project
-# or
-ryeos fetch tool:ryeos/core/sign --to user
 ```
 
-The copied item lives in project/user space and shadows the system
+The copied item lives in project space and shadows the system
 version (first match wins).
 
 ## Installing Bundles
@@ -131,8 +109,7 @@ For a canonical ref like `tool:ryeos/core/sign`:
 
 ```
 1. <project>/.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}
-2. ~/.ryeos/.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}
-3. <bundle>/.../.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}  (for each installed bundle)
+2. <bundle>/.../.ai/tools/ryeos/core/sign.{py,yaml,js,ts,...}  (for each installed bundle)
 ```
 
 If a project-level item exists, it **shadows** the system version.

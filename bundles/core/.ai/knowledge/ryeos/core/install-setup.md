@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:eb4c31132735c34e8692b07cd7422ef8367060c4b1a7c59588c75a6da628e367:fAj+VTswPnuDhWBmfqRD0y6xwI9x3IeW8YS6qws1sY1J373C9eDJiHpyPxZ4gOJKoHCdDROF9Xfv7y9OHmmYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:44:15Z:e064200c1d998854d3cb14d15c37f575d764492a1ac9d69d4d3891fd1fa5e19e:uZiuoYEJdrusm+ElR3yJ8Ufui35qVaoN9TOdUNyQCdaZarzTz7ohjadE6NvnBvJ5JzJSFxwg8lCmCfmTPL6TCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
@@ -42,7 +42,7 @@ installs and registers bundles, creates vault key material, writes
 default ingest-ignore config, and verifies post-init trust.
 
 Daemon bootstrap can repair daemon-local artifacts after init, but it
-cannot install bundles or create user-space trust artifacts and is not a
+cannot install bundles or create operator trust artifacts and is not a
 substitute for `ryeos init`.
 
 ## Bundle discovery
@@ -71,8 +71,8 @@ ryeos start
 ## Directory layout after init/start
 
 ```text
-~/.ryeos/.ai/config/keys/signing/private_key.pem
-~/.ryeos/.ai/config/keys/trusted/<fp>.toml
+<system-space>/.ai/config/keys/signing/private_key.pem
+<system-space>/.ai/config/keys/trusted/<fp>.toml
 
 <system-space>/.ai/bundles/<name>/.ai/
 <system-space>/.ai/node/identity/private_key.pem

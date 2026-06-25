@@ -875,8 +875,10 @@ mod tests {
         let fire = ctx.db.get_fire(&fire_id).unwrap().expect("fire claimed");
         assert_eq!(fire.status, "dispatched");
 
-        // A gate writer must not block behind the running job.
-        tokio::time::timeout(std::time::Duration::from_secs(1), gate.write())
+        // A gate writer must not block behind the running job. We only
+        // assert the writer *acquires* within the timeout; the guard itself
+        // is unused and released immediately.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), gate.write())
             .await
             .expect("gate writer must acquire while a scheduled job is running");
 

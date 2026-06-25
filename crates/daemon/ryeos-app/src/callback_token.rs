@@ -133,6 +133,24 @@ impl CallbackCapabilityStore {
         Ok(cap.clone())
     }
 
+    /// Validate a callback token without binding it to a thread. Returns the
+    /// capability if the token exists and has not expired. The caller is
+    /// responsible for any access-scope check (e.g. chain membership for a
+    /// read). Never use this for a write or lifecycle method — those require an
+    /// exact-thread match via [`Self::validate_token_and_thread`].
+    pub fn validate_token_only(&self, token: &str) -> Result<CallbackCapability> {
+        let map = self.capabilities.lock().unwrap();
+        let cap = map
+            .get(token)
+            .ok_or_else(|| anyhow::anyhow!("invalid callback capability"))?;
+
+        if Instant::now() > cap.expires_at {
+            bail!("callback capability expired");
+        }
+
+        Ok(cap.clone())
+    }
+
     pub fn invalidate(&self, token: &str) {
         self.capabilities.lock().unwrap().remove(token);
     }
@@ -177,6 +195,39 @@ impl CallbackCapabilityStore {
 pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
     let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
     Duration::from_secs(secs.min(MAX_CALLBACK_TTL_SECS))
+}
+
+/// Margin added to a run's hard timeout so the run-scoped token outlives the
+/// finalization callback that fires at/just after the deadline.
+const LAUNCH_TTL_MARGIN_SECS: u64 = 300;
+
+/// Absolute backstop for a run-scoped token — far above any realistic run — so a
+/// zombie run cannot hold its credential indefinitely, without re-introducing
+/// the sub-run cap that caused tokens to expire mid-run.
+const MAX_LAUNCH_TTL_SECS: u64 = 7 * 24 * 3600;
+
+/// TTL for a **run-scoped** launch token (the callback + thread-auth tokens a
+/// launched runtime holds for its whole life).
+///
+/// Unlike [`compute_ttl`], it is deliberately NOT capped at
+/// [`MAX_CALLBACK_TTL_SECS`] (3600s): the token must outlive the run's hard
+/// timeout (`duration_seconds`) plus the finalization window, or a run allowed
+/// to exceed 3600s loses callback/auth authority before it can finalize — a
+/// silent mid-run failure. The token is thread-scoped and invalidated at run
+/// end, so a TTL that tracks the run's duration is the correct lifetime; a
+/// generous absolute backstop bounds the pathological zombie case.
+///
+/// CAVEAT: a run whose effective `duration_seconds` exceeds
+/// [`MAX_LAUNCH_TTL_SECS`] (7 days) would re-expose the original divergence
+/// (token expiring before the run finalizes). If runs are ever allowed past that
+/// ceiling, clamp the effective runtime timeout to `MAX_LAUNCH_TTL_SECS - margin`
+/// instead of raising it silently here.
+pub fn launch_token_ttl(duration_seconds: Option<u64>) -> Duration {
+    let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
+    Duration::from_secs(
+        secs.saturating_add(LAUNCH_TTL_MARGIN_SECS)
+            .min(MAX_LAUNCH_TTL_SECS),
+    )
 }
 
 pub fn effective_bundle_id_from_item_ref(item_ref: &str) -> Option<String> {
@@ -543,6 +594,39 @@ mod tests {
     #[test]
     fn compute_ttl_caps_at_3600() {
         assert_eq!(compute_ttl(Some(9999)), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn launch_token_ttl_outlives_a_run_past_3600() {
+        // The bug: a run allowed to exceed 3600s must NOT lose its callback
+        // token before it finalizes. The run-scoped TTL covers the run duration
+        // plus a finalization margin, not the sub-run 3600 cap.
+        let run = 7200u64;
+        let ttl = launch_token_ttl(Some(run));
+        assert!(
+            ttl >= Duration::from_secs(run),
+            "run-scoped token must outlive the run's hard timeout: {ttl:?}"
+        );
+        assert_eq!(ttl, Duration::from_secs(run + LAUNCH_TTL_MARGIN_SECS));
+    }
+
+    #[test]
+    fn launch_token_ttl_has_absolute_backstop() {
+        // A pathological duration is bounded, but the backstop is far above any
+        // realistic run (so it never clips a real run the way 3600 did).
+        assert_eq!(
+            launch_token_ttl(Some(u64::MAX)),
+            Duration::from_secs(MAX_LAUNCH_TTL_SECS)
+        );
+        assert!(MAX_LAUNCH_TTL_SECS > 3600);
+    }
+
+    #[test]
+    fn launch_token_ttl_defaults_when_unset() {
+        assert_eq!(
+            launch_token_ttl(None),
+            Duration::from_secs(DEFAULT_CALLBACK_TTL_SECS + LAUNCH_TTL_MARGIN_SECS)
+        );
     }
 
     #[test]

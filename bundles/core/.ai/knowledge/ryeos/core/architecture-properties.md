@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:b36f9d4c73dd6023f5811c2c8da900c6003ee810d224e3688814216ac4b95169:sNPmsMhb9T2O/mBXtLxBv93eispdWTgWqYjN4jonTIqrcUVu6pD4IF+SHWLbvL8cnOvfpJOOElPfm1IiKiX2CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:0d6f7ea67c8f4c77017054e25e3cd7812a55f2a87496e140c867c25ea28b8bd1:9BKwtoks+YFQkXW8BWCf3UpvoHcBI7hOROgbgsrBsoB76ZCYfnBCs6JwsWProrKH2sOUumVrMZS60xKq1+ZDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -74,10 +74,10 @@ and rewriting history. The right model for distributed write sources.
 ### 6. Trust Fold-Back (Weakest-Link Inheritance)
 
 Trust propagates through extends chains by taking the minimum:
-TrustedSystem > TrustedUser > UntrustedUserSpace > Unsigned. A single
+TrustedBundle > TrustedProject > UntrustedProject > Unsigned. A single
 untrusted ancestor taints the entire chain. Source space caps trust level
-— a system-signed binary reached through a user-tier descriptor is
-capped at TrustedUser.
+— a bundle-signed binary reached through a project-tier descriptor is
+capped at TrustedProject.
 
 → [Signing and Trust](signing.md), [Permissions](permissions.md)
 

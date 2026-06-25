@@ -223,7 +223,7 @@ mod tests {
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: &str) -> Result<Value, CallbackError> {
+        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
@@ -238,9 +238,10 @@ mod tests {
         async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn replay_events(&self, _: &str) -> Result<Value, CallbackError> {
+        async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
             Ok(serde_json::to_value(ReplayResponse {
                 events: self.events.clone(),
+                next_cursor: None,
             })
             .unwrap())
         }

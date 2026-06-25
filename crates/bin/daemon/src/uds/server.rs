@@ -119,9 +119,39 @@ pub async fn dispatch_runtime_method(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
-    // Validate callback token on ALL runtime.* methods
-    // dispatch_action does its own stronger validation (primary + project_path)
-    let callback_cap = if method != "runtime.dispatch_action" {
+    // Validate the callback token on ALL runtime.* methods, by access class:
+    //
+    //  - `runtime.dispatch_action` does its own stronger validation (per-request
+    //    thread_auth_token + project_path).
+    //  - chain *reads* (get_thread / replay) may target any thread in the
+    //    capability's own chain — a successor rehydrates by folding its
+    //    predecessors. Authorized by state-checked chain membership, never an
+    //    exact-thread match.
+    //  - everything else (writes + lifecycle: append, finalize, mark_running,
+    //    request_continuation, publish_artifact, vault/bundle writes) requires an
+    //    exact-thread match. A chain read must never widen into a chain write.
+    let callback_cap = if method == "runtime.dispatch_action" {
+        // runtime.dispatch_action: validate thread_auth_token (per-request
+        // identity proof). Missing or invalid = hard fail, no fallback.
+        let tat = params
+            .get("thread_auth_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.dispatch_action"))?;
+        let thread_id = params
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_id"))?;
+        state.thread_auth.validate(tat, thread_id)?;
+        None
+    } else if is_chain_read_method(method) {
+        let token = params
+            .get("callback_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing callback_token"))?;
+        let cap = state.callback_tokens.validate_token_only(token)?;
+        authorize_chain_read(&cap, params, state)?;
+        Some(cap)
+    } else {
         let token = params
             .get("callback_token")
             .and_then(|v| v.as_str())
@@ -135,19 +165,6 @@ pub async fn dispatch_runtime_method(
                 .callback_tokens
                 .validate_token_and_thread(token, thread_id)?,
         )
-    } else {
-        // runtime.dispatch_action: validate thread_auth_token (per-request
-        // identity proof). Missing or invalid = hard fail, no fallback.
-        let tat = params
-            .get("thread_auth_token")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.dispatch_action"))?;
-        let thread_id = params
-            .get("thread_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_id"))?;
-        state.thread_auth.validate(tat, thread_id)?;
-        None
     };
 
     // Strip transport-level fields before typed deserialization so
@@ -185,7 +202,11 @@ pub async fn dispatch_runtime_method(
         }
         "runtime.finalize_thread" => handle_finalize(&clean_params, state),
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
-        "runtime.request_continuation" => handle_request_continuation(&clean_params, state),
+        "runtime.request_continuation" => {
+            let result = handle_request_continuation(&clean_params, state)?;
+            spawn_machine_continuation_launch(state, &result);
+            Ok(result)
+        }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
@@ -196,6 +217,52 @@ pub async fn dispatch_runtime_method(
         "runtime.attach_process" => handle_attach_process(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
+}
+
+/// Runtime read methods a callback may invoke against any thread in its own
+/// chain (to rehydrate predecessors), not just its exact thread. Reads only.
+fn is_chain_read_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.get_thread" | "runtime.replay_events" | "runtime.get_thread_events"
+    )
+}
+
+/// Authorize a chain read: the capability's own thread and the read target must
+/// share a chain root. Reads across a chain (predecessors/siblings) are allowed;
+/// reads into another chain are rejected. Membership is resolved from state —
+/// the runtime cannot assert its own chain.
+fn authorize_chain_read(
+    cap: &ryeos_app::callback_token::CallbackCapability,
+    params: &serde_json::Value,
+    state: &AppState,
+) -> Result<()> {
+    let cap_chain = state
+        .state_store
+        .get_thread(&cap.thread_id)?
+        .map(|d| d.chain_root_id)
+        .ok_or_else(|| anyhow!("callback capability thread not found: {}", cap.thread_id))?;
+
+    // Target chain: an explicit `chain_root_id` param wins; otherwise the
+    // requested `thread_id`'s chain root.
+    let target_chain = if let Some(cr) = params.get("chain_root_id").and_then(|v| v.as_str()) {
+        cr.to_string()
+    } else {
+        let thread_id = params
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("chain read requires thread_id or chain_root_id"))?;
+        state
+            .state_store
+            .get_thread(thread_id)?
+            .map(|d| d.chain_root_id)
+            .ok_or_else(|| anyhow!("chain read target thread not found: {thread_id}"))?
+    };
+
+    if cap_chain != target_chain {
+        anyhow::bail!("callback capability does not authorize reads outside its chain");
+    }
+    Ok(())
 }
 
 fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -312,14 +379,64 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
     }
 }
 
+/// Auto-launch a machine continuation successor after a limit cut-off handoff.
+///
+/// The successor row and the chain link are ALWAYS recorded by
+/// `request_continuation`; only the autonomous RELAUNCH is gated here. Without a
+/// chain-level budget ceiling (still to land) an unbounded task could spawn an
+/// infinite chain, so auto-launch is opt-in via `RYEOS_AUTO_MACHINE_CONTINUATION=1`.
+/// Default OFF leaves the successor `created` with its captured `ResumeContext`
+/// for reconcile or an operator to launch.
+///
+/// Spawned daemon-side (NOT from the dying runtime — a lifecycle hazard) after
+/// the source is settled `continued` and the state-store write lock has dropped.
+/// `launch_successor` claims the launch lease, so a concurrent reconcile cannot
+/// double-launch the same successor.
+fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Value) {
+    // Same gate as reconcile — they must never disagree on whether autonomous
+    // launch is enabled.
+    if !crate::reconcile::auto_machine_continuation_enabled() {
+        return;
+    }
+    let Some(successor_id) = result
+        .get("successor_thread_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        tracing::warn!("machine continuation: result missing successor_thread_id; not launching");
+        return;
+    };
+    let st = state.clone();
+    tokio::spawn(async move {
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        match ryeos_executor::execution::launch::launch_successor(st, &successor_id).await {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                tracing::debug!(
+                    successor_id = %successor_id,
+                    reason,
+                    "machine continuation: successor launch skipped"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    successor_id = %successor_id,
+                    error = %err,
+                    "machine continuation: successor launch failed"
+                );
+            }
+        }
+    });
+}
+
 fn handle_request_continuation(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
     let params: ThreadContinuationParams = serde_json::from_value(params.clone())
-        .context("invalid threads.request_continuation params")?;
+        .context("invalid runtime.request_continuation params")?;
     serde_json::to_value(state.threads.request_continuation(&params)?)
-        .context("failed to encode threads.request_continuation result")
+        .context("failed to encode runtime.request_continuation result")
 }
 
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -1995,5 +2112,194 @@ mod tests {
             let result = rpc_ok(&resp);
             assert!(result.is_object());
         }
+    }
+
+    // ── chain-scoped callback authorization ─────────────────────────
+    //
+    // A successor's callback token may READ any thread in its own chain (to
+    // rehydrate predecessors) but may only WRITE its exact thread, and may not
+    // read into another chain.
+
+    /// Predecessor `T-pred` + successor `T-succ` in chain `T-pred`, plus a token
+    /// minted for the successor.
+    fn chain_with_successor(
+        state: &AppState,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        state
+            .threads
+            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .unwrap();
+        state.threads.mark_running("T-pred").unwrap();
+        // Successor shares the predecessor's chain root.
+        state
+            .threads
+            .create_thread(&make_create_params("T-succ", "T-pred"))
+            .unwrap();
+        state.callback_tokens.generate(
+            "T-succ",
+            std::path::PathBuf::from("/test"),
+            std::time::Duration::from_secs(300),
+            Vec::new(),
+            test_provenance(state, "/test"),
+        )
+    }
+
+    #[tokio::test]
+    async fn successor_token_can_read_predecessor_in_chain() {
+        let (_tmp, state) = setup_app_state();
+        let succ = chain_with_successor(&state);
+
+        // get_thread on the predecessor — a cross-thread read within the chain.
+        let resp = dispatch(
+            rpc(
+                "runtime.get_thread",
+                json!({"callback_token": succ.token, "thread_id": "T-pred"}),
+            ),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_none(), "chain read of predecessor must pass: {resp:?}");
+
+        // replay by predecessor thread_id, and by chain_root_id — both reads.
+        for params in [
+            json!({"callback_token": succ.token, "thread_id": "T-pred"}),
+            json!({"callback_token": succ.token, "chain_root_id": "T-pred"}),
+        ] {
+            let resp = dispatch(rpc("runtime.replay_events", params), &state).await;
+            assert!(resp.error.is_none(), "chain replay must pass: {resp:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn successor_token_cannot_write_predecessor() {
+        let (_tmp, state) = setup_app_state();
+        let succ = chain_with_successor(&state);
+
+        // Writes/lifecycle stay exact-thread: the successor token must not
+        // append to, finalize, or mark-running the predecessor.
+        for method in [
+            "runtime.append_event",
+            "runtime.finalize_thread",
+            "runtime.mark_running",
+            "runtime.request_continuation",
+            "runtime.publish_artifact",
+        ] {
+            let resp = dispatch(
+                rpc(
+                    method,
+                    json!({
+                        "callback_token": succ.token,
+                        "thread_id": "T-pred",
+                        "status": "completed",
+                        "event": {"event_type": "cognition_in", "payload": {}, "storage_class": "indexed"},
+                    }),
+                ),
+                &state,
+            )
+            .await;
+            assert!(
+                resp.error.is_some(),
+                "{method} against predecessor must be rejected for a successor token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn token_cannot_read_another_chain() {
+        let (_tmp, state) = setup_app_state();
+        let succ = chain_with_successor(&state);
+
+        // A thread in a DIFFERENT chain.
+        state
+            .threads
+            .create_thread(&make_create_params("T-other", "T-other"))
+            .unwrap();
+
+        let resp = dispatch(
+            rpc(
+                "runtime.get_thread",
+                json!({"callback_token": succ.token, "thread_id": "T-other"}),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            resp.error.is_some(),
+            "reading a thread outside the token's chain must be rejected"
+        );
+    }
+
+    // ── threads/input handler response contract ─────────────────────
+
+    #[tokio::test]
+    async fn threads_input_refuses_already_continued_completed_source() {
+        // The handler must refuse a follow-up to a completed predecessor that
+        // already has a successor — synchronously, with delivery=refused,
+        // thread_id=null, and a notice pointing at the successor — rather than
+        // launch a duplicate the async single-successor guard later rejects.
+        use ryeos_app::handler_context::HandlerContext;
+        use ryeos_app::state_store::NewThreadRecord;
+
+        let (_tmp, state) = setup_app_state();
+        let state = std::sync::Arc::new(state);
+
+        // Completed predecessor owned by `user:test`.
+        state
+            .threads
+            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .unwrap();
+        state.threads.mark_running("T-pred").unwrap();
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-pred".to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: Some(json!({"a": 1})),
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        // Braid a successor so the predecessor exposes `successor_thread_id`.
+        state
+            .state_store
+            .create_continuation(
+                &NewThreadRecord {
+                    thread_id: "T-succ".to_string(),
+                    chain_root_id: "T-pred".to_string(),
+                    kind: "system_task".to_string(),
+                    item_ref: "test/directive".to_string(),
+                    executor_ref: "test/executor".to_string(),
+                    launch_mode: "inline".to_string(),
+                    current_site_id: "site:test".to_string(),
+                    origin_site_id: "site:test".to_string(),
+                    upstream_thread_id: Some("T-pred".to_string()),
+                    requested_by: Some("user:test".to_string()),
+                    usage_subject: None,
+                    usage_subject_asserted_by: None,
+                },
+                "T-pred",
+                "T-pred",
+                Some("follow-up"),
+            )
+            .unwrap();
+
+        let ctx = HandlerContext::new("user:test".to_string(), Vec::new(), true);
+        let req: ryeos_api::handlers::threads_input::Request =
+            serde_json::from_value(json!({"input": "again", "thread": "T-pred"})).unwrap();
+        let resp = ryeos_api::handlers::threads_input::handle(req, ctx, state.clone())
+            .await
+            .expect("handler returns Ok(refused)");
+
+        assert_eq!(resp["delivery"], "refused");
+        assert!(resp["thread_id"].is_null());
+        assert!(
+            resp["notice"].as_str().unwrap_or_default().contains("T-succ"),
+            "notice must point at the successor: {resp:?}"
+        );
     }
 }

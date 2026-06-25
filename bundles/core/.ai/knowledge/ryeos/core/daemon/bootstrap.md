@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-05T04:12:08Z:11326b072baa9e9b48bafe97bb4add1dbd56f7a28ead25d86a59b4e238e7cdab:AJKdvMAKKYQGQ+hrxNBM70rVeuRBCe2ZH+xlwTbcTJEmXQ47ARD+t1coTZud79n3XCkw3rjckmcHZYrHpjBTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:1b58275764e2af34802201aa661639c616f237222521c7a40146b035d09eabd8:HYJCGFpZiBK8eijBiUkb/uDD8slGt+ffgfL6KOVKNmGJ/aazrZWZaL03OMGLmKtT/ifmj+IziKYliG4VOQCtBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]
@@ -22,11 +22,11 @@ install, signed registrations, vault key creation, and post-init trust
 verification.
 
 `bootstrap::repair_daemon_local` owns only daemon-local repair after
-init-state verification. It first checks that user signing key, node
-signing key, user trust doc, and node trust doc exist. Missing artifacts
-fail with `Run: ryeos init` guidance. The daemon never writes to user
-trust and never regenerates the node key, because that would invalidate
-the node trust doc in user space.
+init-state verification. It first checks that operator signing key, node
+signing key, operator trust doc, and node trust doc exist. Missing
+artifacts fail with `Run: ryeos init` guidance. The daemon never writes
+to operator trust and never regenerates the node key, because that would
+invalidate the node trust doc in the operator trust store.
 
 Daemon-local artifacts repaired by startup include layout dirs, default
 daemon config, public identity derived from node key, vault public/key

@@ -146,9 +146,11 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
                         true
                     }
                 };
-                ctx.caller
-                    .require_owner(Some(&existing.requester_fingerprint))
-                    .map_err(|e| anyhow!(e))?;
+                require_project_reconcile_schedule_owner(
+                    ctx.caller,
+                    schedule_id,
+                    &existing.requester_fingerprint,
+                )?;
                 actions.push(ScheduleAction::Update {
                     desired: desired_schedule.clone(),
                     existing,
@@ -179,9 +181,11 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
                 schedule_id
             )
         })?;
-        ctx.caller
-            .require_owner(Some(&existing.requester_fingerprint))
-            .map_err(|e| anyhow!(e))?;
+        require_project_reconcile_schedule_owner(
+            ctx.caller,
+            schedule_id,
+            &existing.requester_fingerprint,
+        )?;
         actions.push(ScheduleAction::DeleteMissing {
             schedule_id: schedule_id.clone(),
             existing,
@@ -476,9 +480,11 @@ fn revalidate_action(
                             schedule_id
                         );
                     }
-                    ctx.caller
-                        .require_owner(Some(&current.requester_fingerprint))
-                        .map_err(|e| anyhow!(e))?;
+                    require_project_reconcile_schedule_owner(
+                        ctx.caller,
+                        schedule_id,
+                        &current.requester_fingerprint,
+                    )?;
                 }
                 None => {
                     anyhow::bail!(
@@ -511,9 +517,6 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            ctx.caller
-                .require_owner(Some(&current.requester_fingerprint))
-                .map_err(|e| anyhow!(e))?;
             let body =
                 read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
                     anyhow!(
@@ -546,6 +549,14 @@ fn revalidate_action(
                     schedule_id
                 );
             }
+            // Same-project is now re-proven (managed_by.project_key matches);
+            // only here do we surface an ownership conflict (409), never before
+            // the project-scope check.
+            require_project_reconcile_schedule_owner(
+                ctx.caller,
+                schedule_id,
+                &current.requester_fingerprint,
+            )?;
         }
     }
     Ok(())
@@ -770,6 +781,34 @@ fn require_schedule_registration_authority(ctx: &ProjectDeployContext<'_>) -> Re
             "project schedule creation requires ryeos.execute.service.scheduler/register capability"
         );
     }
+}
+
+/// Ownership gate for deploy-reconcile schedule actions (Update / DeleteMissing).
+///
+/// Unlike `HandlerContext::require_owner` (which returns `NotFound` to hide
+/// existence on *direct* resource access), this returns a descriptive
+/// `Conflict` (409). Inside a project sync the caller is reconciling their own
+/// snapshot, which *declares* this schedule — they already know it exists, so
+/// hiding it behind a bare `404 {"error":"not found"}` only produced a failure
+/// indistinguishable from a routing 404. The conflicting owner's fingerprint is
+/// never disclosed. Still fails closed as `NotFound` for an unverified caller
+/// (apply-snapshot requires a verified caller; this is defence in depth).
+fn require_project_reconcile_schedule_owner(
+    caller: &crate::handler_context::HandlerContext,
+    schedule_id: &str,
+    owner_fingerprint: &str,
+) -> Result<()> {
+    use crate::handler_error::HandlerError;
+    if caller.is_owner(Some(owner_fingerprint)) {
+        return Ok(());
+    }
+    if !caller.is_present() {
+        return Err(anyhow!(HandlerError::NotFound));
+    }
+    Err(anyhow!(HandlerError::Conflict(format!(
+        "schedule '{schedule_id}' in this project is registered by a different \
+         principal; deregister it on the remote or run the sync as its owner"
+    ))))
 }
 
 fn reject_schedule_history_reuse(ctx: &ProjectDeployContext<'_>, schedule_id: &str) -> Result<()> {
@@ -1012,5 +1051,64 @@ fn reload_touched(ctx: &ProjectDeployContext<'_>, touched: &HashSet<String>) {
                 tracing::warn!(schedule_id = %schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_project_reconcile_schedule_owner;
+    use crate::handler_context::HandlerContext;
+    use crate::handler_error::{extract_handler_error, HandlerError};
+
+    fn verified(fp: &str) -> HandlerContext {
+        HandlerContext::new(fp.to_string(), vec!["*".to_string()], true)
+    }
+
+    #[test]
+    fn reconcile_owner_ok_for_owner() {
+        let caller = verified("fp:owner");
+        assert!(
+            require_project_reconcile_schedule_owner(&caller, "snap-track-feed", "fp:owner")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn reconcile_owner_conflict_for_other_principal_without_leaking_owner() {
+        let caller = verified("fp:caller2a88");
+        let err = require_project_reconcile_schedule_owner(
+            &caller,
+            "snap-track-feed",
+            "fp:owner_secret_fingerprint",
+        )
+        .expect_err("a schedule owned by another principal must conflict");
+
+        // Typed as Conflict (→ 409 on both route and /execute), not NotFound.
+        let he = extract_handler_error(&err).expect("typed HandlerError in chain");
+        assert!(matches!(he, HandlerError::Conflict(_)), "got: {he:?}");
+
+        let msg = format!("{err}");
+        assert!(msg.contains("snap-track-feed"), "must name the schedule: {msg}");
+        assert!(
+            msg.contains("different principal") && msg.contains("deregister"),
+            "must be actionable: {msg}"
+        );
+        // Never disclose the conflicting owner's identity.
+        assert!(
+            !msg.contains("fp:owner_secret_fingerprint"),
+            "must NOT leak the owner fingerprint: {msg}"
+        );
+    }
+
+    #[test]
+    fn reconcile_owner_fails_closed_as_notfound_for_unverified_caller() {
+        // Defence in depth: an unverified caller never even learns of the
+        // conflict — it gets the existence-hiding NotFound, as on direct access.
+        let caller = HandlerContext::anonymous();
+        let err =
+            require_project_reconcile_schedule_owner(&caller, "snap-track-feed", "fp:owner")
+                .expect_err("unverified caller must fail closed");
+        let he = extract_handler_error(&err).expect("typed HandlerError in chain");
+        assert!(matches!(he, HandlerError::NotFound), "got: {he:?}");
     }
 }

@@ -141,9 +141,12 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
     async fn request_continuation(
         &self,
         thread_id: &str,
-        prompt: &str,
+        log_reason: Option<&str>,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id, "reason": prompt});
+        let mut params = json!({
+            "thread_id": thread_id,
+            "reason": log_reason,
+        });
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.request_continuation", params)
@@ -186,8 +189,7 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
-    async fn replay_events(&self, thread_id: &str) -> Result<Value, CallbackError> {
-        let mut params = json!({"thread_id": thread_id});
+    async fn replay_events(&self, mut params: Value) -> Result<Value, CallbackError> {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.replay_events", params)

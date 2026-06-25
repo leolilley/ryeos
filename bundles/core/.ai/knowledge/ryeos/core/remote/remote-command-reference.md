@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T05:13:18Z:a2b45d6005ea85d9bd0e95e563692dd23b0b54196e0dde821cc040fbf3b2b0e4:QxwiS3oSeDQGUHeQ4M3SH8oVCREO8g13Ba6t8C+wOsXyCaAnR+4MiOCLOW+1Pu0JuU1Va0u6RupqGdYhKcYXBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:125dd5df005f05356db8e6b9155d7b4101e6b8a79d4182aa77916eba3d70fb0b:DcPm7aZU3Qg8tzkY2o3XJauyWtc3eF3RxDCQCnvxP32yYwkDHPd/jFsitVSF2mrkVwg3qN5UDD2rjk5bsS4TBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -243,10 +243,10 @@ an absolute project path or the explicit no-project sentinel.
 
 Execution phases:
 
-1. Push project state, or an empty project plus user-space manifest in
-   `--no-project` mode.
+1. Push project state, or an empty project manifest in `--no-project`
+   mode.
 2. Call remote `/execute` using the pushed project source.
-3. Pull result objects and apply changed project/user files locally.
+3. Pull result objects and apply changed project files locally.
 
 Clean-base guard: if local tracked files changed since the push, the
 pull-back apply aborts without partial writes.

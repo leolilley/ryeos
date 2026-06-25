@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:3391fb7e221431ee9c5b2f3144e9a09f6182dc31a857bca1ce57c9b246b24a3b:blSaeGqN0wc0NfjykZUV60OeGngcAW9qzE69q1Bf5gZvQAFCby4+iyxuXECoy8LYSskDoHp9qcZ3ALmtQSO8AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-06-24T04:51:58Z:da5dc6df02ec2dc63c827deb64cd99d5fcae9ae15e0f2aadf7ee182bba4dd789:uOJ7nzRU44POL168Rn2VzMgVaW/gvYOqtvOYkttE+jqiFqtz98PE6mSWLkvK23J0LWyS/SA0+h8IKJexeV+yBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -26,8 +26,7 @@ Daemon-backed dispatch is preflighted with local lifecycle status unless
 ### `ryeos init`
 
 ```bash
-ryeos init [--source <dir>] [--system-space-dir <dir>] [--user-root <dir>]
-           [--trust-file <file>...]
+ryeos init [--source <dir>] [--app-root <dir>] [--trust-file <file>...]
 ```
 
 Packaged installs use `/usr/share/ryeos` by default, so plain
@@ -40,7 +39,7 @@ ryeos init --source bundles --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ### `ryeos start`
 
 ```bash
-ryeos start [--system-space-dir <dir>]
+ryeos start [--app-root <dir>]
 ```
 
 Starts the local daemon. Fails if not initialized, succeeds immediately
@@ -50,7 +49,7 @@ timeout is 15 seconds.
 ### `ryeos stop`
 
 ```bash
-ryeos stop [--force] [--system-space-dir <dir>]
+ryeos stop [--force] [--app-root <dir>]
 ```
 
 Gracefully stops the local daemon via the UDS that just proved live.
@@ -61,7 +60,7 @@ Default graceful timeout is 10 seconds. `--force` re-confirms live
 ### `ryeos status`
 
 ```bash
-ryeos status [--json] [--system-space-dir <dir>]
+ryeos status [--json] [--app-root <dir>]
 ```
 
 Read-only lifecycle status. Treats `daemon.json` as a hint and trusts
