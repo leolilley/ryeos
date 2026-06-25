@@ -312,36 +312,7 @@ fn prepare_owned_schema(
     ddl: &str,
     path: &Path,
 ) -> Result<()> {
-    let app_id: i32 = conn
-        .query_row("PRAGMA application_id", [], |row| row.get(0))
-        .context("failed to read PRAGMA application_id")?;
-
-    if app_id == spec.application_id {
-        migrate_owned_scheduler_db(conn)?;
-        sqlite_schema::assert_owned(conn, spec, path)?;
-        return Ok(());
-    }
-
-    if app_id == 0 && user_table_count(conn)? == 0 {
-        sqlite_schema::init_owned(conn, spec, ddl, path)?;
-        return Ok(());
-    }
-
-    if sqlite_schema::is_empty_or_owned(conn, spec.application_id)? {
-        sqlite_schema::init_owned(conn, spec, ddl, path)?;
-    } else {
-        sqlite_schema::assert_owned(conn, spec, path)?;
-    }
-    Ok(())
-}
-
-fn user_table_count(conn: &Connection) -> Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-        [],
-        |row| row.get(0),
-    )
-    .context("failed to count user tables")
+    sqlite_schema::prepare_owned(conn, spec, ddl, path, migrate_owned_scheduler_db)
 }
 
 fn migrate_owned_scheduler_db(conn: &Connection) -> Result<()> {

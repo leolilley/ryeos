@@ -2225,18 +2225,19 @@ mod tests {
     // ── threads/input handler response contract ─────────────────────
 
     #[tokio::test]
-    async fn threads_input_refuses_already_continued_completed_source() {
-        // The handler must refuse a follow-up to a completed predecessor that
-        // already has a successor — synchronously, with delivery=refused,
-        // thread_id=null, and a notice pointing at the successor — rather than
-        // launch a duplicate the async single-successor guard later rejects.
+    async fn threads_input_refuses_follow_up_to_non_continuable_kind() {
+        // A follow-up to a settled source whose KIND cannot chain-fold (here
+        // `system_task`) is an EXPECTED, structured refusal at the API boundary
+        // — delivery=refused, thread_id=null, and daemon-authored
+        // execution.supports_continuation=false — NOT a 500 from the deeper
+        // lifecycle guard. The client gates on this fact; the server enforces it
+        // as defense-in-depth for a stale/third-party client.
         use ryeos_app::handler_context::HandlerContext;
-        use ryeos_app::state_store::NewThreadRecord;
 
         let (_tmp, state) = setup_app_state();
         let state = std::sync::Arc::new(state);
 
-        // Completed predecessor owned by `user:test`.
+        // Completed `system_task` predecessor owned by `user:test`.
         state
             .threads
             .create_thread(&make_create_params("T-pred", "T-pred"))
@@ -2257,7 +2258,67 @@ mod tests {
             })
             .unwrap();
 
-        // Braid a successor so the predecessor exposes `successor_thread_id`.
+        let ctx = HandlerContext::new("user:test".to_string(), Vec::new(), true);
+        let req: ryeos_api::handlers::threads_input::Request =
+            serde_json::from_value(json!({"input": "again", "thread": "T-pred"})).unwrap();
+        let resp = ryeos_api::handlers::threads_input::handle(req, ctx, state.clone())
+            .await
+            .expect("a non-continuable kind is a refusal, not an error");
+
+        assert_eq!(resp["delivery"], "refused");
+        assert!(resp["thread_id"].is_null());
+        assert_eq!(resp["execution"]["supports_continuation"], false);
+        assert!(
+            resp["notice"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("system_task"),
+            "notice must name the non-continuable kind: {resp:?}"
+        );
+    }
+
+    // ── client-facing thread projections carry daemon-authored execution facts ──
+    //
+    // These pin the WIRING of the continuation-authority surfacing: every
+    // client-facing thread projection (`threads.get` / `list` / `children` /
+    // `chain`) flattens the thread fields and nests an
+    // `execution.supports_continuation` the client gates on, and the list rows
+    // carry the chain-head edges (`upstream_thread_id` / `successor_thread_id`).
+    //
+    // The harness builds `KindProfileRegistry::build(None)`, whose only kinds are
+    // the internal non-continuable profiles, so the value here is always `false`.
+    // That is the right thing to assert at this layer: `supports_continuation`'s
+    // true/false value is the kind profile's concern (covered in
+    // `kind_profiles`), while the risk THIS change introduces is whether every
+    // projection is decorated and shaped correctly. A directive→true /
+    // graph→false contrast belongs to a full-daemon harness that loads real
+    // signed kind schemas.
+
+    /// Build a completed predecessor `T-pred` with a braided continuation
+    /// successor `T-succ` (a real `thread_continued` handoff), so projections
+    /// expose `successor_thread_id` / `upstream_thread_id` and the chain view
+    /// returns both. Mirrors an operator follow-up onto a settled turn.
+    fn pred_with_continuation_successor(state: &AppState) {
+        use ryeos_app::state_store::NewThreadRecord;
+        state
+            .threads
+            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .unwrap();
+        state.threads.mark_running("T-pred").unwrap();
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: "T-pred".to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: None,
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
         state
             .state_store
             .create_continuation(
@@ -2280,19 +2341,106 @@ mod tests {
                 Some("follow-up"),
             )
             .unwrap();
+    }
 
-        let ctx = HandlerContext::new("user:test".to_string(), Vec::new(), true);
-        let req: ryeos_api::handlers::threads_input::Request =
-            serde_json::from_value(json!({"input": "again", "thread": "T-pred"})).unwrap();
-        let resp = ryeos_api::handlers::threads_input::handle(req, ctx, state.clone())
-            .await
-            .expect("handler returns Ok(refused)");
+    #[tokio::test]
+    async fn thread_get_view_carries_execution_facts() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-1", "T-1"))
+            .unwrap();
 
-        assert_eq!(resp["delivery"], "refused");
-        assert!(resp["thread_id"].is_null());
+        let view = state
+            .threads
+            .get_thread_view("T-1")
+            .unwrap()
+            .expect("thread exists");
+        let v = serde_json::to_value(&view).unwrap();
+
+        // Flatten: the thread fields stay at the top level.
+        assert_eq!(v["thread_id"], "T-1");
+        assert_eq!(v["kind"], "system_task");
+        // Daemon-authored execution facts, nested under `execution`.
+        assert_eq!(v["execution"]["supports_continuation"], false);
+    }
+
+    #[tokio::test]
+    async fn thread_list_carries_execution_and_head_fields() {
+        let (_tmp, state) = setup_app_state();
+        pred_with_continuation_successor(&state);
+
+        let listing = state.threads.list_threads_filtered(100, None).unwrap();
+        let rows = listing["threads"].as_array().expect("threads array");
+        let row = |id: &str| {
+            rows.iter()
+                .find(|r| r["thread_id"] == id)
+                .unwrap_or_else(|| panic!("row {id} missing from list: {listing:#?}"))
+        };
+
+        let pred = row("T-pred");
+        let succ = row("T-succ");
+
+        // Every row decorated.
+        assert_eq!(pred["execution"]["supports_continuation"], false);
+        assert_eq!(succ["execution"]["supports_continuation"], false);
+
+        // Chain-head edges: the predecessor points at its successor; the
+        // successor (the head — no successor of its own) points back upstream.
+        assert_eq!(pred["successor_thread_id"], "T-succ");
+        assert!(pred["upstream_thread_id"].is_null());
+        assert_eq!(succ["upstream_thread_id"], "T-pred");
+        assert!(succ["successor_thread_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn thread_chain_decorates_every_row() {
+        let (_tmp, state) = setup_app_state();
+        pred_with_continuation_successor(&state);
+
+        let chain = state
+            .threads
+            .get_chain("T-pred")
+            .unwrap()
+            .expect("chain exists");
+        let v = serde_json::to_value(&chain).unwrap();
+        let threads = v["threads"].as_array().expect("chain threads");
         assert!(
-            resp["notice"].as_str().unwrap_or_default().contains("T-succ"),
-            "notice must point at the successor: {resp:?}"
+            threads.len() >= 2,
+            "chain holds predecessor + successor: {v:#?}"
         );
+        for t in threads {
+            assert!(
+                t["execution"]["supports_continuation"].is_boolean(),
+                "every chain thread is decorated: {t:#?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_children_decorate_every_row() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("T-parent", "T-parent"))
+            .unwrap();
+        // A child is a thread whose `upstream_thread_id` points at the parent
+        // (edges are derived from that link).
+        let mut child = make_create_params("T-child", "T-parent");
+        child.upstream_thread_id = Some("T-parent".to_string());
+        state.threads.create_thread(&child).unwrap();
+
+        let children = state.threads.list_children("T-parent").unwrap();
+        let v = serde_json::to_value(&children).unwrap();
+        let rows = v.as_array().expect("children array");
+        assert!(!rows.is_empty(), "parent has a child via upstream edge: {v:#?}");
+        for c in rows {
+            assert!(
+                c["execution"]["supports_continuation"].is_boolean(),
+                "every child is decorated: {c:#?}"
+            );
+            // Flatten: thread fields stay at the top level.
+            assert!(c["thread_id"].is_string(), "flattened thread fields top-level");
+        }
     }
 }

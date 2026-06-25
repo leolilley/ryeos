@@ -134,6 +134,14 @@ pub struct ThreadListItem {
     pub launch_mode: String,
     pub current_site_id: String,
     pub origin_site_id: String,
+    /// The predecessor this thread continues, if any. Lets the client identify
+    /// chain heads from authoritative edges instead of inferring them.
+    pub upstream_thread_id: Option<String>,
+    /// The continuation successor this thread handed off to, if any. A thread
+    /// with no successor is the current chain head — the only place a follow-up
+    /// can braid onto. Derived from the `thread_continued` event, terminal
+    /// threads only (mirrors `ThreadDetail`).
+    pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -1438,22 +1446,7 @@ impl StateStore {
     pub fn list_threads(&self, limit: usize) -> Result<Vec<ThreadListItem>> {
         let g = self.lock()?;
         let thread_rows = queries::list_threads(g.state_db.projection(), limit)?;
-        Ok(thread_rows
-            .into_iter()
-            .map(|row| ThreadListItem {
-                thread_id: row.thread_id,
-                chain_root_id: row.chain_root_id,
-                kind: row.kind,
-                status: row.status,
-                item_ref: row.item_ref,
-                launch_mode: row.launch_mode,
-                current_site_id: row.current_site_id,
-                origin_site_id: row.origin_site_id,
-                requested_by: row.requested_by,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            })
-            .collect())
+        Self::rows_to_list_items(&g, thread_rows)
     }
 
     /// List threads with optional principal filtering.
@@ -1469,9 +1462,25 @@ impl StateStore {
         let g = self.lock()?;
         let thread_rows =
             queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
-        Ok(thread_rows
-            .into_iter()
-            .map(|row| ThreadListItem {
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
+    /// Project thread rows into `ThreadListItem`s, resolving each terminal
+    /// thread's continuation successor so the client can identify chain heads
+    /// (a head has no successor). Shared by the filtered and unfiltered list
+    /// paths.
+    fn rows_to_list_items(
+        g: &Inner,
+        rows: Vec<queries::ThreadRow>,
+    ) -> Result<Vec<ThreadListItem>> {
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let successor_thread_id = if is_terminal_status(&row.status) {
+                queries::continuation_successor(g.state_db.projection(), &row.thread_id)?
+            } else {
+                None
+            };
+            items.push(ThreadListItem {
                 thread_id: row.thread_id,
                 chain_root_id: row.chain_root_id,
                 kind: row.kind,
@@ -1480,11 +1489,14 @@ impl StateStore {
                 launch_mode: row.launch_mode,
                 current_site_id: row.current_site_id,
                 origin_site_id: row.origin_site_id,
+                upstream_thread_id: row.upstream_thread_id,
+                successor_thread_id,
                 requested_by: row.requested_by,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
-            })
-            .collect())
+            });
+        }
+        Ok(items)
     }
 
     pub fn summarize_usage_by_subject(
