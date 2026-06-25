@@ -669,6 +669,31 @@ impl StudioCore {
     /// (most-recent first, as the daemon returns them). The head of a chain
     /// is the thread no other thread continues from (its `thread_id` is not
     /// any sibling's `upstream_thread_id`); a follow-up braids onto it.
+    /// The daemon-authored `execution.supports_continuation` for a thread, read
+    /// from the fetched thread projections (`threads` data carries it per row
+    /// via the thread-view layer). `None` = the thread isn't in the fetched
+    /// data (e.g. a just-launched thread before the list refresh) or carries no
+    /// execution facts — callers treat unknown optimistically, distrusting only
+    /// an explicit `Some(false)`. This is the substrate authority the cycle and
+    /// label gate on, replacing a self-declared surface flag.
+    pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
+        let row = self
+            .data
+            .threads
+            .as_ref()?
+            .threads
+            .iter()
+            .find(|row| {
+                row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+            })?;
+        // Typed execution facts (no `supports_continuation` string literal).
+        // `None` = no execution object on the row (unknown), distinct from an
+        // explicit `Some(false)`.
+        let facts: super::dto::ExecutionFacts =
+            serde_json::from_value(row.get("execution")?.clone()).ok()?;
+        Some(facts.supports_continuation)
+    }
+
     fn input_target_chains(&self) -> Vec<(String, String)> {
         let Some(threads) = self.data.threads.as_ref() else {
             return Vec::new();
@@ -695,6 +720,13 @@ impl StudioCore {
                 .filter_map(|x| x.get("thread_id").and_then(serde_json::Value::as_str))
                 .find(|id| !upstreams.contains(id))
                 .unwrap_or(root);
+            // Only offer chains whose head can actually be continued — gate on
+            // the substrate's `execution.supports_continuation`, not a surface
+            // flag. Distrust only an explicit `false`; unknown stays offered
+            // (the daemon refuses a real non-continuation submit anyway).
+            if self.thread_supports_continuation(head) == Some(false) {
+                continue;
+            }
             out.push((root.to_string(), head.to_string()));
         }
         out
@@ -1408,30 +1440,24 @@ impl StudioCore {
                     return effects;
                 }
                 StudioEffectResultKind::Invoked => {
-                    // Submit result contract: { thread_id?, delivery, notice? }.
-                    let delivery = data
-                        .get("delivery")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("launched");
-                    let notice_text = data
-                        .get("notice")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
-                    if delivery == "refused" {
-                        // Keep the buffer: the operator's text was not
-                        // delivered.
+                    // Typed submit result: { thread_id?, delivery, notice?, execution? }.
+                    let outcome: super::dto::LaunchOutcome =
+                        serde_json::from_value(data.clone()).unwrap_or_default();
+                    if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
+                        // A refused delivery (non-continuation target, settled
+                        // status, or duplicate-submit conflict) delivered
+                        // nothing: KEEP the buffer so the operator's text isn't
+                        // lost, surface the daemon's reason, and do NOT ratchet
+                        // or claim a launch. (`thread_id` may be null or an
+                        // existing id; either way nothing new was created.)
                         self.notice(
-                            notice_text.unwrap_or_else(|| "Delivery refused.".to_string()),
+                            outcome.notice.unwrap_or_else(|| REFUSED_NOTICE.to_string()),
                             StudioTone::Warn,
                         );
                         return Vec::new();
                     }
                     self.clear_focused_input();
-                    let thread_id = data
-                        .get("thread_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string);
-                    let Some(thread_id) = thread_id else {
+                    let Some(thread_id) = outcome.thread_id.clone() else {
                         self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
                         self.bump_generation();
                         return Vec::new();
@@ -1449,8 +1475,13 @@ impl StudioCore {
                         let fold = self.seat.fold();
                         // Eligibility was decided at issue time (see submit_route)
                         // — read it, don't recompute from current focus, which
-                        // may have moved while the launch was in flight.
-                        let targets = *ratchet_on_thread_id;
+                        // may have moved while the launch was in flight. AND in
+                        // the produced thread's substrate facts when the result
+                        // carries them (an operator continuation does; a fresh
+                        // async launch doesn't — unknown stays eligible, and the
+                        // daemon refuses a real non-continuation continue).
+                        let result_supports = outcome.execution.map(|e| e.supports_continuation);
+                        let targets = *ratchet_on_thread_id && result_supports != Some(false);
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
                             // Only ratchet a continuation target onto routes
@@ -1700,6 +1731,9 @@ impl StudioCore {
 fn parse_tile_id(tile_id: &str) -> Option<crate::ids::TileId> {
     tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)
 }
+
+/// Fallback notice when a refused delivery carries no reason from the daemon.
+const REFUSED_NOTICE: &str = "Delivery refused.";
 
 /// A route-chain target the input can cycle onto.
 #[derive(Debug, Clone, PartialEq)]
@@ -2814,6 +2848,48 @@ mod tests {
     }
 
     #[test]
+    fn thread_supports_continuation_reads_execution_facts() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-a", "execution": { "supports_continuation": true } }),
+                serde_json::json!({ "thread_id": "T-b", "execution": { "supports_continuation": false } }),
+                serde_json::json!({ "thread_id": "T-c" }), // no execution facts
+            ],
+        });
+        assert_eq!(core.thread_supports_continuation("T-a"), Some(true));
+        assert_eq!(core.thread_supports_continuation("T-b"), Some(false));
+        assert_eq!(core.thread_supports_continuation("T-c"), None, "missing facts → unknown");
+        assert_eq!(core.thread_supports_continuation("T-missing"), None);
+    }
+
+    #[test]
+    fn cycle_input_target_excludes_non_continuation_chain() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Two single-thread chains: one continuation-capable, one not (per the
+        // substrate's execution facts). Only the capable one is a valid target.
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-yes", "chain_root_id": "T-yes",
+                    "execution": { "supports_continuation": true } }),
+                serde_json::json!({ "thread_id": "T-no", "chain_root_id": "T-no",
+                    "execution": { "supports_continuation": false } }),
+            ],
+        });
+        // New → the continuation-capable chain (T-no is never offered).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.seat.fold().input_route().chain_root.as_deref(), Some("T-yes"));
+        // Forward again → wraps straight back to "new conversation".
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.seat.fold().input_route().chain_root, None);
+    }
+
+    #[test]
     fn cycle_input_target_is_noop_with_no_chains() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
@@ -3158,6 +3234,43 @@ mod tests {
             "ratcheted on the issue-time decision, not the moved focus"
         );
         assert_eq!(route.chain_root.as_deref(), Some("T-9"));
+    }
+
+    #[test]
+    fn refused_delivery_surfaces_reason_and_does_not_ratchet() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core); // targeting input → ratchet would be eligible
+        set_focused_input(&mut core, "go");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        // Daemon refuses (e.g. non-continuation target / duplicate conflict).
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({
+                    "thread_id": serde_json::Value::Null,
+                    "delivery": "refused",
+                    "notice": "thread is not continuation-capable"
+                })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "refused → no ratchet");
+        assert_eq!(route.chain_root, None);
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|n| n.message.contains("not continuation-capable")),
+            "surfaces the daemon's refusal reason, not a generic success"
+        );
     }
 
     #[test]

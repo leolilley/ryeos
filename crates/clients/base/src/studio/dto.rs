@@ -6,6 +6,46 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// How the daemon delivered a `service:threads/input` submit. Typed so the
+/// client branches on a variant, not a string literal. Unknown/future values
+/// fold to `Unknown` (treated as non-launched).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadDelivery {
+    Launched,
+    Submitted,
+    Refused,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Daemon-authored per-execution facts, surfaced both on thread projections
+/// (`thread.execution`) and on a continuation launch result — the substrate
+/// authority the client gates continuation affordances on. Mirrors the daemon
+/// `ExecutionFacts`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct ExecutionFacts {
+    #[serde(default)]
+    pub supports_continuation: bool,
+}
+
+/// The typed result of a `service:threads/input` submit
+/// (`{ thread_id?, delivery, notice?, execution? }`). A non-launch invocation
+/// (e.g. a slash command) deserializes to all-default — `delivery` absent.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LaunchOutcome {
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub delivery: Option<ThreadDelivery>,
+    #[serde(default)]
+    pub notice: Option<String>,
+    /// Present on a continuation launch (kind known synchronously); absent on a
+    /// fresh async launch (the thread is created later).
+    #[serde(default)]
+    pub execution: Option<ExecutionFacts>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StudioDimensionDto {
     #[serde(default)]
