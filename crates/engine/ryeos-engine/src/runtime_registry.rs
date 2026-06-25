@@ -275,6 +275,32 @@ impl RuntimeRegistry {
         self.by_ref.get(canonical)
     }
 
+    /// Resolve the serving runtime for a (re)launch.
+    ///
+    /// `None` runtime_ref → the kind's default runtime. `Some(ref)` → that
+    /// exact runtime by-ref; a malformed or unregistered ref is an ERROR — never
+    /// silently the kind default. Distinguishing the two matters for
+    /// continuation/reconstruction: silently switching to today's default could
+    /// change the binary, envelope requirements, or `native_resume` policy out
+    /// from under a thread that already launched under a specific runtime.
+    pub fn resolve_for_launch(
+        &self,
+        runtime_ref: Option<&str>,
+        kind: &str,
+    ) -> Result<&VerifiedRuntime, String> {
+        match runtime_ref {
+            Some(r) => {
+                let canon = CanonicalRef::parse(r)
+                    .map_err(|e| format!("malformed captured runtime_ref `{r}`: {e}"))?;
+                self.lookup_by_ref(&canon)
+                    .ok_or_else(|| format!("captured runtime_ref `{r}` is not a registered runtime"))
+            }
+            None => self
+                .lookup_for(kind)
+                .map_err(|e| format!("no runtime registered for kind `{kind}`: {e}")),
+        }
+    }
+
     pub fn all(&self) -> impl Iterator<Item = &VerifiedRuntime> {
         self.by_ref.values()
     }

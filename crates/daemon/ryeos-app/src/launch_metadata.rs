@@ -222,6 +222,14 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    /// Set the replay-aware `native_resume` policy. Runtime-registry launches
+    /// read it from the serving runtime's YAML; the subprocess path reads it
+    /// from the spec.
+    pub fn with_native_resume(mut self, spec: NativeResumeSpec) -> Self {
+        self.native_resume = Some(spec);
+        self
+    }
+
     /// Set the resume context (origin params + project context) so
     /// `reconcile.rs` can re-spawn this thread after a daemon restart.
     pub fn with_resume_context(mut self, ctx: ResumeContext) -> Self {
