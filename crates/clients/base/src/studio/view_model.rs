@@ -323,10 +323,32 @@ pub enum StudioViewVm {
     Atlas {
         scene: StudioSceneModel,
     },
+    /// A foldable multi-section list — the magit-style status surface: one
+    /// widget over many datasets, each section a titled, collapsible group of
+    /// rows. The engine knows the `sections` widget vocabulary; the specific
+    /// sections (threads/bundles/node/…) are declared by the bound view, never
+    /// named here (no fire-sword). Rows reuse `StudioRowVm`, so per-row actions
+    /// come for free.
+    Sections {
+        title: String,
+        sections: Vec<StudioSectionVm>,
+    },
     Placeholder {
         title: String,
         message: String,
     },
+}
+
+/// One titled, collapsible group within a `Sections` view. `count` is the
+/// section's total even when `collapsed` hides the rows, so the header can
+/// report it without the rows being present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioSectionVm {
+    pub title: String,
+    pub count: usize,
+    #[serde(default)]
+    pub collapsed: bool,
+    pub rows: Vec<StudioRowVm>,
 }
 
 // The timeline entry shapes live in `super::timeline`; re-exported here so
