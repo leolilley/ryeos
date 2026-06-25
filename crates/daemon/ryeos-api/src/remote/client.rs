@@ -125,15 +125,7 @@ impl RemoteClient {
                 // `signed_client`.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                // Builder only fails on TLS backend init; fall back rather than
-                // panicking the daemon. The fallback also disables redirects so
-                // the no-auto-redirect invariant holds for signed requests.
-                .unwrap_or_else(|_| {
-                    reqwest::Client::builder()
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()
-                        .unwrap_or_else(|_| reqwest::Client::new())
-                }),
+                .expect("failed to build remote signed HTTP client"),
             identity,
         }
     }
