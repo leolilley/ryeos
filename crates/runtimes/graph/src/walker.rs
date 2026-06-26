@@ -22,6 +22,11 @@ use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
 
+/// Schema version of the graph checkpoint payload. Bump on any incompatible
+/// change to the written fields; the S5b resume parser will reject an unknown
+/// version.
+const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+
 /// Running cost accumulator for a single graph execution. Owned by the
 /// walker behind a `Mutex` (like `warnings`) so cost can be recorded with
 /// `&self` from `commit_step` — the single state-mutation point.
@@ -32,7 +37,7 @@ use ryeos_runtime::TerminalCompletion;
 /// billing/reporting must therefore NOT sum `final_cost` across a thread
 /// tree, or nested executions are double-counted. Parent graph cost is a
 /// rollup/display figure.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct GraphAccounting {
     /// Aggregate across every cost-bearing node. `None` until the first
     /// node reports cost, so a pure-tool graph finalizes `cost: None`
@@ -1843,11 +1848,10 @@ impl Walker {
 
     /// Write a local checkpoint using the daemon-provided CheckpointWriter.
     ///
-    /// LIMITATION: the checkpoint persists cursor/step/state only — NOT the
-    /// `GraphAccounting` aggregate. A run resumed from a checkpoint
-    /// therefore reports only the cost spent AFTER resume; cost spent
-    /// before the checkpoint is not reconstructed. Persisting accounting
-    /// here (or rebuilding it from durable node receipts) is deferred.
+    /// Persists the versioned payload: cursor/step/state plus a snapshot of the
+    /// `GraphAccounting` aggregate, so a resumed run reconstructs cost spent
+    /// before the checkpoint. The restore side (parsing + seeding the walker,
+    /// plus `suppressed_errors`) is handled in S5b.
     async fn write_checkpoint(
         &self,
         graph_run_id: &str,
@@ -1859,11 +1863,20 @@ impl Walker {
             return Ok(());
         };
 
+        // Accounting is interior-mutable on the walker; snapshot it under the
+        // lock (no await) so resume restores accumulated cost instead of
+        // restarting it at zero and under-billing the pre-checkpoint work.
+        let accounting = {
+            let acc = self.accounting.lock().unwrap();
+            serde_json::to_value(&*acc).unwrap_or(Value::Null)
+        };
         writer.write(&json!({
+            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
             "graph_run_id": graph_run_id,
             "current_node": next_node,
             "step_count": next_step,
             "state": state,
+            "accounting": accounting,
             "written_at": lillux::time::iso8601_now(),
         }))
     }
@@ -4023,6 +4036,17 @@ config:
         let contents = std::fs::read_to_string(&checkpoint_file).unwrap();
         let cp: Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(cp["current_node"], "fast_path");
+        // S5: payload is versioned and carries an accounting snapshot so resume
+        // restores accumulated cost rather than restarting it at zero. `total`
+        // may be null (no cost-bearing node yet); `nodes` is always an array.
+        assert_eq!(cp["schema_version"], GRAPH_CHECKPOINT_SCHEMA_VERSION);
+        let accounting = cp
+            .get("accounting")
+            .expect("checkpoint must carry an accounting snapshot");
+        assert!(
+            accounting["nodes"].is_array(),
+            "accounting.nodes must be an array: {accounting}"
+        );
     }
 
     /// Foreach node must emit per-iteration events (graph_foreach_iteration)
