@@ -1,0 +1,44 @@
+# ryeos:signed:2026-06-25T23:34:45Z:b4e8df7f0f5aea47ac23d02076bdefcbecf6142217e572accc58b9a492e8e7db:anPf1gY0c623rzqPTNI0xt6NDdSBt1zJDkRehyvkT15Ck9uDQSNIEjOdNJQOXplwpzjEe45b43VPYUNM1TxVAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: studio-status
+version: "1.0.0"
+description: >-
+  Magit-style status lens — a foldable, sectioned overview of the node:
+  running threads, installed bundles, and node status. One center lens you
+  read (and, in a later increment, act from) without leaving the feed.
+
+widget: sections
+sections:
+  - title: Threads
+    source:
+      ref: service:threads/list
+      params: {}
+      collection: threads
+    projection:
+      primary: item_ref
+      meta: status
+      tone:
+        field: status
+        map:
+          running: accent
+          created: accent
+          failed: danger
+          cancelled: warn
+          completed: good
+        default: neutral
+  - title: Bundles
+    source:
+      ref: service:bundle/list
+      params: {}
+      collection: bundles
+    projection:
+      primary: name
+      meta: version
+  - title: Node
+    source:
+      ref: service:system/status
+      params: {}
+    projection:
+      primary: version
+      meta: site_id
+refresh:
+  on_hint: thread

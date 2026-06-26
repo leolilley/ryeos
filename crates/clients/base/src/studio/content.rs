@@ -378,22 +378,25 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
         .collect()
 }
 
-/// Project one section's source response into records: pull the section's
-/// collection, apply its single projection. The rows-shaped sibling of
-/// `project_records` — sections carry no per-event-kind blocks.
+/// Project one section's source response into records, applying the section's
+/// single projection (no per-event-kind blocks — that's `project_records`).
+/// A section with a `collection` is a list source: one row per record. A
+/// section without one is a *detail* source: the whole response is a single
+/// record — one row — so a sections view can carry a singular status line
+/// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
-    let records: &[Value] = section
-        .source
-        .collection
-        .as_deref()
-        .and_then(|path| field_path(response, path))
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    records
-        .iter()
-        .map(|record| project_record(record, &section.projection))
-        .collect()
+    match section.source.collection.as_deref() {
+        Some(path) => field_path(response, path)
+            .and_then(Value::as_array)
+            .map(|records| {
+                records
+                    .iter()
+                    .map(|record| project_record(record, &section.projection))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => vec![project_record(response, &section.projection)],
+    }
 }
 
 /// Project a key_value detail: `projections.detail` is a list of field
@@ -762,6 +765,41 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn project_section_list_source_yields_one_row_per_record() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Threads",
+            "source": { "ref": "service:threads/list", "collection": "threads" },
+            "projection": { "primary": "thread_id", "meta": "status" }
+        }))
+        .unwrap();
+        let response = json!({ "threads": [
+            { "thread_id": "T-ab", "status": "running" },
+            { "thread_id": "T-cd", "status": "done" }
+        ]});
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].primary, "T-ab");
+        assert_eq!(rows[0].meta.as_deref(), Some("running"));
+        assert_eq!(rows[1].primary, "T-cd");
+    }
+
+    #[test]
+    fn project_section_detail_source_yields_a_single_row() {
+        // No collection → the whole response is one record (e.g. node status).
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Node",
+            "source": { "ref": "service:system/status" },
+            "projection": { "primary": "version", "meta": "site_id" }
+        }))
+        .unwrap();
+        let response = json!({ "version": "1.0.0", "site_id": "node-xyz", "uptime": 42 });
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "1.0.0");
+        assert_eq!(rows[0].meta.as_deref(), Some("node-xyz"));
     }
 
     #[test]
