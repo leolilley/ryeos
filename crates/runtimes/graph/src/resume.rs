@@ -40,6 +40,10 @@ pub struct ResumeState {
     /// event-replay path, which cannot reconstruct cost). The walker
     /// deserializes it into `GraphAccounting` to restore accumulated cost.
     pub accounting: Option<Value>,
+    /// Raw `suppressed_errors` array from the checkpoint payload (`None` for the
+    /// event-replay path). The walker deserializes it into `Vec<ErrorRecord>` to
+    /// restore the pre-checkpoint suppressed-error history.
+    pub suppressed_errors: Option<Value>,
 }
 
 /// Reconstruct a [`ResumeState`] for the thread by scanning its
@@ -93,8 +97,10 @@ pub async fn load_resume_state(
         // CheckpointWriter is the primary resume source.
         state: Value::Object(Default::default()),
         graph_run_id,
-        // Event-replay resume cannot reconstruct cost accounting.
+        // Event-replay resume cannot reconstruct cost accounting or the
+        // suppressed-error history.
         accounting: None,
+        suppressed_errors: None,
     }))
 }
 
@@ -109,6 +115,7 @@ pub async fn load_resume_state(
 ///   "step_count": N,
 ///   "state": {...},
 ///   "accounting": {"total": {...}|null, "nodes": [...]},
+///   "suppressed_errors": [{"step": N, "node": "...", "error": "..."}],
 ///   "written_at": "<iso>"
 /// }
 /// ```
@@ -158,6 +165,7 @@ pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
         state,
         graph_run_id,
         accounting: value.get("accounting").cloned(),
+        suppressed_errors: value.get("suppressed_errors").cloned(),
     })
 }
 
@@ -410,6 +418,7 @@ mod tests {
             "step_count": 7,
             "state": {"counter": 42},
             "accounting": {"total": null, "nodes": []},
+            "suppressed_errors": [{"step": 2, "node": "n1", "error": "boom"}],
             "written_at": "2026-01-01T00:00:00Z",
         });
         let state = from_checkpoint_value(&payload).unwrap();
@@ -421,6 +430,11 @@ mod tests {
             state.accounting,
             Some(json!({"total": null, "nodes": []})),
             "accounting carried through verbatim"
+        );
+        assert_eq!(
+            state.suppressed_errors,
+            Some(json!([{"step": 2, "node": "n1", "error": "boom"}])),
+            "suppressed_errors carried through verbatim"
         );
     }
 

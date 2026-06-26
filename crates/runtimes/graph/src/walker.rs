@@ -448,6 +448,20 @@ impl Walker {
                         ),
                     }
                 }
+                // Restore suppressed errors accumulated before the checkpoint so
+                // the resumed run's final error count/list is complete. A corrupt
+                // snapshot degrades to empty rather than failing the resume.
+                if let Some(se_val) =
+                    resume_val.get("suppressed_errors").filter(|v| !v.is_null())
+                {
+                    match serde_json::from_value::<Vec<ErrorRecord>>(se_val.clone()) {
+                        Ok(se) => suppressed_errors = se,
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "failed to restore suppressed_errors from checkpoint; starting empty"
+                        ),
+                    }
+                }
                 tracing::info!(
                     node = %current,
                     step,
@@ -1029,6 +1043,7 @@ impl Walker {
                             &next_node,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1130,6 +1145,7 @@ impl Walker {
                             next_node,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1216,6 +1232,7 @@ impl Walker {
                             next_node,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1291,6 +1308,7 @@ impl Walker {
                             target,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1315,6 +1333,7 @@ impl Walker {
                                     &next_node,
                                     next_step,
                                     state,
+                                    suppressed_errors,
                                     guard,
                                     hook_list,
                                 )
@@ -1416,6 +1435,7 @@ impl Walker {
                             target,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1439,6 +1459,7 @@ impl Walker {
                                     &next_node,
                                     next_step,
                                     state,
+                                    suppressed_errors,
                                     guard,
                                     hook_list,
                                 )
@@ -1656,11 +1677,12 @@ impl Walker {
         next_node: &str,
         next_step: u32,
         state: &Value,
+        suppressed_errors: &[ErrorRecord],
         guard: &mut RunGuard,
         _hook_list: &[Value],
     ) -> CommitResult {
         if let Err(e) = self
-            .write_checkpoint(graph_run_id, next_node, next_step, state)
+            .write_checkpoint(graph_run_id, next_node, next_step, state, suppressed_errors)
             .await
         {
             // Checkpoint failure is a hard error — resume correctness
@@ -1860,16 +1882,17 @@ impl Walker {
 
     /// Write a local checkpoint using the daemon-provided CheckpointWriter.
     ///
-    /// Persists the versioned payload: cursor/step/state plus a snapshot of the
-    /// `GraphAccounting` aggregate, so a resumed run reconstructs cost spent
-    /// before the checkpoint (restored in `execute` from `resume_state`).
-    /// `suppressed_errors` is added to the payload in S5c.
+    /// Persists the versioned payload: cursor/step/state plus snapshots of the
+    /// `GraphAccounting` aggregate and `suppressed_errors`, so a resumed run
+    /// reconstructs cost and non-fatal error history from before the checkpoint
+    /// (both restored in `execute` from `resume_state`).
     async fn write_checkpoint(
         &self,
         graph_run_id: &str,
         next_node: &str,
         next_step: u32,
         state: &Value,
+        suppressed_errors: &[ErrorRecord],
     ) -> anyhow::Result<()> {
         let Some(writer) = &self.checkpoint else {
             return Ok(());
@@ -1889,6 +1912,7 @@ impl Walker {
             "step_count": next_step,
             "state": state,
             "accounting": accounting,
+            "suppressed_errors": suppressed_errors,
             "written_at": lillux::time::iso8601_now(),
         }))
     }

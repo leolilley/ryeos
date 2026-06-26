@@ -252,6 +252,7 @@ fn main() -> anyhow::Result<()> {
             "step_count": rs.step_count,
             "state": rs.state,
             "accounting": rs.accounting,
+            "suppressed_errors": rs.suppressed_errors,
         });
     }
 
