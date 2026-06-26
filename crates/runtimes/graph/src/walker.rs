@@ -23,9 +23,8 @@ use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
 
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
-/// change to the written fields; the S5b resume parser will reject an unknown
-/// version.
-const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+/// change to the written fields; the resume parser rejects an unknown version.
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
 /// Running cost accumulator for a single graph execution. Owned by the
 /// walker behind a `Mutex` (like `warnings`) so cost can be recorded with
@@ -334,10 +333,10 @@ impl Walker {
             "graph loaded"
         );
 
-        // Reset per-run accounting so a Walker reused across multiple
-        // `execute` calls does not carry stale cost from a prior run.
-        // (NOTE: resume does not yet restore pre-resume cost — a resumed
-        // run reports only post-resume cost. See `write_checkpoint`.)
+        // Reset per-run accounting so a Walker reused across multiple `execute`
+        // calls does not carry stale cost from a prior run. If this is a resumed
+        // run, the checkpoint accounting snapshot is restored below from
+        // `resume_state`, so pre-checkpoint cost is preserved.
         *self.accounting.lock().unwrap() = GraphAccounting::default();
 
         let mut guard = RunGuard { finalized: false };
@@ -436,6 +435,19 @@ impl Walker {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
                 state = resume_val.get("state").cloned().unwrap_or(json!({}));
+                // Restore accumulated cost so post-resume cost adds to the
+                // pre-checkpoint total instead of restarting at zero. A corrupt
+                // snapshot degrades to fresh accounting (under-bills) rather than
+                // failing an otherwise-correct resume.
+                if let Some(acc_val) = resume_val.get("accounting").filter(|v| !v.is_null()) {
+                    match serde_json::from_value::<GraphAccounting>(acc_val.clone()) {
+                        Ok(acc) => *self.accounting.lock().unwrap() = acc,
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "failed to restore accounting from checkpoint; starting fresh"
+                        ),
+                    }
+                }
                 tracing::info!(
                     node = %current,
                     step,
@@ -1850,8 +1862,8 @@ impl Walker {
     ///
     /// Persists the versioned payload: cursor/step/state plus a snapshot of the
     /// `GraphAccounting` aggregate, so a resumed run reconstructs cost spent
-    /// before the checkpoint. The restore side (parsing + seeding the walker,
-    /// plus `suppressed_errors`) is handled in S5b.
+    /// before the checkpoint (restored in `execute` from `resume_state`).
+    /// `suppressed_errors` is added to the payload in S5c.
     async fn write_checkpoint(
         &self,
         graph_run_id: &str,

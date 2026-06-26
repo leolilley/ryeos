@@ -251,6 +251,7 @@ fn main() -> anyhow::Result<()> {
             "current_node": rs.current_node,
             "step_count": rs.step_count,
             "state": rs.state,
+            "accounting": rs.accounting,
         });
     }
 
