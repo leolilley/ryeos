@@ -9,10 +9,14 @@ use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_state::objects::ThreadStatus;
 
 /// The structural shape of a continuation successor stranded `created`: never
-/// launched, links upstream, carries a captured `ResumeContext`, and is NOT a
-/// `native_resume` (checkpoint) thread. NECESSARY but not sufficient — an
-/// operator follow-up successor can share this shape, so [`is_machine_successor`]
-/// is the machine-only proof applied on top.
+/// launched, links upstream, and carries a captured `ResumeContext`. Lineage wins
+/// over checkpoint resume here — a `created` successor is launched as a
+/// continuation even when its runtime declares `native_resume` (a graph successor
+/// is both). Checkpoint resume (`decide_resume`) owns RUNNING/crashed
+/// same-threads, which this `created` gate excludes — a successor is a NEW thread,
+/// not a re-spawn of one that already ran. NECESSARY but not sufficient — an
+/// operator follow-up successor shares this shape, so [`is_machine_successor`] /
+/// [`is_operator_successor`] are the proofs applied on top.
 fn continuation_shape(thread: &ThreadDetail) -> bool {
     thread.status == ThreadStatus::Created.as_str()
         && thread.upstream_thread_id.is_some()
@@ -20,7 +24,7 @@ fn continuation_shape(thread: &ThreadDetail) -> bool {
             .runtime
             .launch_metadata
             .as_ref()
-            .is_some_and(|m| m.resume_context.is_some() && !m.declares_native_resume())
+            .is_some_and(|m| m.resume_context.is_some())
 }
 
 /// Machine-only proof that `successor` is an autonomous MACHINE continuation of
@@ -259,12 +263,14 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         let interrupted_spawn = pgid.is_none();
 
         // Continuation successor safety net: a `created` thread that links upstream
-        // and carries a captured `ResumeContext` but is NOT a `native_resume`
-        // (checkpoint) thread. A crash between create and the spawned launch strands
-        // it here. Both MACHINE (source settled `continued`) and OPERATOR (source
-        // preserved completed/failed) variants are recovered here, BEFORE
-        // `decide_resume` — which would otherwise see no native_resume policy and
-        // (the lost-input bug) finalize the stranded successor as failed.
+        // and carries a captured `ResumeContext`. A crash between create and the
+        // spawned launch strands it here. Lineage is classified BEFORE
+        // `decide_resume`: both MACHINE (source settled `continued`) and OPERATOR
+        // (source preserved completed/failed) successors are launched as
+        // continuations here — even when the runtime declares `native_resume` (a
+        // graph successor is both), so a NEW successor is never mistaken for a
+        // checkpoint-resume of the same thread. A `created` successor that matches
+        // neither proof falls through to `decide_resume`.
         {
             let lm = thread.runtime.launch_metadata.as_ref();
             if continuation_shape(thread) {
@@ -577,10 +583,23 @@ mod tests {
             None,
             Some(RuntimeLaunchMetadata::default())
         )));
-        // native_resume (checkpoint) thread — the decide_resume path owns it.
+    }
+
+    #[test]
+    fn continuation_shape_matches_native_resume_successor() {
+        // Lineage wins over checkpoint resume: a `created` successor that links
+        // upstream and carries a ResumeContext IS a continuation even when its
+        // runtime declares native_resume (the graph case). A new successor must be
+        // launched as a continuation, not checkpoint-resumed as the same thread.
         let nr = native_resume_lm().with_resume_context(ctx());
-        assert!(!continuation_shape(&thread_detail(
+        assert!(continuation_shape(&thread_detail(
             "S", "created", Some("SRC"), None, Some(nr)
+        )));
+        // But a RUNNING native_resume thread stays out — the `created` gate hands
+        // crashed same-threads to the decide_resume (checkpoint) path.
+        let nr_running = native_resume_lm().with_resume_context(ctx());
+        assert!(!continuation_shape(&thread_detail(
+            "S", "running", Some("SRC"), None, Some(nr_running)
         )));
     }
 
