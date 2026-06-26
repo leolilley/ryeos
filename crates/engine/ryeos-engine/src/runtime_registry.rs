@@ -70,7 +70,11 @@ pub struct RuntimeYaml {
     /// rejected — omit the field to disable. Shares
     /// [`NativeResumeSpec::parse_declaration`] with the engine's chain-element
     /// `native_resume` handler so both accept identical shapes.
-    #[serde(default, deserialize_with = "deserialize_native_resume")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_native_resume"
+    )]
     pub native_resume: Option<NativeResumeSpec>,
 }
 
@@ -292,8 +296,19 @@ impl RuntimeRegistry {
             Some(r) => {
                 let canon = CanonicalRef::parse(r)
                     .map_err(|e| format!("malformed captured runtime_ref `{r}`: {e}"))?;
-                self.lookup_by_ref(&canon)
-                    .ok_or_else(|| format!("captured runtime_ref `{r}` is not a registered runtime"))
+                let rt = self.lookup_by_ref(&canon).ok_or_else(|| {
+                    format!("captured runtime_ref `{r}` is not a registered runtime")
+                })?;
+                // The ref must still serve the resumed kind — a registered-but-
+                // repurposed runtime would hand back the wrong binary / envelope
+                // requirements / native_resume policy.
+                if rt.yaml.serves != kind {
+                    return Err(format!(
+                        "captured runtime_ref `{r}` serves kind `{}`, not requested kind `{kind}`",
+                        rt.yaml.serves
+                    ));
+                }
+                Ok(rt)
             }
             None => self
                 .lookup_for(kind)
@@ -520,6 +535,86 @@ mod tests {
             err.to_string().contains("native_resume: false"),
             "error should explain the false rejection: {err}"
         );
+    }
+
+    #[test]
+    fn native_resume_none_serializes_without_null() {
+        // `skip_serializing_if` must omit the field entirely — emitting
+        // `native_resume: null` would be rejected by the custom deserializer on
+        // the round trip.
+        let yaml = minimal_yaml(); // native_resume: None
+        let s = serde_yaml::to_string(&yaml).expect("serialize");
+        assert!(
+            !s.contains("native_resume"),
+            "None must be omitted, got:\n{s}"
+        );
+        let _round: RuntimeYaml = serde_yaml::from_str(&s).expect("round-trips");
+    }
+
+    fn registry_with(serves: &str, ref_str: &str) -> RuntimeRegistry {
+        let mut yaml = minimal_yaml();
+        yaml.serves = serves.to_owned();
+        let canon = CanonicalRef::parse(ref_str).expect("valid ref");
+        let vr = VerifiedRuntime {
+            canonical_ref: canon.clone(),
+            yaml,
+            trust_class: TrustClass::TrustedBundle,
+            bundle_root: test_path(),
+        };
+        let mut reg = RuntimeRegistry::default();
+        reg.by_kind
+            .entry(serves.to_owned())
+            .or_default()
+            .push(vr.clone());
+        reg.by_ref.insert(canon, vr);
+        reg
+    }
+
+    #[test]
+    fn resolve_for_launch_none_uses_kind_default() {
+        let reg = registry_with("graph", "runtime:graph-runtime");
+        let rt = reg.resolve_for_launch(None, "graph").expect("kind default");
+        assert_eq!(rt.yaml.serves, "graph");
+    }
+
+    #[test]
+    fn resolve_for_launch_some_resolves_exact_ref() {
+        let reg = registry_with("graph", "runtime:graph-runtime");
+        let rt = reg
+            .resolve_for_launch(Some("runtime:graph-runtime"), "graph")
+            .expect("by-ref");
+        assert_eq!(
+            rt.canonical_ref,
+            CanonicalRef::parse("runtime:graph-runtime").unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_for_launch_malformed_ref_errors() {
+        let reg = registry_with("graph", "runtime:graph-runtime");
+        let err = reg
+            .resolve_for_launch(Some("not a ref"), "graph")
+            .unwrap_err();
+        assert!(err.contains("malformed"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_for_launch_unregistered_ref_errors() {
+        let reg = registry_with("graph", "runtime:graph-runtime");
+        let err = reg
+            .resolve_for_launch(Some("runtime:other-runtime"), "graph")
+            .unwrap_err();
+        assert!(err.contains("not a registered runtime"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_for_launch_wrong_serves_kind_errors() {
+        // Registered + parseable, but the runtime serves a different kind.
+        let reg = registry_with("graph", "runtime:graph-runtime");
+        let err = reg
+            .resolve_for_launch(Some("runtime:graph-runtime"), "directive")
+            .unwrap_err();
+        assert!(err.contains("serves kind"), "got: {err}");
     }
 
     #[test]
