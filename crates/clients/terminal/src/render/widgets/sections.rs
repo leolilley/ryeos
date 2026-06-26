@@ -37,7 +37,17 @@ pub fn draw_sections(surface: &mut TextSurface, rect: Rect, sections: &[StudioSe
         }
         let glyph = if section.collapsed { "▸" } else { "▾" };
         let header = format!("{glyph} {} ({})", section.title, section.count);
-        surface.draw_text(left, y, &truncate(&header, width), style_fg().bold());
+        // A collapsed section's header is the point that re-expands it; when
+        // it carries the cursor, highlight the full line like a selected row.
+        let header_style = if section.header_selected {
+            style_selected()
+        } else {
+            style_fg().bold()
+        };
+        if section.header_selected {
+            fill_line(surface, left, y, width, header_style);
+        }
+        surface.draw_text(left, y, &truncate(&header, width), header_style);
         y += 1;
 
         if section.collapsed {
@@ -112,6 +122,7 @@ mod tests {
             title: title.to_string(),
             count: rows.len(),
             collapsed,
+            header_selected: false,
             rows,
         }
     }
@@ -172,6 +183,22 @@ mod tests {
             row_text(&s, 40, 1).trim().is_empty(),
             "collapsed rows are hidden: {:?}",
             row_text(&s, 40, 1)
+        );
+    }
+
+    #[test]
+    fn sections_selected_collapsed_header_is_highlighted() {
+        use super::super::super::theme::ACCENT;
+        let (mut s, rect) = surface(40, 4);
+        let mut sec = section("Threads", true, vec![row("T-ab", None)]);
+        sec.header_selected = true;
+        draw_sections(&mut s, rect, &[sec]);
+        // The collapsed header is the re-expand point; selecting it fills the
+        // line with the selection background across the full width.
+        assert!(
+            (0..40).all(|x| s.get(x, 0).bg == ACCENT),
+            "selected collapsed header is highlighted: {:?}",
+            row_text(&s, 40, 0)
         );
     }
 

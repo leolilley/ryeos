@@ -181,7 +181,9 @@ fn find_fold_section(node: &StudioLayoutNodeVm, focused: &str) -> Option<usize> 
     match node {
         StudioLayoutNodeVm::Tile {
             tile_id,
-            view: StudioViewVm::Timeline { fold_section, .. },
+            view:
+                StudioViewVm::Timeline { fold_section, .. }
+                | StudioViewVm::Sections { fold_section, .. },
             ..
         } if tile_id == focused => *fold_section,
         StudioLayoutNodeVm::Tile { .. } => None,
@@ -195,6 +197,16 @@ fn selectable_of(view: &StudioViewVm) -> (usize, bool) {
     match view {
         StudioViewVm::Rows { rows, .. } => (rows.len(), false),
         StudioViewVm::Timeline { entries, .. } => (entries.len(), true),
+        // The point walks a flat top-down list: an expanded section's rows,
+        // or a collapsed section's single header (so it stays re-expandable) —
+        // matching the flat cursor the resolver projects selection from.
+        StudioViewVm::Sections { sections, .. } => {
+            let points = sections
+                .iter()
+                .map(|section| if section.collapsed { 1 } else { section.rows.len() })
+                .sum();
+            (points, false)
+        }
         _ => (0, false),
     }
 }

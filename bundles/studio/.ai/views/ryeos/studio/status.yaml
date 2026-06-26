@@ -1,12 +1,20 @@
-# ryeos:signed:2026-06-25T23:34:45Z:b4e8df7f0f5aea47ac23d02076bdefcbecf6142217e572accc58b9a492e8e7db:anPf1gY0c623rzqPTNI0xt6NDdSBt1zJDkRehyvkT15Ck9uDQSNIEjOdNJQOXplwpzjEe45b43VPYUNM1TxVAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-26T00:56:44Z:623bc5bb121e25acda2b9b9e34b2158f5bd48bf78708c90e19bd77a1d24faf01:JA3MnM9y2fmrpKIl1fUHjdU7A7tKMvWxWyJqWqnPsHislOBk9bf5Wk6HoKEMZMwbZVTxaygMJrtk3MwnDkGZBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-status
 version: "1.0.0"
 description: >-
   Magit-style status lens — a foldable, sectioned overview of the node:
   running threads, installed bundles, and node status. One center lens you
-  read (and, in a later increment, act from) without leaving the feed.
+  read and act from: Enter on a thread aims the foot input at it.
 
 widget: sections
+affordances:
+  - id: aim-input
+    label: Aim input here
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
 sections:
   - title: Threads
     source:
@@ -25,6 +33,7 @@ sections:
           cancelled: warn
           completed: good
         default: neutral
+    activate: aim-input
   - title: Bundles
     source:
       ref: service:bundle/list

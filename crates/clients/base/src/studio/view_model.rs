@@ -332,6 +332,10 @@ pub enum StudioViewVm {
     Sections {
         title: String,
         sections: Vec<StudioSectionVm>,
+        /// The section the point sits in — what a fold key toggles. `None`
+        /// when there is no point (empty view).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fold_section: Option<usize>,
     },
     Placeholder {
         title: String,
@@ -348,6 +352,11 @@ pub struct StudioSectionVm {
     pub count: usize,
     #[serde(default)]
     pub collapsed: bool,
+    /// The point is on this section's header. Only a collapsed section's
+    /// header is a point (it has no visible rows to land on); the highlight
+    /// lets the operator see what a fold key would re-expand.
+    #[serde(default)]
+    pub header_selected: bool,
     pub rows: Vec<StudioRowVm>,
 }
 
@@ -911,43 +920,87 @@ fn bound_view_vm_keyed(
                     message: "sections view declares no sections".to_string(),
                 };
             }
-            let sections = binding
-                .sections
-                .iter()
-                .enumerate()
-                .map(|(index, section)| {
-                    let key = super::content::section_source_key(source_key, index);
-                    let rows: Vec<StudioRowVm> = core
-                        .data
-                        .sources
-                        .get(&key)
-                        .map(|response| super::content::project_section(section, response))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(row_index, record)| StudioRowVm {
-                            id: format!("{view_ref}#{index}#{row_index}"),
+            // One flat point list walks top-down across sections: an expanded
+            // section contributes its rows, a collapsed section contributes a
+            // single header point (so it stays addressable to re-expand). The
+            // tile cursor addresses that flat index; `fold_section` is the
+            // section the point lands in — what a fold key toggles.
+            let folds = collapsed;
+            let mut flat = 0usize;
+            let mut fold_section = None;
+            let mut sections = Vec::with_capacity(binding.sections.len());
+            for (index, section) in binding.sections.iter().enumerate() {
+                let is_collapsed = folds.is_some_and(|set| set.contains(&index));
+                // Row activation per section: the section names an affordance
+                // (in the host binding's `affordances`) the same way the rows
+                // widget's `selection.activate` does — validated identically.
+                let activate = section.activate.as_ref().filter(|affordance_id| {
+                    binding
+                        .affordances
+                        .iter()
+                        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id.as_str()))
+                        .is_some_and(|affordance| {
+                            super::content::validate_affordance_placeholders(
+                                affordance,
+                                super::content::Producer::Selection,
+                            )
+                            .is_ok()
+                        })
+                });
+                let key = super::content::section_source_key(source_key, index);
+                let records = core
+                    .data
+                    .sources
+                    .get(&key)
+                    .map(|response| super::content::project_section(section, response))
+                    .unwrap_or_default();
+                let count = records.len();
+                let mut header_selected = false;
+                let mut rows = Vec::new();
+                if is_collapsed {
+                    // The collapsed section is one point: its header.
+                    if cursor == Some(flat) {
+                        header_selected = true;
+                        fold_section = Some(index);
+                    }
+                    flat += 1;
+                } else {
+                    rows.reserve(count);
+                    for record in records {
+                        let selected = cursor == Some(flat);
+                        if selected {
+                            fold_section = Some(index);
+                        }
+                        flat += 1;
+                        rows.push(StudioRowVm {
+                            id: format!("{view_ref}#{index}#{}", rows.len()),
                             primary: record.primary,
                             secondary: None,
                             meta: record.meta,
                             kind: None,
-                            // Per-row activation is wired in a later increment.
-                            action: None,
+                            action: activate.map(|affordance_id| StudioAction::InvokeAffordance {
+                                view_ref: view_ref.to_string(),
+                                affordance_id: affordance_id.clone(),
+                                record: record.raw.clone(),
+                            }),
                             tone: tone_from_name(record.tone.as_deref()),
-                            selected: false,
-                        })
-                        .collect();
-                    StudioSectionVm {
-                        title: section.title.clone(),
-                        count: rows.len(),
-                        // Fold interaction lands with selection support; for now
-                        // sections render expanded.
-                        collapsed: false,
-                        rows,
+                            selected,
+                        });
                     }
-                })
-                .collect();
-            return StudioViewVm::Sections { title, sections };
+                }
+                sections.push(StudioSectionVm {
+                    title: section.title.clone(),
+                    count,
+                    collapsed: is_collapsed,
+                    header_selected,
+                    rows,
+                });
+            }
+            return StudioViewVm::Sections {
+                title,
+                sections,
+                fold_section,
+            };
         }
         _ => {}
     }
@@ -1504,10 +1557,7 @@ fn inspect_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
 }
 
 fn focused_selection_hint(core: &StudioCore) -> Option<String> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
-    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let row = focused_rows(core, view, tile_id).get(cursor)?.clone();
+    let row = focused_selected_row(core)?;
     Some(row.secondary.or(row.meta).unwrap_or(row.primary))
 }
 
@@ -1589,20 +1639,26 @@ pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> 
                 _ => None,
             });
     }
-    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let rows = focused_rows(core, view, tile_id);
-    rows.get(cursor).and_then(|row| row.action.clone())
+    focused_selected_row(core).and_then(|row| row.action)
 }
 
-/// Rows of the focused tile, regardless of how it is bound. Bound views
-/// project their fetched source; the thread view projects the threads
-/// DTO; ambient views have no rows.
-fn focused_rows(core: &StudioCore, view: &ViewSpec, tile_id: TileId) -> Vec<StudioRowVm> {
-    // Scene widgets (graph/atlas) render an Atlas/Map VM, not Rows, so the
-    // non-Rows fallback already yields no rows for them.
+/// The row under the point in the focused tile, if the point is on a row. The
+/// rows widget indexes by the flat cursor; sections carry the selection on the
+/// row VM itself (the point may instead be on a collapsed header → no row).
+/// Scene widgets (graph/atlas) have no rows.
+fn focused_selected_row(core: &StudioCore) -> Option<StudioRowVm> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
-        StudioViewVm::Rows { rows, .. } => rows,
-        _ => Vec::new(),
+        StudioViewVm::Rows { rows, .. } => {
+            let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+            rows.into_iter().nth(cursor)
+        }
+        StudioViewVm::Sections { sections, .. } => sections
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.selected),
+        _ => None,
     }
 }
 

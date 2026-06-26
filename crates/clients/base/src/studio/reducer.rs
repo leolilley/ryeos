@@ -2641,6 +2641,182 @@ mod tests {
     }
 
     #[test]
+    fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {
+        use crate::studio::view_model::{
+            action_for_focused_row, StudioLayoutNodeVm, StudioViewVm,
+        };
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/studio/status"],
+                "views": {
+                    "view:ryeos/studio/status": {
+                        "widget": "sections",
+                        "affordances": [{
+                            "id": "aim-input",
+                            "label": "Aim",
+                            "invoke": { "plane": "ui", "facet": "input.route", "merge": { "thread": "{record.thread_id}" } }
+                        }],
+                        "sections": [
+                            { "title": "Threads", "source": { "ref": "service:threads/list", "collection": "threads" }, "projection": { "primary": "thread_id" }, "activate": "aim-input" },
+                            { "title": "Bundles", "source": { "ref": "service:bundle/list", "collection": "bundles" }, "projection": { "primary": "name" } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let tile = core.workspace.focused_tile;
+        let key = tile.0.to_string();
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 0),
+            serde_json::json!({ "threads": [ { "thread_id": "T-ab" }, { "thread_id": "T-cd" } ]}),
+        );
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 1),
+            serde_json::json!({ "bundles": [ { "name": "studio" } ]}),
+        );
+
+        fn find_tile_view(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+            match node {
+                StudioLayoutNodeVm::Tile { view, .. } => Some(view),
+                StudioLayoutNodeVm::Split { first, second, .. } => {
+                    find_tile_view(first).or_else(|| find_tile_view(second))
+                }
+            }
+        }
+        let selected_primaries = |core: &StudioCore| -> Vec<String> {
+            let vm = build_view_model(core);
+            let root = vm.workspace.root.expect("layout root");
+            match find_tile_view(&root).expect("tile view") {
+                StudioViewVm::Sections { sections, .. } => sections
+                    .iter()
+                    .flat_map(|s| &s.rows)
+                    .filter(|r| r.selected)
+                    .map(|r| r.primary.clone())
+                    .collect(),
+                other => panic!("expected sections view, got {other:?}"),
+            }
+        };
+
+        // Flat cursor 0 = the first Threads row; its section's activation fires
+        // carrying that row's record.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 0 },
+        });
+        assert_eq!(selected_primaries(&core), vec!["T-ab".to_string()]);
+        match action_for_focused_row(&core).expect("threads row activates") {
+            StudioAction::InvokeAffordance { affordance_id, record, .. } => {
+                assert_eq!(affordance_id, "aim-input");
+                assert_eq!(record["thread_id"], "T-ab");
+            }
+            other => panic!("expected aim-input invoke, got {other:?}"),
+        }
+
+        // Flat cursor 2 = the first Bundles row (Threads contributed 2). Bundles
+        // declares no activation, so the point resolves a row but no action.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 2 },
+        });
+        assert_eq!(selected_primaries(&core), vec!["studio".to_string()]);
+        assert!(
+            action_for_focused_row(&core).is_none(),
+            "a bundles row has no section activation"
+        );
+    }
+
+    #[test]
+    fn folding_a_section_collapses_it_to_a_single_header_point() {
+        use crate::studio::view_model::{StudioLayoutNodeVm, StudioViewVm};
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/studio/status"],
+                "views": {
+                    "view:ryeos/studio/status": {
+                        "widget": "sections",
+                        "sections": [
+                            { "title": "Threads", "source": { "ref": "service:threads/list", "collection": "threads" }, "projection": { "primary": "thread_id" } },
+                            { "title": "Bundles", "source": { "ref": "service:bundle/list", "collection": "bundles" }, "projection": { "primary": "name" } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let tile = core.workspace.focused_tile;
+        let key = tile.0.to_string();
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 0),
+            serde_json::json!({ "threads": [ { "thread_id": "T-ab" }, { "thread_id": "T-cd" } ]}),
+        );
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 1),
+            serde_json::json!({ "bundles": [ { "name": "studio" } ]}),
+        );
+
+        fn tile_sections(
+            core: &StudioCore,
+        ) -> (Vec<crate::studio::view_model::StudioSectionVm>, Option<usize>) {
+            fn find(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+                match node {
+                    StudioLayoutNodeVm::Tile { view, .. } => Some(view),
+                    StudioLayoutNodeVm::Split { first, second, .. } => {
+                        find(first).or_else(|| find(second))
+                    }
+                }
+            }
+            let vm = build_view_model(core);
+            match find(&vm.workspace.root.expect("root")).expect("tile view") {
+                StudioViewVm::Sections {
+                    sections,
+                    fold_section,
+                    ..
+                } => (sections.clone(), *fold_section),
+                other => panic!("expected sections, got {other:?}"),
+            }
+        }
+
+        // Fold section 0 (Threads).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetFold {
+                tile_id: key.clone(),
+                section: 0,
+                collapsed: true,
+            },
+        });
+        let (sections, _) = tile_sections(&core);
+        assert!(sections[0].collapsed, "threads is collapsed");
+        assert_eq!(sections[0].count, 2, "collapsed header still reports count");
+        assert!(sections[0].rows.is_empty(), "collapsed rows are hidden");
+        assert!(!sections[1].collapsed);
+        assert_eq!(sections[1].rows.len(), 1);
+
+        // The collapsed section now occupies one flat point: its header at
+        // index 0. The point there marks the header (no row) and folds it.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 0 },
+        });
+        let (sections, fold_section) = tile_sections(&core);
+        assert!(sections[0].header_selected, "collapsed header carries the point");
+        assert_eq!(fold_section, Some(0), "fold key would toggle threads");
+
+        // Flat index 1 is now the first Bundles row (Threads contributes one
+        // header point, not two rows).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 1 },
+        });
+        let (sections, fold_section) = tile_sections(&core);
+        assert!(!sections[0].header_selected);
+        assert!(sections[1].rows[0].selected, "point lands on the bundles row");
+        assert_eq!(fold_section, Some(1));
+    }
+
+    #[test]
     fn sections_view_without_a_loaded_source_shows_an_empty_group() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.ui.docks.left.as_mut().unwrap().visible = true;
