@@ -1250,18 +1250,18 @@ fn derived_target_label(
     }
     // `submit: route` — render the seat route truthfully (the target the
     // next submit lands on). "continuing" only when the input declares
-    // conversation targeting AND the targeted thread actually supports
-    // continuation per the substrate (`execution.supports_continuation` from
+    // conversation targeting AND the targeted thread actually accepts OPERATOR
+    // follow-up per the substrate (`execution.supports_operator_followup` from
     // the fetched projections — distrust only an explicit `false`, so a
     // just-launched thread not yet in the list still reads as continuing). A
-    // route with a stray `thread` on a non-targeting or non-continuation
-    // thread is not a conversation. No keybinding copy here; an author
+    // route with a stray `thread` on a non-targeting or machine-only thread
+    // (e.g. graph) is not a conversation. No keybinding copy here; an author
     // overrides the whole strip via `target_label`.
     match (&route.invoke, &route.thread) {
         (None, _) => "no target — surface declares no route".to_string(),
         (Some(_), Some(thread))
             if input.target.is_some()
-                && core.thread_supports_continuation(thread) != Some(false) =>
+                && core.thread_supports_operator_followup(thread) != Some(false) =>
         {
             format!("→ continuing {thread}")
         }
@@ -1561,7 +1561,11 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
-    if core.seat.fold().input_route().thread.is_some() {
+    if let Some(head) = core.seat.fold().input_route().thread {
+        // "continue" is an operator follow-up — gate it on the substrate fact so
+        // a machine-only thread (graph) doesn't offer an operator continue the
+        // daemon refuses. interrupt/cancel apply to any active thread.
+        let operator_continuable = core.thread_supports_operator_followup(&head) != Some(false);
         for (label, command) in [
             ("Interrupt thread", "interrupt"),
             ("Continue thread", "continue"),
@@ -1574,7 +1578,7 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
                     command: command.to_string(),
                 },
                 secondary_action: None,
-                enabled: true,
+                enabled: command != "continue" || operator_continuable,
             });
         }
     }

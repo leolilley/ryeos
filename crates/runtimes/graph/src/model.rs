@@ -25,6 +25,13 @@ pub struct GraphConfig {
     pub state: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
+    /// Per-thread step budget. When set and a run reaches it without hitting a
+    /// terminal node, the walker checkpoints and cuts a machine continuation
+    /// successor (which resumes mid-graph in a fresh thread) instead of running
+    /// to `max_steps`. `step` stays cumulative across the chain; `max_steps`
+    /// remains the hard total ceiling. `None` = no segmentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_steps: Option<u32>,
 }
 
 fn default_max_steps() -> u32 {

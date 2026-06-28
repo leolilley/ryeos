@@ -668,6 +668,11 @@ pub(crate) fn derive_effective_caps(
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
     pub executor_ref: &'a str,
+    /// The serving runtime's canonical ref (`runtime:<name>`) for a managed
+    /// runtime-registry launch (directive / graph); `None` for direct subprocess
+    /// launches. Persisted into the `ResumeContext` so a continuation successor
+    /// reattaches the same runtime identity rather than re-resolving the default.
+    pub runtime_ref: Option<&'a str>,
     pub acting_principal: &'a str,
     pub resolved: &'a ResolvedExecutionRequest,
     pub project_path: &'a Path,
@@ -692,6 +697,12 @@ pub struct BuildAndLaunchParams<'a> {
     /// snapshot-pinned continuation resolves against the captured version).
     /// `None` for fresh launches, which use the freshly-resolved caps.
     pub captured_effective_caps: Option<&'a [String]>,
+    /// `true` only for an autonomous MACHINE continuation successor. For a
+    /// replay-aware (`native_resume`) kind this drives checkpoint resume: the
+    /// predecessor's checkpoint is copied into this successor's dir and
+    /// `RYEOS_RESUME=1` is injected so the runtime resumes mid-run. `false` for
+    /// fresh launches and operator follow-ups (which open with a new stimulus).
+    pub is_machine_continuation: bool,
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -768,6 +779,7 @@ async fn run_claimed_thread_row(
     let BuildAndLaunchParams {
         state,
         executor_ref,
+        runtime_ref,
         acting_principal,
         resolved,
         project_path,
@@ -779,6 +791,7 @@ async fn run_claimed_thread_row(
         previous_thread_id,
         suppress_stimulus,
         captured_effective_caps,
+        is_machine_continuation,
     } = params;
     let engine = provenance.request_engine();
     tracing::info!(
@@ -1048,39 +1061,122 @@ async fn run_claimed_thread_row(
         }
     }
 
-    // Seed THIS thread's launch identity so a continuation successor of it can be
-    // relaunched later (machine handoff / reconciler) with no live request. Only
-    // for continuation-capable kinds; uses the REAL composed `effective_caps`
-    // (unlike `spawn_item`, which captures empty caps). Warn-not-fail: a fresh
-    // launch still works, and the continuation path fails loudly later if the
-    // identity is absent. The clobber-preserving attach keeps this against the
-    // runtime's later empty self-attach.
-    if state
+    // The serving runtime (captured ref, else the kind's default). A runtime that
+    // declares `native_resume` is replay-aware: allocate its per-thread checkpoint
+    // dir so the spawn can inject `RYEOS_CHECKPOINT_DIR` and reconcile can reason
+    // about restart-safe state.
+    // Resolve via the REQUEST engine (a malformed/unregistered captured
+    // runtime_ref is an error, never silently the kind default — that could
+    // switch binary / envelope / native_resume policy).
+    let native_resume = engine
+        .runtimes
+        .resolve_for_launch(runtime_ref, &resolved.kind)
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .native_resume
+        .clone();
+    // Replay-aware runtimes get a per-thread checkpoint dir. If allocation fails,
+    // FAIL the launch rather than spawn a replay-aware process with no checkpoint
+    // env (the finalize-on-drop guard records a failed thread).
+    let checkpoint_dir: Option<std::path::PathBuf> = if native_resume.is_some() {
+        let dir = state
+            .config
+            .app_root
+            .join("threads")
+            .join(&thread_id)
+            .join("checkpoints");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "failed to allocate checkpoint dir for replay-aware runtime `{}`: {e}",
+                resolved.item_ref
+            ))
+        })?;
+        Some(dir)
+    } else {
+        None
+    };
+
+    // A machine continuation of a replay-aware kind resumes from the
+    // predecessor's checkpoint: copy it into this successor's dir and flag the
+    // spawn so `RYEOS_RESUME=1` is injected and the runtime resumes mid-run.
+    // A machine continuation with no predecessor checkpoint cannot resume — fail
+    // rather than cold-start (which would re-run the graph from the beginning).
+    let is_resume = is_machine_continuation && native_resume.is_some();
+    if is_resume {
+        let prev = previous_thread_id.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no predecessor thread",
+                resolved.item_ref
+            ))
+        })?;
+        let succ_dir = checkpoint_dir.as_deref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no checkpoint dir",
+                resolved.item_ref
+            ))
+        })?;
+        let prev_dir = state
+            .config
+            .app_root
+            .join("threads")
+            .join(prev)
+            .join("checkpoints");
+        let copied = ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir)
+            .map_err(|e| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
+            })?;
+        if !copied {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}`: predecessor `{prev}` has no checkpoint to resume from",
+                resolved.item_ref
+            )));
+        }
+    }
+
+    // Seed launch metadata for continuation-capable kinds (the launch identity a
+    // successor relaunches from — REAL composed `effective_caps`, unlike
+    // `spawn_item`) AND for replay-aware runtimes (the `native_resume` +
+    // `checkpoint_dir` reconcile reads on restart). These are independent: a graph
+    // is replay-aware before its continuation flag is set. Warn-not-fail: a fresh
+    // launch still works; the relevant path fails loudly later if identity is absent.
+    let supports_continuation = state
         .threads
         .kind_profiles()
         .get(&resolved.kind)
-        .is_some_and(|p| p.supports_continuation)
-    {
-        let resume_context = ryeos_app::launch_metadata::ResumeContext {
-            kind: resolved.kind.clone(),
-            item_ref: resolved.item_ref.clone(),
-            launch_mode: resolved.launch_mode.clone(),
-            parameters: parameters.clone(),
-            project_context: resolved.plan_context.project_context.clone(),
-            original_snapshot_hash: None,
-            current_site_id: resolved.current_site_id.clone(),
-            origin_site_id: resolved.origin_site_id.clone(),
-            requested_by: resolved.plan_context.requested_by.clone(),
-            execution_hints: resolved.plan_context.execution_hints.clone(),
-            effective_caps: effective_caps.clone(),
-        };
-        let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
-            .with_resume_context(resume_context);
+        .is_some_and(|p| p.supports_continuation);
+    if supports_continuation || native_resume.is_some() {
+        let mut metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default();
+        if supports_continuation {
+            metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
+                kind: resolved.kind.clone(),
+                item_ref: resolved.item_ref.clone(),
+                launch_mode: resolved.launch_mode.clone(),
+                parameters: parameters.clone(),
+                project_context: resolved.plan_context.project_context.clone(),
+                original_snapshot_hash: None,
+                current_site_id: resolved.current_site_id.clone(),
+                origin_site_id: resolved.origin_site_id.clone(),
+                requested_by: resolved.plan_context.requested_by.clone(),
+                execution_hints: resolved.plan_context.execution_hints.clone(),
+                effective_caps: effective_caps.clone(),
+                // Capture the actual launch identity so a continuation successor of
+                // a delegate kind (directive / graph) can reconstruct how to launch
+                // without a per-item `executor_id`.
+                executor_ref: Some(executor_ref.to_string()),
+                runtime_ref: runtime_ref.map(str::to_string),
+            });
+        }
+        if let Some(nr) = native_resume.clone() {
+            metadata = metadata.with_native_resume(nr);
+        }
+        if let Some(ckpt) = checkpoint_dir.clone() {
+            metadata = metadata.with_checkpoint_dir(ckpt);
+        }
         if let Err(e) = state.state_store.seed_launch_metadata(&thread_id, &metadata) {
             tracing::warn!(
                 thread_id = %thread_id,
                 error = %e,
-                "failed to seed continuation launch identity"
+                "failed to seed launch metadata"
             );
         }
     }
@@ -1326,6 +1422,7 @@ async fn run_claimed_thread_row(
         .and_then(|preflight| preflight.env_var.clone());
     let app_root_owned = state.config.app_root.clone();
     let cas_root_owned = state.config.app_root.join("cas");
+    let checkpoint_dir_owned = checkpoint_dir.clone();
 
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(SpawnRuntimeParams {
@@ -1342,6 +1439,11 @@ async fn run_claimed_thread_row(
             roots: runtime_roots,
             app_root: &app_root_owned,
             cas_root: &cas_root_owned,
+            checkpoint_dir: checkpoint_dir_owned.as_deref(),
+            // A machine continuation of a replay-aware kind resumes from the
+            // predecessor's copied-forward checkpoint; a fresh launch writes a
+            // cold one.
+            is_resume,
         })
     })
     .await
@@ -1690,13 +1792,21 @@ async fn launch_claimed_successor(
     // its own kind, restores principal / hints / sites verbatim).
     let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
 
-    // Envelope-field requirements come from the successor kind's runtime entry.
+    // Envelope-field requirements come from the runtime entry. Prefer the
+    // predecessor's captured `runtime_ref` (by-ref) so a continued thread keeps
+    // the exact runtime it launched under; a captured-but-bad ref is an error,
+    // never a silent switch to the kind default.
     let required_envelope_fields = state
         .engine
         .runtimes
-        .lookup_for(&params.resolved.resolved_item.kind)
-        .map(|runtime| runtime.yaml.required_envelope_fields.clone())
-        .unwrap_or_default();
+        .resolve_for_launch(
+            resume.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        )
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .required_envelope_fields
+        .clone();
 
     // Machine: fold the chain with NO new stimulus, and pin authority to the
     // predecessor's captured caps. Operator: inject the seeded input as the
@@ -1711,6 +1821,9 @@ async fn launch_claimed_successor(
         BuildAndLaunchParams {
             state,
             executor_ref: &params.resolved.executor_ref,
+            // Propagate the predecessor's runtime identity so this successor
+            // re-seeds the same runtime for the NEXT continuation turn.
+            runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &params.acting_principal,
             resolved: &params.resolved,
             project_path: &project_path,
@@ -1722,6 +1835,7 @@ async fn launch_claimed_successor(
             previous_thread_id: Some(&previous_thread_id),
             suppress_stimulus,
             captured_effective_caps,
+            is_machine_continuation: matches!(mode, SuccessorMode::Machine),
         },
         successor,
     )
@@ -1742,6 +1856,13 @@ struct SpawnRuntimeParams<'a> {
     roots: ryeos_app::env_contract::DaemonRootEnv,
     app_root: &'a Path,
     cas_root: &'a Path,
+    /// Daemon-allocated checkpoint dir for a replay-aware (`native_resume`)
+    /// runtime; `Some` injects `RYEOS_CHECKPOINT_DIR` so the runtime writes
+    /// restart-safe state. `None` for runtimes that declare no `native_resume`.
+    checkpoint_dir: Option<&'a Path>,
+    /// Inject `RYEOS_RESUME=1` so a replay-aware runtime loads its checkpoint
+    /// instead of cold-starting.
+    is_resume: bool,
 }
 
 fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
@@ -1759,6 +1880,8 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         roots,
         app_root,
         cas_root,
+        checkpoint_dir,
+        is_resume,
     } = params;
     let secret_map: std::collections::BTreeMap<String, String> =
         vault_bindings.iter().cloned().collect();
@@ -1806,7 +1929,24 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
             ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection { source },
         ))
     });
-    let protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
+    let mut protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
+    // Replay-aware runtimes: surface the daemon-allocated checkpoint dir (and the
+    // resume flag) so the runtime writes / reloads restart-safe state via
+    // `ryeos_runtime::CheckpointWriter`.
+    if let Some(ckpt) = checkpoint_dir {
+        protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
+            "RYEOS_CHECKPOINT_DIR",
+            ckpt.display().to_string(),
+            ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
+        ));
+        if is_resume {
+            protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
+                "RYEOS_RESUME",
+                "1",
+                ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
+            ));
+        }
+    }
 
     let declared_secret_bindings = secret_map
         .iter()

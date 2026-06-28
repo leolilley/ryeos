@@ -690,6 +690,14 @@ pub struct ThreadProfileDecl {
     /// Whether the thread supports continuation (successor threads).
     #[serde(default)]
     pub supports_continuation: bool,
+    /// Whether an OPERATOR follow-up (`threads.input`) can continue this thread.
+    /// A conversation-shaped kind (directive) chain-folds operator input; a
+    /// checkpoint-resumed kind (graph) self-continues by MACHINE only and refuses
+    /// operator follow-up. Independent of `supports_continuation`: a graph has
+    /// machine continuation but no operator follow-up. Defaults `true`, so only
+    /// machine-only kinds opt out.
+    #[serde(default = "default_true")]
+    pub supports_operator_followup: bool,
 }
 
 fn default_true() -> bool {
@@ -2775,6 +2783,26 @@ execution:
             err.to_string().contains("thread_profile") && err.to_string().contains("mapping"),
             "expected mapping-only thread_profile rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn thread_profile_operator_followup_defaults_true() {
+        // A thread_profile that omits `supports_operator_followup` must default
+        // to `true` so conversation-shaped kinds (directive) keep operator
+        // follow-up; only machine-only kinds (graph) opt out.
+        let yaml = "\
+execution:
+  thread_profile:
+    name: directive_run
+    root_executable: true
+    supports_interrupt: true
+    supports_continuation: true
+  delegate:
+    via: runtime_registry
+";
+        let exec = parse_exec(yaml).unwrap().unwrap();
+        let tp = exec.thread_profile.expect("thread_profile present");
+        assert!(tp.supports_operator_followup);
     }
 
     // Removed: `project_overlay_replaces_resolution` — kind schemas are

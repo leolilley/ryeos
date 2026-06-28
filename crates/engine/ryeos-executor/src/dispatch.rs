@@ -1860,6 +1860,10 @@ async fn dispatch_managed_subprocess(
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         executor_ref: &prepared.executor_ref,
+        // The serving runtime's canonical ref, captured so a continuation
+        // successor reattaches the same runtime identity (not just the kind's
+        // current default).
+        runtime_ref: Some(&runtime_ref),
         acting_principal,
         resolved: &prepared.resolved,
         project_path,
@@ -1874,6 +1878,8 @@ async fn dispatch_managed_subprocess(
         suppress_stimulus: false,
         // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
         captured_effective_caps: None,
+        // Fresh launch: never a machine-continuation resume.
+        is_machine_continuation: false,
     })
     .await
     .map_err(|e| match &e {
@@ -2185,6 +2191,9 @@ async fn dispatch_tool_subprocess(
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
         provenance: request.provenance.clone(),
+        // Fresh dispatch: no captured runtime ref. The thread's runtime identity
+        // is captured in launch metadata; resume reads it back from there.
+        runtime_ref: None,
     };
 
     if request.launch_mode == "detached" {

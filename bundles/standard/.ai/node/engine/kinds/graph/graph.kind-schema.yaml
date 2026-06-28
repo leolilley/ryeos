@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-24T02:11:52Z:09c5447358ec7aaf4160aeaaef30c6db4f97197a58bc31a0879685d7bdaf24df:6l7iP73IeUnqht7U1E408QHgx9Ig+JuZqyksMR9Hieaoht9jwOyYmJg9tDC5qIDOqwH+Qgl75f+AAmq9+KrSDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-28T06:41:07Z:98fa594c150c41b5e531f9957bb4d632197614632d35b250d9f8ca2c8ea26647:UVZRIMAcWmH6lvkk0BnkCUqhJz7FTHdmTm0qypTu4T6aHs3iXwBsSjr3iPQ7XG/HBUZOvtipMJFyTTFRKH9YAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -19,11 +19,15 @@ execution:
     name: graph_run
     root_executable: true
     supports_interrupt: true
-    # A graph does NOT continue itself: continuation is a chain-fold of a
-    # conversation-shaped kind (the directive). Graph *follow* — a graph driving
-    # and polling a CHILD's continuation to terminal — is a separate capability
-    # and grants the parent no self-continuation.
-    supports_continuation: false
+    # A graph self-continues by MACHINE only: when a segment-step budget is
+    # exhausted the walker checkpoints the frontier and a machine successor
+    # resumes it from that checkpoint. So the kind IS continuation-capable.
+    supports_continuation: true
+    # But a graph folds no conversation, so an operator follow-up
+    # (threads.input) has nowhere to deliver input — it is refused. Graph
+    # *follow* — a graph driving and polling a CHILD's continuation to terminal —
+    # is a separate capability and grants the parent no operator follow-up.
+    supports_operator_followup: false
 formats:
   - extensions: [".yaml", ".yml"]
     parser: parser:ryeos/core/yaml/yaml

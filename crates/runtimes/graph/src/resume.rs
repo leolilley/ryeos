@@ -36,6 +36,14 @@ pub struct ResumeState {
     pub step_count: u32,
     pub state: Value,
     pub graph_run_id: String,
+    /// Raw `accounting` snapshot from the checkpoint payload (`None` for the
+    /// event-replay path, which cannot reconstruct cost). The walker
+    /// deserializes it into `GraphAccounting` to restore accumulated cost.
+    pub accounting: Option<Value>,
+    /// Raw `suppressed_errors` array from the checkpoint payload (`None` for the
+    /// event-replay path). The walker deserializes it into `Vec<ErrorRecord>` to
+    /// restore the pre-checkpoint suppressed-error history.
+    pub suppressed_errors: Option<Value>,
 }
 
 /// Reconstruct a [`ResumeState`] for the thread by scanning its
@@ -89,6 +97,10 @@ pub async fn load_resume_state(
         // CheckpointWriter is the primary resume source.
         state: Value::Object(Default::default()),
         graph_run_id,
+        // Event-replay resume cannot reconstruct cost accounting or the
+        // suppressed-error history.
+        accounting: None,
+        suppressed_errors: None,
     }))
 }
 
@@ -97,18 +109,36 @@ pub async fn load_resume_state(
 /// Payload shape (written by `walker::write_checkpoint`):
 /// ```json
 /// {
+///   "schema_version": 1,
 ///   "graph_run_id": "...",
 ///   "current_node": "<NEXT cursor>",
 ///   "step_count": N,
 ///   "state": {...},
+///   "accounting": {"total": {...}|null, "nodes": [...]},
+///   "suppressed_errors": [{"step": N, "node": "...", "error": "..."}],
 ///   "written_at": "<iso>"
 /// }
 /// ```
 ///
-/// Note: `current_node` here means "where to resume *into*" — the
-/// walker writes the NEXT node's name, not the just-completed one
-/// (R4 fix in `walker.rs`).
+/// `schema_version` is required and must match
+/// [`crate::walker::GRAPH_CHECKPOINT_SCHEMA_VERSION`] — an unknown version is
+/// rejected rather than mis-read. `current_node` means "where to resume *into*":
+/// the walker writes the NEXT node's name, not the just-completed one (R4 fix in
+/// `walker.rs`).
 pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
+    // The payload is versioned; reject an unknown version rather than
+    // mis-reading a future/foreign shape. The branch is unreleased, so there is
+    // no legacy v0 to accept.
+    let schema_version = value
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("checkpoint payload missing 'schema_version'"))?;
+    if schema_version != crate::walker::GRAPH_CHECKPOINT_SCHEMA_VERSION as u64 {
+        anyhow::bail!(
+            "unsupported checkpoint schema_version {schema_version} (expected {})",
+            crate::walker::GRAPH_CHECKPOINT_SCHEMA_VERSION
+        );
+    }
     let current_node = value
         .get("current_node")
         .and_then(|v| v.as_str())
@@ -134,6 +164,8 @@ pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
         step_count,
         state,
         graph_run_id,
+        accounting: value.get("accounting").cloned(),
+        suppressed_errors: value.get("suppressed_errors").cloned(),
     })
 }
 
@@ -380,10 +412,13 @@ mod tests {
     #[test]
     fn from_checkpoint_value_parses_valid_payload() {
         let payload = json!({
+            "schema_version": 1,
             "graph_run_id": "gr-test",
             "current_node": "step4",
             "step_count": 7,
             "state": {"counter": 42},
+            "accounting": {"total": null, "nodes": []},
+            "suppressed_errors": [{"step": 2, "node": "n1", "error": "boom"}],
             "written_at": "2026-01-01T00:00:00Z",
         });
         let state = from_checkpoint_value(&payload).unwrap();
@@ -391,17 +426,42 @@ mod tests {
         assert_eq!(state.step_count, 7);
         assert_eq!(state.graph_run_id, "gr-test");
         assert_eq!(state.state["counter"], 42);
+        assert_eq!(
+            state.accounting,
+            Some(json!({"total": null, "nodes": []})),
+            "accounting carried through verbatim"
+        );
+        assert_eq!(
+            state.suppressed_errors,
+            Some(json!([{"step": 2, "node": "n1", "error": "boom"}])),
+            "suppressed_errors carried through verbatim"
+        );
+    }
+
+    #[test]
+    fn from_checkpoint_value_rejects_bad_schema_version() {
+        // Missing schema_version → rejected (no legacy v0 on this branch).
+        let no_version = json!({"current_node": "x", "step_count": 1, "state": {}});
+        assert!(from_checkpoint_value(&no_version).is_err());
+        // Unknown future version → rejected, not mis-read.
+        let future = json!({
+            "schema_version": 999,
+            "current_node": "x",
+            "step_count": 1,
+            "state": {},
+        });
+        assert!(from_checkpoint_value(&future).is_err());
     }
 
     #[test]
     fn from_checkpoint_value_rejects_missing_fields() {
-        let missing_node = json!({"step_count": 1, "state": {}});
+        let missing_node = json!({"schema_version": 1, "step_count": 1, "state": {}});
         assert!(from_checkpoint_value(&missing_node).is_err());
 
-        let missing_step = json!({"current_node": "x", "state": {}});
+        let missing_step = json!({"schema_version": 1, "current_node": "x", "state": {}});
         assert!(from_checkpoint_value(&missing_step).is_err());
 
-        let missing_state = json!({"current_node": "x", "step_count": 1});
+        let missing_state = json!({"schema_version": 1, "current_node": "x", "step_count": 1});
         assert!(from_checkpoint_value(&missing_state).is_err());
     }
 

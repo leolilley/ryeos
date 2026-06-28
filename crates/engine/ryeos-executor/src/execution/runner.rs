@@ -79,6 +79,10 @@ pub struct ExecutionParams {
     /// Required provenance for this execution. Drives engine,
     /// effective path, snapshot lifecycle gates, and callback minting.
     pub provenance: ExecutionProvenance,
+    /// Captured runtime ref (`runtime:<name>`) the thread launched under, so the
+    /// resume path resolves the SAME runtime by-ref rather than the kind's
+    /// current default. `None` for fresh launches and non-runtime-registry kinds.
+    pub runtime_ref: Option<String>,
 }
 
 /// Tracks execution state for explicit cleanup.
@@ -1419,12 +1423,42 @@ pub fn execution_params_from_resume_context(
         .resolve(&plan_ctx, &canonical)
         .map_err(|e| anyhow::anyhow!("resume: resolve failed: {e}"))?;
 
-    let executor_ref = resolved_item.metadata.executor_id.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "resume: item {} does not declare an executor_id",
-            resume.item_ref
-        )
-    })?;
+    // Reconstruct the executor identity for the resumed launch, in priority:
+    //   1. captured `executor_ref` (exact identity this thread launched under);
+    //   2. captured runtime by-ref — a delegate kind (directive, graph) has NO
+    //      item `executor_id`, so its identity is the serving runtime's
+    //      `native:<binary>`. A captured-but-bad ref is an error, never a silent
+    //      switch to a different runtime;
+    //   3. the item's own `metadata.executor_id`;
+    //   4. the kind's default runtime.
+    let executor_ref = if let Some(er) = resume.executor_ref.clone() {
+        er
+    } else if let Some(rr) = resume.runtime_ref.as_deref() {
+        let runtime = state
+            .engine
+            .runtimes
+            .resolve_for_launch(Some(rr), &resolved_item.kind)
+            .map_err(|e| anyhow::anyhow!("resume: {e}"))?;
+        let bare = crate::dispatch::strip_binary_ref_prefix(&runtime.yaml.binary_ref)?;
+        format!("native:{bare}")
+    } else if let Some(eid) = resolved_item.metadata.executor_id.clone() {
+        eid
+    } else {
+        let runtime = state
+            .engine
+            .runtimes
+            .resolve_for_launch(None, &resolved_item.kind)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "resume: item {} has neither an executor_id nor a runtime-registry \
+                     entry for kind {}: {e}",
+                    resume.item_ref,
+                    resolved_item.kind,
+                )
+            })?;
+        let bare = crate::dispatch::strip_binary_ref_prefix(&runtime.yaml.binary_ref)?;
+        format!("native:{bare}")
+    };
 
     let resolved = ResolvedExecutionRequest {
         kind: resume.kind.clone(),
@@ -1484,6 +1518,8 @@ pub fn execution_params_from_resume_context(
         // pre-crash run had.
         effective_caps: resume.effective_caps.clone(),
         provenance,
+        // Resolve the SAME runtime this thread launched under on resume.
+        runtime_ref: resume.runtime_ref.clone(),
     })
 }
 
@@ -1544,11 +1580,26 @@ pub async fn run_existing_detached(
     // provider resolution see the snapshot checkout, not the live tree.
     {
         let engine = params.provenance.request_engine();
-        let required_envelope_fields = engine
-            .runtimes
-            .lookup_for(&params.resolved.resolved_item.kind)
-            .map(|runtime| runtime.yaml.required_envelope_fields.clone())
-            .unwrap_or_default();
+        // Resolve via the captured runtime ref (the runtime this thread launched
+        // under) rather than the kind's current default, consistent with every
+        // other runtime-resolution site. A captured-but-bad ref (malformed,
+        // unregistered, or serving the wrong kind) is an error — fail the resume
+        // rather than silently proceeding with no envelope requirements. Only the
+        // `None` case (no captured ref, no registry entry) degrades to empty.
+        let required_envelope_fields = match engine.runtimes.resolve_for_launch(
+            params.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        ) {
+            Ok(runtime) => runtime.yaml.required_envelope_fields.clone(),
+            Err(_) if params.runtime_ref.is_none() => Vec::new(),
+            Err(e) => {
+                guard.fail_thread("preflight_failed");
+                guard.cleanup();
+                return Err(ResumeError::Other(anyhow::anyhow!(
+                    "resume: captured runtime_ref unresolvable: {e}"
+                )));
+            }
+        };
 
         let provider_preflight =
             if crate::execution::launch::requires_provider_snapshot(&required_envelope_fields) {

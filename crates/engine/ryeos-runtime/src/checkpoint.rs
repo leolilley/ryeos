@@ -53,6 +53,22 @@ impl CheckpointWriter {
         std::env::var("RYEOS_RESUME").ok().as_deref() == Some("1")
     }
 
+    /// Copy the latest checkpoint from `from_dir` into `to_dir` — used by the
+    /// daemon to seed a continuation successor's checkpoint dir from its
+    /// predecessor's, so the successor's `load_latest()` resumes mid-run.
+    /// Returns `Ok(true)` if a checkpoint was found and copied, `Ok(false)` if
+    /// the source dir has none.
+    pub fn copy_latest(from_dir: &Path, to_dir: &Path) -> Result<bool> {
+        let src = from_dir.join(LATEST_FILE);
+        if !src.exists() {
+            return Ok(false);
+        }
+        std::fs::create_dir_all(to_dir).with_context(|| format!("create {}", to_dir.display()))?;
+        std::fs::copy(&src, to_dir.join(LATEST_FILE))
+            .with_context(|| format!("copy {} -> {}", src.display(), to_dir.display()))?;
+        Ok(true)
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -114,6 +130,25 @@ mod tests {
         let payload = json!({"step": 3, "buffer": [1, 2, 3]});
         w.write(&payload).unwrap();
         assert_eq!(w.load_latest().unwrap(), Some(payload));
+    }
+
+    #[test]
+    fn copy_latest_seeds_successor_dir_and_reports_absence() {
+        let from = TempDir::new().unwrap();
+        let to = TempDir::new().unwrap();
+        // No checkpoint in the source yet → nothing copied.
+        assert!(!CheckpointWriter::copy_latest(from.path(), to.path()).unwrap());
+        // Write one, copy it forward, and confirm the destination resumes it.
+        CheckpointWriter::new(from.path())
+            .write(&json!({"node": "b", "step": 2}))
+            .unwrap();
+        assert!(CheckpointWriter::copy_latest(from.path(), to.path()).unwrap());
+        let loaded = CheckpointWriter::new(to.path())
+            .load_latest()
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded["node"], "b");
+        assert_eq!(loaded["step"], 2);
     }
 
     #[test]

@@ -115,20 +115,28 @@ pub struct ThreadChainResult {
 /// Daemon-authored execution facts decorated onto a client-facing thread
 /// projection. These are kind-policy values (mirroring what lifecycle
 /// enforcement already consults), composed here in the lifecycle layer — the
-/// persistence module (`state_store`) stays free of kind-policy vocabulary. The
-/// client gates continuation affordances on `supports_continuation` rather than
-/// on a self-declared surface flag.
+/// persistence module (`state_store`) stays free of kind-policy vocabulary. A
+/// client gates machine-continuation affordances on `supports_continuation` and
+/// operator-input affordances on `supports_operator_followup`, rather than on a
+/// self-declared surface flag.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ExecutionFacts {
-    /// Whether this thread's kind can chain-fold a continuation successor.
+    /// Whether this thread's kind can continue into a successor — chain-fold for
+    /// conversation kinds, checkpoint resume (machine) for graph.
     pub supports_continuation: bool,
+    /// Whether an OPERATOR follow-up (`threads.input`) can continue this kind.
+    /// `false` for machine-only kinds (graph) even when `supports_continuation`
+    /// is `true`, so a client gates the operator-input affordance on this rather
+    /// than on `supports_continuation` alone.
+    pub supports_operator_followup: bool,
 }
 
 /// A `ThreadDetail` projection decorated with daemon-authored
 /// [`ExecutionFacts`]. The detail's fields serialize flat alongside an
-/// `execution` object, so a client gates the continuation affordance on
-/// `execution.supports_continuation` (substrate authority for the actual
-/// target thread) rather than a self-declared surface flag.
+/// `execution` object, so a client gates affordances on
+/// `execution.{supports_continuation, supports_operator_followup}` (substrate
+/// authority for the actual target thread) rather than a self-declared surface
+/// flag.
 #[derive(Debug, Serialize)]
 pub struct ThreadView {
     #[serde(flatten)]
@@ -484,9 +492,15 @@ impl ThreadLifecycleService {
             .get_thread(source_thread_id)?
             .ok_or_else(|| anyhow!("continuation source thread not found: {source_thread_id}"))?;
 
+        // OPERATOR follow-up gate: the source kind must accept operator input,
+        // not merely support (machine) continuation. A graph self-continues by
+        // machine only, so it is refused here even though it IS continuable.
         let profile = self.kind_profiles().get(&source.kind);
-        if !profile.is_some_and(|p| p.supports_continuation) {
-            bail!("continuation is not supported for kind '{}'", source.kind);
+        if !profile.is_some_and(|p| p.supports_continuation && p.supports_operator_followup) {
+            bail!(
+                "operator follow-up is not supported for kind '{}'",
+                source.kind
+            );
         }
 
         // An operator follow-up braids onto a SETTLED turn (completed/failed) and
@@ -852,9 +866,24 @@ impl ThreadLifecycleService {
             .is_some_and(|p| p.supports_continuation)
     }
 
+    /// Whether an operator follow-up (`threads.input`) can continue this kind.
+    /// Operator follow-up IMPLIES continuation — a kind that cannot continue at
+    /// all cannot accept operator input — so the effective fact is
+    /// `supports_continuation && supports_operator_followup`. That prevents a
+    /// non-continuable kind (which defaults `supports_operator_followup: true`)
+    /// from projecting the contradictory `{continuation: false, followup: true}`.
+    /// A graph is `{continuation: true, followup: false}` (machine only). Unknown
+    /// kinds fail closed.
+    pub fn supports_operator_followup_for_kind(&self, kind: &str) -> bool {
+        self.kind_profiles()
+            .get(kind)
+            .is_some_and(|p| p.supports_continuation && p.supports_operator_followup)
+    }
+
     fn execution_facts(&self, kind: &str) -> ExecutionFacts {
         ExecutionFacts {
             supports_continuation: self.supports_continuation_for_kind(kind),
+            supports_operator_followup: self.supports_operator_followup_for_kind(kind),
         }
     }
 
@@ -1426,10 +1455,20 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     // the checkpoint/resume bindings.
     let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
     let mut resume_env_for_first_native_resume: Option<Vec<EnvBinding>> = None;
+    // A runtime-registry kind (e.g. graph) declares `native_resume` on its
+    // runtime YAML, not on a subprocess decorate handler, so it never reaches
+    // `spec.execution.native_resume`. Resolve it from the serving runtime so the
+    // resume path injects the checkpoint env for runtime-level native_resume too
+    // — without this a crashed graph cold-starts instead of resuming.
+    let runtime_native_resume = engine
+        .runtimes
+        .lookup_for(&resolved.resolved_item.kind)
+        .map(|rt| rt.yaml.native_resume.is_some())
+        .unwrap_or(false);
     if let Some(ts_dir) = thread_state_dir {
         for node in &plan.nodes {
             if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
-                if spec.execution.native_resume.is_some() {
+                if spec.execution.native_resume.is_some() || runtime_native_resume {
                     let ckpt = ts_dir.join("checkpoints");
                     std::fs::create_dir_all(&ckpt).map_err(|e| {
                         anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
@@ -1582,6 +1621,12 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),
                 execution_hints: resolved.plan_context.execution_hints.clone(),
+                // Subprocess (`spawn_item`) path: the executor identity is the
+                // tool's own `executor_ref`; there is no serving runtime, so
+                // `runtime_ref` stays `None`. (Runtime-registry launches capture
+                // both in `launch::run_claimed_thread_row`.)
+                executor_ref: Some(resolved.executor_ref.clone()),
+                runtime_ref: None,
                 // V5.5 P2: subprocess terminator has no permissions
                 // composition step, so resumed callbacks inherit the
                 // same deny-all posture the original spawn had. Native

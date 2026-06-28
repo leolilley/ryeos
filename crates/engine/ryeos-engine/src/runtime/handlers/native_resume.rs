@@ -40,7 +40,6 @@
 //! dir, which the engine doesn't own). The handler's only job is to
 //! mark the spec so the daemon knows to do that allocation.
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::contracts::NativeResumeSpec;
@@ -48,26 +47,6 @@ use crate::error::EngineError;
 use crate::runtime::{CompileContext, RuntimeHandler};
 
 pub const KEY: &str = "native_resume";
-
-const DEFAULT_CHECKPOINT_INTERVAL_SECS: u64 = 30;
-const DEFAULT_MAX_AUTO_RESUME_ATTEMPTS: u32 = 1;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RichForm {
-    #[serde(default = "default_checkpoint_interval")]
-    checkpoint_interval_secs: u64,
-    #[serde(default = "default_max_attempts")]
-    max_auto_resume_attempts: u32,
-}
-
-fn default_checkpoint_interval() -> u64 {
-    DEFAULT_CHECKPOINT_INTERVAL_SECS
-}
-
-fn default_max_attempts() -> u32 {
-    DEFAULT_MAX_AUTO_RESUME_ATTEMPTS
-}
 
 pub struct NativeResumeHandler;
 
@@ -95,28 +74,12 @@ impl RuntimeHandler for NativeResumeHandler {
     fn apply(&self, block: &Value, ctx: &mut CompileContext<'_>) -> Result<(), EngineError> {
         let intermediate = &ctx.chain[ctx.current_index];
 
-        let spec = match block {
-            Value::Bool(true) => NativeResumeSpec::default(),
-            Value::Bool(false) => {
-                return Err(EngineError::InvalidRuntimeConfig {
-                    path: intermediate.source_path.display().to_string(),
-                    reason: "`native_resume: false` is not supported — omit the block to disable"
-                        .to_string(),
-                });
+        let spec = NativeResumeSpec::parse_declaration(block).map_err(|reason| {
+            EngineError::InvalidRuntimeConfig {
+                path: intermediate.source_path.display().to_string(),
+                reason,
             }
-            other => {
-                let rich: RichForm = serde_json::from_value(other.clone()).map_err(|e| {
-                    EngineError::InvalidRuntimeConfig {
-                        path: intermediate.source_path.display().to_string(),
-                        reason: format!("invalid native_resume block: {e}"),
-                    }
-                })?;
-                NativeResumeSpec {
-                    checkpoint_interval_secs: rich.checkpoint_interval_secs,
-                    max_auto_resume_attempts: rich.max_auto_resume_attempts,
-                }
-            }
-        };
+        })?;
 
         ctx.spec_overrides.execution.native_resume = Some(spec);
 
@@ -185,11 +148,11 @@ mod tests {
         let spec = overrides.execution.native_resume.unwrap();
         assert_eq!(
             spec.checkpoint_interval_secs,
-            DEFAULT_CHECKPOINT_INTERVAL_SECS
+            NativeResumeSpec::default().checkpoint_interval_secs
         );
         assert_eq!(
             spec.max_auto_resume_attempts,
-            DEFAULT_MAX_AUTO_RESUME_ATTEMPTS
+            NativeResumeSpec::default().max_auto_resume_attempts
         );
     }
 
@@ -222,7 +185,7 @@ mod tests {
         let spec = overrides.execution.native_resume.unwrap();
         assert_eq!(
             spec.checkpoint_interval_secs,
-            DEFAULT_CHECKPOINT_INTERVAL_SECS
+            NativeResumeSpec::default().checkpoint_interval_secs
         );
         assert_eq!(spec.max_auto_resume_attempts, 5);
     }
