@@ -697,6 +697,12 @@ pub struct BuildAndLaunchParams<'a> {
     /// snapshot-pinned continuation resolves against the captured version).
     /// `None` for fresh launches, which use the freshly-resolved caps.
     pub captured_effective_caps: Option<&'a [String]>,
+    /// `true` only for an autonomous MACHINE continuation successor. For a
+    /// replay-aware (`native_resume`) kind this drives checkpoint resume: the
+    /// predecessor's checkpoint is copied into this successor's dir and
+    /// `RYEOS_RESUME=1` is injected so the runtime resumes mid-run. `false` for
+    /// fresh launches and operator follow-ups (which open with a new stimulus).
+    pub is_machine_continuation: bool,
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -785,6 +791,7 @@ async fn run_claimed_thread_row(
         previous_thread_id,
         suppress_stimulus,
         captured_effective_caps,
+        is_machine_continuation,
     } = params;
     let engine = provenance.request_engine();
     tracing::info!(
@@ -1088,6 +1095,43 @@ async fn run_claimed_thread_row(
     } else {
         None
     };
+
+    // A machine continuation of a replay-aware kind resumes from the
+    // predecessor's checkpoint: copy it into this successor's dir and flag the
+    // spawn so `RYEOS_RESUME=1` is injected and the runtime resumes mid-run.
+    // A machine continuation with no predecessor checkpoint cannot resume — fail
+    // rather than cold-start (which would re-run the graph from the beginning).
+    let is_resume = is_machine_continuation && native_resume.is_some();
+    if is_resume {
+        let prev = previous_thread_id.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no predecessor thread",
+                resolved.item_ref
+            ))
+        })?;
+        let succ_dir = checkpoint_dir.as_deref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no checkpoint dir",
+                resolved.item_ref
+            ))
+        })?;
+        let prev_dir = state
+            .config
+            .app_root
+            .join("threads")
+            .join(prev)
+            .join("checkpoints");
+        let copied = ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir)
+            .map_err(|e| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
+            })?;
+        if !copied {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}`: predecessor `{prev}` has no checkpoint to resume from",
+                resolved.item_ref
+            )));
+        }
+    }
 
     // Seed launch metadata for continuation-capable kinds (the launch identity a
     // successor relaunches from — REAL composed `effective_caps`, unlike
@@ -1396,10 +1440,10 @@ async fn run_claimed_thread_row(
             app_root: &app_root_owned,
             cas_root: &cas_root_owned,
             checkpoint_dir: checkpoint_dir_owned.as_deref(),
-            // Fresh launch: the runtime writes a cold checkpoint. A graph
-            // continuation successor that resumes a copied frontier sets this
-            // when copy-forward lands.
-            is_resume: false,
+            // A machine continuation of a replay-aware kind resumes from the
+            // predecessor's copied-forward checkpoint; a fresh launch writes a
+            // cold one.
+            is_resume,
         })
     })
     .await
@@ -1783,6 +1827,7 @@ async fn launch_claimed_successor(
             previous_thread_id: Some(&previous_thread_id),
             suppress_stimulus,
             captured_effective_caps,
+            is_machine_continuation: matches!(mode, SuccessorMode::Machine),
         },
         successor,
     )

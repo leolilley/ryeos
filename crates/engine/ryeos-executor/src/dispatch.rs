@@ -1878,6 +1878,8 @@ async fn dispatch_managed_subprocess(
         suppress_stimulus: false,
         // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
         captured_effective_caps: None,
+        // Fresh launch: never a machine-continuation resume.
+        is_machine_continuation: false,
     })
     .await
     .map_err(|e| match &e {
