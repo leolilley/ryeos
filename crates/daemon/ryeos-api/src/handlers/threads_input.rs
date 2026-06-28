@@ -102,6 +102,16 @@ pub async fn handle(
         return Err(HandlerError::BadRequest("input is empty".to_string()));
     }
 
+    // Full daemon-authored execution facts for a kind — every arm returns both
+    // so the client gates the operator-input affordance on
+    // `supports_operator_followup`, not on `supports_continuation` alone.
+    let exec_facts = |kind: &str| {
+        json!({
+            "supports_continuation": state.threads.supports_continuation_for_kind(kind),
+            "supports_operator_followup": state.threads.supports_operator_followup_for_kind(kind),
+        })
+    };
+
     // Resolve the prior turn, if the route carries one. Eligibility only — a
     // live source or a non-continuable settled status is refused; an existing
     // successor is NOT a refusal (the create-or-get below dedups by fingerprint).
@@ -135,7 +145,7 @@ pub async fn handle(
                         "thread {} is kind '{}', which does not support continuation",
                         detail.thread_id, detail.kind
                     ),
-                    "execution": { "supports_continuation": false },
+                    "execution": exec_facts(&detail.kind),
                 }));
             }
             // A machine-only kind (e.g. graph) self-continues by checkpoint resume
@@ -154,10 +164,7 @@ pub async fn handle(
                          and does not accept operator follow-up",
                         detail.thread_id, detail.kind
                     ),
-                    "execution": {
-                        "supports_continuation": true,
-                        "supports_operator_followup": false,
-                    },
+                    "execution": exec_facts(&detail.kind),
                 }));
             }
             Some(detail)
@@ -309,12 +316,6 @@ pub async fn handle(
         });
     };
 
-    // Daemon-authored continuation authority for the actual successor the
-    // client will ratchet `route.thread` to — computed from that successor's
-    // own kind in every arm.
-    let successor_supports_continuation = |kind: &str| {
-        json!({ "supports_continuation": state.threads.supports_continuation_for_kind(kind) })
-    };
 
     use ryeos_app::thread_lifecycle::OperatorContinuation;
     match outcome {
@@ -324,7 +325,7 @@ pub async fn handle(
                 "thread_id": detail.thread_id,
                 "delivery": "launched",
                 "notice": Value::Null,
-                "execution": successor_supports_continuation(&detail.kind),
+                "execution": exec_facts(&detail.kind),
             }))
         }
         OperatorContinuation::Existing(detail) => {
@@ -337,7 +338,7 @@ pub async fn handle(
                 "thread_id": detail.thread_id,
                 "delivery": "launched",
                 "notice": Value::Null,
-                "execution": successor_supports_continuation(&detail.kind),
+                "execution": exec_facts(&detail.kind),
             }))
         }
         OperatorContinuation::Conflict(detail) => Ok(json!({
@@ -348,7 +349,7 @@ pub async fn handle(
                  follow that thread or start a new chain",
                 previous.thread_id, detail.thread_id
             ),
-            "execution": successor_supports_continuation(&detail.kind),
+            "execution": exec_facts(&detail.kind),
         })),
     }
 }

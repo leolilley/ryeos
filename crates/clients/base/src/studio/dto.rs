@@ -27,6 +27,11 @@ pub enum ThreadDelivery {
 pub struct ExecutionFacts {
     #[serde(default)]
     pub supports_continuation: bool,
+    /// `false` for machine-only kinds (graph): the kind is continuation-capable
+    /// but folds no conversation, so the operator-input affordance must gate on
+    /// this, not on `supports_continuation` alone.
+    #[serde(default)]
+    pub supports_operator_followup: bool,
 }
 
 /// The typed result of a `service:threads/input` submit

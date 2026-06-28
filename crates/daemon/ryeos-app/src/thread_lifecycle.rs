@@ -120,8 +120,14 @@ pub struct ThreadChainResult {
 /// on a self-declared surface flag.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ExecutionFacts {
-    /// Whether this thread's kind can chain-fold a continuation successor.
+    /// Whether this thread's kind can continue into a successor — chain-fold for
+    /// conversation kinds, checkpoint resume (machine) for graph.
     pub supports_continuation: bool,
+    /// Whether an OPERATOR follow-up (`threads.input`) can continue this kind.
+    /// `false` for machine-only kinds (graph) even when `supports_continuation`
+    /// is `true`, so a client gates the operator-input affordance on this rather
+    /// than on `supports_continuation` alone.
+    pub supports_operator_followup: bool,
 }
 
 /// A `ThreadDetail` projection decorated with daemon-authored
@@ -484,9 +490,15 @@ impl ThreadLifecycleService {
             .get_thread(source_thread_id)?
             .ok_or_else(|| anyhow!("continuation source thread not found: {source_thread_id}"))?;
 
+        // OPERATOR follow-up gate: the source kind must accept operator input,
+        // not merely support (machine) continuation. A graph self-continues by
+        // machine only, so it is refused here even though it IS continuable.
         let profile = self.kind_profiles().get(&source.kind);
-        if !profile.is_some_and(|p| p.supports_continuation) {
-            bail!("continuation is not supported for kind '{}'", source.kind);
+        if !profile.is_some_and(|p| p.supports_continuation && p.supports_operator_followup) {
+            bail!(
+                "operator follow-up is not supported for kind '{}'",
+                source.kind
+            );
         }
 
         // An operator follow-up braids onto a SETTLED turn (completed/failed) and
@@ -853,17 +865,23 @@ impl ThreadLifecycleService {
     }
 
     /// Whether an operator follow-up (`threads.input`) can continue this kind.
-    /// Independent of `supports_continuation`: a graph self-continues by MACHINE
-    /// only and refuses operator follow-up. Unknown kinds fail closed.
+    /// Operator follow-up IMPLIES continuation — a kind that cannot continue at
+    /// all cannot accept operator input — so the effective fact is
+    /// `supports_continuation && supports_operator_followup`. That prevents a
+    /// non-continuable kind (which defaults `supports_operator_followup: true`)
+    /// from projecting the contradictory `{continuation: false, followup: true}`.
+    /// A graph is `{continuation: true, followup: false}` (machine only). Unknown
+    /// kinds fail closed.
     pub fn supports_operator_followup_for_kind(&self, kind: &str) -> bool {
         self.kind_profiles()
             .get(kind)
-            .is_some_and(|p| p.supports_operator_followup)
+            .is_some_and(|p| p.supports_continuation && p.supports_operator_followup)
     }
 
     fn execution_facts(&self, kind: &str) -> ExecutionFacts {
         ExecutionFacts {
             supports_continuation: self.supports_continuation_for_kind(kind),
+            supports_operator_followup: self.supports_operator_followup_for_kind(kind),
         }
     }
 

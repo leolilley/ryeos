@@ -137,7 +137,11 @@ impl KindProfileRegistry {
                 actions
             }
             "completed" | "failed" | "cancelled" | "killed" | "timed_out" => {
-                if profile.supports_continuation {
+                // Terminal "continue" is an OPERATOR action — it must gate on
+                // operator follow-up, not mere (machine) continuation. A graph
+                // self-continues by machine from its running segment path, never
+                // by an operator continuing a settled turn.
+                if profile.supports_continuation && profile.supports_operator_followup {
                     vec!["continue".to_string()]
                 } else {
                     Vec::new()

@@ -694,6 +694,20 @@ impl StudioCore {
         Some(facts.supports_continuation)
     }
 
+    /// The daemon-authored `execution.supports_operator_followup` for a thread.
+    /// Gates OPERATOR-input targeting/labels: a graph is continuation-capable but
+    /// machine-only, so it accepts no operator input even though it continues.
+    /// Same unknown-optimistic semantics as [`Self::thread_supports_continuation`]
+    /// — distrust only an explicit `Some(false)`.
+    pub(crate) fn thread_supports_operator_followup(&self, thread_id: &str) -> Option<bool> {
+        let row = self.data.threads.as_ref()?.threads.iter().find(|row| {
+            row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+        })?;
+        let facts: super::dto::ExecutionFacts =
+            serde_json::from_value(row.get("execution")?.clone()).ok()?;
+        Some(facts.supports_operator_followup)
+    }
+
     fn input_target_chains(&self) -> Vec<(String, String)> {
         let Some(threads) = self.data.threads.as_ref() else {
             return Vec::new();
@@ -720,11 +734,12 @@ impl StudioCore {
                 .filter_map(|x| x.get("thread_id").and_then(serde_json::Value::as_str))
                 .find(|id| !upstreams.contains(id))
                 .unwrap_or(root);
-            // Only offer chains whose head can actually be continued — gate on
-            // the substrate's `execution.supports_continuation`, not a surface
-            // flag. Distrust only an explicit `false`; unknown stays offered
-            // (the daemon refuses a real non-continuation submit anyway).
-            if self.thread_supports_continuation(head) == Some(false) {
+            // Only offer chains whose head accepts OPERATOR input — gate on
+            // `execution.supports_operator_followup`, not `supports_continuation`
+            // (a graph continues by machine but takes no operator input).
+            // Distrust only an explicit `false`; unknown stays offered (the
+            // daemon refuses a real non-followup submit anyway).
+            if self.thread_supports_operator_followup(head) == Some(false) {
                 continue;
             }
             out.push((root.to_string(), head.to_string()));
@@ -1480,7 +1495,10 @@ impl StudioCore {
                         // carries them (an operator continuation does; a fresh
                         // async launch doesn't — unknown stays eligible, and the
                         // daemon refuses a real non-continuation continue).
-                        let result_supports = outcome.execution.map(|e| e.supports_continuation);
+                        // Operator-input targeting: ratchet only onto a successor
+                        // that accepts OPERATOR follow-up (a graph continues by
+                        // machine but takes no operator input).
+                        let result_supports = outcome.execution.map(|e| e.supports_operator_followup);
                         let targets = *ratchet_on_thread_id && result_supports != Some(false);
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
@@ -2848,33 +2866,47 @@ mod tests {
     }
 
     #[test]
-    fn thread_supports_continuation_reads_execution_facts() {
+    fn thread_execution_facts_accessors() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.data.threads = Some(StudioThreadsDto {
             threads: vec![
-                serde_json::json!({ "thread_id": "T-a", "execution": { "supports_continuation": true } }),
+                // directive: continuation + operator follow-up.
+                serde_json::json!({ "thread_id": "T-a",
+                    "execution": { "supports_continuation": true, "supports_operator_followup": true } }),
+                // graph: machine continuation, NO operator follow-up.
+                serde_json::json!({ "thread_id": "T-g",
+                    "execution": { "supports_continuation": true, "supports_operator_followup": false } }),
                 serde_json::json!({ "thread_id": "T-b", "execution": { "supports_continuation": false } }),
                 serde_json::json!({ "thread_id": "T-c" }), // no execution facts
             ],
         });
         assert_eq!(core.thread_supports_continuation("T-a"), Some(true));
+        assert_eq!(core.thread_supports_operator_followup("T-a"), Some(true));
+        assert_eq!(core.thread_supports_continuation("T-g"), Some(true));
+        assert_eq!(
+            core.thread_supports_operator_followup("T-g"),
+            Some(false),
+            "graph is machine-only"
+        );
         assert_eq!(core.thread_supports_continuation("T-b"), Some(false));
         assert_eq!(core.thread_supports_continuation("T-c"), None, "missing facts → unknown");
+        assert_eq!(core.thread_supports_operator_followup("T-c"), None);
         assert_eq!(core.thread_supports_continuation("T-missing"), None);
     }
 
     #[test]
-    fn cycle_input_target_excludes_non_continuation_chain() {
+    fn cycle_input_target_excludes_machine_only_chain() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        // Two single-thread chains: one continuation-capable, one not (per the
-        // substrate's execution facts). Only the capable one is a valid target.
+        // Two single-thread chains: one accepts operator follow-up, one is
+        // machine-only (a graph — continuation-capable but no operator input).
+        // Only the operator-followup chain is a valid input target.
         core.data.threads = Some(StudioThreadsDto {
             threads: vec![
                 serde_json::json!({ "thread_id": "T-yes", "chain_root_id": "T-yes",
-                    "execution": { "supports_continuation": true } }),
+                    "execution": { "supports_continuation": true, "supports_operator_followup": true } }),
                 serde_json::json!({ "thread_id": "T-no", "chain_root_id": "T-no",
-                    "execution": { "supports_continuation": false } }),
+                    "execution": { "supports_continuation": true, "supports_operator_followup": false } }),
             ],
         });
         // New → the continuation-capable chain (T-no is never offered).
