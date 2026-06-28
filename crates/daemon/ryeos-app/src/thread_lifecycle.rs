@@ -1455,10 +1455,20 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     // the checkpoint/resume bindings.
     let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
     let mut resume_env_for_first_native_resume: Option<Vec<EnvBinding>> = None;
+    // A runtime-registry kind (e.g. graph) declares `native_resume` on its
+    // runtime YAML, not on a subprocess decorate handler, so it never reaches
+    // `spec.execution.native_resume`. Resolve it from the serving runtime so the
+    // resume path injects the checkpoint env for runtime-level native_resume too
+    // — without this a crashed graph cold-starts instead of resuming.
+    let runtime_native_resume = engine
+        .runtimes
+        .lookup_for(&resolved.resolved_item.kind)
+        .map(|rt| rt.yaml.native_resume.is_some())
+        .unwrap_or(false);
     if let Some(ts_dir) = thread_state_dir {
         for node in &plan.nodes {
             if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
-                if spec.execution.native_resume.is_some() {
+                if spec.execution.native_resume.is_some() || runtime_native_resume {
                     let ckpt = ts_dir.join("checkpoints");
                     std::fs::create_dir_all(&ckpt).map_err(|e| {
                         anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
