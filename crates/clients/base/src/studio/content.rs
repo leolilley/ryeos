@@ -357,7 +357,18 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
     let primary = if role == TimelineRole::Flow && projected_primary.is_none() {
         String::new()
     } else {
-        projected_primary.clone().unwrap_or_else(|| compact(record))
+        projected_primary.clone().unwrap_or_else(|| {
+            // A declared projection that misses must NOT dump raw event JSON
+            // into the feed. Degrade to the record's `event_type` (its honest
+            // kind) when it is an event; only non-event records (rows over a
+            // service) fall back to compact JSON. The full record stays in
+            // `raw` for an inspector.
+            record
+                .get("event_type")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| compact(record))
+        })
     };
     let meta = projection
         .get("meta")
@@ -822,6 +833,36 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn project_record_missing_primary_degrades_to_event_type_not_raw_json() {
+        // An event whose declared projection primary is absent must degrade to
+        // its event_type (the honest kind), never a raw-JSON dump of the whole
+        // event into the feed.
+        let record = json!({ "event_type": "thread_continued", "payload": {} });
+        let projection = json!({ "primary": "payload.previous_thread_id", "role": "boundary" });
+        let projected = project_record(&record, &projection);
+        assert_eq!(projected.primary, "thread_continued");
+        assert!(
+            !projected.primary.starts_with('{'),
+            "never raw JSON: {}",
+            projected.primary
+        );
+    }
+
+    #[test]
+    fn project_record_non_event_missing_primary_still_compacts() {
+        // A non-event record (rows over a service) has no event_type, so the
+        // honest fallback remains the compact record — unchanged behavior.
+        let record = json!({ "id": "x", "label": "y" });
+        let projection = json!({ "primary": "missing.field" });
+        let projected = project_record(&record, &projection);
+        assert!(
+            projected.primary.starts_with('{'),
+            "non-event degrades to compact: {}",
+            projected.primary
+        );
     }
 
     #[test]
