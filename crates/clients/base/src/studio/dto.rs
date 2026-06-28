@@ -21,8 +21,9 @@ pub enum ThreadDelivery {
 
 /// Daemon-authored per-execution facts, surfaced both on thread projections
 /// (`thread.execution`) and on a continuation launch result — the substrate
-/// authority the client gates continuation affordances on. Mirrors the daemon
-/// `ExecutionFacts`.
+/// authority the client gates machine-continuation (`supports_continuation`) and
+/// operator-input (`supports_operator_followup`) affordances on. Mirrors the
+/// daemon `ExecutionFacts`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionFacts {
     #[serde(default)]

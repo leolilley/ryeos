@@ -155,18 +155,34 @@ fn thread_list_reflects_real_kind_continuation_authority() {
 
     let listing = threads.list_threads_filtered(100, None).unwrap();
     let rows = listing["threads"].as_array().expect("threads array");
-    let supports = |id: &str| {
+    let fact = |id: &str, key: &str| {
         rows.iter()
             .find(|r| r["thread_id"] == id)
             .unwrap_or_else(|| panic!("row {id} missing from list: {listing:#?}"))["execution"]
-            ["supports_continuation"]
+            [key]
             .clone()
     };
 
-    assert_eq!(supports("T-dir"), true, "directive_run row continuable");
+    // directive: continuation + operator follow-up.
     assert_eq!(
-        supports("T-graph"),
+        fact("T-dir", "supports_continuation"),
+        true,
+        "directive_run row continuable"
+    );
+    assert_eq!(
+        fact("T-dir", "supports_operator_followup"),
+        true,
+        "directive_run row accepts operator follow-up"
+    );
+    // graph: machine continuation, NO operator follow-up.
+    assert_eq!(
+        fact("T-graph", "supports_continuation"),
         true,
         "graph_run row machine-continuable"
+    );
+    assert_eq!(
+        fact("T-graph", "supports_operator_followup"),
+        false,
+        "graph_run row refuses operator follow-up"
     );
 }

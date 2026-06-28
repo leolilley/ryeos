@@ -129,6 +129,7 @@ pub async fn handle(
                     "thread_id": Value::Null,
                     "delivery": "refused",
                     "notice": notice,
+                    "execution": exec_facts(&detail.kind),
                 }));
             }
             // Daemon-authored continuation authority, enforced at the API

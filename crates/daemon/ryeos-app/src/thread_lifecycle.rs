@@ -115,9 +115,10 @@ pub struct ThreadChainResult {
 /// Daemon-authored execution facts decorated onto a client-facing thread
 /// projection. These are kind-policy values (mirroring what lifecycle
 /// enforcement already consults), composed here in the lifecycle layer — the
-/// persistence module (`state_store`) stays free of kind-policy vocabulary. The
-/// client gates continuation affordances on `supports_continuation` rather than
-/// on a self-declared surface flag.
+/// persistence module (`state_store`) stays free of kind-policy vocabulary. A
+/// client gates machine-continuation affordances on `supports_continuation` and
+/// operator-input affordances on `supports_operator_followup`, rather than on a
+/// self-declared surface flag.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ExecutionFacts {
     /// Whether this thread's kind can continue into a successor — chain-fold for
@@ -132,9 +133,10 @@ pub struct ExecutionFacts {
 
 /// A `ThreadDetail` projection decorated with daemon-authored
 /// [`ExecutionFacts`]. The detail's fields serialize flat alongside an
-/// `execution` object, so a client gates the continuation affordance on
-/// `execution.supports_continuation` (substrate authority for the actual
-/// target thread) rather than a self-declared surface flag.
+/// `execution` object, so a client gates affordances on
+/// `execution.{supports_continuation, supports_operator_followup}` (substrate
+/// authority for the actual target thread) rather than a self-declared surface
+/// flag.
 #[derive(Debug, Serialize)]
 pub struct ThreadView {
     #[serde(flatten)]
