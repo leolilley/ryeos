@@ -17,6 +17,7 @@ pub struct ThreadKindProfile {
     pub root_executable: bool,
     pub supports_interrupt: bool,
     pub supports_continuation: bool,
+    pub supports_operator_followup: bool,
 }
 
 impl From<&ThreadProfileDecl> for ThreadKindProfile {
@@ -25,6 +26,7 @@ impl From<&ThreadProfileDecl> for ThreadKindProfile {
             root_executable: tp.root_executable,
             supports_interrupt: tp.supports_interrupt,
             supports_continuation: tp.supports_continuation,
+            supports_operator_followup: tp.supports_operator_followup,
         }
     }
 }
@@ -85,6 +87,7 @@ impl KindProfileRegistry {
                 root_executable: false,
                 supports_interrupt: false,
                 supports_continuation: false,
+                supports_operator_followup: false,
             },
         );
         // seat_session: the seat is itself a thread — braided, owned,
@@ -96,6 +99,7 @@ impl KindProfileRegistry {
                 root_executable: false,
                 supports_interrupt: false,
                 supports_continuation: false,
+                supports_operator_followup: false,
             },
         );
     }
@@ -183,10 +187,12 @@ mod tests {
             root_executable: true,
             supports_interrupt: true,
             supports_continuation: false,
+            supports_operator_followup: false,
         };
         let profile = ThreadKindProfile::from(&decl);
         assert!(profile.root_executable);
         assert!(profile.supports_interrupt);
         assert!(!profile.supports_continuation);
+        assert!(!profile.supports_operator_followup);
     }
 }

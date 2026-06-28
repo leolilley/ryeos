@@ -852,6 +852,15 @@ impl ThreadLifecycleService {
             .is_some_and(|p| p.supports_continuation)
     }
 
+    /// Whether an operator follow-up (`threads.input`) can continue this kind.
+    /// Independent of `supports_continuation`: a graph self-continues by MACHINE
+    /// only and refuses operator follow-up. Unknown kinds fail closed.
+    pub fn supports_operator_followup_for_kind(&self, kind: &str) -> bool {
+        self.kind_profiles()
+            .get(kind)
+            .is_some_and(|p| p.supports_operator_followup)
+    }
+
     fn execution_facts(&self, kind: &str) -> ExecutionFacts {
         ExecutionFacts {
             supports_continuation: self.supports_continuation_for_kind(kind),

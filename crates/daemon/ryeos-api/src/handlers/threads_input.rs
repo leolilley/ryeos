@@ -138,6 +138,28 @@ pub async fn handle(
                     "execution": { "supports_continuation": false },
                 }));
             }
+            // A machine-only kind (e.g. graph) self-continues by checkpoint resume
+            // and refuses operator follow-up: it folds no conversation, so there is
+            // nowhere to deliver operator input. Refuse cleanly even though the
+            // kind IS continuation-capable (machine).
+            if !state
+                .threads
+                .supports_operator_followup_for_kind(&detail.kind)
+            {
+                return Ok(json!({
+                    "thread_id": Value::Null,
+                    "delivery": "refused",
+                    "notice": format!(
+                        "thread {} is kind '{}', which self-continues by machine only \
+                         and does not accept operator follow-up",
+                        detail.thread_id, detail.kind
+                    ),
+                    "execution": {
+                        "supports_continuation": true,
+                        "supports_operator_followup": false,
+                    },
+                }));
+            }
             Some(detail)
         }
     };
