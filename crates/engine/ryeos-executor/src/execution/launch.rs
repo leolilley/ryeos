@@ -1364,13 +1364,21 @@ async fn run_claimed_thread_row(
     let runtime_result = match spawn_result {
         Ok(result) => result,
         Err(err) => {
-            // Pre-runtime failure: launcher finalizes as failed
+            // Pre-runtime failure (provider/secret resolution, materialization,
+            // builder): record the real cause into `error` — the ONLY field the
+            // terminal `thread_failed` braid event persists — not `result`,
+            // which is dropped. Without this the operator only ever sees a bare
+            // "failed" and is locked out of why the thread died. `{err:#}` keeps
+            // the full cause chain (e.g. "missing required secret …").
             let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: thread_id.clone(),
                 status: "failed".to_string(),
-                outcome_code: None,
-                result: Some(json!({"error": err.to_string()})),
-                error: None,
+                outcome_code: Some("pre_runtime_failure".to_string()),
+                result: None,
+                error: Some(json!({
+                    "code": "pre_runtime_failure",
+                    "message": format!("{err:#}"),
+                })),
                 metadata: None,
                 artifacts: Vec::new(),
                 final_cost: None,
