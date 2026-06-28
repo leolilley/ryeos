@@ -290,6 +290,10 @@ pub struct StudioUiState {
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
+    /// The keys/help overlay is open. A meta-overlay (not conversation
+    /// content), so it is modal like the launcher, unlike braid entries.
+    #[serde(default)]
+    pub help_open: bool,
     /// Transient input buffers, keyed layout-neutrally by
     /// `InputBufferKey::storage_key()`. A buffer belongs to a view
     /// instance, not a placement; the same view rendered twice has
@@ -325,6 +329,7 @@ impl Default for StudioUiState {
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
             launcher: StudioLauncherState::default(),
+            help_open: false,
             input_buffers: BTreeMap::new(),
             docks: StudioDockState::default(),
             atlas: AtlasUiStateVm::default(),
@@ -926,6 +931,7 @@ impl StudioCore {
 
         super::keymap::StudioKeyContext {
             launcher_open: self.ui.launcher.open,
+            help_open: self.ui.help_open,
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
             input_has_completion: input.is_some_and(|i| i.completion.is_some()),

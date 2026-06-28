@@ -162,6 +162,8 @@ pub enum StudioUiEvent {
     },
     OpenLauncher,
     CloseLauncher,
+    OpenHelp,
+    CloseHelp,
     SetLauncherQuery {
         query: String,
     },
