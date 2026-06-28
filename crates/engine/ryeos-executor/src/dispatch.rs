@@ -2191,6 +2191,9 @@ async fn dispatch_tool_subprocess(
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
         provenance: request.provenance.clone(),
+        // Fresh dispatch: no captured runtime ref. The thread's runtime identity
+        // is captured in launch metadata; resume reads it back from there.
+        runtime_ref: None,
     };
 
     if request.launch_mode == "detached" {

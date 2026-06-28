@@ -79,6 +79,10 @@ pub struct ExecutionParams {
     /// Required provenance for this execution. Drives engine,
     /// effective path, snapshot lifecycle gates, and callback minting.
     pub provenance: ExecutionProvenance,
+    /// Captured runtime ref (`runtime:<name>`) the thread launched under, so the
+    /// resume path resolves the SAME runtime by-ref rather than the kind's
+    /// current default. `None` for fresh launches and non-runtime-registry kinds.
+    pub runtime_ref: Option<String>,
 }
 
 /// Tracks execution state for explicit cleanup.
@@ -1514,6 +1518,8 @@ pub fn execution_params_from_resume_context(
         // pre-crash run had.
         effective_caps: resume.effective_caps.clone(),
         provenance,
+        // Resolve the SAME runtime this thread launched under on resume.
+        runtime_ref: resume.runtime_ref.clone(),
     })
 }
 
@@ -1574,11 +1580,26 @@ pub async fn run_existing_detached(
     // provider resolution see the snapshot checkout, not the live tree.
     {
         let engine = params.provenance.request_engine();
-        let required_envelope_fields = engine
-            .runtimes
-            .lookup_for(&params.resolved.resolved_item.kind)
-            .map(|runtime| runtime.yaml.required_envelope_fields.clone())
-            .unwrap_or_default();
+        // Resolve via the captured runtime ref (the runtime this thread launched
+        // under) rather than the kind's current default, consistent with every
+        // other runtime-resolution site. A captured-but-bad ref (malformed,
+        // unregistered, or serving the wrong kind) is an error — fail the resume
+        // rather than silently proceeding with no envelope requirements. Only the
+        // `None` case (no captured ref, no registry entry) degrades to empty.
+        let required_envelope_fields = match engine.runtimes.resolve_for_launch(
+            params.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        ) {
+            Ok(runtime) => runtime.yaml.required_envelope_fields.clone(),
+            Err(_) if params.runtime_ref.is_none() => Vec::new(),
+            Err(e) => {
+                guard.fail_thread("preflight_failed");
+                guard.cleanup();
+                return Err(ResumeError::Other(anyhow::anyhow!(
+                    "resume: captured runtime_ref unresolvable: {e}"
+                )));
+            }
+        };
 
         let provider_preflight =
             if crate::execution::launch::requires_provider_snapshot(&required_envelope_fields) {
