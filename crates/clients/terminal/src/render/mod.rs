@@ -14,6 +14,7 @@
 //! traversal, the empty-center backdrop, view dispatch.
 
 mod chrome;
+mod help;
 mod input;
 mod launcher;
 mod primitives;
@@ -107,6 +108,11 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
         // the palette on top at full brightness.
         primitives::dim_surface(&mut surface);
         launcher::draw_launcher(&mut surface, vm);
+    } else if vm.help.open {
+        // The keys overlay is a sibling scrim — never stacked with the
+        // launcher (the keymap makes them mutually exclusive).
+        primitives::dim_surface(&mut surface);
+        help::draw_help(&mut surface, vm);
     }
 
     surface

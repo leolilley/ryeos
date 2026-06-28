@@ -203,6 +203,18 @@ impl StudioCore {
                 }
                 Vec::new()
             }
+            StudioUiEvent::OpenHelp => {
+                self.ui.help_open = true;
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioUiEvent::CloseHelp => {
+                if self.ui.help_open {
+                    self.ui.help_open = false;
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             StudioUiEvent::SetLauncherQuery { query } => {
                 self.ui.launcher.query = query;
                 self.ui.launcher.selected = 0;
@@ -2814,6 +2826,24 @@ mod tests {
         assert!(!sections[0].header_selected);
         assert!(sections[1].rows[0].selected, "point lands on the bundles row");
         assert_eq!(fold_section, Some(1));
+    }
+
+    #[test]
+    fn help_overlay_toggles_through_the_view_model() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // The catalogue is always present (discovery); only `open` toggles.
+        assert!(!build_view_model(&core).help.open);
+        assert!(!build_view_model(&core).help.entries.is_empty());
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::OpenHelp,
+        });
+        assert!(build_view_model(&core).help.open);
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CloseHelp,
+        });
+        assert!(!build_view_model(&core).help.open);
     }
 
     #[test]

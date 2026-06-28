@@ -18,6 +18,8 @@ pub struct StudioViewModel {
     pub presentation: StudioPresentationVm,
     pub workspace: StudioWorkspaceVm,
     pub launcher: StudioLauncherVm,
+    #[serde(default)]
+    pub help: StudioHelpVm,
     pub overlays: Vec<StudioOverlayVm>,
     pub notices: Vec<StudioNoticeVm>,
 }
@@ -382,6 +384,21 @@ pub struct StudioLauncherVm {
     pub items: Vec<StudioLauncherItemVm>,
 }
 
+/// The keys/help overlay: a static catalogue of the global key bindings,
+/// grouped by category. A meta-overlay (discoverability), not braid content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StudioHelpVm {
+    pub open: bool,
+    pub entries: Vec<StudioHelpEntryVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioHelpEntryVm {
+    pub category: String,
+    pub keys: String,
+    pub description: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioTileActionVm {
     pub label: String,
@@ -441,6 +458,7 @@ pub fn build_view_model(core: &StudioCore) -> StudioViewModel {
         chrome,
         workspace,
         launcher: launcher(core),
+        help: help(core),
         overlays: Vec::new(),
         notices: core.notices_vm(),
     }
@@ -1608,6 +1626,37 @@ fn launcher(core: &StudioCore) -> StudioLauncherVm {
         hint: "Alt+K open · Ctrl+←/→ tab · Ctrl+↑/↓ move · Ctrl+Shift+arrows resize · Alt+M master/slave · Alt+Q close"
             .to_string(),
         items,
+    }
+}
+
+/// The keys overlay catalogue — the canonical global bindings, mirroring
+/// `studio_key_command`. Static content (no per-state filtering): the overlay
+/// is for discovery, so it always lists the full vocabulary.
+fn help(core: &StudioCore) -> StudioHelpVm {
+    let entry = |category: &str, keys: &str, description: &str| StudioHelpEntryVm {
+        category: category.to_string(),
+        keys: keys.to_string(),
+        description: description.to_string(),
+    };
+    StudioHelpVm {
+        open: core.ui.help_open,
+        entries: vec![
+            entry("Move", "↑ / ↓", "Move the point through rows; else move focus"),
+            entry("Move", "← / →", "Fold / unfold the section under the point; else move focus"),
+            entry("Act", "Enter", "Activate the selected row (or submit when typing)"),
+            entry("Act", "Tab / ⇧Tab", "Accept completion, else cycle the route target"),
+            entry("Act", "Esc", "Interrupt a running thread; else close the lens"),
+            entry("Input", "type", "The foot input is always live — text routes at the directive"),
+            entry("Lenses", "Ctrl+K", "Open the lens launcher (swap the center lens)"),
+            entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
+            entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
+            entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
+            entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
+            entry("Layout", "Alt+T / Alt+B", "Toggle the top / bottom status bar"),
+            entry("App", "Alt+Q", "Close the focused lens"),
+            entry("App", "Ctrl+C", "Quit"),
+            entry("App", "?", "Show / hide this help"),
+        ],
     }
 }
 
