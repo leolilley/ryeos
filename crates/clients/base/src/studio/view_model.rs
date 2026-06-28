@@ -1205,12 +1205,13 @@ fn input_vm(
         .map(|label| format!("→ {label}"))
         .unwrap_or_else(|| derived_target_label(core, view_ref, input, &route));
 
-    // Completion suggestions come from the input's `completion` source.
-    let completion = input_completion(core, input, &text);
+    // Completion suggestions: an inline @-mention hint when the cursor is in
+    // one, else the input's `/` command grammar.
+    let completion = input_completion(core, view_ref, input, &text, cursor);
     let hint = completion
         .first()
         .cloned()
-        .unwrap_or_else(|| "Shift+Enter submit · / for commands".to_string());
+        .unwrap_or_else(|| "Shift+Enter submit · / for commands · @ for refs".to_string());
 
     let has_route_target =
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
@@ -1312,9 +1313,26 @@ fn affordance_invoke_target(
 /// candidates; pure projection over open JSON.
 fn input_completion(
     core: &StudioCore,
+    view_ref: &str,
     input: &super::content::InputBlock,
     text: &str,
+    cursor: usize,
 ) -> Vec<String> {
+    // Inline @-mention: when the cursor is in an @-token, the hint lists
+    // matching refs from the declared mentions source.
+    if let Some(mentions) = input.mentions.as_ref() {
+        if super::tokenize::active_mention(text, cursor).is_some() {
+            let records = core
+                .data
+                .sources
+                .get(&super::content::mention_source_key(view_ref, &input.id))
+                .map(|response| super::content::project_mentions(mentions, response))
+                .unwrap_or_default();
+            return super::tokenize::mention_hint(&records, text, cursor)
+                .into_iter()
+                .collect();
+        }
+    }
     let Some(completion) = input.completion.as_ref() else {
         return Vec::new();
     };
@@ -2345,6 +2363,48 @@ mod tests {
         assert!(
             input.completion.is_empty(),
             "no completion source -> no suggestions"
+        );
+    }
+
+    #[test]
+    fn completion_shows_mention_refs_inside_an_at_token() {
+        let mut core = input_session(json!({
+            "widget": "text",
+            "input": {
+                "id": "line",
+                "submit": "route",
+                "mentions": {
+                    "ref": "service:threads/list",
+                    "collection": "threads",
+                    "reference": "thread_id",
+                    "label": "item_ref"
+                }
+            }
+        }));
+        core.data.sources.insert(
+            crate::studio::content::mention_source_key("view:ryeos/input", "line"),
+            json!({ "threads": [
+                { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
+                { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
+            ]}),
+        );
+        core.ui.input_buffers.insert(
+            crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
+                .storage_key(),
+            crate::studio::model::StudioInputState {
+                text: "ping @directive".to_string(),
+                cursor: "ping @directive".len(),
+            },
+        );
+        let vm = build_view_model(&core);
+        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        assert!(
+            input
+                .completion
+                .iter()
+                .any(|s| s.contains("directive:ops/base") && s.contains("directive:demo/chat")),
+            "mention hint lists matching refs by label: {:?}",
+            input.completion
         );
     }
 }

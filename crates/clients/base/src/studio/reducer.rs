@@ -246,7 +246,7 @@ impl StudioCore {
                 self.effects_for_focused_feeds()
             }
             StudioUiEvent::CompleteInput => {
-                let Some((key, _)) = self.focused_input_instance() else {
+                let Some((key, view_ref)) = self.focused_input_instance() else {
                     return Vec::new();
                 };
                 let buffer = self
@@ -255,16 +255,39 @@ impl StudioCore {
                     .get(&key.storage_key())
                     .cloned()
                     .unwrap_or_default();
-                let Some(records) =
-                    self.data.commands.as_ref().and_then(|data| {
-                        data.get("commands").and_then(serde_json::Value::as_array)
-                    })
-                else {
-                    return Vec::new();
-                };
-                if let Some((text, cursor)) =
-                    super::tokenize::accept_slash_completion(records, &buffer.text, buffer.cursor)
+                // An inline @-mention under the cursor wins; otherwise the
+                // line-start / command grammar. Both resolve to an optional
+                // (text, cursor) before the buffer is mutated.
+                let completed = if super::tokenize::active_mention(&buffer.text, buffer.cursor)
+                    .is_some()
                 {
+                    let records = self
+                        .views
+                        .get(&view_ref)
+                        .and_then(|binding| binding.input.as_ref())
+                        .and_then(|input| input.mentions.as_ref())
+                        .and_then(|mentions| {
+                            let response = self.data.sources.get(
+                                &super::content::mention_source_key(&view_ref, &key.input_id),
+                            )?;
+                            Some(super::content::project_mentions(mentions, response))
+                        })
+                        .unwrap_or_default();
+                    super::tokenize::accept_mention_completion(&records, &buffer.text, buffer.cursor)
+                } else {
+                    self.data
+                        .commands
+                        .as_ref()
+                        .and_then(|data| data.get("commands").and_then(serde_json::Value::as_array))
+                        .and_then(|records| {
+                            super::tokenize::accept_slash_completion(
+                                records,
+                                &buffer.text,
+                                buffer.cursor,
+                            )
+                        })
+                };
+                if let Some((text, cursor)) = completed {
                     if let Some(buffer) = self.focused_input_buffer_mut() {
                         buffer.set_text(text, cursor);
                         self.bump_generation();
@@ -3396,6 +3419,47 @@ mod tests {
             core.focused_input_buffer().unwrap().cursor,
             "/thread ".len()
         );
+    }
+
+    #[test]
+    fn complete_input_accepts_top_mention() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // An input declaring an @-mention source (projected from threads).
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": {
+                    "id": "line",
+                    "submit": "route",
+                    "mentions": {
+                        "ref": "service:threads/list",
+                        "collection": "threads",
+                        "reference": "thread_id",
+                        "label": "item_ref"
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        // The refs land under the mention source key via the generic fetch.
+        core.data.sources.insert(
+            crate::studio::content::mention_source_key("view:ryeos/input", "line"),
+            serde_json::json!({ "threads": [
+                { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
+                { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
+            ]}),
+        );
+        set_focused_input(&mut core, "look @T-a");
+
+        // Cursor sits in an @-mention with a match → Tab can accept it.
+        assert!(core.key_context().input_can_accept_completion);
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CompleteInput,
+        });
+        assert!(effects.is_empty());
+        assert_eq!(focused_input_text(&core), "look @T-ab ");
     }
 
     #[test]
