@@ -152,6 +152,11 @@ pub struct InputBlock {
     /// Optional suggestion source (rows over a service).
     #[serde(default)]
     pub completion: Option<InputCompletion>,
+    /// Optional inline `@`-mention source: substrate refs (items/threads/
+    /// files) to mention mid-text, projected to {ref,label}. Distinct from
+    /// `completion` (the line-start `/` command grammar).
+    #[serde(default)]
+    pub mentions: Option<InputMentions>,
     /// Enter behaviour: an affordance id, or the reserved `route` value.
     #[serde(default)]
     pub submit: Option<String>,
@@ -195,6 +200,58 @@ pub struct InputCompletion {
     pub item_ref: String,
     #[serde(default)]
     pub collection: Option<String>,
+}
+
+/// An inline `@`-mention source: a refs collection projected to the inserted
+/// reference and an optional hint label. Separate from `completion` (the
+/// line-start `/` grammar) — mentions are inline and over substrate refs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputMentions {
+    #[serde(rename = "ref")]
+    pub item_ref: String,
+    #[serde(default)]
+    pub collection: Option<String>,
+    /// Source-record field whose value is inserted as the mention reference.
+    pub reference: String,
+    /// Optional source-record field shown in the completion hint.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// The data-store key a view's `@`-mention source response lands under —
+/// derived identically by the fetch emitter and the reader, so the generic
+/// `FetchSource` path carries mentions with no bespoke effect.
+pub fn mention_source_key(view_ref: &str, input_id: &str) -> String {
+    format!("mentions\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// Project a mentions source response into normalized `{ref,label}` records the
+/// `@`-completion matchers consume: pull the collection, map each record's
+/// declared `reference`/`label` fields. Records missing the ref field drop out.
+pub fn project_mentions(mentions: &InputMentions, response: &Value) -> Vec<Value> {
+    let records: &[Value] = mentions
+        .collection
+        .as_deref()
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    records
+        .iter()
+        .filter_map(|record| {
+            let reference = field_text(record, &mentions.reference)?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("ref".to_string(), Value::String(reference));
+            if let Some(label) = mentions
+                .label
+                .as_deref()
+                .and_then(|field| field_text(record, field))
+            {
+                obj.insert("label".to_string(), Value::String(label));
+            }
+            Some(Value::Object(obj))
+        })
+        .collect()
 }
 
 /// The reserved `submit:` value meaning "dispatch through the engine's

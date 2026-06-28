@@ -576,6 +576,28 @@ impl StudioCore {
         for (key, view_ref) in self.visible_dock_views() {
             effects.extend(self.emit_fetch_source_keyed(key, &view_ref));
         }
+        // @-mention sources: fetch the refs each input declares, keyed so the
+        // reader (key_context / CompleteInput) reads them back. A generic
+        // FetchSource, so clients need no bespoke handling.
+        let mention_fetches: Vec<(String, String)> = self
+            .views
+            .iter()
+            .filter_map(|(view_ref, binding)| {
+                let input = binding.input.as_ref()?;
+                let mentions = input.mentions.as_ref()?;
+                Some((
+                    super::content::mention_source_key(view_ref, &input.id),
+                    mentions.item_ref.clone(),
+                ))
+            })
+            .collect();
+        for (key, source_ref) in mention_fetches {
+            effects.push(self.emit(StudioEffectKind::FetchSource {
+                tile_id: key,
+                source_ref,
+                params: serde_json::json!({}),
+            }));
+        }
         for (tile_id, query, kind) in tile_item_fetches {
             effects.push(self.emit(StudioEffectKind::FetchItems {
                 tile_id: Some(tile_id),
@@ -915,7 +937,7 @@ impl StudioCore {
         // result (cursor at end, leading single `/`, a matching record) —
         // the same predicate `CompleteInput` acts on, so Tab never dispatches
         // a no-op completion when it could cycle the target instead.
-        let input_can_accept_completion = input
+        let slash_can_accept = input
             .and_then(|i| i.completion.as_ref())
             .filter(|c| c.item_ref == "service:commands/list")
             .and_then(|_| {
@@ -929,12 +951,32 @@ impl StudioCore {
                 super::tokenize::accept_slash_completion(records, &text, cursor).is_some()
             });
 
+        // A mention can accept now iff the cursor sits in an `@`-token and the
+        // declared mentions source has a matching ref — the same predicate
+        // `CompleteInput` acts on, so Tab completes a mention rather than
+        // cycling the target or no-op-ing.
+        let mention_can_accept = focused
+            .as_ref()
+            .and_then(|(key, view_ref)| {
+                let mentions = self.views.get(view_ref)?.input.as_ref()?.mentions.as_ref()?;
+                let (_, partial) = super::tokenize::active_mention(&text, cursor)?;
+                let response = self
+                    .data
+                    .sources
+                    .get(&super::content::mention_source_key(view_ref, &key.input_id))?;
+                let records = super::content::project_mentions(mentions, response);
+                (!super::tokenize::mention_completion(&records, partial).is_empty()).then_some(())
+            })
+            .is_some();
+        let input_can_accept_completion = slash_can_accept || mention_can_accept;
+
         super::keymap::StudioKeyContext {
             launcher_open: self.ui.launcher.open,
             help_open: self.ui.help_open,
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
-            input_has_completion: input.is_some_and(|i| i.completion.is_some()),
+            input_has_completion: input
+                .is_some_and(|i| i.completion.is_some() || i.mentions.is_some()),
             input_can_accept_completion,
             // Targeting retargets the route, so it's only exposed for a
             // route-submit input (defense-in-depth; content validation also
