@@ -1342,15 +1342,26 @@ fn map_method_error(
 pub(crate) fn finalize_params(
     thread_id: &str,
     status: &str,
-    result: Option<Value>,
+    payload: Option<Value>,
 ) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams {
     use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+    use ryeos_state::objects::ThreadStatus;
+    // A failed thread's payload is its cause → route it to `error` (which the
+    // terminal braid event persists, and the feed reads) instead of burying it
+    // in `result` (which the event drops), leaving the operator with a bare
+    // "failed". A non-failure terminal's payload is its result.
+    let is_failure = ThreadStatus::from_str_lossy(status).is_some_and(|s| s.is_failure());
+    let (result, error) = if is_failure {
+        (None, payload)
+    } else {
+        (payload, None)
+    };
     ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: status.to_string(),
         outcome_code: None,
         result,
-        error: None,
+        error,
         metadata: None,
         artifacts: Vec::new(),
         final_cost: None,
@@ -2880,6 +2891,26 @@ mod tests {
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
     use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+
+    #[test]
+    fn finalize_params_routes_failure_cause_to_error_not_result() {
+        // Failure terminals (failed/killed/timed_out) carry a cause → it must
+        // land in `error` (which the terminal braid event persists) not
+        // `result` (dropped), so the feed shows the reason, not a bare "failed".
+        for status in ["failed", "killed", "timed_out"] {
+            let p = finalize_params("T-x", status, Some(serde_json::json!({ "error": "boom" })));
+            assert_eq!(p.error, Some(serde_json::json!({ "error": "boom" })), "{status}");
+            assert!(p.result.is_none(), "{status}");
+        }
+
+        // Non-failure terminals carry a result, not an error — including ones
+        // the old `status == "completed"` compare would have misrouted.
+        for status in ["completed", "continued", "cancelled"] {
+            let p = finalize_params("T-y", status, Some(serde_json::json!({ "ok": true })));
+            assert_eq!(p.result, Some(serde_json::json!({ "ok": true })), "{status}");
+            assert!(p.error.is_none(), "{status}");
+        }
+    }
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[71u8; 32])

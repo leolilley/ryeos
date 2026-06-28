@@ -130,6 +130,14 @@ impl ThreadStatus {
                 | Self::Continued
         )
     }
+
+    /// A terminal status that ended in failure (carries a cause), as opposed to
+    /// a successful or operator-driven terminal (`Completed`/`Continued`/
+    /// `Cancelled`). Drives where a thread's terminal payload is recorded — the
+    /// `error` field for failures, `result` otherwise.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed | Self::Killed | Self::TimedOut)
+    }
 }
 
 impl std::fmt::Display for ThreadStatus {
