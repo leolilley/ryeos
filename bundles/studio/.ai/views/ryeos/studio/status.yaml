@@ -1,0 +1,53 @@
+# ryeos:signed:2026-06-26T00:56:44Z:623bc5bb121e25acda2b9b9e34b2158f5bd48bf78708c90e19bd77a1d24faf01:JA3MnM9y2fmrpKIl1fUHjdU7A7tKMvWxWyJqWqnPsHislOBk9bf5Wk6HoKEMZMwbZVTxaygMJrtk3MwnDkGZBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: studio-status
+version: "1.0.0"
+description: >-
+  Magit-style status lens — a foldable, sectioned overview of the node:
+  running threads, installed bundles, and node status. One center lens you
+  read and act from: Enter on a thread aims the foot input at it.
+
+widget: sections
+affordances:
+  - id: aim-input
+    label: Aim input here
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+sections:
+  - title: Threads
+    source:
+      ref: service:threads/list
+      params: {}
+      collection: threads
+    projection:
+      primary: item_ref
+      meta: status
+      tone:
+        field: status
+        map:
+          running: accent
+          created: accent
+          failed: danger
+          cancelled: warn
+          completed: good
+        default: neutral
+    activate: aim-input
+  - title: Bundles
+    source:
+      ref: service:bundle/list
+      params: {}
+      collection: bundles
+    projection:
+      primary: name
+      meta: version
+  - title: Node
+    source:
+      ref: service:system/status
+      params: {}
+    projection:
+      primary: version
+      meta: site_id
+refresh:
+  on_hint: thread

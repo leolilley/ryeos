@@ -78,6 +78,11 @@ pub struct ViewBinding {
     pub input: Option<InputBlock>,
     #[serde(default)]
     pub affordances: Vec<Value>,
+    /// Sections for the `sections` widget: each a titled group with its own
+    /// source + projection, fetched and projected independently. Empty for
+    /// every non-sections widget.
+    #[serde(default)]
+    pub sections: Vec<SectionBinding>,
     #[serde(default)]
     pub refresh: Value,
     /// The view item's canonical ref (provenance chrome).
@@ -225,6 +230,28 @@ pub struct SourceBinding {
     pub collection: Option<String>,
 }
 
+/// One section of a `sections` view: a titled group with its own source and
+/// single projection, fetched and projected independently of its siblings.
+/// Sections share the host view's `affordances`; `activate` names which one a
+/// row in this section fires (wired in a later increment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectionBinding {
+    pub title: String,
+    pub source: SourceBinding,
+    #[serde(default)]
+    pub projection: Value,
+    #[serde(default)]
+    pub activate: Option<String>,
+}
+
+/// The per-section source key for a `sections` view: the host key (tile id or
+/// dock key) plus the section index. Each section's source response lands
+/// under its own key so the resolver reads them back independently. Both the
+/// fetch emitter and the resolver derive section keys through this one helper.
+pub fn section_source_key(base: &str, index: usize) -> String {
+    format!("{base}#section{index}")
+}
+
 /// Flat field path lookup: `payload.delta` walks objects, never arrays.
 pub fn field_path<'v>(record: &'v Value, path: &str) -> Option<&'v Value> {
     let mut current = record;
@@ -349,6 +376,27 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
             project_record(record, projection)
         })
         .collect()
+}
+
+/// Project one section's source response into records, applying the section's
+/// single projection (no per-event-kind blocks — that's `project_records`).
+/// A section with a `collection` is a list source: one row per record. A
+/// section without one is a *detail* source: the whole response is a single
+/// record — one row — so a sections view can carry a singular status line
+/// (e.g. node status) beside its list sections.
+pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    match section.source.collection.as_deref() {
+        Some(path) => field_path(response, path)
+            .and_then(Value::as_array)
+            .map(|records| {
+                records
+                    .iter()
+                    .map(|record| project_record(record, &section.projection))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => vec![project_record(response, &section.projection)],
+    }
 }
 
 /// Project a key_value detail: `projections.detail` is a list of field
@@ -717,6 +765,41 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn project_section_list_source_yields_one_row_per_record() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Threads",
+            "source": { "ref": "service:threads/list", "collection": "threads" },
+            "projection": { "primary": "thread_id", "meta": "status" }
+        }))
+        .unwrap();
+        let response = json!({ "threads": [
+            { "thread_id": "T-ab", "status": "running" },
+            { "thread_id": "T-cd", "status": "done" }
+        ]});
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].primary, "T-ab");
+        assert_eq!(rows[0].meta.as_deref(), Some("running"));
+        assert_eq!(rows[1].primary, "T-cd");
+    }
+
+    #[test]
+    fn project_section_detail_source_yields_a_single_row() {
+        // No collection → the whole response is one record (e.g. node status).
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Node",
+            "source": { "ref": "service:system/status" },
+            "projection": { "primary": "version", "meta": "site_id" }
+        }))
+        .unwrap();
+        let response = json!({ "version": "1.0.0", "site_id": "node-xyz", "uptime": 42 });
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "1.0.0");
+        assert_eq!(rows[0].meta.as_deref(), Some("node-xyz"));
     }
 
     #[test]

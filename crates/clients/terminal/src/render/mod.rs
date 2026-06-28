@@ -206,6 +206,10 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         widgets::scene::draw_scene(surface, rect, scene);
         return;
     }
+    if let StudioViewVm::Sections { sections, .. } = view {
+        widgets::sections::draw_sections(surface, rect, sections);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
         StudioViewVm::Rows { .. } => unreachable!("rows views return above"),
@@ -213,6 +217,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         StudioViewVm::Map { .. } | StudioViewVm::Atlas { .. } => {
             unreachable!("scene views return above")
         }
+        StudioViewVm::Sections { .. } => unreachable!("sections views return above"),
         StudioViewVm::Placeholder { title, message } => {
             lines.push(title.clone());
             lines.push(message.clone());

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-23T05:17:26Z:0a73d43dc632af255cda21d6df670c3763982deb7deaff7c9181e32a795d9bd4:n8PYSQlCGmNJJKirdcmGcT2mbt49cNDkKjcH5eXFdI1BYqohJ2wUwA+RX+PeuO8hHsKo/2avQhdNsSHeXfjaDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-25T23:34:45Z:efd1d5953317a964faeca81a108e6a19e8b5129f7888a7d1cc156bf4e927a050:lOzOMke4THdcZ1w48t6/zjFkGQ3l9d1v6SO48EdOwFEeVtGfOkgCLzPWXWtTwB1QPmkP4qQ4/BKdL0kuXPxjAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-lens
 version: "1.0.0"
 description: >-
@@ -34,6 +34,7 @@ backdrop: view:ryeos/backdrop/shard
 # The full lens set — swap the single center lens to reach any of these.
 library:
   - view:ryeos/chain/timeline
+  - view:ryeos/studio/status
   - view:ryeos/input
   - view:ryeos/threads/list
   - view:ryeos/item/inspector

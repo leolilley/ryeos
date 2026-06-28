@@ -566,14 +566,10 @@ impl StudioCore {
             self.emit(StudioEffectKind::FetchCommands),
         ];
         for (tile_id, view_ref) in bound_tiles {
-            if let Some(effect) = self.emit_fetch_source(tile_id, &view_ref) {
-                effects.push(effect);
-            }
+            effects.extend(self.emit_fetch_source(tile_id, &view_ref));
         }
         for (key, view_ref) in self.visible_dock_views() {
-            if let Some(effect) = self.emit_fetch_source_keyed(key, &view_ref) {
-                effects.push(effect);
-            }
+            effects.extend(self.emit_fetch_source_keyed(key, &view_ref));
         }
         for (tile_id, query, kind) in tile_item_fetches {
             effects.push(self.emit(StudioEffectKind::FetchItems {
@@ -632,17 +628,18 @@ impl StudioCore {
             .collect();
         targets
             .into_iter()
-            .filter_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
             .collect()
     }
 
-    /// Emit the generic source fetch for a bound view tile, resolving
-    /// `@facet:` params against the seat fold (explicit references only).
+    /// Emit the source fetch(es) for a bound view tile, resolving `@facet:`
+    /// params against the seat fold (explicit references only). One effect for
+    /// a single-source widget; one per section for a `sections` widget.
     pub fn emit_fetch_source(
         &mut self,
         tile_id: crate::ids::TileId,
         view_ref: &str,
-    ) -> Option<StudioEffect> {
+    ) -> Vec<StudioEffect> {
         self.emit_fetch_source_keyed(tile_id.0.to_string(), view_ref)
     }
 
@@ -650,47 +647,89 @@ impl StudioCore {
     /// stable string keys (e.g. `dock:left`). The same key addresses the
     /// instance's transient input buffer: a view declaring `input.feeds`
     /// injects its buffer text into the named source param before fetch.
+    ///
+    /// A `sections` view fetches one source per section, each under its own
+    /// `section_source_key` so the resolver reads them independently; sections
+    /// carry no input buffer, so only the single-source path injects `feeds`.
     pub fn emit_fetch_source_keyed(
         &mut self,
         source_key: String,
         view_ref: &str,
-    ) -> Option<StudioEffect> {
-        let binding = self.views.get(view_ref)?;
-        let source = binding.source.clone()?;
+    ) -> Vec<StudioEffect> {
+        let Some(binding) = self.views.get(view_ref) else {
+            return Vec::new();
+        };
+        if binding.widget == "sections" {
+            let sections = binding.sections.clone();
+            let fold = self.seat.fold();
+            let resolved: Vec<(String, super::content::SourceBinding, serde_json::Value)> = sections
+                .iter()
+                .enumerate()
+                .map(|(index, section)| {
+                    let params = super::content::resolve_params(&section.source.params, |key| {
+                        fold.get(key).cloned()
+                    });
+                    (
+                        super::content::section_source_key(&source_key, index),
+                        section.source.clone(),
+                        params,
+                    )
+                })
+                .collect();
+            return resolved
+                .into_iter()
+                .filter_map(|(key, source, params)| self.build_fetch_source(key, &source, params))
+                .collect();
+        }
+        let Some(source) = binding.source.clone() else {
+            return Vec::new();
+        };
+        let feeds_param = binding
+            .input
+            .as_ref()
+            .and_then(|input| input.feeds.as_ref())
+            .map(|feeds| feeds.param.clone());
+        let input_id = binding.input.as_ref().map(|input| input.id.clone());
         let fold = self.seat.fold();
         let mut params =
             super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
         // LIVE filter: the buffer is a writer of one source param.
-        if let Some(feeds) = binding
-            .input
-            .as_ref()
-            .and_then(|input| input.feeds.as_ref())
-        {
-            if let Some(input_id) = binding.input.as_ref().map(|input| input.id.clone()) {
-                let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
-                let text = self
-                    .ui
-                    .input_buffers
-                    .get(&key.storage_key())
-                    .map(|buffer| buffer.text.clone())
-                    .unwrap_or_default();
-                if let Some(object) = params.as_object_mut() {
-                    object.insert(feeds.param.clone(), serde_json::Value::String(text));
-                } else {
-                    params = serde_json::json!({ feeds.param.clone(): text });
-                }
+        if let (Some(param), Some(input_id)) = (feeds_param, input_id) {
+            let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
+            let text = self
+                .ui
+                .input_buffers
+                .get(&key.storage_key())
+                .map(|buffer| buffer.text.clone())
+                .unwrap_or_default();
+            if let Some(object) = params.as_object_mut() {
+                object.insert(param, serde_json::Value::String(text));
+            } else {
+                params = serde_json::json!({ param: text });
             }
         }
-        // A source param that references a facet which isn't set yet (e.g.
-        // the inspector's `@facet:selection.item` before anything is
-        // selected) resolves to null. There is nothing to fetch — skip
-        // rather than dispatch a null arg the op rejects (a 500).
+        self.build_fetch_source(source_key, &source, params)
+            .into_iter()
+            .collect()
+    }
+
+    /// Emit one `FetchSource` for a resolved (key, source, params) triple, or
+    /// skip when a param references an unset facet (e.g. the inspector's
+    /// `@facet:selection.item` before anything is selected): that resolves to
+    /// null — nothing to fetch — and dispatching the null arg the op rejects
+    /// is a 500, not an empty view.
+    fn build_fetch_source(
+        &mut self,
+        source_key: String,
+        source: &super::content::SourceBinding,
+        params: serde_json::Value,
+    ) -> Option<StudioEffect> {
         if facet_param_unresolved(&source.params, &params) {
             return None;
         }
         Some(self.emit(StudioEffectKind::FetchSource {
             tile_id: source_key,
-            source_ref: source.item_ref,
+            source_ref: source.item_ref.clone(),
             params,
         }))
     }
@@ -994,6 +1033,48 @@ mod tests {
         input.delete_before_cursor();
         assert_eq!(input.text, "é");
         assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn sections_view_emits_one_fetch_per_section_under_distinct_keys() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/studio/status"],
+                "views": {
+                    "view:ryeos/studio/status": {
+                        "widget": "sections",
+                        "sections": [
+                            { "title": "Threads", "source": { "ref": "service:ui/studio/threads", "collection": "rows" }, "projection": { "primary": "thread_id" } },
+                            { "title": "Bundles", "source": { "ref": "service:ui/studio/bundles", "collection": "rows" }, "projection": { "primary": "name" } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let fetches: Vec<(String, String)> = core
+            .initial_effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchSource {
+                    tile_id,
+                    source_ref,
+                    ..
+                } => Some((tile_id.clone(), source_ref.clone())),
+                _ => None,
+            })
+            .collect();
+        // One fetch per section, in section order, each addressing its own service.
+        assert_eq!(fetches.len(), 2, "one fetch per section: {fetches:?}");
+        assert_eq!(fetches[0].1, "service:ui/studio/threads");
+        assert_eq!(fetches[1].1, "service:ui/studio/bundles");
+        // Distinct per-section keys so the resolver reads each independently.
+        assert!(fetches[0].0.ends_with("#section0"), "{fetches:?}");
+        assert!(fetches[1].0.ends_with("#section1"), "{fetches:?}");
+        assert_ne!(fetches[0].0, fetches[1].0);
     }
 
     #[test]
