@@ -473,8 +473,16 @@ if [[ "$resolved" != "$bin_dir/ryeos" ]]; then
 fi
 
 if [[ $run_init -eq 1 ]]; then
-    echo "[install-local-direct] running ryeos init from PATH"
-    state_root="${init_app_root:-$HOME/.local/share/ryeos}"
+    # The node lives in the INVOKING USER's XDG data dir, not root's. Run init as that
+    # user so ryeos's own app-root resolution (RYEOS_APP_ROOT > BaseDirs data dir) picks
+    # the right node and writes user-owned state. Never init under sudo: $HOME would be
+    # /root and XDG would be scrubbed — that is what silently sent the node to /root.
+    init_user="${SUDO_USER:-$(id -un)}"
+    init_user_home="$(getent passwd "$init_user" | cut -d: -f6)"
+    init_as=()
+    [[ "$init_user" != "$(id -un)" ]] && init_as=(sudo -H -u "$init_user")
+    echo "[install-local-direct] running ryeos init as $init_user"
+    state_root="${init_app_root:-$init_user_home/.local/share/ryeos}"
     for path in "$state_root/.ai/bundles"/*; do
         [[ -d "$path/.ai" ]] || continue
         name="$(basename "$path")"
@@ -514,10 +522,10 @@ if [[ $run_init -eq 1 ]]; then
     if [[ -n "$init_app_root" ]]; then
         init_args+=(--app-root "$init_app_root")
     fi
-    ryeos "${init_args[@]}" "${trust_args[@]}"
+    "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}"
 
     echo "[install-local-direct] verifying initialized bundle state"
-    state_root="${init_app_root:-$HOME/.local/share/ryeos}"
+    state_root="${init_app_root:-$init_user_home/.local/share/ryeos}"
     for name in "${bundle_names[@]}"; do
         test -d "$state_root/.ai/bundles/$name/.ai" || \
             die "initialized $name bundle missing from $state_root"
