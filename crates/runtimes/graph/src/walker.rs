@@ -26,6 +26,11 @@ use ryeos_runtime::TerminalCompletion;
 /// change to the written fields; the resume parser rejects an unknown version.
 pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
+/// Free-form breadcrumb passed to `request_continuation` when a segment budget
+/// is exhausted. For logs only — the substrate keys off the thread lineage, not
+/// this string.
+const SEGMENT_CONTINUATION_REASON: &str = "graph segment step budget exhausted";
+
 /// Running cost accumulator for a single graph execution. Owned by the
 /// walker behind a `Mutex` (like `warnings`) so cost can be recorded with
 /// `&self` from `commit_step` — the single state-mutation point.
@@ -490,7 +495,14 @@ impl Walker {
         // ── F3 main loop: run_node_body → commit_step ───────────
         // Every iteration produces exactly one StepOutcome and routes
         // through commit_step. ALL persistence happens there.
-        while step < cfg.max_steps {
+        //
+        // `step` is cumulative across the continuation chain (restored on
+        // resume); `steps_this_segment` is per-thread and bounds one segment
+        // before the walker cuts a machine continuation. A `None` segment budget
+        // ⇒ run until a terminal node or `max_steps`.
+        let segment_limit = cfg.segment_steps.unwrap_or(u32::MAX);
+        let mut steps_this_segment: u32 = 0;
+        while step < cfg.max_steps && steps_this_segment < segment_limit {
             let node = match cfg.nodes.get(&current) {
                 Some(n) => n,
                 None => {
@@ -557,33 +569,105 @@ impl Walker {
                 } => {
                     current = next_node;
                     step = next_step;
+                    steps_this_segment += 1;
                 }
                 CommitResult::Terminate(result) => return result,
             }
         }
 
-        // Max steps exceeded — terminal via commit_step.
-        let outcome = StepOutcome::Terminal {
-            status: "max_steps_exceeded",
-            error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
-        };
-        match self
-            .commit_step(CommitStepInput {
-                graph_run_id: &graph_run_id,
-                step,
-                current: "",
-                state: &mut state,
-                receipts: &mut receipts,
-                suppressed_errors: &mut suppressed_errors,
-                outcome,
-                guard: &mut guard,
-                hook_list: &hook_list,
-                inputs: &inputs,
-            })
+        // Budget exhausted without reaching a terminal node. The hard ceiling
+        // fails; a segment-budget cut (step < max_steps) hands off to a machine
+        // continuation successor that resumes from the checkpoint the last
+        // commit_step wrote (pointing at `current`).
+        if step >= cfg.max_steps {
+            let outcome = StepOutcome::Terminal {
+                status: "max_steps_exceeded",
+                error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
+            };
+            return match self
+                .commit_step(CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: "",
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    hook_list: &hook_list,
+                    inputs: &inputs,
+                })
+                .await
+            {
+                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                CommitResult::Terminate(result) => result,
+            };
+        }
+
+        // Segment budget exhausted: cut a machine continuation. A failed handoff
+        // settles the thread as a terminal error rather than leaving it
+        // `continued` with no successor.
+        if let Err(e) = self
+            .client
+            .request_continuation(Some(SEGMENT_CONTINUATION_REASON))
             .await
         {
-            CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-            CommitResult::Terminate(result) => result,
+            let outcome = StepOutcome::Terminal {
+                status: "error",
+                error: Some(format!("continuation handoff failed: {e}")),
+            };
+            return match self
+                .commit_step(CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: &current,
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    hook_list: &hook_list,
+                    inputs: &inputs,
+                })
+                .await
+            {
+                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                CommitResult::Terminate(result) => result,
+            };
+        }
+
+        // Handoff accepted: settle `continued` WITHOUT the terminal lifecycle
+        // (no GraphCompleted, no finalize-as-completed). The daemon settles the
+        // thread to Continued and launches the successor off this status. The
+        // checkpoint already written by the last commit_step is the resume point.
+        guard.finalized = true;
+        let (agg_cost, node_costs) = {
+            let acc = self.accounting.lock().unwrap();
+            (acc.total.clone(), acc.nodes.clone())
+        };
+        GraphResult {
+            success: false,
+            graph_id: self.graph.graph_id.clone(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
+            graph_run_id: graph_run_id.clone(),
+            status: "continued".into(),
+            steps: step,
+            state: state.clone(),
+            result: None,
+            errors_suppressed: if suppressed_errors.is_empty() {
+                None
+            } else {
+                Some(suppressed_errors.len())
+            },
+            errors: if suppressed_errors.is_empty() {
+                None
+            } else {
+                Some(suppressed_errors.clone())
+            },
+            error: None,
+            cost: agg_cost,
+            node_costs,
         }
     }
 
@@ -2151,6 +2235,7 @@ mod tests {
             env_requires: Vec::new(),
             state: None,
             max_concurrency: None,
+            segment_steps: None,
         }
     }
 
@@ -3012,6 +3097,35 @@ config:
         let result = w.execute(json!({}), None).await;
         assert!(!result.success);
         assert_eq!(result.status, "max_steps_exceeded");
+    }
+
+    #[tokio::test]
+    async fn segment_steps_cuts_machine_continuation() {
+        // With segment_steps=1 the first step advances and the per-thread budget
+        // is hit before a terminal node — the walker cuts a machine continuation
+        // (request_continuation succeeds) and settles `continued` rather than
+        // running on toward max_steps. The successor would resume from the
+        // checkpoint the last commit_step wrote.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: loop
+  max_steps: 100
+  segment_steps: 1
+  nodes:
+    loop:
+      action: {item_id: "tool:test/noop"}
+      next:
+        type: unconditional
+        to: loop
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![json!({})]);
+        let result = w.execute(json!({}), None).await;
+        assert_eq!(result.status, "continued", "got: {result:?}");
+        assert!(!result.success);
+        assert_eq!(result.steps, 1, "one step ran before the segment cut");
     }
 
     #[test]
