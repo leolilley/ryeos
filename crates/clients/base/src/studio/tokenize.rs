@@ -172,6 +172,108 @@ pub fn accept_slash_completion(
     Some((completed, cursor))
 }
 
+/// One `@`-mention candidate: the ref to insert, plus an optional label for
+/// the hint. Source-agnostic — the caller fetches the refs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionCandidate {
+    pub reference: String,
+    pub label: Option<String>,
+}
+
+/// The active `@`-mention under the cursor: the `@`-prefixed token whose end is
+/// at `cursor`. Mentions are *inline* (unlike the line-start `/`), so we scan
+/// back to the preceding whitespace. Returns `(start_byte, partial)` where
+/// `partial` is the text after `@`, or `None` when the cursor isn't sitting in
+/// a mention token.
+pub fn active_mention(text: &str, cursor: usize) -> Option<(usize, &str)> {
+    let cursor = cursor.min(text.len());
+    if !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let head = &text[..cursor];
+    let start = head
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(index, c)| index + c.len_utf8())
+        .unwrap_or(0);
+    let partial = head[start..].strip_prefix('@')?;
+    // The token can't hold inner whitespace (the back-scan stops at it); a
+    // second `@` means it isn't a clean mention.
+    if partial.contains('@') {
+        return None;
+    }
+    Some((start, partial))
+}
+
+/// Mention candidates: records whose `ref` (or `label`) matches `partial`
+/// (case-insensitive substring; empty `partial` lists all). Each record
+/// supplies a `ref` string and optional `label`.
+pub fn mention_completion(records: &[serde_json::Value], partial: &str) -> Vec<MentionCandidate> {
+    let needle = partial.to_lowercase();
+    let mut out: Vec<MentionCandidate> = Vec::new();
+    for record in records {
+        let Some(reference) = record.get("ref").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let label = record.get("label").and_then(serde_json::Value::as_str);
+        let haystack = format!("{} {}", reference, label.unwrap_or("")).to_lowercase();
+        if (needle.is_empty() || haystack.contains(&needle))
+            && !out.iter().any(|c| c.reference == reference)
+        {
+            out.push(MentionCandidate {
+                reference: reference.to_string(),
+                label: label.map(str::to_string),
+            });
+        }
+    }
+    out
+}
+
+/// The hint line shown while typing a mention: matching refs joined, or a
+/// no-match note. `None` when the cursor isn't in a mention.
+pub fn mention_hint(records: &[serde_json::Value], text: &str, cursor: usize) -> Option<String> {
+    let (_, partial) = active_mention(text, cursor)?;
+    let candidates = mention_completion(records, partial);
+    if candidates.is_empty() {
+        return Some("no matching refs".to_string());
+    }
+    Some(
+        candidates
+            .into_iter()
+            .take(6)
+            .map(|candidate| candidate.label.unwrap_or(candidate.reference))
+            .collect::<Vec<_>>()
+            .join(" · "),
+    )
+}
+
+/// Accept the top mention candidate: replace the active `@partial` span with
+/// `@<ref> ` and return `(new_text, new_cursor)`. Preserves any text after the
+/// cursor (mentions are inline). `None` when not in a mention or no candidate.
+pub fn accept_mention_completion(
+    records: &[serde_json::Value],
+    text: &str,
+    cursor: usize,
+) -> Option<(String, usize)> {
+    let (start, partial) = active_mention(text, cursor)?;
+    let candidate = mention_completion(records, partial).into_iter().next()?;
+    let cursor = cursor.min(text.len());
+    let tail = &text[cursor..];
+    let mut completed = String::with_capacity(text.len() + candidate.reference.len());
+    completed.push_str(&text[..start]);
+    completed.push('@');
+    completed.push_str(&candidate.reference);
+    // One trailing space so you keep typing — unless the tail already starts
+    // with whitespace (mid-text accept), which would double it.
+    if !tail.starts_with(char::is_whitespace) {
+        completed.push(' ');
+    }
+    let new_cursor = completed.len();
+    completed.push_str(tail);
+    Some((completed, new_cursor))
+}
+
 fn argument_hint(record: &serde_json::Value, current_arg: usize) -> String {
     let args = record
         .get("arguments")
@@ -408,5 +510,62 @@ mod tests {
             accept_slash_completion(&records, "/thread g", 9),
             Some(("/thread get ".to_string(), 12))
         );
+    }
+
+    fn refs() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({ "ref": "thread:T-ab", "label": "ops base" }),
+            serde_json::json!({ "ref": "thread:T-cd" }),
+            serde_json::json!({ "ref": "item:directive/demo" }),
+        ]
+    }
+
+    #[test]
+    fn active_mention_finds_the_token_under_the_cursor() {
+        // At end of a trailing mention.
+        assert_eq!(active_mention("look @T-a", 9), Some((5, "T-a")));
+        // Mid-text: cursor at the end of the mention token, more text after.
+        assert_eq!(active_mention("see @T-a here", 8), Some((4, "T-a")));
+        // Bare `@` opens an empty mention (lists all).
+        assert_eq!(active_mention("@", 1), Some((0, "")));
+        // Not a mention: plain word, slash command, or cursor past the token.
+        assert_eq!(active_mention("plain word", 10), None);
+        assert_eq!(active_mention("a@b", 3), None); // token doesn't start with @
+        assert_eq!(active_mention("@x ", 3), None); // cursor after the space
+    }
+
+    #[test]
+    fn mention_completion_matches_ref_or_label_and_dedupes() {
+        let records = refs();
+        // Prefix-ish substring over the ref.
+        let by_ref = mention_completion(&records, "T-ab");
+        assert_eq!(by_ref.len(), 1);
+        assert_eq!(by_ref[0].reference, "thread:T-ab");
+        // Matches the label too.
+        let by_label = mention_completion(&records, "ops");
+        assert_eq!(by_label.len(), 1);
+        assert_eq!(by_label[0].reference, "thread:T-ab");
+        // Empty partial lists everything.
+        assert_eq!(mention_completion(&records, "").len(), 3);
+        // A shared substring matches several.
+        assert_eq!(mention_completion(&records, "thread:").len(), 2);
+    }
+
+    #[test]
+    fn accept_mention_replaces_the_span_and_keeps_the_tail() {
+        let records = refs();
+        // Trailing mention → inserts the ref + a space.
+        assert_eq!(
+            accept_mention_completion(&records, "look @T-ab", 10),
+            Some(("look @thread:T-ab ".to_string(), 18))
+        );
+        // Mid-text mention → the tail (its existing space) is preserved, no
+        // doubled space; the point lands right after the inserted ref.
+        assert_eq!(
+            accept_mention_completion(&records, "see @ops here", 8),
+            Some(("see @thread:T-ab here".to_string(), 16))
+        );
+        // No active mention → nothing to accept.
+        assert_eq!(accept_mention_completion(&records, "plain", 5), None);
     }
 }
