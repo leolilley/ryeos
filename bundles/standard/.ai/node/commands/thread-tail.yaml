@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:ed905dd1339039f434259c800854003c491d57d2de3e9c78f5a791679515a2ec:PBeqUoW9TqYJzJMpL8iNSpIgpFrfI7uyINhEp1ZomVVOUJKWSqZM2tkhEgynVtaXyrV/kj0riAHKkdmhlS26Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-29T08:41:15Z:a21872a12afdbf1bae1a171b1441de619905fc19d0fe9f7ee96eb5cc999dd234:Wf4O0oHm4DsYvh+oMK5uQvBznNMySMws6uYPt64ESyXbGG7TCACvb+8jcjA0QYtKK2hgg/boGVTX9bU85wdfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - tail
 description: Tail a thread's persisted events live (SSE)
+forms:
+- slots:
+  - field: thread_id
 dispatch:
   kind: execute_ref
   execute: service:threads/tail
