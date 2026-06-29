@@ -344,7 +344,27 @@ if [[ $run_populate -eq 1 ]]; then
     [[ -n "$jobs" ]] && populate_args+=(--jobs "$jobs")
     [[ -n "$crates" ]] && populate_args+=(--crates "$crates")
     [[ $populate_all -eq 1 ]] && populate_args+=(--all)
-    "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}"
+
+    # populate-bundles.sh runs `cargo build` and stages binaries into the
+    # CHECKOUT (bundles/*/.ai/bin, target/). Those belong to the invoking
+    # user, and the build must use that user's toolchain — not root's. When
+    # this installer is run under sudo, drop the populate step back to
+    # $SUDO_USER through their login shell so their rustup env
+    # (CARGO_HOME/RUSTUP_HOME/PATH, sourced from ~/.zshenv etc.) is restored.
+    # Otherwise the build runs as root with the wrong toolchain and leaves
+    # root-owned artifacts in the checkout that break later user-run
+    # cargo/tests. Same reasoning as the `ryeos init` drop below.
+    populate_user="${SUDO_USER:-$(id -un)}"
+    if [[ "$populate_user" != "$(id -un)" ]]; then
+        populate_shell="$(getent passwd "$populate_user" | cut -d: -f7)"
+        [[ -x "$populate_shell" ]] || populate_shell="/bin/sh"
+        printf -v populate_cmd 'cd %q && exec %q' "$repo_root" "$repo_root/scripts/populate-bundles.sh"
+        for a in "${populate_args[@]}"; do printf -v populate_cmd '%s %q' "$populate_cmd" "$a"; done
+        echo "[install-local-direct] populating bundles as $populate_user (build runs as the invoking user, not root)"
+        sudo -H -u "$populate_user" "$populate_shell" -lc "$populate_cmd"
+    else
+        "$repo_root/scripts/populate-bundles.sh" "${populate_args[@]}"
+    fi
 fi
 
 daemon_was_running=0
