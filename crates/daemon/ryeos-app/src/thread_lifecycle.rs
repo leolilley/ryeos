@@ -90,6 +90,11 @@ pub struct ThreadMarkRunningParams {
 pub struct ThreadAttachProcessParams {
     pub thread_id: String,
     pub pid: i64,
+    /// Process-group id. The UDS `runtime.attach_process` wire reports `pid`
+    /// only (the runtime knows its pid, not its group), so this defaults to 0
+    /// and is derived daemon-side via `process::pgid_of`. Direct in-process
+    /// callers (the detached spawn path) set it explicitly.
+    #[serde(default)]
     pub pgid: i64,
     #[serde(default)]
     pub metadata: Option<Value>,

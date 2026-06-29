@@ -30,6 +30,19 @@ pub fn daemon_pgid() -> i64 {
     unsafe { libc::getpgid(0) as i64 }
 }
 
+/// Resolve the process-group id for `pid`. Runtimes are `setsid` session
+/// leaders (so this equals `pid`), but `getpgid` is the correct general
+/// derivation. Returns `pid` if the lookup fails (e.g. the process already
+/// exited) so callers still record a usable group id rather than 0.
+pub fn pgid_of(pid: i64) -> i64 {
+    let g = unsafe { libc::getpgid(pid as libc::pid_t) };
+    if g > 0 {
+        g as i64
+    } else {
+        pid
+    }
+}
+
 /// Send SIGTERM to a process group, wait for grace period, then SIGKILL if needed.
 pub fn kill_process_group(pgid: i64, grace: Duration) -> KillResult {
     let neg_pgid = -(pgid as i32);

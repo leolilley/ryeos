@@ -729,7 +729,11 @@ async fn main() -> Result<()> {
 }
 
 fn drain_running_threads(state: &AppState) {
-    let threads = match state.state_store.list_threads_by_status(&["running"]) {
+    // Include `created`: a runtime registers its pgid (attach_process) BEFORE
+    // it marks running, so there is a brief `created` + live-pgid window. The
+    // kill loop below only acts on rows with `Some(pgid)`, so unlaunched
+    // `created` rows (no pgid) are untouched.
+    let threads = match state.state_store.list_threads_by_status(&["created", "running"]) {
         Ok(threads) => threads,
         Err(err) => {
             tracing::warn!(error = %err, "failed to list running threads during shutdown");

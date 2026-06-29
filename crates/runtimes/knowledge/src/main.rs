@@ -71,6 +71,18 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
         &thread_auth_token,
     );
 
+    // Register this process's pgid before marking running so the daemon can
+    // tell a live runtime from a crashed one on restart (else it resumes a
+    // duplicate). Resume-critical.
+    if let Err(e) = client.attach_current_process().await {
+        return MethodCallResult::failure(
+            envelope,
+            MethodCallError::MethodFailed {
+                reason: format!("attach_process failed: {e}"),
+            },
+        );
+    }
+
     if let Err(e) = client.mark_running().await {
         return MethodCallResult::failure(
             envelope,

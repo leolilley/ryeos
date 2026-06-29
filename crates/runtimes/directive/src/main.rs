@@ -143,6 +143,13 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &thread_auth_token,
     );
 
+    // Register this process's pgid BEFORE any durable callback — the resume
+    // replay read, `append_event(thread_continued)`, and the opening
+    // `emit_stimulus` below all happen after this. Without it the daemon
+    // cannot tell a live runtime from a crashed one on restart and would
+    // resume a duplicate. Resume-critical: must precede all work.
+    callback.attach_current_process().await?;
+
     let provider_snapshot: ResolvedProviderSnapshot =
         serde_json::from_value(envelope.provider_snapshot.clone().ok_or_else(|| {
             anyhow::anyhow!(

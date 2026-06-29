@@ -305,6 +305,10 @@ impl Runner {
         loop {
             state = match state {
                 State::Init => {
+                    // pid/pgid is registered earlier, in `run_with_envelope`
+                    // right after the callback client is built — BEFORE any
+                    // durable callback — so the daemon can always tell a live
+                    // runtime from a crashed one.
                     if let Err(e) = self.callback.mark_running().await {
                         state = State::Errored {
                             error: format!("resume-critical callback mark_running failed: {e}"),

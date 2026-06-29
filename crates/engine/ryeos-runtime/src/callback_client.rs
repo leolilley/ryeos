@@ -194,6 +194,26 @@ impl CallbackClient {
         }
     }
 
+    /// Report this process's pid so the daemon records the runtime's process
+    /// group. Resume-critical: hard-fails when the callback channel is
+    /// unavailable. A live runtime that cannot register its pgid must exit
+    /// rather than keep doing untracked work — otherwise, after a daemon
+    /// restart, reconcile cannot tell it from a crashed thread and would
+    /// resume a duplicate alongside the still-running original.
+    pub async fn attach_current_process(&self) -> Result<()> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback attach_process called without an inner UDS client \
+                 (socket missing); cannot register runtime process"
+            )
+        })?;
+        client
+            .attach_process(&self.thread_id, std::process::id())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
+    }
+
     /// Resume-critical: must hard-fail on disconnect.
     pub async fn mark_running(&self) -> Result<()> {
         let client = self.inner.as_ref().ok_or_else(|| {

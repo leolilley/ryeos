@@ -407,6 +407,9 @@ impl Walker {
             json!({}),
         );
 
+        // pid/pgid is registered earlier, in `main.rs` right after the callback
+        // client is built — BEFORE any durable callback or this `execute()` —
+        // so the daemon can always tell a live graph from a crashed one.
         let r = self.client.mark_running().await;
         self.record_callback_warning("mark_running", r.map(|_| ()));
 
@@ -2018,9 +2021,10 @@ impl Walker {
                 .as_deref()
                 == Some(next_node)
         {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-            }
+            // Park forever without depending on the tokio `time` feature:
+            // a never-resolving future suspends this task until the process
+            // is killed by the harness.
+            std::future::pending::<()>().await;
         }
         Ok(())
     }

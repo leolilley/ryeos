@@ -276,8 +276,13 @@ fn handle_attach_process(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
-    let params: ThreadAttachProcessParams =
+    let mut params: ThreadAttachProcessParams =
         serde_json::from_value(params.clone()).context("invalid threads.attach_process params")?;
+    // The runtime self-reports its pid only; ALWAYS derive the process group
+    // daemon-side — never trust a runtime-supplied pgid. This gives reconcile's
+    // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
+    // probe instead of treating the thread as dead.
+    params.pgid = ryeos_app::process::pgid_of(params.pid);
     serde_json::to_value(state.threads.attach_process(&params)?)
         .context("failed to encode threads.attach_process result")
 }
