@@ -720,8 +720,12 @@ impl StudioCore {
     /// via the thread-view layer). `None` = the thread isn't in the fetched
     /// data (e.g. a just-launched thread before the list refresh) or carries no
     /// execution facts — callers treat unknown optimistically, distrusting only
-    /// an explicit `Some(false)`. This is the substrate authority the cycle and
-    /// label gate on, replacing a self-declared surface flag.
+    /// an explicit `Some(false)`. Symmetric counterpart to
+    /// [`Self::thread_supports_operator_followup`] — the machine-continuation
+    /// fact. Operator surfaces gate on operator-follow-up, so this isn't gated on
+    /// in prod today; kept (and tested) as the substrate accessor for a future
+    /// machine-continuation affordance.
+    #[allow(dead_code)]
     pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
         let row = self
             .data

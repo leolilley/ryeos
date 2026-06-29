@@ -604,6 +604,28 @@ async fn main() -> Result<()> {
                 }
                 return;
             }
+            // NativeResume routing. A runtime-registry kind (e.g. graph) captured
+            // a `runtime_ref` and MUST resume through the managed launch path,
+            // which builds the `LaunchEnvelope` the runtime reads from stdin — the
+            // executor-chain `run_existing_detached`/`spawn_item` path below cannot
+            // build one. A tool-subprocess native_resume (no `runtime_ref`) keeps
+            // that path.
+            if intent.resume_context.runtime_ref.is_some() {
+                if let Err(err) =
+                    ryeos_executor::execution::launch::launch_existing_native_resume(
+                        st,
+                        &intent.thread_id,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        thread_id = %intent.thread_id,
+                        error = %err,
+                        "resume: managed native resume failed"
+                    );
+                }
+                return;
+            }
             let params =
                 match ryeos_executor::execution::runner::execution_params_from_resume_context(
                     &st,

@@ -15,6 +15,10 @@ pub const BASE_ALLOWLIST_NAMES: &[&str] = &[
     "RUST_LOG",
     "RUST_BACKTRACE",
     "RYEOSD_TEST_STDERR_DIR",
+    // Test-only: lets the graph crash-recovery e2e propagate its
+    // checkpoint-park node name into the graph runtime subprocess. Prod-inert
+    // (unset in every non-test launch), same pattern as RYEOSD_TEST_STDERR_DIR.
+    "RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT",
     "HTTPS_PROXY",
     "HTTP_PROXY",
     "NO_PROXY",

@@ -1998,7 +1998,31 @@ impl Walker {
             "accounting": accounting,
             "suppressed_errors": suppressed_errors,
             "written_at": lillux::time::iso8601_now(),
-        }))
+        }))?;
+
+        // Test-only crash-injection hook (prod-inert: fires ONLY when
+        // `RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT` is set, which only the
+        // graph crash-recovery e2e sets — and that name only reaches this
+        // process because the daemon env allowlist lets it through). Once the
+        // checkpoint for `next_node` is durably written, park forever so a
+        // harness can SIGKILL the daemon with this thread's row still
+        // `running`, kill this orphaned process group, and then exercise the
+        // daemon's startup-reconcile native-resume path. The resumed launch
+        // injects `RYEOS_RESUME=1` (`is_resume()`), so this hook never fires on
+        // the resume pass: the walker proceeds from the checkpoint cursor to
+        // completion. Gated on `next_node` (the resume cursor), so the test
+        // names the node the graph should resume *into*.
+        if !CheckpointWriter::is_resume()
+            && std::env::var("RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT")
+                .ok()
+                .as_deref()
+                == Some(next_node)
+        {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+        Ok(())
     }
 }
 

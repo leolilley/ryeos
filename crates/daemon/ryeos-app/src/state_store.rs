@@ -513,11 +513,20 @@ impl StateStore {
             .get_thread(thread_id)?
             .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
 
-        if thread_row.status != "created" {
-            bail!(
-                "invalid status transition: {} -> running",
-                thread_row.status
-            );
+        match thread_row.status.as_str() {
+            // Fresh launch: fall through to the created -> running transition
+            // (appends `thread_started`, sets `started_at`).
+            "created" => {}
+            // Same-thread crash recovery re-spawns a row that is still `running`,
+            // and the resumed runtime calls `mark_running` again. Idempotent
+            // no-op: do NOT append a second `thread_started` or rewrite
+            // `started_at` — an empty persisted-events list means "already
+            // running". (`drain_running_threads` still sees `running`, so the
+            // shutdown kill window stays intact — no transient non-running state.)
+            "running" => return Ok(Vec::new()),
+            other => {
+                bail!("invalid status transition: {other} -> running");
+            }
         }
 
         let now = lillux::time::iso8601_now();

@@ -665,6 +665,32 @@ pub(crate) fn derive_effective_caps(
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
 }
 
+/// How a managed runtime launch should treat checkpoint state. One axis (distinct
+/// from `reconcile::ResumeKind`, which is the dispatch route). Encoding the three
+/// legal cases as an enum makes the illegal "both machine-continuation AND
+/// same-thread" state unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointResumeMode {
+    /// Fresh launch / operator follow-up: cold start, no resume env.
+    None,
+    /// Autonomous machine continuation successor: copy the PREDECESSOR's
+    /// checkpoint into this (new) thread's dir, then inject `RYEOS_RESUME=1`.
+    MachineContinuation,
+    /// Same-thread crash recovery: resume from this thread's OWN checkpoint
+    /// (already in its dir — no copy), then inject `RYEOS_RESUME=1`.
+    SameThread,
+}
+
+impl CheckpointResumeMode {
+    fn injects_resume_env(self) -> bool {
+        matches!(self, Self::MachineContinuation | Self::SameThread)
+    }
+
+    fn copies_predecessor_checkpoint(self) -> bool {
+        matches!(self, Self::MachineContinuation)
+    }
+}
+
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
     pub executor_ref: &'a str,
@@ -697,12 +723,10 @@ pub struct BuildAndLaunchParams<'a> {
     /// snapshot-pinned continuation resolves against the captured version).
     /// `None` for fresh launches, which use the freshly-resolved caps.
     pub captured_effective_caps: Option<&'a [String]>,
-    /// `true` only for an autonomous MACHINE continuation successor. For a
-    /// replay-aware (`native_resume`) kind this drives checkpoint resume: the
-    /// predecessor's checkpoint is copied into this successor's dir and
-    /// `RYEOS_RESUME=1` is injected so the runtime resumes mid-run. `false` for
-    /// fresh launches and operator follow-ups (which open with a new stimulus).
-    pub is_machine_continuation: bool,
+    /// How this managed launch treats checkpoint state — see
+    /// [`CheckpointResumeMode`]. Drives `RYEOS_RESUME=1` injection and predecessor
+    /// copy-forward, and only for replay-aware (`native_resume`) kinds.
+    pub checkpoint_resume_mode: CheckpointResumeMode,
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -791,7 +815,7 @@ async fn run_claimed_thread_row(
         previous_thread_id,
         suppress_stimulus,
         captured_effective_caps,
-        is_machine_continuation,
+        checkpoint_resume_mode,
     } = params;
     let engine = provenance.request_engine();
     tracing::info!(
@@ -1070,7 +1094,10 @@ async fn run_claimed_thread_row(
     // switch binary / envelope / native_resume policy).
     let native_resume = engine
         .runtimes
-        .resolve_for_launch(runtime_ref, &resolved.kind)
+        // ITEM kind (`graph`), not the thread-profile kind (`graph_run`):
+        // runtimes are registered by the kind they serve and resolve_for_launch
+        // verifies serves == kind.
+        .resolve_for_launch(runtime_ref, &resolved.resolved_item.kind)
         .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
         .yaml
         .native_resume
@@ -1101,8 +1128,14 @@ async fn run_claimed_thread_row(
     // spawn so `RYEOS_RESUME=1` is injected and the runtime resumes mid-run.
     // A machine continuation with no predecessor checkpoint cannot resume — fail
     // rather than cold-start (which would re-run the graph from the beginning).
-    let is_resume = is_machine_continuation && native_resume.is_some();
-    if is_resume {
+    // Both a machine-continuation successor and a same-thread crash recovery
+    // resume from a checkpoint (RYEOS_RESUME=1 — `injects_resume_env`). They
+    // differ on WHICH checkpoint: a machine successor copies the PREDECESSOR's
+    // forward into its own dir (`copies_predecessor_checkpoint`); a same-thread
+    // resume reads its OWN dir (already populated) — so copy-forward is gated on
+    // the mode, not on `is_resume`.
+    let is_resume = checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
+    if checkpoint_resume_mode.copies_predecessor_checkpoint() && native_resume.is_some() {
         let prev = previous_thread_id.ok_or_else(|| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "machine continuation of `{}` has no predecessor thread",
@@ -1835,11 +1868,172 @@ async fn launch_claimed_successor(
             previous_thread_id: Some(&previous_thread_id),
             suppress_stimulus,
             captured_effective_caps,
-            is_machine_continuation: matches!(mode, SuccessorMode::Machine),
+            checkpoint_resume_mode: match mode {
+                SuccessorMode::Machine => CheckpointResumeMode::MachineContinuation,
+                SuccessorMode::Operator => CheckpointResumeMode::None,
+            },
         },
         successor,
     )
     .await
+}
+
+/// Inner half of a SAME-THREAD native-resume crash recovery, run once the claim
+/// is held: rebuild the execution from this thread's own seeded `ResumeContext`
+/// and re-run the existing row through the managed runtime path (which builds the
+/// `LaunchEnvelope` the runtime needs — `spawn_item` cannot). Mirrors
+/// `launch_claimed_successor`, but it is the SAME thread (no upstream/braid), so
+/// `previous_thread_id` is `None`, there is no copy-forward, and `RYEOS_RESUME=1`
+/// makes the runtime load its OWN checkpoint.
+async fn launch_claimed_native_resume(
+    state: &AppState,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let thread_id = thread.thread_id.clone();
+    let resume = state
+        .state_store
+        .get_launch_metadata(&thread_id)?
+        .and_then(|m| m.resume_context)
+        .ok_or_else(|| {
+            anyhow::anyhow!("native resume: {thread_id} has no captured ResumeContext")
+        })?;
+
+    let project_path = match &resume.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
+        other => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "native resume: snapshot-pinned resume not supported yet \
+                 (project_context = {other:?})"
+            )));
+        }
+    };
+
+    let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
+
+    let required_envelope_fields = state
+        .engine
+        .runtimes
+        .resolve_for_launch(
+            resume.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        )
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .required_envelope_fields
+        .clone();
+
+    run_claimed_thread_row(
+        BuildAndLaunchParams {
+            state,
+            executor_ref: &params.resolved.executor_ref,
+            runtime_ref: resume.runtime_ref.as_deref(),
+            acting_principal: &params.acting_principal,
+            resolved: &params.resolved,
+            project_path: &project_path,
+            provenance: &params.provenance,
+            parameters: &params.parameters,
+            metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
+            required_envelope_fields: &required_envelope_fields,
+            pre_minted_thread_id: None,
+            // SAME thread, not a successor — no chain braid.
+            previous_thread_id: None,
+            // Crash resume folds no new stimulus; it reloads its own checkpoint.
+            suppress_stimulus: true,
+            // Pin the captured authority verbatim (same as a machine relaunch).
+            captured_effective_caps: Some(resume.effective_caps.as_slice()),
+            checkpoint_resume_mode: CheckpointResumeMode::SameThread,
+        },
+        thread,
+    )
+    .await
+}
+
+/// Claim-guarded entry for a SAME-THREAD native-resume crash recovery (the
+/// reconciler's `NativeResume` for a runtime-registry kind, e.g. graph). Claims
+/// the launch lease (so only one launcher acts), skips a thread that already
+/// reached a terminal status, then rebuilds + re-runs through the managed path.
+/// The resume-attempt budget is enforced upstream by `reconcile::decide_resume`.
+pub async fn launch_existing_native_resume(
+    state: AppState,
+    thread_id: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let claimed_by = format!("daemon:{}", std::process::id());
+    match state.state_store.claim_thread_launch(
+        thread_id,
+        &claim_id,
+        &claimed_by,
+        SUCCESSOR_LAUNCH_LEASE_MS,
+    )? {
+        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
+        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+        }
+    }
+
+    let thread = match state.threads.get_thread(thread_id) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(thread_id, &claim_id);
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "native resume: thread not found: {thread_id}"
+            )));
+        }
+        Err(e) => {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(thread_id, &claim_id);
+            return Err(e.into());
+        }
+    };
+
+    // A terminal thread is already done (a duplicate trigger or a stale-lease
+    // reclaim of a settled row) — release and skip without finalizing. A
+    // non-terminal (crashed `running`/`created`) row is the resume target.
+    if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+        .is_some_and(|s| s.is_terminal())
+    {
+        let _ = state
+            .state_store
+            .release_thread_launch_claim(thread_id, &claim_id);
+        return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
+    }
+
+    // A still-`running` row whose process group is ALIVE is not crashed — this is
+    // a duplicate trigger or a stale-lease reclaim of a live launch. Skip rather
+    // than spawn a duplicate runtime. (reconcile already gates on liveness; this
+    // keeps the launcher safe if called twice or if the lease expires under a
+    // long-running resume.)
+    if thread.status == ryeos_state::objects::ThreadStatus::Running.as_str() {
+        if let Some(pgid) = thread.runtime.pgid {
+            if ryeos_app::process::pgid_alive(pgid) {
+                let _ = state
+                    .state_store
+                    .release_thread_launch_claim(thread_id, &claim_id);
+                return Ok(SuccessorLaunchOutcome::Skipped("live_process"));
+            }
+        }
+    }
+
+    let result = launch_claimed_native_resume(&state, thread).await;
+    let _ = state
+        .state_store
+        .release_thread_launch_claim(thread_id, &claim_id);
+
+    match result {
+        Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
+        Err(e) => {
+            crate::dispatch::finalize_method_thread_if_needed(
+                &state,
+                thread_id,
+                "failed",
+                Some(json!({ "error": e.to_string() })),
+            );
+            Err(e)
+        }
+    }
 }
 
 struct SpawnRuntimeParams<'a> {
