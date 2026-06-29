@@ -1,0 +1,8 @@
+# ryeos:signed:2026-06-29T05:47:01Z:0b78d2c4f503f3daea7c96b1f7c7fe378d77c22701dea04c2a09da03af16c72a:dJVztNQgmjOyfQltnlNeUUh0H4ZWPBRbb4ALKk7Hx0e3ZLFsJVXczqJJRpBlY+yVQzDulbjymNCSEW4vFbD9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- thread
+- cancel
+description: Cancel a running thread by id
+dispatch:
+  kind: execute_ref
+  execute: service:threads/cancel
