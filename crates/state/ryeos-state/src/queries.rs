@@ -613,13 +613,33 @@ pub fn continuation_fingerprint(
 pub enum ContinuationReasonMarker {
     /// An operator follow-up (the explicit-user-turn path).
     OperatorFollowUp,
+    /// A parent resuming after a followed child chain terminates. Daemon-written
+    /// only — runtime-facing continuation paths scrub all reserved markers — so
+    /// it needs no fingerprint to be trusted.
+    GraphFollowResume,
 }
 
 impl ContinuationReasonMarker {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OperatorFollowUp => "operator_follow_up",
+            Self::GraphFollowResume => "graph_follow_resume",
         }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "operator_follow_up" => Some(Self::OperatorFollowUp),
+            "graph_follow_resume" => Some(Self::GraphFollowResume),
+            _ => None,
+        }
+    }
+
+    /// Whether `value` is any daemon-reserved marker. Runtime-facing continuation
+    /// paths scrub these from caller-supplied reasons so a runtime cannot forge
+    /// an operator reset or a depth-exempt follow edge.
+    pub fn is_reserved_str(value: &str) -> bool {
+        Self::from_str(value).is_some()
     }
 }
 
@@ -709,6 +729,10 @@ pub fn consecutive_machine_continuation_depth(
             && fingerprint.is_some()
         {
             break; // VERIFIED operator link resets the autonomous run
+        }
+        if reason.as_deref() == Some(ContinuationReasonMarker::GraphFollowResume.as_str()) {
+            break; // graph follow-resume edge (daemon-only marker) — structural
+                   // progress, not an autonomous segment-cut; resets the run
         }
         count += 1; // verified machine continuation link
         current = upstream;
@@ -1091,6 +1115,29 @@ mod tests {
         project_cont_edge(&db2, "K2", "a", "c", 2, Some("turn_limit"), None);
         // from c: c←a machine (1); a←r spoofed-operator-no-fp → counts machine (2).
         assert_eq!(consecutive_machine_continuation_depth(&db2, "c", 100).unwrap(), 2);
+    }
+
+    #[test]
+    fn machine_depth_resets_on_graph_follow_resume() {
+        // A graph follow-resume edge (daemon-only marker, no fingerprint) is
+        // structural progress, not an autonomous run, so it resets the count: a
+        // machine edge above it has depth 1, not prior-depth + 1.
+        let db = test_db();
+        insert_thread(&db, "r", "K", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db, "a", "K", ThreadStatus::Continued, Some("r"));
+        insert_thread_with_upstream(&db, "c", "K", ThreadStatus::Created, Some("a"));
+        project_cont_edge(
+            &db,
+            "K",
+            "r",
+            "a",
+            1,
+            Some(ContinuationReasonMarker::GraphFollowResume.as_str()),
+            None,
+        );
+        project_cont_edge(&db, "K", "a", "c", 2, Some("turn_limit"), None);
+        // from c: c←a machine (1); a←r follow-resume → stop. depth 1.
+        assert_eq!(consecutive_machine_continuation_depth(&db, "c", 100).unwrap(), 1);
     }
 
     fn project_usage_event(

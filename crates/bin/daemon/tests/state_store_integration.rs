@@ -759,6 +759,240 @@ mod integration_tests {
             "running",
             "the source stays running for terminal-fail, not continued"
         );
+
+        // A follow-resume successor IS allowed at the machine-depth cap: it is
+        // structural progress, not an autonomous segment-cut, so the cap does not
+        // apply. It is created (not launched) and settles the source `continued`.
+        let follow_succ = make_thread("D-follow", "D0", "directive", "test/item", Some(&source));
+        store
+            .create_follow_resume_successor(&follow_succ, &source, "D0")
+            .expect("follow-resume must be allowed at the machine cap");
+        let fs = store
+            .get_thread("D-follow")
+            .unwrap()
+            .expect("follow successor persisted");
+        assert_eq!(fs.status, "created", "follow successor is created, not running");
+        assert_eq!(fs.upstream_thread_id.as_deref(), Some(source.as_str()));
+        assert_eq!(
+            store.get_thread(&source).unwrap().unwrap().status,
+            "continued",
+            "the follow-resume settles the source continued"
+        );
+    }
+
+    #[test]
+    fn follow_resume_and_marker_scrubbing() {
+        use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+        use ryeos_engine::contracts::{
+            EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+        };
+        let (_tmpdir, store) = setup_state_store();
+
+        let resume_ctx = || ResumeContext {
+            kind: "directive".into(),
+            item_ref: "test/item".into(),
+            launch_mode: "inline".into(),
+            parameters: serde_json::json!({}),
+            project_context: ProjectContext::LocalPath {
+                path: std::path::PathBuf::from("/tmp/p"),
+            },
+            original_snapshot_hash: None,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp".into(),
+                scopes: vec![],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: vec![],
+            executor_ref: None,
+            runtime_ref: None,
+        };
+        let make_continuable = |id: &str| {
+            store.mark_thread_running(id, None).expect("mark_thread_running");
+            store
+                .seed_launch_metadata(
+                    id,
+                    &RuntimeLaunchMetadata::default().with_resume_context(resume_ctx()),
+                )
+                .expect("seed launch metadata");
+        };
+        let edge = |id: &str| -> (Option<String>, Option<String>) {
+            store
+                .with_state_db(|db| {
+                    Ok::<_, anyhow::Error>(
+                        ryeos_state::queries::continuation_edge(db.projection(), id)?
+                            .map(|(_, reason, fp)| (reason, fp))
+                            .unwrap_or((None, None)),
+                    )
+                })
+                .unwrap()
+        };
+
+        // Machine scrubs ALL reserved markers from a runtime-supplied reason, so a
+        // runtime can forge neither an operator reset nor a depth-exempt follow.
+        for spoof in ["operator_follow_up", "graph_follow_resume"] {
+            let src = format!("M-{spoof}");
+            store
+                .create_thread(&make_thread(&src, &src, "directive", "test/item", None))
+                .expect("create root");
+            make_continuable(&src);
+            let succ = format!("M-{spoof}-s");
+            store
+                .create_machine_continuation(
+                    &make_thread(&succ, &src, "directive", "test/item", Some(&src)),
+                    &src,
+                    &src,
+                    Some(spoof),
+                )
+                .expect("machine continuation");
+            assert_eq!(
+                edge(&src).0,
+                None,
+                "reserved marker '{spoof}' must be scrubbed from a runtime reason"
+            );
+        }
+
+        // Follow-resume successor invariants.
+        store
+            .create_thread(&make_thread("F-root", "F-root", "directive", "test/item", None))
+            .expect("create root");
+        make_continuable("F-root");
+        store
+            .create_follow_resume_successor(
+                &make_thread("F-succ", "F-root", "directive", "test/item", Some("F-root")),
+                "F-root",
+                "F-root",
+            )
+            .expect("follow-resume");
+
+        let fs = store.get_thread("F-succ").unwrap().expect("successor persisted");
+        assert_eq!(fs.status, "created", "successor is created, not running");
+        assert_eq!(fs.upstream_thread_id.as_deref(), Some("F-root"));
+        assert_eq!(
+            store.get_thread("F-root").unwrap().unwrap().status,
+            "continued",
+            "source settled continued"
+        );
+        let (reason, fp) = edge("F-root");
+        assert_eq!(reason.as_deref(), Some("graph_follow_resume"));
+        assert!(fp.is_none(), "follow-resume edge has no request fingerprint");
+        assert!(store.get_continuation_fingerprint("F-root").unwrap().is_none());
+        assert!(
+            store
+                .get_launch_metadata("F-succ")
+                .unwrap()
+                .and_then(|m| m.resume_context)
+                .is_some(),
+            "follow successor must have the source resume context seeded"
+        );
+        // The reconcile guard's discriminator: a follow-resume edge is detected
+        // (so reconcile leaves the successor pending) ONLY for the actual edge
+        // target — another created row naming the same upstream does not match —
+        // and a machine edge is never matched.
+        assert!(
+            store.is_follow_resume_successor("F-root", "F-succ").unwrap(),
+            "the follow edge F-root -> F-succ must read as a follow-resume successor"
+        );
+        assert!(
+            !store.is_follow_resume_successor("F-root", "F-other").unwrap(),
+            "a different successor naming the same upstream must NOT match"
+        );
+        assert!(
+            !store
+                .is_follow_resume_successor("M-operator_follow_up", "M-operator_follow_up-s")
+                .unwrap(),
+            "a machine edge must NOT read as a follow-resume successor"
+        );
+        // A second continuation off the now-continued source is rejected.
+        assert!(
+            store
+                .create_follow_resume_successor(
+                    &make_thread("F-dup", "F-root", "directive", "test/item", Some("F-root")),
+                    "F-root",
+                    "F-root",
+                )
+                .is_err(),
+            "a second successor off a settled source must be rejected"
+        );
+
+        // Source must be running.
+        store
+            .create_thread(&make_thread("R-cr", "R-cr", "directive", "test/item", None))
+            .expect("create");
+        assert!(
+            store
+                .create_machine_continuation(
+                    &make_thread("R-cr-s", "R-cr", "directive", "test/item", Some("R-cr")),
+                    "R-cr",
+                    "R-cr",
+                    Some("turn_limit"),
+                )
+                .is_err(),
+            "machine continuation requires a running source"
+        );
+
+        // Missing resume context fails BEFORE the source settles.
+        store
+            .create_thread(&make_thread("R-nr", "R-nr", "directive", "test/item", None))
+            .expect("create");
+        store.mark_thread_running("R-nr", None).expect("mark running");
+        assert!(
+            store
+                .create_machine_continuation(
+                    &make_thread("R-nr-s", "R-nr", "directive", "test/item", Some("R-nr")),
+                    "R-nr",
+                    "R-nr",
+                    Some("turn_limit"),
+                )
+                .is_err(),
+            "missing source ResumeContext must fail"
+        );
+        assert_eq!(
+            store.get_thread("R-nr").unwrap().unwrap().status,
+            "running",
+            "source stays running when continuation fails"
+        );
+
+        // Successor preconditions are checked BEFORE any runtime-db write, so a
+        // rejection leaves no orphan row and the source untouched.
+        store
+            .create_thread(&make_thread("G-root", "G-root", "directive", "test/item", None))
+            .expect("create");
+        make_continuable("G-root");
+        // A successor in a FOREIGN chain is rejected.
+        assert!(
+            store
+                .create_follow_resume_successor(
+                    &make_thread("G-bad-chain", "OTHER", "directive", "test/item", Some("G-root")),
+                    "G-root",
+                    "G-root",
+                )
+                .is_err(),
+            "successor with a foreign chain root must be rejected"
+        );
+        assert!(store.get_thread("G-bad-chain").unwrap().is_none());
+        assert!(
+            store.get_launch_metadata("G-bad-chain").unwrap().is_none(),
+            "rejected successor must leave no orphan runtime row"
+        );
+        // A successor declaring a DIFFERENT upstream is rejected.
+        assert!(
+            store
+                .create_follow_resume_successor(
+                    &make_thread("G-bad-up", "G-root", "directive", "test/item", Some("ELSEWHERE")),
+                    "G-root",
+                    "G-root",
+                )
+                .is_err(),
+            "successor declaring a foreign upstream must be rejected"
+        );
+        assert!(store.get_thread("G-bad-up").unwrap().is_none());
+        assert_eq!(
+            store.get_thread("G-root").unwrap().unwrap().status,
+            "running",
+            "a rejected continuation leaves the source running"
+        );
     }
 
     #[test]

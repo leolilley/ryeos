@@ -279,6 +279,33 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     .as_deref()
                     .expect("continuation_shape implies upstream is Some");
                 if let Ok(Some(src)) = state.threads.get_thread(upstream_id) {
+                    // A follow-resume successor has the same shape as a stranded
+                    // machine continuation (source `continued`, points back), but it
+                    // must NOT be auto-launched here — it waits for the followed
+                    // child's result and is driven by the follow-resume path. Leave
+                    // it pending. Fail closed: a marker-read error must not let a
+                    // follow-resume successor slip into machine launch.
+                    match state
+                        .state_store
+                        .is_follow_resume_successor(upstream_id, &thread.thread_id)
+                    {
+                        Ok(true) => {
+                            tracing::info!(
+                                thread_id = %thread.thread_id,
+                                "follow-resume successor — leaving pending, not a machine continuation"
+                            );
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                thread_id = %thread.thread_id,
+                                error = %err,
+                                "follow-resume marker read failed — leaving pending"
+                            );
+                            continue;
+                        }
+                    }
                     if is_machine_successor(thread, &src) {
                         // Autonomous continuation is always-on, bounded by the
                         // chain-depth cap enforced at create time (an unbounded
