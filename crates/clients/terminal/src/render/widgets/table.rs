@@ -95,6 +95,13 @@ mod tests {
         (0..w).map(|x| surface.get(x, y).rune).collect()
     }
 
+    /// Slice a rendered row starting at display column `col`. Indexing must be
+    /// by character, not byte: the tone-glyph gutter ('•') is one column but
+    /// three bytes, so a byte offset would land mid-glyph.
+    fn from_col(row: &str, col: usize) -> String {
+        row.chars().skip(col).collect()
+    }
+
     fn surface(w: usize, h: usize) -> (TextSurface, Rect) {
         (
             TextSurface::new(w, h),
@@ -134,15 +141,15 @@ mod tests {
         let cell_x = |i: usize| GUTTER + i * col_w;
         let body = row_text(&s, 60, 1);
         assert!(
-            body[cell_x(0)..].starts_with("T-ab"),
+            from_col(&body, cell_x(0)).starts_with("T-ab"),
             "first cell aligned under its column: {body:?}"
         );
         assert!(
-            body[cell_x(1)..].starts_with("ops/base"),
+            from_col(&body, cell_x(1)).starts_with("ops/base"),
             "second cell aligned under its column: {body:?}"
         );
         assert!(
-            body[cell_x(2)..].starts_with("running"),
+            from_col(&body, cell_x(2)).starts_with("running"),
             "third cell aligned under its column: {body:?}"
         );
     }
@@ -190,9 +197,9 @@ mod tests {
         );
         let col_w = (60 - GUTTER) / 3;
         let body = row_text(&s, 60, 0);
-        assert!(body[GUTTER..].starts_with('a'));
-        assert!(body[GUTTER + col_w..].starts_with('b'));
-        assert!(body[GUTTER + 2 * col_w..].starts_with('c'));
+        assert!(from_col(&body, GUTTER).starts_with('a'));
+        assert!(from_col(&body, GUTTER + col_w).starts_with('b'));
+        assert!(from_col(&body, GUTTER + 2 * col_w).starts_with('c'));
     }
 
     #[test]
