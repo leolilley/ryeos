@@ -1748,6 +1748,90 @@ impl StateStore {
         g.runtime_db.get_launch_claim(thread_id)
     }
 
+    // ── Follow waiters ───────────────────────────────────────────────────
+
+    pub fn reserve_follow(
+        &self,
+        seed: &runtime_db::NewFollowWaiter,
+    ) -> Result<runtime_db::FollowWaiter> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_follow(seed)
+    }
+
+    pub fn set_follow_child(
+        &self,
+        follow_key: &str,
+        child_thread_id: &str,
+        child_chain_root_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .set_follow_child(follow_key, child_thread_id, child_chain_root_id)
+    }
+
+    pub fn set_follow_parent_successor(
+        &self,
+        follow_key: &str,
+        successor_thread_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .set_follow_parent_successor(follow_key, successor_thread_id)
+    }
+
+    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_follow_waiting(follow_key)
+    }
+
+    pub fn mark_follow_resuming(&self, follow_key: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_follow_resuming(follow_key)
+    }
+
+    pub fn mark_follow_child_terminal(
+        &self,
+        child_chain_root_id: &str,
+        child_terminal_thread_id: &str,
+        child_terminal_status: &str,
+        terminal_envelope: &serde_json::Value,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.mark_follow_child_terminal(
+            child_chain_root_id,
+            child_terminal_thread_id,
+            child_terminal_status,
+            terminal_envelope,
+        )
+    }
+
+    pub fn get_follow_waiter_by_key(
+        &self,
+        follow_key: &str,
+    ) -> Result<Option<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db.get_follow_waiter_by_key(follow_key)
+    }
+
+    pub fn get_follow_waiter_by_child_chain(
+        &self,
+        child_chain_root_id: &str,
+    ) -> Result<Option<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .get_follow_waiter_by_child_chain(child_chain_root_id)
+    }
+
+    pub fn list_follow_waiters(&self) -> Result<Vec<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db.list_follow_waiters()
+    }
+
+    pub fn clear_follow_waiter(&self, follow_key: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.clear_follow_waiter(follow_key)
+    }
+
     /// Delete all launch claims — startup cleanup so a stale claim from a crashed
     /// daemon does not block a reconcile relaunch. See
     /// [`runtime_db::RuntimeDb::clear_all_launch_claims`].

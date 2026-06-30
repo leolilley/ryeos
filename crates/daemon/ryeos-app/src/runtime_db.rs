@@ -62,6 +62,56 @@ pub struct LaunchClaim {
     pub claimed_by: String,
 }
 
+/// Phase of a follow waiter. The row exists only while the follow is active —
+/// `clear_follow_waiter` deletes it once the parent successor is independently
+/// recoverable. EVERY stored phase is recoverable by reconcile.
+pub mod follow_phase {
+    pub const RESERVED: &str = "reserved";
+    pub const WAITING: &str = "waiting";
+    pub const READY: &str = "ready";
+    pub const RESUMING: &str = "resuming";
+}
+
+/// Fields needed to reserve a follow attempt (the get-or-create seed).
+#[derive(Debug, Clone)]
+pub struct NewFollowWaiter {
+    pub follow_key: String,
+    pub parent_thread_id: String,
+    pub parent_chain_root_id: String,
+    pub follow_node: String,
+    pub graph_run_id: String,
+    pub step_count: i64,
+    pub frontier_id: Option<String>,
+}
+
+/// A durable parent↔child follow dependency. The graph checkpoint owns the
+/// parent's cursor; THIS row owns the child/successor identities and the stored
+/// child terminal envelope. Keyed by `follow_key`
+/// (`parent_thread_id`/`graph_run_id`/`follow_node`/`step_count`), which is the
+/// idempotency key for the whole follow attempt.
+#[derive(Debug, Clone)]
+pub struct FollowWaiter {
+    pub follow_key: String,
+    pub parent_thread_id: String,
+    pub parent_chain_root_id: String,
+    pub parent_successor_thread_id: Option<String>,
+    pub follow_node: String,
+    pub graph_run_id: String,
+    pub step_count: i64,
+    pub frontier_id: Option<String>,
+    pub child_thread_id: Option<String>,
+    pub child_chain_root_id: Option<String>,
+    pub child_terminal_thread_id: Option<String>,
+    pub child_terminal_status: Option<String>,
+    /// Opaque canonical child terminal envelope (the supervisor's parsed
+    /// `RuntimeResult`, or a synthesized failure envelope). Stored opaque here;
+    /// the resume path classifies it via `classify_envelope`.
+    pub terminal_envelope: Option<Value>,
+    pub phase: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -102,6 +152,31 @@ CREATE TABLE IF NOT EXISTS thread_launch_claim (
     lease_expires_at_ms INTEGER NOT NULL,
     claimed_by TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS follow_waiter (
+    follow_key TEXT PRIMARY KEY,
+    parent_thread_id TEXT NOT NULL,
+    parent_chain_root_id TEXT NOT NULL,
+    parent_successor_thread_id TEXT,
+    follow_node TEXT NOT NULL,
+    graph_run_id TEXT NOT NULL,
+    step_count INTEGER NOT NULL,
+    frontier_id TEXT,
+    child_thread_id TEXT,
+    child_chain_root_id TEXT,
+    child_terminal_thread_id TEXT,
+    child_terminal_status TEXT,
+    terminal_envelope TEXT,
+    phase TEXT NOT NULL CHECK (phase IN ('reserved', 'waiting', 'ready', 'resuming')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_successor
+    ON follow_waiter(parent_successor_thread_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_child_chain
+    ON follow_waiter(child_chain_root_id);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -263,6 +338,27 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "follow_waiter",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "follow_key", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "parent_thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "parent_chain_root_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "parent_successor_thread_id", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "follow_node", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "graph_run_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "step_count", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "frontier_id", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "child_chain_root_id", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "child_terminal_thread_id", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "child_terminal_status", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "terminal_envelope", col_type: "TEXT", pk: false, not_null: false },
+                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -276,6 +372,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "thread_commands",
                 columns: &["thread_id", "status"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_follow_waiter_successor",
+                table: "follow_waiter",
+                columns: &["parent_successor_thread_id"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_follow_waiter_child_chain",
+                table: "follow_waiter",
+                columns: &["child_chain_root_id"],
+                unique: true,
             },
         ],
     }
@@ -674,6 +782,301 @@ impl RuntimeDb {
             .optional()?
             .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
     }
+
+    // ── Follow waiters ───────────────────────────────────────────────────
+
+    /// Get-or-create a follow reservation by `follow_key` (idempotent). On a
+    /// retry the existing row is returned ONLY if the seed agrees — a
+    /// conflicting re-drive (same key, different parent/node/step) is rejected
+    /// rather than silently reusing a row for a different follow point. New rows
+    /// start in phase `reserved`.
+    pub fn reserve_follow(&self, seed: &NewFollowWaiter) -> Result<FollowWaiter> {
+        let now = lillux::time::timestamp_millis();
+        self.conn.execute(
+            "INSERT INTO follow_waiter (
+                 follow_key, parent_thread_id, parent_chain_root_id,
+                 follow_node, graph_run_id, step_count, frontier_id,
+                 phase, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'reserved', ?8, ?8)
+             ON CONFLICT(follow_key) DO NOTHING",
+            params![
+                seed.follow_key,
+                seed.parent_thread_id,
+                seed.parent_chain_root_id,
+                seed.follow_node,
+                seed.graph_run_id,
+                seed.step_count,
+                seed.frontier_id,
+                now,
+            ],
+        )?;
+        let existing = self.require_follow_waiter(&seed.follow_key)?;
+        if existing.parent_thread_id != seed.parent_thread_id
+            || existing.parent_chain_root_id != seed.parent_chain_root_id
+            || existing.follow_node != seed.follow_node
+            || existing.graph_run_id != seed.graph_run_id
+            || existing.step_count != seed.step_count
+            || existing.frontier_id != seed.frontier_id
+        {
+            bail!(
+                "follow reservation conflict for follow_key {}: seed does not match the persisted row",
+                seed.follow_key
+            );
+        }
+        Ok(existing)
+    }
+
+    /// Record the spawned child's identities. Allowed only when unset (first
+    /// write) or already equal (idempotent retry); never overwrites a different
+    /// child, which would strand the original.
+    pub fn set_follow_child(
+        &self,
+        follow_key: &str,
+        child_thread_id: &str,
+        child_chain_root_id: &str,
+    ) -> Result<()> {
+        let w = self.require_follow_waiter(follow_key)?;
+        match (w.child_thread_id.as_deref(), w.child_chain_root_id.as_deref()) {
+            (None, None) => {}
+            (Some(t), Some(c)) if t == child_thread_id && c == child_chain_root_id => {
+                return Ok(())
+            }
+            _ => bail!(
+                "follow waiter {follow_key} already has a different child; refusing to overwrite"
+            ),
+        }
+        self.conn.execute(
+            "UPDATE follow_waiter
+                SET child_thread_id = ?2, child_chain_root_id = ?3, updated_at_ms = ?4
+              WHERE follow_key = ?1",
+            params![
+                follow_key,
+                child_thread_id,
+                child_chain_root_id,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the parent's (un-launched) follow-resume successor. Allowed only
+    /// when unset or already equal; never overwrites a different successor.
+    pub fn set_follow_parent_successor(
+        &self,
+        follow_key: &str,
+        successor_thread_id: &str,
+    ) -> Result<()> {
+        let w = self.require_follow_waiter(follow_key)?;
+        match w.parent_successor_thread_id.as_deref() {
+            None => {}
+            Some(s) if s == successor_thread_id => return Ok(()),
+            _ => bail!(
+                "follow waiter {follow_key} already has a different parent successor; refusing to overwrite"
+            ),
+        }
+        self.conn.execute(
+            "UPDATE follow_waiter
+                SET parent_successor_thread_id = ?2, updated_at_ms = ?3
+              WHERE follow_key = ?1",
+            params![follow_key, successor_thread_id, lillux::time::timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Transition → waiting. Only `reserved → waiting` (idempotent on
+    /// `waiting`); requires the child + successor recorded first. Never regresses
+    /// a later phase.
+    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<()> {
+        let w = self.require_follow_waiter(follow_key)?;
+        if w.phase == follow_phase::WAITING {
+            return Ok(());
+        }
+        if w.phase != follow_phase::RESERVED {
+            bail!("follow waiter {follow_key} cannot transition {} -> waiting", w.phase);
+        }
+        if w.child_chain_root_id.is_none() || w.parent_successor_thread_id.is_none() {
+            bail!(
+                "follow waiter {follow_key} cannot mark waiting before child + successor are recorded"
+            );
+        }
+        self.set_follow_phase_unchecked(follow_key, follow_phase::WAITING)
+    }
+
+    /// Transition → resuming. Only `ready → resuming` (idempotent on
+    /// `resuming`); requires the terminal envelope + successor present.
+    pub fn mark_follow_resuming(&self, follow_key: &str) -> Result<()> {
+        let w = self.require_follow_waiter(follow_key)?;
+        if w.phase == follow_phase::RESUMING {
+            return Ok(());
+        }
+        if w.phase != follow_phase::READY {
+            bail!("follow waiter {follow_key} cannot transition {} -> resuming", w.phase);
+        }
+        if w.terminal_envelope.is_none() || w.parent_successor_thread_id.is_none() {
+            bail!(
+                "follow waiter {follow_key} cannot resume without terminal envelope + successor"
+            );
+        }
+        self.set_follow_phase_unchecked(follow_key, follow_phase::RESUMING)
+    }
+
+    fn require_follow_waiter(&self, follow_key: &str) -> Result<FollowWaiter> {
+        self.get_follow_waiter_by_key(follow_key)?.ok_or_else(|| {
+            anyhow::anyhow!("follow waiter row missing for follow_key: {follow_key}")
+        })
+    }
+
+    fn set_follow_phase_unchecked(&self, follow_key: &str, phase: &str) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE follow_waiter SET phase = ?2, updated_at_ms = ?3 WHERE follow_key = ?1",
+            params![follow_key, phase, lillux::time::timestamp_millis()],
+        )?;
+        if updated == 0 {
+            bail!("follow waiter row missing for follow_key: {follow_key}");
+        }
+        Ok(())
+    }
+
+    /// Mark the followed child chain terminal, keyed by the child's chain root.
+    /// Stores the canonical terminal envelope and flips the waiter to `ready`.
+    ///
+    /// Idempotent and immutable once captured. The only state that transitions
+    /// is `waiting` (where the child + successor are recorded); a row already
+    /// `ready` keeps its first terminal result (a duplicate with identical data
+    /// is a no-op, conflicting data is rejected), `resuming` is never downgraded,
+    /// and `reserved` (child not yet launched) is not eligible. Returns `true`
+    /// only on the first `waiting → ready` transition.
+    pub fn mark_follow_child_terminal(
+        &self,
+        child_chain_root_id: &str,
+        child_terminal_thread_id: &str,
+        child_terminal_status: &str,
+        terminal_envelope: &Value,
+    ) -> Result<bool> {
+        let Some(w) = self.get_follow_waiter_by_child_chain(child_chain_root_id)? else {
+            return Ok(false);
+        };
+        match w.phase.as_str() {
+            p if p == follow_phase::READY => {
+                let same = w.child_terminal_thread_id.as_deref() == Some(child_terminal_thread_id)
+                    && w.child_terminal_status.as_deref() == Some(child_terminal_status)
+                    && w.terminal_envelope.as_ref() == Some(terminal_envelope);
+                if same {
+                    Ok(false)
+                } else {
+                    bail!(
+                        "follow waiter for child chain {child_chain_root_id} is already ready \
+                         with a different terminal result; refusing to overwrite"
+                    );
+                }
+            }
+            p if p == follow_phase::WAITING => {
+                let envelope_json = serde_json::to_string(terminal_envelope)
+                    .context("failed to encode follow terminal envelope")?;
+                self.conn.execute(
+                    "UPDATE follow_waiter
+                        SET phase = 'ready',
+                            child_terminal_thread_id = ?2,
+                            child_terminal_status = ?3,
+                            terminal_envelope = ?4,
+                            updated_at_ms = ?5
+                      WHERE follow_key = ?1",
+                    params![
+                        w.follow_key,
+                        child_terminal_thread_id,
+                        child_terminal_status,
+                        envelope_json,
+                        lillux::time::timestamp_millis(),
+                    ],
+                )?;
+                Ok(true)
+            }
+            // resuming (resume in progress) or reserved (child not yet launched).
+            _ => Ok(false),
+        }
+    }
+
+    pub fn get_follow_waiter_by_key(&self, follow_key: &str) -> Result<Option<FollowWaiter>> {
+        self.conn
+            .query_row(
+                &format!("SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter WHERE follow_key = ?1"),
+                params![follow_key],
+                read_follow_waiter_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn get_follow_waiter_by_child_chain(
+        &self,
+        child_chain_root_id: &str,
+    ) -> Result<Option<FollowWaiter>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
+                     WHERE child_chain_root_id = ?1"
+                ),
+                params![child_chain_root_id],
+                read_follow_waiter_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// All active follow waiters. The table holds only non-cleared rows, so
+    /// every row here is recoverable by reconcile.
+    pub fn list_follow_waiters(&self) -> Result<Vec<FollowWaiter>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter ORDER BY created_at_ms ASC"
+        ))?;
+        let rows = stmt.query_map([], read_follow_waiter_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Delete a follow waiter — only once the parent successor is independently
+    /// recoverable (checkpoint copied with the result + launch claimed, or the
+    /// successor reached terminal).
+    pub fn clear_follow_waiter(&self, follow_key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM follow_waiter WHERE follow_key = ?1", params![follow_key])?;
+        Ok(())
+    }
+}
+
+const FOLLOW_WAITER_COLUMNS: &str = "follow_key, parent_thread_id, parent_chain_root_id, \
+     parent_successor_thread_id, follow_node, graph_run_id, step_count, frontier_id, \
+     child_thread_id, child_chain_root_id, child_terminal_thread_id, child_terminal_status, \
+     terminal_envelope, phase, created_at_ms, updated_at_ms";
+
+fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiter> {
+    let terminal_envelope_json: Option<String> = row.get(12)?;
+    // Corrupt persisted JSON is a hard read error, not a silent `None` (which
+    // would make a `ready`/`resuming` row look incomplete and strand the parent).
+    let terminal_envelope = match terminal_envelope_json {
+        Some(s) => Some(serde_json::from_str(&s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(e))
+        })?),
+        None => None,
+    };
+    Ok(FollowWaiter {
+        follow_key: row.get(0)?,
+        parent_thread_id: row.get(1)?,
+        parent_chain_root_id: row.get(2)?,
+        parent_successor_thread_id: row.get(3)?,
+        follow_node: row.get(4)?,
+        graph_run_id: row.get(5)?,
+        step_count: row.get(6)?,
+        frontier_id: row.get(7)?,
+        child_thread_id: row.get(8)?,
+        child_chain_root_id: row.get(9)?,
+        child_terminal_thread_id: row.get(10)?,
+        child_terminal_status: row.get(11)?,
+        terminal_envelope,
+        phase: row.get(13)?,
+        created_at_ms: row.get(14)?,
+        updated_at_ms: row.get(15)?,
+    })
 }
 
 fn read_command_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandRecord> {
@@ -1021,5 +1424,195 @@ mod tests {
                 .unwrap(),
             LaunchClaimOutcome::Claimed
         );
+    }
+
+    fn seed_follow(key: &str) -> NewFollowWaiter {
+        NewFollowWaiter {
+            follow_key: key.to_string(),
+            parent_thread_id: "parent-1".to_string(),
+            parent_chain_root_id: "chain-parent".to_string(),
+            follow_node: "n_follow".to_string(),
+            graph_run_id: "gr-1".to_string(),
+            step_count: 3,
+            frontier_id: None,
+        }
+    }
+
+    #[test]
+    fn reserve_follow_is_idempotent() {
+        let (_tmp, db) = fresh_db();
+        let a = db.reserve_follow(&seed_follow("fk1")).unwrap();
+        assert_eq!(a.phase, follow_phase::RESERVED);
+        let b = db.reserve_follow(&seed_follow("fk1")).unwrap();
+        // ON CONFLICT DO NOTHING ⇒ same row, not a second insert.
+        assert_eq!(b.created_at_ms, a.created_at_ms);
+        assert_eq!(db.list_follow_waiters().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn follow_waiter_full_lifecycle() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.set_follow_child("fk1", "child-1", "chain-child").unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap();
+        db.mark_follow_waiting("fk1").unwrap();
+
+        let w = db.get_follow_waiter_by_key("fk1").unwrap().unwrap();
+        assert_eq!(w.phase, follow_phase::WAITING);
+        assert_eq!(w.child_chain_root_id.as_deref(), Some("chain-child"));
+        assert_eq!(w.parent_successor_thread_id.as_deref(), Some("succ-1"));
+
+        // Lookup by child chain (the terminal-hook path).
+        let by_child = db
+            .get_follow_waiter_by_child_chain("chain-child")
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_child.follow_key, "fk1");
+
+        // Mark terminal by child chain stores the envelope and flips to ready.
+        let envelope =
+            serde_json::json!({"success": true, "status": "completed", "result": {"x": 1}});
+        let matched = db
+            .mark_follow_child_terminal("chain-child", "child-tail", "completed", &envelope)
+            .unwrap();
+        assert!(matched);
+        let ready = db.get_follow_waiter_by_key("fk1").unwrap().unwrap();
+        assert_eq!(ready.phase, follow_phase::READY);
+        assert_eq!(ready.child_terminal_status.as_deref(), Some("completed"));
+        assert_eq!(ready.terminal_envelope, Some(envelope));
+
+        db.clear_follow_waiter("fk1").unwrap();
+        assert!(db.get_follow_waiter_by_key("fk1").unwrap().is_none());
+        assert!(db.list_follow_waiters().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_terminal_unknown_chain_is_no_match() {
+        let (_tmp, db) = fresh_db();
+        let matched = db
+            .mark_follow_child_terminal("nope", "t", "completed", &serde_json::json!({}))
+            .unwrap();
+        assert!(!matched);
+    }
+
+    #[test]
+    fn child_chain_root_is_unique_across_follows() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.reserve_follow(&seed_follow("fk2")).unwrap();
+        db.set_follow_child("fk1", "child-1", "shared-chain").unwrap();
+        // A second follow cannot claim the same child chain root (UNIQUE).
+        assert!(
+            db.set_follow_child("fk2", "child-2", "shared-chain").is_err(),
+            "duplicate child_chain_root_id must violate UNIQUE"
+        );
+    }
+
+    #[test]
+    fn invalid_phase_rejected_by_check() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        // Exercise the CHECK constraint via a raw update.
+        assert!(
+            db.conn
+                .execute(
+                    "UPDATE follow_waiter SET phase = 'bogus' WHERE follow_key = 'fk1'",
+                    [],
+                )
+                .is_err(),
+            "CHECK must reject an unknown phase"
+        );
+    }
+
+    #[test]
+    fn reserve_follow_rejects_conflicting_seed() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        let mut conflicting = seed_follow("fk1");
+        conflicting.step_count = 99; // same key, different follow point
+        assert!(db.reserve_follow(&conflicting).is_err());
+    }
+
+    #[test]
+    fn set_follow_child_refuses_conflicting_overwrite() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.set_follow_child("fk1", "child-1", "chain-1").unwrap();
+        db.set_follow_child("fk1", "child-1", "chain-1").unwrap(); // idempotent
+        assert!(db.set_follow_child("fk1", "child-2", "chain-2").is_err());
+    }
+
+    #[test]
+    fn set_follow_parent_successor_refuses_conflicting_overwrite() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap(); // idempotent
+        assert!(db.set_follow_parent_successor("fk1", "succ-2").is_err());
+    }
+
+    #[test]
+    fn phase_transitions_are_constrained() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        // Cannot mark waiting before child + successor recorded.
+        assert!(db.mark_follow_waiting("fk1").is_err());
+        db.set_follow_child("fk1", "c", "chain-1").unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap();
+        db.mark_follow_waiting("fk1").unwrap();
+        // Cannot resume from waiting (must be ready first).
+        assert!(db.mark_follow_resuming("fk1").is_err());
+        db.mark_follow_child_terminal("chain-1", "c-tail", "completed", &serde_json::json!({"ok": true}))
+            .unwrap();
+        db.mark_follow_resuming("fk1").unwrap();
+        // A late/duplicate terminal hook must NOT downgrade resuming → ready.
+        let matched = db
+            .mark_follow_child_terminal("chain-1", "c-tail", "completed", &serde_json::json!({"ok": true}))
+            .unwrap();
+        assert!(!matched, "resuming row must not be downgraded by a late terminal");
+        assert_eq!(
+            db.get_follow_waiter_by_key("fk1").unwrap().unwrap().phase,
+            follow_phase::RESUMING
+        );
+    }
+
+    #[test]
+    fn corrupt_terminal_envelope_json_fails_read() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.conn
+            .execute(
+                "UPDATE follow_waiter SET terminal_envelope = '{not json' WHERE follow_key = 'fk1'",
+                [],
+            )
+            .unwrap();
+        assert!(db.get_follow_waiter_by_key("fk1").is_err());
+    }
+
+    #[test]
+    fn ready_terminal_result_is_immutable() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.set_follow_child("fk1", "c", "chain-1").unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap();
+        db.mark_follow_waiting("fk1").unwrap();
+
+        let env_a = serde_json::json!({"success": true, "result": "A"});
+        assert!(db
+            .mark_follow_child_terminal("chain-1", "c-tail", "completed", &env_a)
+            .unwrap());
+        // Same data again: idempotent no-op (no error, no rewrite).
+        assert!(!db
+            .mark_follow_child_terminal("chain-1", "c-tail", "completed", &env_a)
+            .unwrap());
+        // Conflicting terminal data is refused; the row keeps the first result.
+        let env_b = serde_json::json!({"success": false, "result": "B"});
+        assert!(db
+            .mark_follow_child_terminal("chain-1", "c-other", "failed", &env_b)
+            .is_err());
+        let w = db.get_follow_waiter_by_key("fk1").unwrap().unwrap();
+        assert_eq!(w.terminal_envelope, Some(env_a));
+        assert_eq!(w.child_terminal_thread_id.as_deref(), Some("c-tail"));
+        assert_eq!(w.child_terminal_status.as_deref(), Some("completed"));
     }
 }
