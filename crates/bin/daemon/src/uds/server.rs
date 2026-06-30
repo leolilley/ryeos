@@ -267,9 +267,9 @@ fn authorize_chain_read(
 
 fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadMarkRunningParams =
-        serde_json::from_value(params.clone()).context("invalid threads.mark_running params")?;
+        serde_json::from_value(params.clone()).context("invalid runtime.mark_running params")?;
     serde_json::to_value(state.threads.mark_running(&params.thread_id)?)
-        .context("failed to encode threads.mark_running result")
+        .context("failed to encode runtime.mark_running result")
 }
 
 fn handle_attach_process(
@@ -277,14 +277,14 @@ fn handle_attach_process(
     state: &AppState,
 ) -> Result<serde_json::Value> {
     let mut params: ThreadAttachProcessParams =
-        serde_json::from_value(params.clone()).context("invalid threads.attach_process params")?;
+        serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
     // The runtime self-reports its pid only; ALWAYS derive the process group
     // daemon-side — never trust a runtime-supplied pgid. This gives reconcile's
     // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
     // probe instead of treating the thread as dead.
     params.pgid = ryeos_app::process::pgid_of(params.pid);
     serde_json::to_value(state.threads.attach_process(&params)?)
-        .context("failed to encode threads.attach_process result")
+        .context("failed to encode runtime.attach_process result")
 }
 
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
@@ -364,7 +364,7 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
 
 fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadGetParams =
-        serde_json::from_value(params.clone()).context("invalid threads.get params")?;
+        serde_json::from_value(params.clone()).context("invalid runtime.get_thread params")?;
     match state.threads.get_thread(&params.thread_id)? {
         Some(thread) => {
             let facets = state.state_store.get_facets(&params.thread_id)?;
@@ -378,7 +378,7 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
                 "artifacts": state.threads.list_thread_artifacts(&params.thread_id)?,
                 "facets": facets_map,
             }))
-            .context("failed to encode threads.get result")
+            .context("failed to encode runtime.get_thread result")
         }
         None => Ok(serde_json::Value::Null),
     }
