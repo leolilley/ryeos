@@ -196,6 +196,7 @@ fn find_fold_section(node: &StudioLayoutNodeVm, focused: &str) -> Option<usize> 
 fn selectable_of(view: &StudioViewVm) -> (usize, bool) {
     match view {
         StudioViewVm::Rows { rows, .. } => (rows.len(), false),
+        StudioViewVm::Table { rows, .. } => (rows.len(), false),
         StudioViewVm::Timeline { entries, .. } => (entries.len(), true),
         // The point walks a flat top-down list: an expanded section's rows,
         // or a collapsed section's single header (so it stays re-expandable) —

@@ -271,6 +271,11 @@ fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
             provenance,
             affordance_hints,
             ..
+        }
+        | StudioViewVm::Table {
+            provenance,
+            affordance_hints,
+            ..
         } => provenance
             .as_deref()
             .map(|provenance| (provenance, affordance_hints.as_slice())),
