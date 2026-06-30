@@ -197,23 +197,24 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // `thread tail`) is followed here by opening the stream and rendering it. A
     // descriptor that is present but unsupported/unsafe errors loudly rather than
     // being misread as an ordinary JSON result and exiting zero.
-    if let Some(path) = stream_descriptor_path(&result)? {
-        return follow_stream_descriptor(&app_root, &path).await;
+    if let Some((path, braid)) = stream_descriptor_path(&result)? {
+        return follow_stream_descriptor(&app_root, &path, braid).await;
     }
 
     print_result(result);
     Ok(())
 }
 
-/// Extract a stream descriptor's path from an `/execute` response.
+/// Parse a stream descriptor from an `/execute` response into `(path, braid)`.
 ///
 /// The service envelope nests the handler's value under `result`, so the
-/// descriptor is `result.stream` = `{ transport: "sse", method: "GET", path }`.
-/// Returns `Ok(None)` when there is no descriptor (an ordinary result), `Ok(Some)`
-/// for a valid, followable, safe descriptor, and `Err` when a descriptor is
-/// present but malformed, an unsupported transport/method, or an unsafe path —
-/// so a broken stream contract never silently prints as JSON and exits zero.
-fn stream_descriptor_path(response: &Value) -> Result<Option<String>, CliError> {
+/// descriptor is `result.stream` = `{ transport, method, path, follow }`.
+/// Returns `Ok(None)` when there is no descriptor (an ordinary result),
+/// `Ok(Some((path, braid)))` for a valid, followable, safe descriptor (`braid`
+/// = chain follow), and `Err` when a descriptor is present but malformed, an
+/// unsupported transport/method/follow, or an unsafe path — so a broken stream
+/// contract never silently prints as JSON and exits zero.
+fn stream_descriptor_path(response: &Value) -> Result<Option<(String, bool)>, CliError> {
     let Some(stream) = response.get("result").and_then(|r| r.get("stream")) else {
         return Ok(None);
     };
@@ -246,7 +247,21 @@ fn stream_descriptor_path(response: &Value) -> Result<Option<String>, CliError> 
             detail: "stream descriptor missing 'path'".into(),
         })?;
     validate_descriptor_path(path)?;
-    Ok(Some(path.to_string()))
+    // `follow` selects the completion policy: a single thread stops at its
+    // terminal; a chain (braid) follows continuations until the stream closes.
+    // Absent defaults to `thread`; an unknown mode errors loudly.
+    let braid = match stream.get("follow").and_then(Value::as_str) {
+        None | Some("thread") => false,
+        Some("chain") => true,
+        Some(other) => {
+            return Err(CliError::Local {
+                detail: format!(
+                    "unsupported stream follow mode '{other}' (expected 'thread' or 'chain')"
+                ),
+            })
+        }
+    };
+    Ok(Some((path.to_string(), braid)))
 }
 
 /// Reject any descriptor path that is not a safe, node-relative path before it is
@@ -278,11 +293,19 @@ fn validate_descriptor_path(path: &str) -> Result<(), CliError> {
 }
 
 /// Sign and follow a daemon-issued stream descriptor: GET the SSE route and
-/// render events with the shared renderer. Tail completion differs from
-/// `execute --stream`: a live or replayed tail can end on a clean EOF with no
-/// terminal event (e.g. a running thread the user Ctrl-Cs), so only a failing
-/// terminal — or a transport/auth error — is non-zero; Done / clean EOF exit 0.
-async fn follow_stream_descriptor(app_root: &Path, path: &str) -> Result<(), CliError> {
+/// render events with the shared renderer. Completion differs from
+/// `execute --stream`: a tail can end on a clean EOF with no terminal event
+/// (e.g. a running thread the user Ctrl-Cs), so only a failing terminal — or a
+/// transport/auth error — is non-zero; Done / clean EOF exit 0.
+///
+/// `braid` follows the whole chain across continuations: it renders each
+/// thread's terminal as it passes but never stops on one — the braid keeps
+/// going to the next turn — ending only on clean EOF / interrupt (exit 0).
+async fn follow_stream_descriptor(
+    app_root: &Path,
+    path: &str,
+    braid: bool,
+) -> Result<(), CliError> {
     use crate::exec_stream::StreamOutcome;
 
     let daemon_url = crate::transport::http::resolve_daemon_url(app_root).await?;
@@ -299,6 +322,10 @@ async fn follow_stream_descriptor(app_root: &Path, path: &str) -> Result<(), Cli
     crate::transport::http::get_streaming(&url, &headers, |ev| {
         match crate::exec_stream::render_event(ev) {
             StreamOutcome::Continue => false,
+            // A braid follows continuations: a per-thread terminal is rendered
+            // but does not stop the stream — only EOF / interrupt ends it.
+            StreamOutcome::Done if braid => false,
+            StreamOutcome::Failed(_) if braid => false,
             StreamOutcome::Done => {
                 terminal = Some(Ok(()));
                 true
@@ -1788,7 +1815,8 @@ mod tests {
 
     #[test]
     fn stream_descriptor_path_extracts_followable_sse_get() {
-        // Service envelope: descriptor nested under `result`.
+        // Service envelope: descriptor nested under `result`. No `follow` field
+        // → defaults to the single-thread completion policy (braid = false).
         let resp = serde_json::json!({
             "thread": { "thread_id": "audit-1" },
             "result": { "stream": {
@@ -1798,9 +1826,48 @@ mod tests {
             }}
         });
         assert_eq!(
-            stream_descriptor_path(&resp).unwrap().as_deref(),
-            Some("/threads/abc/events/stream")
+            stream_descriptor_path(&resp).unwrap(),
+            Some(("/threads/abc/events/stream".to_string(), false))
         );
+    }
+
+    #[test]
+    fn stream_descriptor_path_honors_follow_mode() {
+        // follow=chain → braid follow (true); follow=thread → single (false).
+        let chain = serde_json::json!({
+            "result": { "stream": {
+                "transport": "sse",
+                "method": "GET",
+                "path": "/chains/root/events/stream",
+                "follow": "chain"
+            }}
+        });
+        assert_eq!(
+            stream_descriptor_path(&chain).unwrap(),
+            Some(("/chains/root/events/stream".to_string(), true))
+        );
+        let thread = serde_json::json!({
+            "result": { "stream": {
+                "transport": "sse",
+                "method": "GET",
+                "path": "/threads/abc/events/stream",
+                "follow": "thread"
+            }}
+        });
+        assert_eq!(
+            stream_descriptor_path(&thread).unwrap(),
+            Some(("/threads/abc/events/stream".to_string(), false))
+        );
+        // Unknown follow mode errors loudly.
+        let bad = serde_json::json!({
+            "result": { "stream": {
+                "transport": "sse",
+                "method": "GET",
+                "path": "/x/stream",
+                "follow": "everything"
+            }}
+        });
+        assert!(stream_descriptor_path(&bad).is_err());
     }
 
     #[test]

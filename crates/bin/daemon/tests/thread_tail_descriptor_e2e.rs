@@ -3,9 +3,12 @@
 //! Proves the full path the unit tests can't:
 //!   1. Run a directive to completion → own a thread.
 //!   2. POST /execute `service:threads/tail` → the daemon returns a stream
-//!      descriptor (`result.stream = { transport: sse, method: GET, path }`)
-//!      pointing at the thread's signed SSE route — it does NOT stream bytes.
-//!   3. Sign + GET that path → real SSE events (replay of the completed thread).
+//!      descriptor (`result.stream = { transport: sse, method: GET, path, follow }`)
+//!      pointing at a signed SSE route — it does NOT stream bytes. The default
+//!      descriptor follows the braid (the chain route); `thread_only: true`
+//!      narrows it to this one thread's route.
+//!   3. Sign + GET the thread route → real SSE events (replay of the completed
+//!      thread), ending on a terminal event.
 //!   4. A non-owner asking for the descriptor gets 404 (no existence leak),
 //!      matching the route's own ownership check.
 
@@ -241,12 +244,15 @@ async fn boot_and_run_directive(
 async fn thread_tail_descriptor_round_trip() {
     let (h, user_sk, node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
 
-    // 1. Owner POSTs /execute service:threads/tail → daemon returns a descriptor.
+    // 1. Owner POSTs /execute service:threads/tail with thread_only=true → the
+    //    daemon returns the single-thread descriptor. (The default follows the
+    //    braid, whose chain stream stays open `tail -f`-style and so can't be
+    //    read to EOF here — that default is asserted separately, below.)
     let (status, body) = h
         .post_execute(
             "service:threads/tail",
             &project_path,
-            serde_json::json!({ "thread_id": thread_id }),
+            serde_json::json!({ "thread_id": thread_id, "thread_only": true }),
         )
         .await
         .expect("post threads.tail");
@@ -258,6 +264,7 @@ async fn thread_tail_descriptor_round_trip() {
         .unwrap_or_else(|| panic!("no result.stream descriptor in {body:#}"));
     assert_eq!(stream.get("transport").and_then(|v| v.as_str()), Some("sse"));
     assert_eq!(stream.get("method").and_then(|v| v.as_str()), Some("GET"));
+    assert_eq!(stream.get("follow").and_then(|v| v.as_str()), Some("thread"));
     let path = stream
         .get("path")
         .and_then(|v| v.as_str())
@@ -309,6 +316,38 @@ async fn thread_tail_descriptor_round_trip() {
             prev = Some(seq);
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thread_tail_descriptor_defaults_to_braid() {
+    // With no flag, `thread tail` follows the braid: the descriptor points at the
+    // chain-events route and declares `follow: chain`. The stream is not opened
+    // here — a chain stream stays open across continuations and wouldn't EOF.
+    let (h, _user_sk, _node_fp, thread_id, project_path) = boot_and_run_directive(&[]).await;
+
+    let (status, body) = h
+        .post_execute(
+            "service:threads/tail",
+            &project_path,
+            serde_json::json!({ "thread_id": thread_id }),
+        )
+        .await
+        .expect("post threads.tail");
+    assert_eq!(status, reqwest::StatusCode::OK, "threads.tail body={body:#}");
+
+    let stream = body
+        .get("result")
+        .and_then(|r| r.get("stream"))
+        .unwrap_or_else(|| panic!("no result.stream descriptor in {body:#}"));
+    assert_eq!(stream.get("follow").and_then(|v| v.as_str()), Some("chain"));
+    let path = stream
+        .get("path")
+        .and_then(|v| v.as_str())
+        .expect("descriptor path");
+    assert!(
+        path.starts_with("/chains/") && path.ends_with("/events/stream"),
+        "default tail must point at the chain-events route, got {path}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
