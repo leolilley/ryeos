@@ -1492,7 +1492,13 @@ pub async fn dispatch_service(
                 state,
                 None,
             )
-            .await?;
+            .await
+            // `execute_service_verified` maps a handler's typed `HandlerError`
+            // (e.g. ownership → NotFound) to a `DispatchError` and returns it
+            // through `anyhow`. Recover that typed error here so it keeps its
+            // HTTP status — a blanket `?` would re-wrap it as `Internal` (500),
+            // dropping the 404/409/etc. that the route path preserves.
+            .map_err(|e| e.downcast::<DispatchError>().unwrap_or_else(DispatchError::Internal))?;
             let envelope = serde_json::json!({
                 "thread": {
                     "thread_id": result.audit_thread_id,
