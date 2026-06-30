@@ -827,6 +827,10 @@ async fn run_claimed_thread_row(
         "launching native runtime"
     );
     let thread_id = thread.thread_id.clone();
+    // Authoritative chain root from the freshly-created thread row (a successor
+    // inherits its source's root; a fresh launch is its own root). Used to set
+    // the callback cap's chain root.
+    let chain_root_id = thread.chain_root_id.clone();
 
     // Arm the persistence-first guard: any post-create failure below finalizes
     // the thread `failed` instead of leaving it stuck at `created` (no-op once
@@ -1285,6 +1289,14 @@ async fn run_claimed_thread_row(
         effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
     );
+    // Carry the thread's authoritative chain root on the cap (it defaults to
+    // thread_id / root until set here).
+    if !state.callback_tokens.set_chain_root(&cap.token, &chain_root_id) {
+        tracing::warn!(
+            thread_id = %thread_id,
+            "set_chain_root found no cap for the just-minted token; chain root left at default"
+        );
+    }
 
     // 6b. Build inventory the launching kind asked for. The engine
     //     enumerates + parses every inventoried item once here so the

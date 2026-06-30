@@ -18,6 +18,12 @@ pub struct CallbackCapability {
     pub token: String,
     pub invocation_id: String,
     pub thread_id: String,
+    /// Chain root of the minting thread. Carried so the daemon can key
+    /// cross-chain wiring from a callback without re-deriving it. It is NOT an
+    /// authority source by itself — callers that act on it MUST confirm it
+    /// against the authoritative thread row via
+    /// [`CallbackCapability::assert_chain_root`].
+    pub chain_root_id: String,
     pub project_path: PathBuf,
     pub expires_at: Instant,
     /// V5.5 P2: composed effective capabilities the parent thread
@@ -35,6 +41,23 @@ pub struct CallbackCapability {
     pub effective_bundle_id: Option<String>,
     /// Root item ref that minted this callback token, used for attribution.
     pub item_ref: Option<String>,
+}
+
+impl CallbackCapability {
+    /// Confirm this cap's carried `chain_root_id` against the authoritative
+    /// chain root from state. The cap value is a convenience carrier, never
+    /// trusted on its own — cross-chain wiring keys on the validated result of
+    /// this check, not the raw token value.
+    pub fn assert_chain_root(&self, authoritative_chain_root_id: &str) -> Result<()> {
+        if self.chain_root_id != authoritative_chain_root_id {
+            bail!(
+                "callback capability chain_root_id mismatch: cap={}, state={}",
+                self.chain_root_id,
+                authoritative_chain_root_id
+            );
+        }
+        Ok(())
+    }
 }
 
 pub struct CallbackCapabilityStore {
@@ -95,6 +118,10 @@ impl CallbackCapabilityStore {
             token: token.clone(),
             invocation_id,
             thread_id: thread_id.to_string(),
+            // Defaults to root (chain_root == thread_id). The managed launch
+            // path overrides this via `set_chain_root` with the thread's
+            // authoritative chain root from state.
+            chain_root_id: thread_id.to_string(),
             project_path,
             expires_at: Instant::now() + ttl,
             effective_caps,
@@ -105,6 +132,20 @@ impl CallbackCapabilityStore {
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
         cap
+    }
+
+    /// Override the carried chain root for a freshly-minted cap. Returns whether
+    /// the token was found. Root mints default `chain_root == thread_id`; the
+    /// managed launch path sets the thread's authoritative chain root (from
+    /// state) here so the cap reflects real chain lineage.
+    pub fn set_chain_root(&self, token: &str, chain_root_id: &str) -> bool {
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.chain_root_id = chain_root_id.to_string();
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn validate(
@@ -386,6 +427,59 @@ mod tests {
     }
 
     #[test]
+    fn chain_root_defaults_to_thread_id_then_set_chain_root_overrides() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate_with_context(
+            "T-succ",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+            None,
+            None,
+        );
+        // Defaults to root (chain_root == thread_id).
+        assert_eq!(cap.chain_root_id, "T-succ");
+        // The managed launch path overrides with the authoritative chain root.
+        store.set_chain_root(&cap.token, "T-root");
+        let v = store
+            .validate(&cap.token, "T-succ", PathBuf::from("/p").as_path())
+            .unwrap();
+        assert_eq!(v.chain_root_id, "T-root");
+    }
+
+    #[test]
+    fn generate_uses_thread_id_as_chain_root() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-root",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+        );
+        assert_eq!(cap.chain_root_id, "T-root");
+    }
+
+    #[test]
+    fn assert_chain_root_rejects_mismatch() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-succ",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+        );
+        store.set_chain_root(&cap.token, "T-root");
+        let cap = store
+            .validate(&cap.token, "T-succ", PathBuf::from("/p").as_path())
+            .unwrap();
+        assert!(cap.assert_chain_root("T-root").is_ok());
+        assert!(cap.assert_chain_root("T-other").is_err());
+    }
+
+    #[test]
     fn validate_rejects_unknown_token() {
         let store = CallbackCapabilityStore::new();
         let err = store
@@ -555,6 +649,7 @@ mod tests {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test".to_string(),
+            chain_root_id: "T-test".to_string(),
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),
             effective_caps: vec![],

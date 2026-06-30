@@ -220,6 +220,7 @@ mod tests {
             token: "cbt-test".into(),
             invocation_id: "inv-test".into(),
             thread_id: "T-test".into(),
+            chain_root_id: "T-test".into(),
             project_path: PathBuf::from("/tmp/test"),
             expires_at: Instant::now() + Duration::from_secs(60),
             effective_caps,
