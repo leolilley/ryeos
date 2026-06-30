@@ -1888,7 +1888,7 @@ async fn dispatch_managed_subprocess(
         // opening stimulus; only an autonomous machine continuation suppresses it.
         suppress_stimulus: false,
         // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
-        captured_effective_caps: None,
+        capability_policy: crate::execution::launch::CapabilityPolicy::Fresh,
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
     })

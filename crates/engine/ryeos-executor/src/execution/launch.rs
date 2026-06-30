@@ -691,6 +691,69 @@ impl CheckpointResumeMode {
     }
 }
 
+/// How the run-half reconciles the freshly-resolved (live composed) caps against
+/// any captured authority.
+pub enum CapabilityPolicy<'a> {
+    /// Fresh launch: run with exactly the live composed caps.
+    Fresh,
+    /// Continuation / native-resume: the live composed caps MUST equal the caps
+    /// the predecessor captured (no silent privilege drift); run with them.
+    ExactPinned(&'a [String]),
+    /// Follow child: the (parent-bounded) caps MUST be a subset of the live
+    /// composed caps (no escalation beyond what the item can compose); run with
+    /// the bounded set, narrowing authority to the parent's bound.
+    BoundedOverride(&'a [String]),
+}
+
+/// Apply a [`CapabilityPolicy`] to the freshly-resolved `composed` caps, returning
+/// the caps the launch should actually run with (callback token + envelope +
+/// launch metadata all consume the result).
+fn apply_capability_policy(
+    composed: Vec<String>,
+    policy: CapabilityPolicy<'_>,
+    item_ref: &str,
+) -> Result<Vec<String>, BuildAndLaunchError> {
+    match policy {
+        CapabilityPolicy::Fresh => Ok(composed),
+        CapabilityPolicy::ExactPinned(captured) => {
+            let recomputed: BTreeSet<&str> = composed.iter().map(String::as_str).collect();
+            let captured_set: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
+            if recomputed != captured_set {
+                return Err(BuildAndLaunchError::CapabilityRejected {
+                    reason: format!(
+                        "continuation capability drift for `{item_ref}`: the live item resolves \
+                         to a different capability set than the predecessor captured — refusing \
+                         to launch with changed authority (snapshot-pinned continuation not yet \
+                         implemented)"
+                    ),
+                });
+            }
+            Ok(composed)
+        }
+        CapabilityPolicy::BoundedOverride(bounded) => {
+            // Each bounded cap must be *implied* by a live composed grant, using
+            // grant-side wildcard matching (`cap_matches(grant, required)`): a
+            // composed grant `ryeos.execute.tool.*` covers a bounded
+            // `ryeos.execute.tool.echo`, but an exact composed grant never covers
+            // a wider bounded wildcard. Raw string subset would reject the former.
+            if let Some(uncovered) = bounded.iter().find(|cap| {
+                !composed
+                    .iter()
+                    .any(|grant| ryeos_runtime::authorizer::cap_matches(grant, cap))
+            }) {
+                return Err(BuildAndLaunchError::CapabilityRejected {
+                    reason: format!(
+                        "follow-child capability escalation for `{item_ref}`: bounded cap \
+                         `{uncovered}` is not covered by any live composed grant — refusing to \
+                         grant authority the item cannot compose"
+                    ),
+                });
+            }
+            Ok(bounded.to_vec())
+        }
+    }
+}
+
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
     pub executor_ref: &'a str,
@@ -715,14 +778,9 @@ pub struct BuildAndLaunchParams<'a> {
     /// limit-cutoff successor, whose `parameters` are the source's originals and
     /// are already in the folded chain.
     pub suppress_stimulus: bool,
-    /// `Some` only for a continuation successor: the `effective_caps` the
-    /// PREDECESSOR captured at spawn. The run-half re-resolves the item against
-    /// the *live* tree, which could yield a different capability set if the item
-    /// changed — a silent privilege change. When present, the recomputed caps
-    /// MUST match this captured set exactly, else the launch is refused (until
-    /// snapshot-pinned continuation resolves against the captured version).
-    /// `None` for fresh launches, which use the freshly-resolved caps.
-    pub captured_effective_caps: Option<&'a [String]>,
+    /// How the run-half reconciles the freshly-resolved caps against any captured
+    /// authority — see [`CapabilityPolicy`].
+    pub capability_policy: CapabilityPolicy<'a>,
     /// How this managed launch treats checkpoint state — see
     /// [`CheckpointResumeMode`]. Drives `RYEOS_RESUME=1` injection and predecessor
     /// copy-forward, and only for replay-aware (`native_resume`) kinds.
@@ -814,7 +872,7 @@ async fn run_claimed_thread_row(
         pre_minted_thread_id: _,
         previous_thread_id,
         suppress_stimulus,
-        captured_effective_caps,
+        capability_policy,
         checkpoint_resume_mode,
     } = params;
     let engine = provenance.request_engine();
@@ -1060,34 +1118,18 @@ async fn run_claimed_thread_row(
     )
     .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
 
-    let effective_caps: Vec<String> = composed_effective_caps
+    let composed_caps: Vec<String> = composed_effective_caps
         .into_iter()
         .chain(runtime_capability_caps)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
 
-    // Continuation capability pin: a successor must run with EXACTLY the
-    // authority its predecessor captured. We re-resolved against the live tree
-    // above, so if the item changed (caps widened OR narrowed) the recomputed
-    // set differs — refuse rather than silently grant/strip authority. Identity
-    // means no drift; snapshot-pinned continuation (future) resolves against the
-    // captured version and so always matches. Fresh launches pass `None`.
-    if let Some(captured) = captured_effective_caps {
-        let recomputed: BTreeSet<&str> = effective_caps.iter().map(String::as_str).collect();
-        let captured_set: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
-        if recomputed != captured_set {
-            return Err(BuildAndLaunchError::CapabilityRejected {
-                reason: format!(
-                    "continuation capability drift for `{}`: the live item resolves to a \
-                     different capability set than the predecessor captured — refusing to launch \
-                     the successor with changed authority (snapshot-pinned continuation not yet \
-                     implemented)",
-                    resolved.item_ref
-                ),
-            });
-        }
-    }
+    // Reconcile the freshly-resolved caps against any captured authority per the
+    // launch's policy: fresh uses them as-is; a continuation/native-resume pins
+    // them to EXACTLY the predecessor's captured set (no silent drift); a follow
+    // child narrows them to the parent-bounded subset.
+    let effective_caps = apply_capability_policy(composed_caps, capability_policy, &resolved.item_ref)?;
 
     // The serving runtime (captured ref, else the kind's default). A runtime that
     // declares `native_resume` is replay-aware: allocate its per-thread checkpoint
@@ -1857,9 +1899,12 @@ async fn launch_claimed_successor(
     // predecessor's captured caps. Operator: inject the seeded input as the
     // opening stimulus, and re-derive caps fresh (an explicit launch, not a
     // relaunch of the same authority).
-    let (suppress_stimulus, captured_effective_caps) = match mode {
-        SuccessorMode::Machine => (true, Some(resume.effective_caps.as_slice())),
-        SuccessorMode::Operator => (false, None),
+    let (suppress_stimulus, capability_policy) = match mode {
+        SuccessorMode::Machine => (
+            true,
+            CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
+        ),
+        SuccessorMode::Operator => (false, CapabilityPolicy::Fresh),
     };
 
     run_claimed_thread_row(
@@ -1879,7 +1924,7 @@ async fn launch_claimed_successor(
             pre_minted_thread_id: None,
             previous_thread_id: Some(&previous_thread_id),
             suppress_stimulus,
-            captured_effective_caps,
+            capability_policy,
             checkpoint_resume_mode: match mode {
                 SuccessorMode::Machine => CheckpointResumeMode::MachineContinuation,
                 SuccessorMode::Operator => CheckpointResumeMode::None,
@@ -1952,7 +1997,7 @@ async fn launch_claimed_native_resume(
             // Crash resume folds no new stimulus; it reloads its own checkpoint.
             suppress_stimulus: true,
             // Pin the captured authority verbatim (same as a machine relaunch).
-            captured_effective_caps: Some(resume.effective_caps.as_slice()),
+            capability_policy: CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
             checkpoint_resume_mode: CheckpointResumeMode::SameThread,
         },
         thread,
@@ -2040,6 +2085,164 @@ pub async fn launch_existing_native_resume(
             crate::dispatch::finalize_method_thread_if_needed(
                 &state,
                 thread_id,
+                "failed",
+                Some(json!({ "error": e.to_string() })),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Inner half of a follow-child launch (claim held): rebuild the execution from
+/// the child's seeded launch identity and run the FRESH child row through the
+/// managed runtime path (which builds the `LaunchEnvelope` the runtime needs —
+/// `spawn_item` cannot). Mirrors `launch_claimed_native_resume`, but the child is
+/// a FRESH root launch, not a resume: it injects its opening stimulus
+/// (`suppress_stimulus = false`) and is not a checkpoint resume. It is its own
+/// chain root, so `previous_thread_id` is `None`. Caps are pinned to the
+/// (parent-bounded) set captured on the row at create time.
+async fn launch_claimed_follow_child(
+    state: &AppState,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let thread_id = thread.thread_id.clone();
+    // A follow child is a FRESH ROOT: no upstream braid, its own chain root.
+    // Reject a continuation-shaped row (a sign the caller created it wrong).
+    if thread.upstream_thread_id.is_some() {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow child {thread_id} must be a fresh root but has upstream {:?}",
+            thread.upstream_thread_id
+        )));
+    }
+    if thread.chain_root_id != thread.thread_id {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow child {thread_id} must be its own chain root (chain_root = {})",
+            thread.chain_root_id
+        )));
+    }
+    let identity = state
+        .state_store
+        .get_launch_metadata(&thread_id)?
+        .and_then(|m| m.resume_context)
+        .ok_or_else(|| anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity"))?;
+
+    let project_path = match &identity.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
+        other => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow child: snapshot-pinned launch not supported yet \
+                 (project_context = {other:?})"
+            )));
+        }
+    };
+
+    let params = crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
+
+    let required_envelope_fields = state
+        .engine
+        .runtimes
+        .resolve_for_launch(identity.runtime_ref.as_deref(), &params.resolved.resolved_item.kind)
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .required_envelope_fields
+        .clone();
+
+    run_claimed_thread_row(
+        BuildAndLaunchParams {
+            state,
+            executor_ref: &params.resolved.executor_ref,
+            runtime_ref: identity.runtime_ref.as_deref(),
+            acting_principal: &params.acting_principal,
+            resolved: &params.resolved,
+            project_path: &project_path,
+            provenance: &params.provenance,
+            parameters: &params.parameters,
+            metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
+            required_envelope_fields: &required_envelope_fields,
+            pre_minted_thread_id: None,
+            // A follow child is its OWN root chain, never a continuation braid.
+            previous_thread_id: None,
+            // A fresh launch injects its opening stimulus.
+            suppress_stimulus: false,
+            // Narrow to the (parent-bounded) caps captured on the row at create
+            // time — must be a subset of what the child item can compose.
+            capability_policy: CapabilityPolicy::BoundedOverride(identity.effective_caps.as_slice()),
+            // Fresh launch, not a checkpoint resume.
+            checkpoint_resume_mode: CheckpointResumeMode::None,
+        },
+        thread,
+    )
+    .await
+}
+
+/// Claim-guarded entry to launch a pre-created, pre-seeded follow CHILD row
+/// through the managed runtime path. Fire-and-forget from the daemon: the follow
+/// path `tokio::spawn`s this so the child runs detached while the parent suspends.
+/// Idempotent + crash-safe like `launch_existing_native_resume`: claims the lease
+/// (a dead launcher's claim is reclaimable), skips a terminal or live-process row,
+/// and finalizes on a pre-run defect.
+pub async fn launch_follow_child(
+    state: AppState,
+    child_id: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let claimed_by = format!("daemon:{}", std::process::id());
+    match state.state_store.claim_thread_launch(
+        child_id,
+        &claim_id,
+        &claimed_by,
+        SUCCESSOR_LAUNCH_LEASE_MS,
+    )? {
+        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
+        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+        }
+    }
+
+    let thread = match state.threads.get_thread(child_id) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow child: thread not found: {child_id}"
+            )));
+        }
+        Err(e) => {
+            let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+            return Err(e.into());
+        }
+    };
+
+    // A terminal row is already done (a duplicate trigger or a stale-lease reclaim
+    // of a settled child) — release and skip without finalizing.
+    if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+        .is_some_and(|s| s.is_terminal())
+    {
+        let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+        return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
+    }
+
+    // A still-`running` row whose process group is ALIVE is not crashed — a
+    // duplicate trigger or a stale-lease reclaim of a live launch. Skip rather than
+    // spawn a duplicate runtime.
+    if thread.status == ryeos_state::objects::ThreadStatus::Running.as_str() {
+        if let Some(pgid) = thread.runtime.pgid {
+            if ryeos_app::process::pgid_alive(pgid) {
+                let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+                return Ok(SuccessorLaunchOutcome::Skipped("live_process"));
+            }
+        }
+    }
+
+    let result = launch_claimed_follow_child(&state, thread).await;
+    let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+
+    match result {
+        Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
+        Err(e) => {
+            crate::dispatch::finalize_method_thread_if_needed(
+                &state,
+                child_id,
                 "failed",
                 Some(json!({ "error": e.to_string() })),
             );
@@ -2237,6 +2440,111 @@ fn normalize_runtime_terminal_status(status: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn caps(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn capability_policy_fresh_uses_composed() {
+        let composed = caps(&["a", "b"]);
+        let out = apply_capability_policy(composed.clone(), CapabilityPolicy::Fresh, "i").unwrap();
+        assert_eq!(out, composed);
+    }
+
+    #[test]
+    fn capability_policy_exact_pinned_requires_equality() {
+        let composed = caps(&["a", "b"]);
+        // Equal set (order-insensitive) → ok, returns composed.
+        let pinned = caps(&["b", "a"]);
+        let out = apply_capability_policy(
+            composed.clone(),
+            CapabilityPolicy::ExactPinned(&pinned),
+            "i",
+        )
+        .unwrap();
+        assert_eq!(out, composed);
+        // Drift (narrower OR wider) → rejected.
+        let narrower = caps(&["a"]);
+        assert!(apply_capability_policy(
+            composed.clone(),
+            CapabilityPolicy::ExactPinned(&narrower),
+            "i"
+        )
+        .is_err());
+        let wider = caps(&["a", "b", "c"]);
+        assert!(
+            apply_capability_policy(composed, CapabilityPolicy::ExactPinned(&wider), "i").is_err()
+        );
+    }
+
+    #[test]
+    fn capability_policy_bounded_override_narrows_to_subset() {
+        let composed = caps(&["a", "b", "c"]);
+        // A subset is accepted and BECOMES the effective set (narrowed).
+        let bounded = caps(&["a", "b"]);
+        let out = apply_capability_policy(
+            composed.clone(),
+            CapabilityPolicy::BoundedOverride(&bounded),
+            "i",
+        )
+        .unwrap();
+        assert_eq!(out, bounded);
+        // A cap not present in the composed set is an escalation → rejected.
+        let escalated = caps(&["a", "d"]);
+        assert!(apply_capability_policy(
+            composed,
+            CapabilityPolicy::BoundedOverride(&escalated),
+            "i"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn capability_policy_bounded_override_grant_side_wildcards() {
+        // A composed wildcard grant covers a narrower bounded exact cap.
+        let composed = caps(&["ryeos.execute.tool.*"]);
+        let bounded = caps(&["ryeos.execute.tool.echo"]);
+        let out = apply_capability_policy(
+            composed,
+            CapabilityPolicy::BoundedOverride(&bounded),
+            "i",
+        )
+        .unwrap();
+        assert_eq!(out, bounded);
+
+        // A broader composed wildcard covers a narrower bounded wildcard.
+        let composed = caps(&["ryeos.execute.*"]);
+        let bounded = caps(&["ryeos.execute.tool.*"]);
+        let out = apply_capability_policy(
+            composed,
+            CapabilityPolicy::BoundedOverride(&bounded),
+            "i",
+        )
+        .unwrap();
+        assert_eq!(out, bounded);
+
+        // An exact composed grant does NOT cover a wider bounded wildcard.
+        let composed = caps(&["ryeos.execute.tool.echo"]);
+        let bounded = caps(&["ryeos.execute.tool.*"]);
+        assert!(apply_capability_policy(
+            composed,
+            CapabilityPolicy::BoundedOverride(&bounded),
+            "i"
+        )
+        .is_err());
+
+        // The global wildcard covers any valid child cap.
+        let composed = caps(&["*"]);
+        let bounded = caps(&["ryeos.execute.tool.echo", "ryeos.execute.service.threads/get"]);
+        let out = apply_capability_policy(
+            composed,
+            CapabilityPolicy::BoundedOverride(&bounded),
+            "i",
+        )
+        .unwrap();
+        assert_eq!(out, bounded);
+    }
 
     #[test]
     fn host_triple_matches_rustc_host() {
