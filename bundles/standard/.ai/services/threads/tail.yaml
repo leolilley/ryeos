@@ -1,0 +1,10 @@
+# ryeos:signed:2026-06-29T08:41:15Z:1cffd3bc15bc39a596698b8f7dc6b388917def1fbe230f099efb94cd4896b8c9:wAN2iA9o68FEvjfb13QCguV7XZ/BnUpGdTuIETkSM3DeZiZsDzFxzvB/p+AVftE6BgR13ASS84ti9gI/WoS/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "threads"
+name: "tail"
+kind: service
+endpoint: threads.tail
+availability: daemon_only
+required_caps: []
+schema:
+  thread_id: string
+description: "Tail a thread's persisted events live; returns an SSE stream descriptor the client opens"

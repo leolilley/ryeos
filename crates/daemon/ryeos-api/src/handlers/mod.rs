@@ -84,6 +84,7 @@ pub mod threads_get;
 pub mod threads_input;
 pub mod threads_list;
 pub mod threads_receipts;
+pub mod threads_tail;
 pub mod tool_env_check;
 pub mod usage_summary;
 pub mod vault_delete;
@@ -120,6 +121,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
+    threads_tail::DESCRIPTOR,
     threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
     commands_dispatch::DESCRIPTOR,
