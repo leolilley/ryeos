@@ -185,10 +185,18 @@ pub enum StudioUiEvent {
     CycleInputTarget {
         forward: bool,
     },
-    /// Interrupt the running head thread (esc while it works) — cancels it
+    /// Cancel the running head thread (esc while it works) — terminates it
     /// through the thread-control channel. No-op when the head isn't running.
+    /// (Named `InterruptHead` for the esc-terminate control; the text-bearing
+    /// "interrupt" is `SubmitInputInterrupt`, a redirect, not a kill.)
     InterruptHead,
+    /// Submit the focused input as a cooperative STEER — a running-thread target
+    /// folds it at the next turn boundary.
     SubmitInput,
+    /// Submit the focused input as a forceful INTERRUPT — a running-thread target
+    /// cuts the in-flight cognition and redirects. Falls back to steer semantics
+    /// on non-running targets. Bound to Alt+Enter.
+    SubmitInputInterrupt,
     MoveLauncherSelection {
         delta: i32,
     },

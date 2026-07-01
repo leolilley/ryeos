@@ -138,6 +138,69 @@ pub fn kill_by_action(pgid: i64, action: ShutdownAction) -> KillResult {
     }
 }
 
+/// Outcome of delivering a one-shot signal to a thread's process group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalResult {
+    /// The signal was delivered to the group.
+    Delivered,
+    /// No usable process group was recorded (`pgid <= 0`). The caller should
+    /// degrade — e.g. an interrupt with no pgid falls back to a cooperative
+    /// steer (the input still folds at the next turn boundary).
+    MissingPgid,
+    /// The group no longer exists (`ESRCH`) — the runtime already exited.
+    AlreadyDead,
+    /// Refused: `pgid` is the daemon's own group; signalling it would hit the
+    /// daemon (and `kill(-0, …)` signals the *caller's* group, which is why
+    /// `pgid == 0` is rejected as `MissingPgid` above).
+    SkippedDaemonPgid,
+    /// `kill(2)` failed for some other reason.
+    Failed,
+}
+
+impl SignalResult {
+    /// A stable wire/log tag.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::MissingPgid => "missing_pgid",
+            Self::AlreadyDead => "already_dead",
+            Self::SkippedDaemonPgid => "skipped_daemon_pgid",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Send a single signal to a thread's process group, guarded the same way as
+/// cancellation: never signal the daemon's own group, and never `kill(-0, …)`
+/// (which would hit the caller's group). Unlike [`kill_process_group`], this
+/// does not wait or escalate — it is a one-shot out-of-band nudge (the runtime
+/// reacts to the signal itself).
+pub fn signal_process_group(pgid: i64, signal: i32) -> SignalResult {
+    if pgid <= 0 {
+        return SignalResult::MissingPgid;
+    }
+    if pgid == daemon_pgid() {
+        return SignalResult::SkippedDaemonPgid;
+    }
+    let rc = unsafe { libc::kill(-(pgid as i32), signal) };
+    if rc == 0 {
+        return SignalResult::Delivered;
+    }
+    let errno = std::io::Error::last_os_error();
+    if errno.raw_os_error() == Some(libc::ESRCH) {
+        SignalResult::AlreadyDead
+    } else {
+        SignalResult::Failed
+    }
+}
+
+/// Deliver the live-intervention nudge (`SIGUSR1`) to a thread's process group.
+/// The runtime's `SIGUSR1` handler sets its interrupt flag, cutting the
+/// in-flight cognition so the queued input folds into a fresh one.
+pub fn interrupt_process_group(pgid: i64) -> SignalResult {
+    signal_process_group(pgid, libc::SIGUSR1)
+}
+
 /// SIGKILL the entire process group immediately — no SIGTERM, no grace.
 ///
 /// Distinct from `kill_process_group(_, Duration::ZERO)` because the
@@ -373,10 +436,10 @@ mod tests {
     /// becomes a zombie that `kill(0, -pgid)` still reports as alive,
     /// confusing the daemon's `pgid_alive` poll. (In production the
     /// reaper is the engine's spawn handle.)
-    fn run_kill_with_reaper<F: FnOnce() -> KillResult + Send + 'static>(
+    fn run_kill_with_reaper<R: Send + 'static, F: FnOnce() -> R + Send + 'static>(
         kill: F,
         child: &mut std::process::Child,
-    ) -> (KillResult, std::process::ExitStatus) {
+    ) -> (R, std::process::ExitStatus) {
         let kill_handle = std::thread::spawn(kill);
         let status = child.wait().expect("wait child");
         let result = kill_handle.join().expect("kill thread join");
@@ -506,5 +569,80 @@ mod tests {
         let result = kill_process_group(pgid, Duration::from_millis(50));
         assert!(result.success);
         assert_eq!(result.method, "already_dead");
+    }
+
+    /// Spawn a target whose SIGUSR1 trap writes a marker then exits, in its own
+    /// process group. Mirrors `spawn_signal_target` but for the live-interrupt
+    /// signal.
+    fn spawn_usr1_target(tmp: &TempDir) -> (std::process::Child, i64, std::path::PathBuf) {
+        let marker = tmp.path().join("got_usr1");
+        let marker_str = marker.display().to_string();
+        let script = format!(
+            r#"trap 'echo usr1 > "{m}"; exit 0' USR1; (while true; do sleep 0.05; done)"#,
+            m = marker_str
+        );
+        let child = unsafe {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    if libc::setpgid(0, 0) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                })
+                .spawn()
+                .expect("spawn usr1 target")
+        };
+        let pgid = child.id() as i64;
+        std::thread::sleep(Duration::from_millis(150));
+        (child, pgid, marker)
+    }
+
+    #[test]
+    fn interrupt_process_group_delivers_sigusr1() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, pgid, marker) = spawn_usr1_target(&tmp);
+
+        let (result, status) =
+            run_kill_with_reaper(move || interrupt_process_group(pgid), &mut child);
+
+        assert_eq!(result, SignalResult::Delivered);
+        assert!(marker.exists(), "SIGUSR1 trap did not run — marker missing");
+        assert_eq!(read_marker(&marker).as_deref(), Some("usr1\n"));
+        assert!(status.success(), "expected clean exit, got {status:?}");
+    }
+
+    #[test]
+    fn signal_missing_pgid_is_not_delivered() {
+        // pgid 0 must NOT map to kill(-0, …) (the daemon's own group).
+        assert_eq!(signal_process_group(0, libc::SIGUSR1), SignalResult::MissingPgid);
+        assert_eq!(signal_process_group(-5, libc::SIGUSR1), SignalResult::MissingPgid);
+    }
+
+    #[test]
+    fn signal_daemon_pgid_is_refused() {
+        assert_eq!(
+            signal_process_group(daemon_pgid(), libc::SIGUSR1),
+            SignalResult::SkippedDaemonPgid
+        );
+    }
+
+    #[test]
+    fn signal_dead_pgid_reports_already_dead() {
+        let tmp = TempDir::new().unwrap();
+        let (mut child, pgid, _marker) = spawn_usr1_target(&tmp);
+        let _ = unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+        let _ = child.wait();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert_eq!(
+            signal_process_group(pgid, libc::SIGUSR1),
+            SignalResult::AlreadyDead
+        );
     }
 }

@@ -20,6 +20,7 @@ use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
 use crate::identity::NodeIdentity;
 use crate::ignore::IgnoreMatcher;
+use crate::live_input_queue::LiveInputQueue;
 use crate::node_config::NodeConfigSnapshot;
 use crate::service_registry::{ServiceDescriptor, ServiceRegistry};
 use crate::state_store::StateStore;
@@ -46,6 +47,13 @@ pub struct AppState {
     pub engine_cache: EngineCache,
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,
+    /// Operator live-input staging for *running* directive threads. The
+    /// `threads.input` handler enqueues here; the running runtime drains it via
+    /// `runtime.poll_input`, which persists each input as a durable
+    /// `cognition_in` through the running-guarded append path. Shares its `Arc`
+    /// with `ThreadLifecycleService` (wired by the composition root via
+    /// `set_live_input_queue`) so finalization closes a thread's entry.
+    pub live_input: Arc<LiveInputQueue>,
     pub events: Arc<EventStoreService>,
     /// Per-thread live broadcast hub for SSE subscribers. Populated by
     /// the UDS callback handler after persistence so subscribers see

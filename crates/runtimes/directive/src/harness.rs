@@ -24,14 +24,29 @@ pub struct Harness {
     limits: HardLimits,
     effective_caps: Vec<String>,
     cancelled: Arc<AtomicBool>,
+    /// Live-interrupt request (SIGUSR1). Distinct from `cancelled`: an interrupt
+    /// cuts the in-flight cognition but the loop CONTINUES (it seals the partial,
+    /// folds the queued operator input, and runs a fresh cognition). The runner
+    /// observes-and-resets it via `take_interrupt` after a cut.
+    interrupted: Arc<AtomicBool>,
     start: Instant,
     turns_used: u32,
     tokens_used: u64,
     spend_used: f64,
     spawns_used: u32,
+    /// Total live interrupts honored this run. Monotonic — NOT refunded — so it
+    /// bounds a runaway interrupt loop (each interrupt refunds its turn, so the
+    /// turn limit alone can't stop repeated SIGUSR1). See [`Self::record_interrupt`].
+    interrupts_used: u32,
     depth: u32,
     risk_policy: Option<RiskPolicy>,
 }
+
+/// Backstop cap on live interrupts per run. An interrupt refunds its turn (an
+/// interrupted attempt is not a completed turn), so without this an automated
+/// SIGUSR1 spam could drive unbounded provider calls. Generous — a human
+/// operator steering one execution will never approach it.
+const MAX_LIVE_INTERRUPTS: u32 = 256;
 
 impl Harness {
     pub fn new(policy: &EnvelopePolicy, depth: u32, risk_policy: Option<RiskPolicy>) -> Self {
@@ -39,11 +54,13 @@ impl Harness {
             limits: policy.hard_limits.clone(),
             effective_caps: policy.effective_caps.clone(),
             cancelled: Arc::new(AtomicBool::new(false)),
+            interrupted: Arc::new(AtomicBool::new(false)),
             start: Instant::now(),
             turns_used: 0,
             tokens_used: 0,
             spend_used: 0.0,
             spawns_used: 0,
+            interrupts_used: 0,
             depth,
             risk_policy,
         }
@@ -51,6 +68,23 @@ impl Harness {
 
     pub fn cancelled_flag(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
+    }
+
+    /// Shared handle to the live-interrupt flag (set by the SIGUSR1 handler,
+    /// observed by the provider stream loop).
+    pub fn interrupted_flag(&self) -> Arc<AtomicBool> {
+        self.interrupted.clone()
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Relaxed)
+    }
+
+    /// Observe-and-reset the interrupt flag. Returns whether an interrupt was
+    /// pending. The runner calls this after a cut so a single SIGUSR1 cuts
+    /// exactly one cognition.
+    pub fn take_interrupt(&self) -> bool {
+        self.interrupted.swap(false, Ordering::Relaxed)
     }
 
     pub fn check_limits(&self) -> Result<(), String> {
@@ -108,6 +142,26 @@ impl Harness {
 
     pub fn record_turn(&mut self) {
         self.turns_used += 1;
+    }
+
+    /// Un-count a turn whose cognition was cut by a live interrupt before it
+    /// completed. DECISION 1: an interrupted attempt is NOT a completed turn, so
+    /// the redirect's fresh cognition stays within the turn limit (e.g. a redirect
+    /// still works under `limits.turns = 1`).
+    pub fn refund_turn(&mut self) {
+        self.turns_used = self.turns_used.saturating_sub(1);
+    }
+
+    /// Record an honored live interrupt. Returns `true` while under the runaway
+    /// backstop, `false` once [`MAX_LIVE_INTERRUPTS`] is exceeded (the runner then
+    /// stops honoring further interrupts for this run).
+    pub fn record_interrupt(&mut self) -> bool {
+        self.interrupts_used += 1;
+        self.interrupts_used <= MAX_LIVE_INTERRUPTS
+    }
+
+    pub fn interrupts_used(&self) -> u32 {
+        self.interrupts_used
     }
 
     pub fn record_tokens(&mut self, input: u64, output: u64) {
@@ -298,6 +352,61 @@ mod tests {
         let harness = make_harness(HardLimits::default(), vec![]);
         harness.cancelled_flag().store(true, Ordering::Relaxed);
         assert!(harness.check_limits().is_err());
+    }
+
+    #[test]
+    fn interrupt_flag_is_independent_of_cancel() {
+        // An interrupt must NOT trip check_limits (the loop continues after a cut),
+        // unlike cancel.
+        let harness = make_harness(HardLimits::default(), vec![]);
+        harness.interrupted_flag().store(true, Ordering::Relaxed);
+        assert!(harness.is_interrupted());
+        assert!(harness.check_limits().is_ok(), "interrupt must not stop the loop");
+    }
+
+    #[test]
+    fn take_interrupt_observes_and_resets() {
+        let harness = make_harness(HardLimits::default(), vec![]);
+        harness.interrupted_flag().store(true, Ordering::Relaxed);
+        assert!(harness.take_interrupt(), "first take sees the interrupt");
+        assert!(!harness.take_interrupt(), "flag was reset");
+        assert!(!harness.is_interrupted());
+    }
+
+    #[test]
+    fn refund_turn_lets_redirect_proceed_under_turn_limit_1() {
+        // DECISION 1: an interrupted attempt is not a completed turn.
+        let mut harness = make_harness(
+            HardLimits {
+                turns: 1,
+                ..HardLimits::default()
+            },
+            vec![],
+        );
+        harness.record_turn(); // the cognition that got interrupted
+        assert!(harness.check_limits().is_err(), "1 used == limit 1");
+        harness.refund_turn(); // interrupted → un-count
+        assert!(
+            harness.check_limits().is_ok(),
+            "redirect's fresh cognition fits within the turn limit"
+        );
+    }
+
+    #[test]
+    fn refund_turn_saturates_at_zero() {
+        let mut harness = make_harness(HardLimits::default(), vec![]);
+        harness.refund_turn();
+        assert_eq!(harness.turns_used(), 0);
+    }
+
+    #[test]
+    fn record_interrupt_bounds_runaway() {
+        let mut harness = make_harness(HardLimits::default(), vec![]);
+        for _ in 0..MAX_LIVE_INTERRUPTS {
+            assert!(harness.record_interrupt(), "under the cap is allowed");
+        }
+        assert!(!harness.record_interrupt(), "past the cap is refused");
+        assert_eq!(harness.interrupts_used(), MAX_LIVE_INTERRUPTS + 1);
     }
 
     #[test]

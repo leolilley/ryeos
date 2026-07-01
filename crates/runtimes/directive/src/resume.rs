@@ -426,6 +426,54 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_seal_folds_as_assistant_then_redirect() {
+        // A live-interrupt seal is a content-bearing cognition_out (with
+        // interrupted:true, no tool_calls). Resume must fold it as an assistant
+        // message in order — the redirect input follows as the next user turn,
+        // and the fresh cognition's output after that. The `interrupted` marker is
+        // ignored by the fold (only content/tool_calls/reasoning are read).
+        let events = vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: json!({"content": "start the long task"}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"turn": 1, "content": "working on it, step on", "interrupted": true}),
+            },
+            // The operator's redirect, folded as a durable cognition_in by the
+            // daemon's poll-and-persist.
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: json!({"content": "stop — do X instead"}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"turn": 2, "content": "doing X"}),
+            },
+        ];
+        let messages = reconstruct_messages(&events).unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(
+            messages[1].content.as_ref().and_then(|c| c.as_str()),
+            Some("working on it, step on"),
+            "interrupted partial content is preserved"
+        );
+        assert!(
+            messages[1].tool_calls.is_none(),
+            "an interrupted seal carries no tool_calls — no unpaired tool call"
+        );
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(
+            messages[2].content.as_ref().and_then(|c| c.as_str()),
+            Some("stop — do X instead")
+        );
+        assert_eq!(messages[3].role, "assistant");
+    }
+
+    #[test]
     fn non_conversational_events_are_skipped() {
         // Lifecycle / usage / turn-marker / streaming events carry no message;
         // folding skips them rather than failing.

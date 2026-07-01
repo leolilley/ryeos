@@ -1734,9 +1734,10 @@ fn help(core: &StudioCore) -> StudioHelpVm {
         entries: vec![
             entry("Move", "↑ / ↓", "Move the point through rows; else move focus"),
             entry("Move", "← / →", "Fold / unfold the section under the point; else move focus"),
-            entry("Act", "Enter", "Activate the selected row (or submit when typing)"),
+            entry("Act", "Enter", "Activate the selected row (or steer-submit when typing)"),
+            entry("Act", "Alt+Enter", "Submit as an interrupt — cut the running thread's turn and redirect"),
             entry("Act", "Tab / ⇧Tab", "Accept completion, else cycle the route target"),
-            entry("Act", "Esc", "Interrupt a running thread; else close the lens"),
+            entry("Act", "Esc", "Cancel a running thread; else close the lens"),
             entry("Input", "type", "The foot input is always live — text routes at the directive"),
             entry("Lenses", "Ctrl+K", "Open the lens launcher (swap the center lens)"),
             entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),

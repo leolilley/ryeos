@@ -133,6 +133,16 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
             ui(StudioUiEvent::InterruptHead)
         }
         StudioKey::Escape if event.modifiers.none() => action(StudioAction::CloseFocused),
+        // Alt+Enter submits as a forceful INTERRUPT (cut the running thread's
+        // in-flight cognition and redirect); plain Enter steers. Checked first so
+        // the modifier wins over the plain-submit arm below.
+        StudioKey::Enter
+            if context.input_visible
+                && context.input_has_text
+                && event.modifiers.alt_only() =>
+        {
+            ui(StudioUiEvent::SubmitInputInterrupt)
+        }
         // Plain Enter submits when you're typing in the input (chat
         // convention); Shift+Enter also submits where the terminal can
         // send it. An empty input lets plain Enter activate a row.
@@ -501,6 +511,30 @@ mod tests {
             studio_key_command(key(StudioKey::Escape), context(false, true)),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::InterruptHead
+            }
+        ));
+    }
+
+    #[test]
+    fn alt_enter_submits_as_interrupt_plain_enter_steers() {
+        let alt_enter = StudioKeyEvent {
+            key: StudioKey::Enter,
+            modifiers: StudioKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            studio_key_command(alt_enter, context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::SubmitInputInterrupt
+            }
+        ));
+        // Plain Enter with text steers (default intent).
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Enter), context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::SubmitInput
             }
         ));
     }

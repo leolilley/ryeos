@@ -201,9 +201,69 @@ fn validate_event_storage_class(
 }
 
 fn is_ephemeral_allowed(event_type: &str, payload: &Value) -> bool {
-    matches!(
-        event_type,
-        "token_delta" | "stream_snapshot" | "cognition_reasoning" | "graph_foreach_iteration"
-    ) || (event_type == "cognition_out"
-        && (payload.get("delta").is_some() || payload.get("tool_use_partial").is_some()))
+    use ryeos_runtime::{RuntimeEventType, StorageClass};
+    // Lock-step with the runtime's `storage_class_for_payload`. The event-type
+    // vocabulary is the typed enum, not raw strings.
+    match RuntimeEventType::parse(event_type) {
+        // Types whose nature is always live-only (token deltas, stream snapshots,
+        // reasoning, foreach progress) — sourced from the enum so a new ephemeral
+        // variant is covered automatically.
+        Ok(t) if t.storage_class() == StorageClass::Ephemeral => true,
+        // cognition_out is indexed by default, but progressive streaming payloads
+        // (delta / tool_use_partial / complete tool_use) are live-only. The durable
+        // tool-call record is the turn-complete `cognition_out{tool_calls}`, never
+        // the mid-stream `tool_use`. (Payload keys are JSON field names, not event
+        // types, so they stay string-keyed.)
+        Ok(RuntimeEventType::CognitionOut) => {
+            payload.get("delta").is_some()
+                || payload.get("tool_use_partial").is_some()
+                || payload.get("tool_use").is_some()
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn progressive_cognition_out_allows_ephemeral() {
+        // Lock-step with the runtime: delta / tool_use_partial / complete tool_use.
+        for payload in [
+            json!({"delta": "hi"}),
+            json!({"tool_use_partial": {"id": "x"}}),
+            json!({"tool_use": {"id": "x", "name": "f", "arguments": {}}}),
+        ] {
+            assert!(
+                is_ephemeral_allowed("cognition_out", &payload),
+                "cognition_out {payload} should allow ephemeral"
+            );
+            // And the validator accepts an ephemeral storage_class for it.
+            assert!(validate_event_storage_class("cognition_out", "ephemeral", &payload).is_ok());
+        }
+    }
+
+    #[test]
+    fn durable_cognition_out_rejects_ephemeral() {
+        // A turn-complete cognition_out (tool_calls array) or interrupted seal must
+        // be indexed; claiming ephemeral is rejected.
+        for payload in [
+            json!({"content": "done", "tool_calls": []}),
+            json!({"content": "partial", "interrupted": true}),
+        ] {
+            assert!(!is_ephemeral_allowed("cognition_out", &payload));
+            assert!(validate_event_storage_class("cognition_out", "ephemeral", &payload).is_err());
+            // Indexed is always fine.
+            assert!(validate_event_storage_class("cognition_out", "indexed", &payload).is_ok());
+        }
+    }
+
+    #[test]
+    fn always_ephemeral_types_come_from_the_enum() {
+        for et in ["token_delta", "stream_snapshot", "cognition_reasoning"] {
+            assert!(is_ephemeral_allowed(et, &json!({})));
+        }
+    }
 }

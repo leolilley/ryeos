@@ -340,6 +340,10 @@ async fn main() -> Result<()> {
         event_streams.clone(),
     )?);
     threads.set_scheduler_db(scheduler_db.clone(), config.app_root.clone());
+    // Operator live-input queue, shared between the `threads.input` enqueue
+    // path (via AppState) and lifecycle finalization (closes a thread's entry).
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(CommandService::new(
         state_store.clone(),
         kind_profiles.clone(),
@@ -393,6 +397,7 @@ async fn main() -> Result<()> {
         ),
         identity: Arc::new(identity),
         threads,
+        live_input,
         events,
         event_streams,
         commands,
@@ -888,6 +893,8 @@ async fn run_service_standalone(
         events.clone(),
         event_streams.clone(),
     )?);
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,
@@ -913,6 +920,7 @@ async fn run_service_standalone(
         ),
         identity: Arc::new(identity),
         threads,
+        live_input,
         events,
         event_streams,
         commands,

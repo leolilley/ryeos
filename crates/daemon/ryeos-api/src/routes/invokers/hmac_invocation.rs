@@ -1319,6 +1319,7 @@ mod tests {
             ),
             identity: std::sync::Arc::new(identity),
             threads,
+            live_input: std::sync::Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new()),
             events,
             event_streams,
             commands,

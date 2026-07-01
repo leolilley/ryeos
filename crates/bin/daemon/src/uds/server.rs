@@ -143,6 +143,30 @@ pub async fn dispatch_runtime_method(
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
+    } else if method == "runtime.poll_input" {
+        // runtime.poll_input drains staged operator inputs and persists them as
+        // durable `cognition_in` for the running thread. Require BOTH proofs the
+        // runtime holds: the per-request thread_auth_token (like dispatch_action)
+        // AND the exact-thread callback token (write tier — it appends durable
+        // events). Either alone is insufficient.
+        let tat = params
+            .get("thread_auth_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.poll_input"))?;
+        let thread_id = params
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_id"))?;
+        state.thread_auth.validate(tat, thread_id)?;
+        let token = params
+            .get("callback_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing callback_token"))?;
+        Some(
+            state
+                .callback_tokens
+                .validate_token_and_thread(token, thread_id)?,
+        )
     } else if is_chain_read_method(method) {
         let token = params
             .get("callback_token")
@@ -215,6 +239,7 @@ pub async fn dispatch_runtime_method(
         "runtime.complete_command" => handle_complete_command(&clean_params, state),
         "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
         "runtime.attach_process" => handle_attach_process(&clean_params, state),
+        "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -469,6 +494,82 @@ fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<
         serde_json::from_value(params.clone()).context("invalid events.replay params")?;
     serde_json::to_value(state.events.replay(&params)?)
         .context("failed to encode events.replay result")
+}
+
+/// `runtime.poll_input` — poll-and-persist staged operator inputs for a running
+/// thread. The queue is daemon-side scratch; this is the ONLY place a queued
+/// input becomes a durable braid event.
+///
+/// Contract: drain FIFO → append indexed `cognition_in` (content only) through
+/// the running-guarded path → return the persisted inputs for the runtime to
+/// fold. The guard is the terminal-safety anchor: if the thread is no longer
+/// running, the append is a no-op and the drained items are discarded (never a
+/// `cognition_in` after terminal). A transient append error restores the items
+/// to the front so a later poll retries.
+fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+    let thread_id = params
+        .get("thread_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing thread_id on runtime.poll_input"))?;
+
+    // Resolve the chain root BEFORE draining so a lookup failure can't strand
+    // drained input — nothing has been drained yet. If the thread vanished there
+    // is nowhere to persist.
+    let Some(detail) = state.state_store.get_thread(thread_id)? else {
+        return Ok(json!({ "inputs": [] }));
+    };
+
+    let pending = state.live_input.drain(thread_id);
+    if pending.is_empty() {
+        return Ok(json!({ "inputs": [] }));
+    }
+    let n = pending.len();
+
+    // Encode the response BEFORE persisting: a serialize failure must restore the
+    // drained items (releasing the in-flight reservation), never leave durable
+    // `cognition_in` the runtime never receives.
+    let inputs_value = match serde_json::to_value(&pending) {
+        Ok(v) => v,
+        Err(e) => {
+            state.live_input.restore_front(thread_id, pending);
+            return Err(anyhow::Error::new(e).context("failed to encode poll_input inputs"));
+        }
+    };
+
+    // A `cognition_in` carries only `content` — the intent is a delivery concern,
+    // not part of the braid. Indexed (durable) so resume folds it in order.
+    let events: Vec<ryeos_app::state_store::NewEventRecord> = pending
+        .iter()
+        .map(|s| ryeos_app::state_store::NewEventRecord {
+            event_type: "cognition_in".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({ "content": s.content }),
+        })
+        .collect();
+
+    match state
+        .threads
+        .append_thread_events(&detail.chain_root_id, thread_id, &events)
+    {
+        // Persisted while running — release the reservation and hand the inputs
+        // back for the loop to fold.
+        Ok(Some(_persisted)) => {
+            state.live_input.ack_drained(thread_id, n);
+            Ok(json!({ "inputs": inputs_value }))
+        }
+        // Not running (terminal) — discard and release the reservation. The
+        // queue close at finalize already cleared queued items; this drops
+        // anything that raced in.
+        Ok(None) => {
+            state.live_input.ack_drained(thread_id, n);
+            Ok(json!({ "inputs": [] }))
+        }
+        // Transient failure — restore for a later poll, then surface the error.
+        Err(e) => {
+            state.live_input.restore_front(thread_id, pending);
+            Err(e)
+        }
+    }
 }
 
 fn handle_bundle_events_append(
@@ -793,6 +894,7 @@ mod tests {
             ),
             identity: Arc::new(identity),
             threads,
+            live_input: Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new()),
             events,
             event_streams,
             commands,

@@ -199,6 +199,24 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             tracing::info!("received SIGTERM, cancellation requested");
         });
     }
+
+    // Wire SIGUSR1 → harness interrupt flag (live intervention). Unlike SIGTERM
+    // this is repeatable: each signal requests cutting the in-flight cognition so
+    // a queued operator input folds into a fresh one. The runner observes-and-
+    // resets the flag, so we re-arm on every signal.
+    {
+        let interrupted = harness.interrupted_flag();
+        let mut sigusr1 =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                .context("failed to install SIGUSR1 handler")?;
+        tokio::spawn(async move {
+            loop {
+                sigusr1.recv().await;
+                interrupted.store(true, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!("received SIGUSR1, live interrupt requested");
+            }
+        });
+    }
     let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     let hooks = bootstrap_output.config.hooks.clone();

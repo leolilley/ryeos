@@ -169,6 +169,17 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     ) -> Result<Value, CallbackError>;
 
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError>;
+
+    /// Drain-and-persist operator inputs staged for this RUNNING thread,
+    /// returning `{ inputs: [LiveInput...] }` in FIFO order. The daemon
+    /// appends each as a durable `cognition_in` through the running-guarded path
+    /// before returning, so a non-empty result is already in the braid.
+    ///
+    /// Default: no live input (mocks and runtimes without a live data channel).
+    /// Only the real UDS client overrides this.
+    async fn poll_input(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+        Ok(serde_json::json!({ "inputs": [] }))
+    }
 }
 
 pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
