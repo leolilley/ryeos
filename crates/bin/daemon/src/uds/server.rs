@@ -646,7 +646,10 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
 fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {
     match result {
         Ok(value) => RpcResponse::ok(request_id, value),
-        Err(err) => RpcResponse::err(request_id, "request_failed", err.to_string()),
+        // `{:#}` walks the anyhow cause chain, so a deep failure (e.g. a serde
+        // decode error under "invalid <method> params") surfaces its root cause
+        // to the caller instead of only the top-level context line.
+        Err(err) => RpcResponse::err(request_id, "request_failed", format!("{err:#}")),
     }
 }
 
