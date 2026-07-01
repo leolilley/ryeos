@@ -1304,28 +1304,33 @@ async fn run_claimed_thread_row(
         .kind_profiles()
         .get(&resolved.kind)
         .is_some_and(|p| p.supports_continuation);
-    if supports_continuation || native_resume.is_some() {
+    // Capture the launch identity whenever a successor or a native resume could
+    // later need to reconstruct how to relaunch: continuation-capable kinds fold
+    // a chain into a successor, and native-resume kinds recover from a checkpoint
+    // (reconcile returns `MissingResumeContext` without it) and hand a copy of
+    // this identity to a follow-resume successor. `ResumeContext` is a
+    // reconstruct-launch-identity record, not a continuation-only one.
+    let should_capture_resume_context = supports_continuation || native_resume.is_some();
+    if should_capture_resume_context {
         let mut metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default();
-        if supports_continuation {
-            metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
-                kind: resolved.kind.clone(),
-                item_ref: resolved.item_ref.clone(),
-                launch_mode: resolved.launch_mode.clone(),
-                parameters: parameters.clone(),
-                project_context: resolved.plan_context.project_context.clone(),
-                original_snapshot_hash: None,
-                current_site_id: resolved.current_site_id.clone(),
-                origin_site_id: resolved.origin_site_id.clone(),
-                requested_by: resolved.plan_context.requested_by.clone(),
-                execution_hints: resolved.plan_context.execution_hints.clone(),
-                effective_caps: effective_caps.clone(),
-                // Capture the actual launch identity so a continuation successor of
-                // a delegate kind (directive / graph) can reconstruct how to launch
-                // without a per-item `executor_id`.
-                executor_ref: Some(executor_ref.to_string()),
-                runtime_ref: runtime_ref.map(str::to_string),
-            });
-        }
+        metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
+            kind: resolved.kind.clone(),
+            item_ref: resolved.item_ref.clone(),
+            launch_mode: resolved.launch_mode.clone(),
+            parameters: parameters.clone(),
+            project_context: resolved.plan_context.project_context.clone(),
+            original_snapshot_hash: None,
+            current_site_id: resolved.current_site_id.clone(),
+            origin_site_id: resolved.origin_site_id.clone(),
+            requested_by: resolved.plan_context.requested_by.clone(),
+            execution_hints: resolved.plan_context.execution_hints.clone(),
+            effective_caps: effective_caps.clone(),
+            // Capture the actual launch identity so a continuation successor of
+            // a delegate kind (directive / graph) can reconstruct how to launch
+            // without a per-item `executor_id`.
+            executor_ref: Some(executor_ref.to_string()),
+            runtime_ref: runtime_ref.map(str::to_string),
+        });
         if let Some(nr) = native_resume.clone() {
             metadata = metadata.with_native_resume(nr);
         }

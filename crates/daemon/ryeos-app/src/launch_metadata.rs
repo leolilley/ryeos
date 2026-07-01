@@ -81,10 +81,11 @@ pub struct RuntimeLaunchMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_dir: Option<PathBuf>,
 
-    /// Minimum context required for `reconcile.rs` to re-spawn the
-    /// thread under the same `thread_id` after a daemon restart.
-    /// Populated by the runner at attach time when `native_resume` is
-    /// declared. `None` for threads that didn't opt in to resume.
+    /// Minimum context required to reconstruct the thread's launch identity —
+    /// for `reconcile.rs` to re-spawn it under the same `thread_id` after a
+    /// daemon restart, and for a continuation/follow-resume successor to
+    /// relaunch it. Populated at managed launch time for continuation-capable
+    /// OR native-resume launches. `None` for threads that are neither.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_context: Option<ResumeContext>,
 }

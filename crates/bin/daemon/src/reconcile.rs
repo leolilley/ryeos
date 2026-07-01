@@ -631,6 +631,18 @@ mod tests {
     }
 
     #[test]
+    fn continuation_shape_rejects_fresh_native_resume_root_with_context() {
+        // Native-resume launches now capture a ResumeContext even on a FRESH root
+        // (so a follow-resume successor can copy the parent's launch identity). A
+        // fresh root has no upstream, so it must NOT be misclassified as a
+        // continuation successor — it is checkpoint-resumed as the same thread.
+        let nr = native_resume_lm().with_resume_context(ctx());
+        assert!(!continuation_shape(&thread_detail(
+            "R", "created", None, None, Some(nr)
+        )));
+    }
+
+    #[test]
     fn is_machine_successor_true_when_source_continued_and_points_back() {
         let succ = thread_detail("S", "created", Some("SRC"), None, None);
         let src = thread_detail("SRC", "continued", None, Some("S"), None);
