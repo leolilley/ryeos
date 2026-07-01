@@ -609,13 +609,16 @@ impl StudioCore {
                         },
                         params: serde_json::json!({
                             "thread_id": thread_id,
-                            "command_type": command,
+                            "command_type": command.as_str(),
                         }),
                         route_seq: None,
                         ratchet_on_thread_id: false,
                     })]
                 } else {
-                    self.notice(format!("No active thread to {command}."), StudioTone::Warn);
+                    self.notice(
+                        format!("No active thread to {}.", command.as_str()),
+                        StudioTone::Warn,
+                    );
                     Vec::new()
                 }
             }
@@ -5113,7 +5116,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
-                    command: "interrupt".to_string(),
+                    command: crate::studio::dto::ThreadControlCommand::Interrupt,
                 },
             },
         });
@@ -5136,7 +5139,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
-                    command: "interrupt".to_string(),
+                    command: crate::studio::dto::ThreadControlCommand::Interrupt,
                 },
             },
         });

@@ -101,7 +101,7 @@ pub enum StudioAction {
     /// `ryeos commands submit` uses — no new bypass; see the daemon authz
     /// note at `command_service.submit` / `.tmp/thread-authorization-review.md`.
     SubmitThreadCommand {
-        command: String,
+        command: super::dto::ThreadControlCommand,
     },
     /// Aim the input route at a thread — the feed re-projects to its braid.
     /// Activating a forked-subthread feed entry "enters" that subthread.

@@ -1630,21 +1630,25 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     if let Some(head) = core.seat.fold().input_route().thread {
         // "continue" is an operator follow-up — gate it on the substrate fact so
         // a machine-only thread (graph) doesn't offer an operator continue the
-        // daemon refuses. interrupt/cancel apply to any active thread.
+        // daemon refuses. "cancel" (terminate) applies to any active thread.
+        //
+        // No command-style "interrupt" item: the operator interrupts a running
+        // directive by submitting text with Alt+Enter (a live cognition_in
+        // redirect via threads/input) — "Interrupt" is reserved for that. The old
+        // commands/submit "interrupt" was inert for directives (nothing claims it)
+        // and only muddied the meaning.
+        use crate::studio::dto::ThreadControlCommand;
         let operator_continuable = core.thread_supports_operator_followup(&head) != Some(false);
         for (label, command) in [
-            ("Interrupt thread", "interrupt"),
-            ("Continue thread", "continue"),
-            ("Cancel thread", "cancel"),
+            ("Continue thread", ThreadControlCommand::Continue),
+            ("Cancel thread", ThreadControlCommand::Cancel),
         ] {
             items.push(StudioLauncherItemVm {
                 label: label.to_string(),
                 hint: "active thread".to_string(),
-                action: StudioAction::SubmitThreadCommand {
-                    command: command.to_string(),
-                },
+                action: StudioAction::SubmitThreadCommand { command },
                 secondary_action: None,
-                enabled: command != "continue" || operator_continuable,
+                enabled: command != ThreadControlCommand::Continue || operator_continuable,
             });
         }
     }
