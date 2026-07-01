@@ -193,7 +193,7 @@ pub async fn dispatch_action(
 /// `continuation_id` lives at the leaf's top level under the typed
 /// callback contract, so classification MUST happen before continuation
 /// chasing reads it.
-fn classify_envelope(value: Value) -> ActionOutcome {
+pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
     let Some(obj) = value.as_object() else {
         return ActionOutcome::Success(ActionSuccess::bare(value));
     };

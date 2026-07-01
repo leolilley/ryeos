@@ -255,7 +255,7 @@ fn main() -> anyhow::Result<()> {
 
     // Inject resume state so walker.rs picks it up
     if let Some(ref rs) = resume_state {
-        params["resume_state"] = json!({
+        let mut resume_json = json!({
             "current_node": rs.current_node,
             "step_count": rs.step_count,
             "state": rs.state,
@@ -266,6 +266,12 @@ fn main() -> anyhow::Result<()> {
             // compute a different follow_key and lose idempotency.
             "graph_run_id": rs.graph_run_id,
         });
+        // Follow resume: the pending-follow marker + the child's canonical envelope
+        // (when present) let the walker consume the result at the follow node
+        // instead of re-dispatching or re-suspending.
+        resume_json[crate::walker::follow_keys::PENDING_FOLLOW] = json!(rs.pending_follow);
+        resume_json[crate::walker::follow_keys::FOLLOW_RESULT] = json!(rs.follow_result);
+        params["resume_state"] = resume_json;
     }
 
     if let Some(ref schema) = graph.config.config_schema {
