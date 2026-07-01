@@ -2193,6 +2193,7 @@ pub async fn launch_existing_native_resume(
 async fn launch_claimed_follow_child(
     state: &AppState,
     thread: ryeos_app::state_store::ThreadDetail,
+    provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let thread_id = thread.thread_id.clone();
     // A follow child is a FRESH ROOT: no upstream braid, its own chain root.
@@ -2225,7 +2226,18 @@ async fn launch_claimed_follow_child(
         }
     };
 
-    let params = crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
+    let mut params =
+        crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
+
+    // Hot-path follow launch: override the resume-context's root-live-fs
+    // provenance with the parent's borrowed-child provenance (pushed-head /
+    // effective workspace / request engine preserved), so the child resolves and
+    // runs against the parent's workspace, not the daemon live tree. The reconcile
+    // path passes `None` and falls back to the resume-context provenance —
+    // non-serializable provenance is not yet restored across a daemon restart.
+    if let Some(provenance) = provenance_override {
+        params.provenance = provenance;
+    }
 
     let required_envelope_fields = state
         .engine
@@ -2281,6 +2293,7 @@ async fn launch_claimed_follow_child(
 pub async fn launch_follow_child(
     state: AppState,
     child_id: &str,
+    provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
     let claimed_by = format!("daemon:{}", std::process::id());
@@ -2331,7 +2344,7 @@ pub async fn launch_follow_child(
         }
     }
 
-    let result = launch_claimed_follow_child(&state, thread).await;
+    let result = launch_claimed_follow_child(&state, thread, provenance_override).await;
     let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
 
     match result {

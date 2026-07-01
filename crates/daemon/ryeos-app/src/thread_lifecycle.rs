@@ -996,6 +996,26 @@ impl ThreadLifecycleService {
         })
     }
 
+    /// Create a parent's follow-resume successor (created, NOT launched) and
+    /// settle the parent `continued` in one atomic op, then publish the resulting
+    /// events. The daemon follow keystone calls this to suspend the parent; the
+    /// successor is launched later, on child-terminal, by the follow-resume path.
+    /// Wraps the raw state-store op so event publishing stays a lifecycle concern.
+    pub fn create_follow_resume_successor(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+    ) -> Result<()> {
+        let persisted = self.state_store.create_follow_resume_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+        )?;
+        self.publish_records(&persisted);
+        Ok(())
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "artifact:publish",

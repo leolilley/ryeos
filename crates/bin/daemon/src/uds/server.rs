@@ -121,8 +121,10 @@ pub async fn dispatch_runtime_method(
 ) -> Result<serde_json::Value> {
     // Validate the callback token on ALL runtime.* methods, by access class:
     //
-    //  - `runtime.dispatch_action` does its own stronger validation (per-request
-    //    thread_auth_token + project_path).
+    //  - thread-auth methods (dispatch_action, spawn_follow_child) prove a
+    //    per-request `thread_auth_token` against the caller's own thread here,
+    //    then do their own stronger validation (callback token + project_path +
+    //    server-side trust derivation) in the handler.
     //  - chain *reads* (get_thread / replay) may target any thread in the
     //    capability's own chain — a successor rehydrates by folding its
     //    predecessors. Authorized by state-checked chain membership, never an
@@ -130,17 +132,18 @@ pub async fn dispatch_runtime_method(
     //  - everything else (writes + lifecycle: append, finalize, mark_running,
     //    request_continuation, publish_artifact, vault/bundle writes) requires an
     //    exact-thread match. A chain read must never widen into a chain write.
-    let callback_cap = if method == "runtime.dispatch_action" {
-        // runtime.dispatch_action: validate thread_auth_token (per-request
-        // identity proof). Missing or invalid = hard fail, no fallback.
+    let callback_cap = if is_thread_auth_method(method) {
+        // Per-request identity proof against the caller's own thread. Missing or
+        // invalid = hard fail, no fallback. The handler re-validates the callback
+        // token and derives principal / provenance / caps from server-side state.
         let tat = params
             .get("thread_auth_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.dispatch_action"))?;
+            .ok_or_else(|| anyhow!("missing thread_auth_token on {method}"))?;
         let thread_id = params
             .get("thread_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_id"))?;
+            .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
     } else if is_chain_read_method(method) {
@@ -175,6 +178,9 @@ pub async fn dispatch_runtime_method(
     match method {
         "runtime.dispatch_action" => {
             ryeos_executor::execution::runtime_dispatch::handle(params, state).await
+        }
+        "runtime.spawn_follow_child" => {
+            ryeos_executor::execution::spawn_follow_child::handle(params, state).await
         }
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
@@ -217,6 +223,17 @@ pub async fn dispatch_runtime_method(
         "runtime.attach_process" => handle_attach_process(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
+}
+
+/// Runtime methods that carry a per-request `thread_auth_token`. The prelude
+/// proves the token against the caller's own `thread_id`; the handler performs
+/// the stronger validation (callback token + project_path) and derives every
+/// trust-bearing field (principal, provenance, caps) from server-side state.
+fn is_thread_auth_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.dispatch_action" | "runtime.spawn_follow_child"
+    )
 }
 
 /// Runtime read methods a callback may invoke against any thread in its own
@@ -999,6 +1016,185 @@ mod tests {
             .expect("thread result row present after finalize");
         assert_eq!(persisted.outcome_code.as_deref(), Some("success"));
         assert_eq!(persisted.result, Some(json!("4")));
+    }
+
+    // ── runtime.spawn_follow_child: auth + admission rejections ──────────
+    // These reject before any mutation; the happy path / adoption / duplicate
+    // cases need a managed runtime registered in the engine (D9) and live in a
+    // dedicated fixture, not this empty-engine harness.
+
+    const FOLLOW_KEY: &str = "P/gr-1/node-a/0";
+
+    /// Create parent thread `P` (chain root `P`), make it native-resume (the
+    /// follow gate requires a checkpoint-resumable parent), and mint a callback
+    /// token (with `caps`) + a thread-auth token for it.
+    fn setup_follow_parent(state: &AppState, caps: Vec<String>) -> (String, String) {
+        state
+            .threads
+            .create_thread(&make_create_params("P", "P"))
+            .unwrap();
+        state
+            .state_store
+            .seed_launch_metadata(
+                "P",
+                &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+                    native_resume: Some(ryeos_engine::contracts::NativeResumeSpec {
+                        checkpoint_interval_secs: 30,
+                        max_auto_resume_attempts: 1,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let cbt = state.callback_tokens.generate(
+            "P",
+            std::path::PathBuf::from("/proj"),
+            std::time::Duration::from_secs(300),
+            caps,
+            test_provenance(state, "/proj"),
+        );
+        let tat = state.thread_auth.mint(
+            "P",
+            "user:test".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+        (cbt.token, tat.token)
+    }
+
+    fn follow_params(callback_token: &str, thread_auth_token: &str, child: &str) -> serde_json::Value {
+        json!({
+            "callback_token": callback_token,
+            "thread_auth_token": thread_auth_token,
+            "thread_id": "P",
+            "project_path": "/proj",
+            "graph_run_id": "gr-1",
+            "follow_node": "node-a",
+            "step_count": 0,
+            "child_item_ref": child,
+            "child_parameters": {},
+        })
+    }
+
+    fn no_waiter(state: &AppState) -> bool {
+        state
+            .state_store
+            .get_follow_waiter_by_key(FOLLOW_KEY)
+            .unwrap()
+            .is_none()
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_missing_thread_auth_token() {
+        let (_tmp, state) = setup_app_state();
+        let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        let mut params = follow_params(&cbt, "unused", "tool:echo");
+        params.as_object_mut().unwrap().remove("thread_auth_token");
+        let resp = dispatch(rpc("runtime.spawn_follow_child", params), &state).await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_invalid_thread_auth_token() {
+        let (_tmp, state) = setup_app_state();
+        let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, "tat-bogus", "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_invalid_callback_token() {
+        let (_tmp, state) = setup_app_state();
+        let (_cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params("cbt-bogus", &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_chain_root_mismatch() {
+        let (_tmp, state) = setup_app_state();
+        let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        // Point the cap at a chain root other than the parent row's.
+        assert!(state.callback_tokens.set_chain_root(&cbt, "OTHER-CHAIN"));
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_missing_execute_cap_without_mutation() {
+        let (_tmp, state) = setup_app_state();
+        // Parent holds an unrelated cap, not execute over `tool:echo`.
+        let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.other".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_non_native_resume_parent() {
+        let (_tmp, state) = setup_app_state();
+        // Parent has full authority but is NOT native-resume (no launch metadata
+        // seeded) → refused: follow needs a checkpoint-resumable parent.
+        state
+            .threads
+            .create_thread(&make_create_params("P", "P"))
+            .unwrap();
+        let cbt = state.callback_tokens.generate(
+            "P",
+            std::path::PathBuf::from("/proj"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.*".into()],
+            test_provenance(&state, "/proj"),
+        );
+        let tat = state.thread_auth.mint(
+            "P",
+            "user:test".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt.token, &tat.token, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_unmanaged_child_kind() {
+        let (_tmp, state) = setup_app_state();
+        // Parent HAS execute authority (wildcard), so admission passes the cap
+        // gate; the empty test engine has no runtime for `tool`, so the managed-
+        // runtime check rejects — and still no waiter is created.
+        let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.*".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
     }
 
     #[tokio::test]

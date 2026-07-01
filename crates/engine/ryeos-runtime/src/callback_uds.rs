@@ -154,6 +154,22 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn spawn_follow_child(
+        &self,
+        request: crate::callback::SpawnFollowChildRequest,
+    ) -> Result<Value, CallbackError> {
+        // Serialize the whole typed request so wire and struct can't drift; the
+        // daemon deserializes it back (plus the injected tokens) server-side.
+        let mut params = serde_json::to_value(&request).map_err(|e| {
+            CallbackError::Transport(anyhow::anyhow!("serialize spawn_follow_child: {e}"))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.spawn_follow_child", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn append_event(
         &self,
         thread_id: &str,

@@ -46,6 +46,35 @@ pub struct DispatchActionRequest {
     pub action: ActionPayload,
 }
 
+/// A graph node's request to launch a detached follow CHILD and suspend the
+/// calling parent until the child's whole continuation chain reaches terminal.
+///
+/// The daemon derives everything trust-bearing (acting principal, parent chain
+/// root, provenance, the caps the child runs under) from validated server-side
+/// state — never from this request. These fields only identify WHICH follow
+/// this is (the idempotency `follow_key` is
+/// `parent_thread_id/graph_run_id/follow_node/step_count`) and WHAT child to run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnFollowChildRequest {
+    /// The caller's own thread — the graph (parent) issuing the follow. Named
+    /// `thread_id` to match the callback wire convention (the caller's thread),
+    /// where "parent" is just its follow-semantics role.
+    pub thread_id: String,
+    /// Project path the parent runs in, for callback-token validation.
+    pub project_path: String,
+    pub graph_run_id: String,
+    pub follow_node: String,
+    pub step_count: i64,
+    /// Canonical ref of the child item to launch.
+    pub child_item_ref: String,
+    #[serde(default)]
+    pub child_parameters: Value,
+    /// Optional graph frontier id, recorded on the waiter for diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontier_id: Option<String>,
+}
+
 /// Terminal completion a runtime sends when it self-finalizes a thread.
 ///
 /// `cost` is carried as raw JSON so the runtime callback wire does not couple
@@ -105,6 +134,29 @@ pub trait RuntimeCallbackAPI: Send + Sync {
         thread_id: &str,
         log_reason: Option<&str>,
     ) -> Result<Value, CallbackError>;
+
+    /// Daemon-managed follow handoff: suspend the calling parent and launch a
+    /// detached CHILD whose entire continuation chain the parent awaits.
+    /// Get-or-create by `follow_key`: idempotent for an already-recorded waiter
+    /// (a duplicate call returns the recorded IDs). Recovery of a crash gap —
+    /// e.g. the waiter is durable but the detached launch never ran — is handled
+    /// by the later reconcile sweep, not this call.
+    ///
+    /// Daemon-only: minting thread rows, seeding launch identity, and launching
+    /// detached processes are things a mock / in-process client cannot do, so the
+    /// default refuses. The real UDS client overrides it; graph test mocks that
+    /// exercise follow override it to simulate the daemon.
+    async fn spawn_follow_child(
+        &self,
+        request: SpawnFollowChildRequest,
+    ) -> Result<Value, CallbackError> {
+        let _ = request;
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "spawn_follow_child is only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
 
     async fn append_event(
         &self,
