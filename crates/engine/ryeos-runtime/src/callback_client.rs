@@ -260,6 +260,42 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// Suspend-critical: ask the daemon to launch a detached follow child and
+    /// suspend this thread. Like `request_continuation`, a missing UDS client is a
+    /// hard error — a lost suspend would leave the graph believing it handed off.
+    /// The caller's own thread + project identity are injected here; the daemon
+    /// derives all trust-bearing state from the validated tokens.
+    pub async fn spawn_follow_child(
+        &self,
+        graph_run_id: &str,
+        follow_node: &str,
+        step_count: i64,
+        child_item_ref: &str,
+        child_parameters: Value,
+        frontier_id: Option<String>,
+    ) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback spawn_follow_child called without an inner UDS client \
+                 (socket missing); the follow suspend cannot be recorded"
+            )
+        })?;
+        let request = crate::callback::SpawnFollowChildRequest {
+            thread_id: self.thread_id.clone(),
+            project_path: self.project_path.clone(),
+            graph_run_id: graph_run_id.to_string(),
+            follow_node: follow_node.to_string(),
+            step_count,
+            child_item_ref: child_item_ref.to_string(),
+            child_parameters,
+            frontier_id,
+        };
+        client
+            .spawn_follow_child(request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn publish_artifact(&self, artifact: Value) -> Result<()> {
         match &self.inner {

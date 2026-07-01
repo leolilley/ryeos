@@ -64,6 +64,13 @@ pub struct GraphNode {
     pub cache_result: bool,
     #[serde(default, alias = "cache")]
     pub cache: bool,
+    /// FOLLOW node: instead of dispatching the action inline, the daemon launches
+    /// it as a detached child and suspends this graph until the child's whole
+    /// continuation chain reaches terminal, then resumes with its result. Only
+    /// valid on an action node, and never cacheable (the result does not exist at
+    /// suspend time). Validated in `validation.rs`.
+    #[serde(default)]
+    pub follow: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

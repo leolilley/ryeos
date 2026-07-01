@@ -261,6 +261,10 @@ fn main() -> anyhow::Result<()> {
             "state": rs.state,
             "accounting": rs.accounting,
             "suppressed_errors": rs.suppressed_errors,
+            // Preserve the ORIGINAL run id across resume: a follow re-entry must
+            // re-drive spawn_follow_child with the same graph_run_id or it would
+            // compute a different follow_key and lose idempotency.
+            "graph_run_id": rs.graph_run_id,
         });
     }
 

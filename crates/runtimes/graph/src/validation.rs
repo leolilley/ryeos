@@ -136,6 +136,34 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         }
     }
 
+    // A follow node suspends the graph and awaits a detached child. It is only
+    // meaningful on a single action dispatch, and its result does not exist at
+    // suspend time — so reject it on non-action, parallel, and cacheable nodes.
+    if node.follow {
+        if node.node_type != NodeType::Action {
+            result.errors.push(format!(
+                "node '{name}' sets 'follow' but is a {:?} node — only action nodes can follow",
+                node.node_type
+            ));
+        }
+        if node.parallel {
+            result
+                .errors
+                .push(format!("node '{name}' cannot be both 'follow' and 'parallel'"));
+        }
+        if node.is_cacheable() {
+            result.errors.push(format!(
+                "node '{name}' cannot be both 'follow' and cacheable — the child result does \
+                 not exist at suspend time"
+            ));
+        }
+        if node.action.is_none() {
+            result
+                .errors
+                .push(format!("follow node '{name}' has no 'action' to launch"));
+        }
+    }
+
     if let Some(ref next) = node.next {
         validate_edges(name, next, cfg, result);
     }
@@ -717,6 +745,112 @@ config:
                 .iter()
                 .any(|e| e.contains("orphan") && e.contains("ambiguous")),
             "expected error for node with no action/type, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_follow_on_non_action() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:x"}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+      follow: true
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("follow") && e.contains("only action nodes")),
+            "expected non-action follow rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_cacheable_follow() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:x"}
+      follow: true
+      cache: true
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("follow") && e.contains("cacheable")),
+            "expected cacheable-follow rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_parallel_follow() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:x"}
+      follow: true
+      parallel: true
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("follow") && e.contains("parallel")),
+            "expected parallel-follow rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_follow_without_action() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      node_type: action
+      follow: true
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("follow node") && e.contains("no 'action'")),
+            "expected follow-without-action rejection, got: {:?}",
             result.errors
         );
     }
