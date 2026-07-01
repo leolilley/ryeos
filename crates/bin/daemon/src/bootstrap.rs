@@ -739,13 +739,9 @@ mod tests {
             "user key should be created"
         );
 
-        // Trust entries for both keys — trust_dir = <RYEOS_APP_ROOT>/.ai/config/keys/trusted/
-        let trust_dir = tmp
-            .path()
-            .join(".ai")
-            .join("config")
-            .join("keys")
-            .join("trusted");
+        // Trust entries for both keys live under the runtime root's trusted-keys
+        // dir — the same path init() writes to.
+        let trust_dir = config.runtime_root().trusted_keys_dir();
         let node_fp = fingerprint_at(&config.node_signing_key_path);
         let user_fp = fingerprint_at(&config.operator_signing_key_path);
         assert!(
@@ -807,13 +803,8 @@ mod tests {
             "user key MUST NOT change with --force"
         );
 
-        // Trust dir
-        let trust_dir = tmp
-            .path()
-            .join(".ai")
-            .join("config")
-            .join("keys")
-            .join("trusted");
+        // Trust dir — where init() writes trusted-key entries.
+        let trust_dir = config.runtime_root().trusted_keys_dir();
 
         // Old node trust entry should be cleaned up
         assert!(
@@ -1001,7 +992,7 @@ mod tests {
 
         let err = repair_daemon_local(&config).expect_err("should refuse without user key");
         let msg = format!("{err:#}");
-        assert!(msg.contains("user signing key missing"), "got: {msg}");
+        assert!(msg.contains("operator signing key missing"), "got: {msg}");
         assert!(
             msg.contains("ryeos init"),
             "must guide to ryeos init, got: {msg}"
