@@ -11,6 +11,16 @@ pub struct DaemonMetadata {
     pub uds_path: Option<PathBuf>,
     pub started_at: Option<String>,
     pub version: Option<String>,
+    /// VCS revision the running daemon was built from. Recorded so `ryeos start`
+    /// can detect an already-running daemon whose build differs from the
+    /// on-disk binary (e.g. an install that replaced the binary but did not
+    /// cycle the daemon). `None` for a daemon built before this was recorded.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Build timestamp of the running daemon — a finer skew discriminator than
+    /// `revision` (it differs across rebuilds at the same commit).
+    #[serde(default)]
+    pub build_date: Option<String>,
     #[serde(default)]
     pub app_root: PathBuf,
 }

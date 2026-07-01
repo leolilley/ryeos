@@ -199,11 +199,81 @@ async fn run_start_command(argv: &[String]) -> Result<()> {
     let report = controller.start().await.context("ryeos start failed")?;
     if report.already_running {
         println!("running");
+        warn_if_stale_daemon(&report.status);
     } else {
         println!("started");
     }
     print_lifecycle_status(&report.status);
     Ok(())
+}
+
+/// When `ryeos start` finds a daemon already running, warn loudly if that daemon
+/// is an older build than the installed binaries — the classic footgun where an
+/// install replaced `ryeosd` on disk but did not cycle the running daemon, so it
+/// keeps holding the state lock and serving stale behavior. `ryeos` and `ryeosd`
+/// are built and installed together, so this binary's build info stands in for
+/// the on-disk `ryeosd`.
+///
+/// Two independent signals, either of which fires the warning:
+///   1. the daemon recorded a different VCS revision (or none — a build from
+///      before revisions were tracked is necessarily older);
+///   2. the on-disk `ryeosd` is newer than the daemon's own metadata file, which
+///      it writes once at startup — i.e. the binary was installed after the
+///      daemon started. This catches a rebuild at the same commit, which the
+///      revision check alone cannot see.
+fn warn_if_stale_daemon(status: &LifecycleStatus) {
+    let LifecycleStatus::Running { metadata } = status else {
+        return;
+    };
+    let current = ryeos_app::build_info::get();
+
+    let revision_skew = is_revision_skew(metadata.revision.as_deref(), current.revision);
+    let binary_is_newer = ryeosd_installed_after_daemon_started(metadata);
+
+    if !revision_skew && !binary_is_newer {
+        return;
+    }
+
+    eprintln!();
+    eprintln!("⚠  the running daemon is an older build than the installed binary.");
+    eprintln!(
+        "   running:   revision {}",
+        metadata.revision.as_deref().unwrap_or("unknown")
+    );
+    eprintln!("   installed: revision {}", current.revision);
+    eprintln!("   It holds the state lock, so newly installed changes will NOT take");
+    eprintln!("   effect until it is cycled:  ryeos stop && ryeos start");
+}
+
+/// Whether the daemon's recorded revision indicates an older build than this
+/// one. A missing recorded revision (a daemon built before revisions were
+/// tracked) counts as skew; an "unknown" current revision (git unavailable at
+/// build time) can't discriminate, so it never fires on its own.
+fn is_revision_skew(recorded: Option<&str>, current: &str) -> bool {
+    match recorded {
+        Some(rev) => current != "unknown" && rev != current,
+        None => true,
+    }
+}
+
+/// True when the on-disk `ryeosd` (sibling of this `ryeos` binary) has a newer
+/// mtime than the daemon's `daemon.json`, which is written once when the daemon
+/// starts. Any failure to resolve either path or its mtime returns false — a
+/// best-effort diagnostic must never block or mislead `start`.
+fn ryeosd_installed_after_daemon_started(metadata: &ryeos_node::DaemonMetadata) -> bool {
+    let Some(ryeosd) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("ryeosd")))
+        .filter(|p| p.exists())
+    else {
+        return false;
+    };
+    let daemon_json = ryeos_node::DaemonMetadata::path(&metadata.app_root);
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (mtime(&ryeosd), mtime(&daemon_json)) {
+        (Some(binary), Some(started)) => binary > started,
+        _ => false,
+    }
 }
 
 // ── ryeos stop ──────────────────────────────────────────────────────
@@ -302,4 +372,23 @@ fn default_app_root() -> PathBuf {
     dirs::data_dir()
         .map(|d| d.join("ryeos"))
         .expect("could not determine XDG data directory")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revision_skew_detects_mismatch_and_missing() {
+        // Same revision → not skewed.
+        assert!(!is_revision_skew(Some("abc123def456"), "abc123def456"));
+        // Different revision → skewed.
+        assert!(is_revision_skew(Some("oldsha000000"), "newsha111111"));
+        // No recorded revision (older daemon predating the field) → skewed.
+        assert!(is_revision_skew(None, "abc123def456"));
+        // Current revision unknown (git unavailable at build): a recorded
+        // revision can't be discriminated, but a missing one still skews.
+        assert!(!is_revision_skew(Some("abc123def456"), "unknown"));
+        assert!(is_revision_skew(None, "unknown"));
+    }
 }

@@ -120,6 +120,16 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                 .and_then(|v| v.as_str())
                 .map(ToOwned::to_owned)
                 .or_else(|| hint.as_ref().and_then(|m| m.version.clone())),
+            revision: value
+                .get("revision")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+                .or_else(|| hint.as_ref().and_then(|m| m.revision.clone())),
+            build_date: value
+                .get("build_date")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+                .or_else(|| hint.as_ref().and_then(|m| m.build_date.clone())),
             app_root: live_app_root
                 .or_else(|| hint.as_ref().map(|m| m.app_root.clone()))
                 .unwrap_or_else(|| config.app_root.clone()),
@@ -202,6 +212,8 @@ mod tests {
             uds_path: Some(config.uds_path.clone()),
             started_at: Some("now".to_string()),
             version: Some("test".to_string()),
+            revision: None,
+            build_date: None,
             app_root: config.app_root.clone(),
         }
         .write(&config.app_root)
@@ -263,6 +275,8 @@ mod tests {
             uds_path: Some(hinted_uds_path.clone()),
             started_at: Some("metadata".to_string()),
             version: Some("metadata".to_string()),
+            revision: None,
+            build_date: None,
             app_root: config.app_root.clone(),
         }
         .write(&config.app_root)
@@ -306,6 +320,8 @@ mod tests {
             uds_path: Some(config.uds_path.clone()),
             started_at: Some("stale".to_string()),
             version: Some("stale".to_string()),
+            revision: None,
+            build_date: None,
             app_root: config.app_root.clone(),
         }
         .write(&config.app_root)
@@ -359,6 +375,8 @@ mod tests {
             uds_path: Some(config.uds_path.clone()),
             started_at: Some("hint".to_string()),
             version: Some("hint".to_string()),
+            revision: None,
+            build_date: None,
             app_root: config.app_root.clone(),
         }
         .write(&config.app_root)
