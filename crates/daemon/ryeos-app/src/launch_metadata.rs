@@ -142,11 +142,16 @@ pub struct ResumeContext {
     /// verbatim so executor-specific flags survive resume.
     #[serde(default = "default_execution_hints")]
     pub execution_hints: ExecutionHints,
-    /// V5.5 P2: composed `effective_caps` captured at original spawn
-    /// time. The reconciler re-mints a callback token for the resumed
-    /// subprocess and the daemon enforces caps on every callback
-    /// dispatch — this set is what gets enforced. Empty `Vec` means
-    /// deny-all.
+    /// Composed `effective_caps` captured at original spawn time. The
+    /// reconciler re-mints a callback token for the resumed subprocess and
+    /// the daemon enforces caps on every callback dispatch — this set is
+    /// what gets enforced. Empty `Vec` means deny-all.
+    ///
+    /// Overload: on an *unlaunched follow-child root row* this instead
+    /// carries the PARENT's effective caps — the bounding authority the
+    /// launcher feeds to `CapabilityPolicy::FollowChildHybrid`. The child's
+    /// own composed caps overwrite it in launch metadata once the child is
+    /// launched and policy resolution succeeds.
     #[serde(default)]
     pub effective_caps: Vec<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that

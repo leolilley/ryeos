@@ -692,30 +692,54 @@ impl CheckpointResumeMode {
 }
 
 /// How the run-half reconciles the freshly-resolved (live composed) caps against
-/// any captured authority.
+/// any captured or bounding authority. The live composition arrives as two
+/// distinct sources — caller-delegated `declared` grants and daemon-minted
+/// manifest `runtime_manifest` authority — because the follow-child policy treats
+/// them differently; every other policy reasons over their union.
 pub enum CapabilityPolicy<'a> {
     /// Fresh launch: run with exactly the live composed caps.
     Fresh,
     /// Continuation / native-resume: the live composed caps MUST equal the caps
     /// the predecessor captured (no silent privilege drift); run with them.
     ExactPinned(&'a [String]),
-    /// Follow child: the (parent-bounded) caps MUST be a subset of the live
-    /// composed caps (no escalation beyond what the item can compose); run with
-    /// the bounded set, narrowing authority to the parent's bound.
-    BoundedOverride(&'a [String]),
+    /// Detached follow child: source-aware bounding against the parent's
+    /// authority. Each child-*declared* (caller-delegated) grant must be implied
+    /// by `parent_effective_caps` and is kept at the child's own exact shape;
+    /// child-owned *manifest runtime* authority is preserved verbatim (the parent
+    /// need not hold it); and the parent must imply the child's execute cap
+    /// (admission). A follow child is a delegated deputy of the parent, so it may
+    /// never hold delegated authority the parent lacks — but it keeps the runtime
+    /// authority its own signed manifest grants.
+    FollowChildHybrid { parent_effective_caps: &'a [String] },
 }
 
-/// Apply a [`CapabilityPolicy`] to the freshly-resolved `composed` caps, returning
-/// the caps the launch should actually run with (callback token + envelope +
-/// launch metadata all consume the result).
+/// Union the two live cap sources into the single set a non-source-aware policy
+/// reasons over (sorted + de-duplicated).
+fn union_cap_sources(declared: Vec<String>, runtime_manifest: Vec<String>) -> Vec<String> {
+    declared
+        .into_iter()
+        .chain(runtime_manifest)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Apply a [`CapabilityPolicy`] to the freshly-resolved cap sources, returning the
+/// caps the launch should actually run with (callback token + envelope + launch
+/// metadata all consume the result). `child_execute_cap` is the canonical execute
+/// cap for the item being launched (`ryeos.execute.<kind>.<bare_id>`); only the
+/// follow-child policy consults it (admission gate).
 fn apply_capability_policy(
-    composed: Vec<String>,
+    declared: Vec<String>,
+    runtime_manifest: Vec<String>,
     policy: CapabilityPolicy<'_>,
     item_ref: &str,
+    child_execute_cap: &str,
 ) -> Result<Vec<String>, BuildAndLaunchError> {
     match policy {
-        CapabilityPolicy::Fresh => Ok(composed),
+        CapabilityPolicy::Fresh => Ok(union_cap_sources(declared, runtime_manifest)),
         CapabilityPolicy::ExactPinned(captured) => {
+            let composed = union_cap_sources(declared, runtime_manifest);
             let recomputed: BTreeSet<&str> = composed.iter().map(String::as_str).collect();
             let captured_set: BTreeSet<&str> = captured.iter().map(String::as_str).collect();
             if recomputed != captured_set {
@@ -730,28 +754,74 @@ fn apply_capability_policy(
             }
             Ok(composed)
         }
-        CapabilityPolicy::BoundedOverride(bounded) => {
-            // Each bounded cap must be *implied* by a live composed grant, using
-            // grant-side wildcard matching (`cap_matches(grant, required)`): a
-            // composed grant `ryeos.execute.tool.*` covers a bounded
-            // `ryeos.execute.tool.echo`, but an exact composed grant never covers
-            // a wider bounded wildcard. Raw string subset would reject the former.
-            if let Some(uncovered) = bounded.iter().find(|cap| {
-                !composed
-                    .iter()
-                    .any(|grant| ryeos_runtime::authorizer::cap_matches(grant, cap))
-            }) {
-                return Err(BuildAndLaunchError::CapabilityRejected {
-                    reason: format!(
-                        "follow-child capability escalation for `{item_ref}`: bounded cap \
-                         `{uncovered}` is not covered by any live composed grant — refusing to \
-                         grant authority the item cannot compose"
-                    ),
-                });
-            }
-            Ok(bounded.to_vec())
-        }
+        CapabilityPolicy::FollowChildHybrid {
+            parent_effective_caps,
+        } => apply_follow_child_hybrid(
+            parent_effective_caps,
+            declared,
+            runtime_manifest,
+            item_ref,
+            child_execute_cap,
+        ),
     }
+}
+
+/// Source-aware capability bounding for a detached follow child (see
+/// [`CapabilityPolicy::FollowChildHybrid`]).
+///
+/// Parent coverage uses grant-side wildcard matching
+/// (`cap_matches(parent_grant, required)`): a parent `ryeos.execute.tool.*` covers
+/// a child-declared `ryeos.execute.tool.echo`, but the child keeps its own exact
+/// `tool.echo` shape — the parent's wildcard is never copied onto the child.
+fn apply_follow_child_hybrid(
+    parent_effective_caps: &[String],
+    declared: Vec<String>,
+    runtime_manifest: Vec<String>,
+    item_ref: &str,
+    child_execute_cap: &str,
+) -> Result<Vec<String>, BuildAndLaunchError> {
+    let parent_implies = |required: &str| {
+        parent_effective_caps
+            .iter()
+            .any(|grant| ryeos_runtime::authorizer::cap_matches(grant, required))
+    };
+
+    // Admission: the parent must itself hold execute authority over the child
+    // item — a follow child may only run what the parent could have dispatched.
+    if !parent_implies(child_execute_cap) {
+        return Err(BuildAndLaunchError::CapabilityRejected {
+            reason: format!(
+                "follow-child admission denied for `{item_ref}`: parent lacks execute authority \
+                 `{child_execute_cap}` — refusing to launch a child the parent cannot itself \
+                 dispatch"
+            ),
+        });
+    }
+
+    let mut effective: BTreeSet<String> = BTreeSet::new();
+
+    // Delegated authority: every child-declared grant must be covered by the
+    // parent, and is kept at the child's exact shape (never widened to the
+    // parent's wildcard).
+    for cap in declared {
+        if !parent_implies(&cap) {
+            return Err(BuildAndLaunchError::CapabilityRejected {
+                reason: format!(
+                    "follow-child capability escalation for `{item_ref}`: child declares delegated \
+                     cap `{cap}` not covered by the parent's authority — a follow child cannot \
+                     hold delegated authority the parent lacks"
+                ),
+            });
+        }
+        effective.insert(cap);
+    }
+
+    // Child-owned manifest runtime authority (bundle-events / runtime-vault),
+    // minted from the child's OWN signed manifest, is preserved verbatim — the
+    // parent need not (and usually does not) hold it.
+    effective.extend(runtime_manifest);
+
+    Ok(effective.into_iter().collect())
 }
 
 pub struct BuildAndLaunchParams<'a> {
@@ -1118,18 +1188,29 @@ async fn run_claimed_thread_row(
     )
     .map_err(|reason| BuildAndLaunchError::CapabilityRejected { reason })?;
 
-    let composed_caps: Vec<String> = composed_effective_caps
-        .into_iter()
-        .chain(runtime_capability_caps)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    // Spell the child's execute cap exactly as the authorizer would
+    // (`ryeos.execute.<kind>.<bare_id>`), so the follow-child admission gate
+    // matches live dispatch.
+    let child_execute_cap = ryeos_runtime::authorizer::canonical_cap(
+        &resolved.resolved_item.canonical_ref.kind,
+        &resolved.resolved_item.canonical_ref.bare_id,
+        "execute",
+    );
 
-    // Reconcile the freshly-resolved caps against any captured authority per the
-    // launch's policy: fresh uses them as-is; a continuation/native-resume pins
-    // them to EXACTLY the predecessor's captured set (no silent drift); a follow
-    // child narrows them to the parent-bounded subset.
-    let effective_caps = apply_capability_policy(composed_caps, capability_policy, &resolved.item_ref)?;
+    // Reconcile the freshly-resolved caps against any captured/bounding authority
+    // per the launch's policy: fresh unions them as-is; a continuation/native-
+    // resume pins them to EXACTLY the predecessor's captured set (no silent
+    // drift); a follow child bounds caller-delegated grants against the parent
+    // while preserving the child's own manifest runtime authority. The two cap
+    // sources stay distinct here because the follow-child policy treats them
+    // differently.
+    let effective_caps = apply_capability_policy(
+        composed_effective_caps,
+        runtime_capability_caps,
+        capability_policy,
+        &resolved.item_ref,
+        &child_execute_cap,
+    )?;
 
     // The serving runtime (captured ref, else the kind's default). A runtime that
     // declares `native_resume` is replay-aware: allocate its per-thread checkpoint
@@ -2099,8 +2180,11 @@ pub async fn launch_existing_native_resume(
 /// `spawn_item` cannot). Mirrors `launch_claimed_native_resume`, but the child is
 /// a FRESH root launch, not a resume: it injects its opening stimulus
 /// (`suppress_stimulus = false`) and is not a checkpoint resume. It is its own
-/// chain root, so `previous_thread_id` is `None`. Caps are pinned to the
-/// (parent-bounded) set captured on the row at create time.
+/// chain root, so `previous_thread_id` is `None`. For an unlaunched follow-child
+/// row ONLY, the seeded `ResumeContext.effective_caps` carries the PARENT's
+/// effective caps (the bounding authority for `FollowChildHybrid`), not the
+/// child's own — `run_claimed_thread_row` overwrites launch metadata with the
+/// child's actual composed caps once policy resolution succeeds.
 async fn launch_claimed_follow_child(
     state: &AppState,
     thread: ryeos_app::state_store::ThreadDetail,
@@ -2147,6 +2231,11 @@ async fn launch_claimed_follow_child(
         .required_envelope_fields
         .clone();
 
+    // For an unlaunched follow-child row the seeded `effective_caps` is the
+    // PARENT's authority (see the fn header) — name it as such at the use site so
+    // the overload is explicit and F5 seeds parent caps, never child-bounded ones.
+    let parent_effective_caps = identity.effective_caps.as_slice();
+
     run_claimed_thread_row(
         BuildAndLaunchParams {
             state,
@@ -2164,9 +2253,12 @@ async fn launch_claimed_follow_child(
             previous_thread_id: None,
             // A fresh launch injects its opening stimulus.
             suppress_stimulus: false,
-            // Narrow to the (parent-bounded) caps captured on the row at create
-            // time — must be a subset of what the child item can compose.
-            capability_policy: CapabilityPolicy::BoundedOverride(identity.effective_caps.as_slice()),
+            // Source-aware bounding against the parent: child-declared grants are
+            // bounded against the parent's effective caps; the child keeps its own
+            // manifest runtime authority.
+            capability_policy: CapabilityPolicy::FollowChildHybrid {
+                parent_effective_caps,
+            },
             // Fresh launch, not a checkpoint resume.
             checkpoint_resume_mode: CheckpointResumeMode::None,
         },
@@ -2445,105 +2537,188 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    #[test]
-    fn capability_policy_fresh_uses_composed() {
-        let composed = caps(&["a", "b"]);
-        let out = apply_capability_policy(composed.clone(), CapabilityPolicy::Fresh, "i").unwrap();
-        assert_eq!(out, composed);
+    /// Test shim over the two-source [`apply_capability_policy`]. `child_execute_cap`
+    /// is irrelevant to the non-follow policies, so they pass a placeholder.
+    fn apply_policy(
+        declared: &[&str],
+        runtime_manifest: &[&str],
+        policy: CapabilityPolicy<'_>,
+        child_execute_cap: &str,
+    ) -> Result<Vec<String>, BuildAndLaunchError> {
+        apply_capability_policy(
+            caps(declared),
+            caps(runtime_manifest),
+            policy,
+            "i",
+            child_execute_cap,
+        )
     }
 
     #[test]
-    fn capability_policy_exact_pinned_requires_equality() {
-        let composed = caps(&["a", "b"]);
-        // Equal set (order-insensitive) → ok, returns composed.
-        let pinned = caps(&["b", "a"]);
-        let out = apply_capability_policy(
-            composed.clone(),
-            CapabilityPolicy::ExactPinned(&pinned),
-            "i",
+    fn capability_policy_fresh_unions_both_sources() {
+        // Fresh runs with the union of caller-delegated and manifest caps.
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &["ryeos.get.vault.child/oauth"],
+            CapabilityPolicy::Fresh,
+            "",
         )
         .unwrap();
-        assert_eq!(out, composed);
-        // Drift (narrower OR wider) → rejected.
-        let narrower = caps(&["a"]);
-        assert!(apply_capability_policy(
-            composed.clone(),
-            CapabilityPolicy::ExactPinned(&narrower),
-            "i"
-        )
-        .is_err());
-        let wider = caps(&["a", "b", "c"]);
-        assert!(
-            apply_capability_policy(composed, CapabilityPolicy::ExactPinned(&wider), "i").is_err()
+        assert_eq!(
+            out,
+            caps(&["ryeos.execute.tool.echo", "ryeos.get.vault.child/oauth"])
         );
     }
 
     #[test]
-    fn capability_policy_bounded_override_narrows_to_subset() {
-        let composed = caps(&["a", "b", "c"]);
-        // A subset is accepted and BECOMES the effective set (narrowed).
-        let bounded = caps(&["a", "b"]);
-        let out = apply_capability_policy(
-            composed.clone(),
-            CapabilityPolicy::BoundedOverride(&bounded),
-            "i",
+    fn capability_policy_exact_pinned_requires_equality() {
+        // Equal set (order-insensitive, across both sources) → ok.
+        let pinned = caps(&["b", "a"]);
+        let out = apply_policy(&["a"], &["b"], CapabilityPolicy::ExactPinned(&pinned), "")
+            .unwrap();
+        assert_eq!(out, caps(&["a", "b"]));
+        // Drift (narrower OR wider) → rejected.
+        let narrower = caps(&["a"]);
+        assert!(
+            apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&narrower), "").is_err()
+        );
+        let wider = caps(&["a", "b", "c"]);
+        assert!(
+            apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&wider), "").is_err()
+        );
+    }
+
+    // ── Follow-child hybrid: source-aware bounding ──────────────────────
+    // Declared (caller-delegated) caps must be covered by the parent and keep the
+    // child's exact shape; manifest runtime caps are preserved without parent
+    // coverage; the parent must imply the child's execute cap (admission).
+
+    const CHILD_EXEC: &str = "ryeos.execute.tool.echo";
+
+    fn hybrid(parent: &[String]) -> CapabilityPolicy<'_> {
+        CapabilityPolicy::FollowChildHybrid {
+            parent_effective_caps: parent,
+        }
+    }
+
+    #[test]
+    fn follow_hybrid_parent_wildcard_narrows_to_child_exact() {
+        // parent execute.tool.* covers child-declared execute.tool.echo; the child
+        // keeps its exact shape, NOT the parent wildcard.
+        let parent = caps(&["ryeos.execute.tool.*"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &[],
+            hybrid(&parent),
+            CHILD_EXEC,
         )
         .unwrap();
-        assert_eq!(out, bounded);
-        // A cap not present in the composed set is an escalation → rejected.
-        let escalated = caps(&["a", "d"]);
-        assert!(apply_capability_policy(
-            composed,
-            CapabilityPolicy::BoundedOverride(&escalated),
-            "i"
+        assert_eq!(out, caps(&["ryeos.execute.tool.echo"]));
+    }
+
+    #[test]
+    fn follow_hybrid_broad_parent_wildcard_does_not_leak() {
+        // parent execute.* covers the child cap, but the result is still the
+        // child's exact cap — the broad parent grant is never copied in.
+        let parent = caps(&["ryeos.execute.*"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &[],
+            hybrid(&parent),
+            CHILD_EXEC,
+        )
+        .unwrap();
+        assert_eq!(out, caps(&["ryeos.execute.tool.echo"]));
+    }
+
+    #[test]
+    fn follow_hybrid_child_wildcard_requires_parent_coverage() {
+        // parent has only the exact execute.tool.echo; a child-declared wildcard
+        // execute.tool.* is wider than the parent grant → rejected.
+        let parent = caps(&["ryeos.execute.tool.echo"]);
+        assert!(apply_policy(
+            &["ryeos.execute.tool.*"],
+            &[],
+            hybrid(&parent),
+            CHILD_EXEC
         )
         .is_err());
     }
 
     #[test]
-    fn capability_policy_bounded_override_grant_side_wildcards() {
-        // A composed wildcard grant covers a narrower bounded exact cap.
-        let composed = caps(&["ryeos.execute.tool.*"]);
-        let bounded = caps(&["ryeos.execute.tool.echo"]);
-        let out = apply_capability_policy(
-            composed,
-            CapabilityPolicy::BoundedOverride(&bounded),
-            "i",
+    fn follow_hybrid_admission_separate_from_run_set() {
+        // parent can execute the child AND holds the delegated tool.echo; only the
+        // child's declared cap lands in the run-set (admission cap is not added).
+        let parent = caps(&["ryeos.execute.tool.echo", "ryeos.execute.tool.echo"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &[],
+            hybrid(&parent),
+            "ryeos.execute.tool.echo",
         )
         .unwrap();
-        assert_eq!(out, bounded);
+        assert_eq!(out, caps(&["ryeos.execute.tool.echo"]));
+    }
 
-        // A broader composed wildcard covers a narrower bounded wildcard.
-        let composed = caps(&["ryeos.execute.*"]);
-        let bounded = caps(&["ryeos.execute.tool.*"]);
-        let out = apply_capability_policy(
-            composed,
-            CapabilityPolicy::BoundedOverride(&bounded),
-            "i",
+    #[test]
+    fn follow_hybrid_admission_cap_is_not_added_to_run_set() {
+        // Parent may execute the child (admission cap `directive.child`) AND holds
+        // the delegated `tool.echo` the child declares. The run-set is exactly the
+        // child's declared cap — the execute-child admission grant is NOT inherited.
+        let parent = caps(&["ryeos.execute.directive.child", "ryeos.execute.tool.echo"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &[],
+            hybrid(&parent),
+            "ryeos.execute.directive.child",
         )
         .unwrap();
-        assert_eq!(out, bounded);
+        assert_eq!(out, caps(&["ryeos.execute.tool.echo"]));
+    }
 
-        // An exact composed grant does NOT cover a wider bounded wildcard.
-        let composed = caps(&["ryeos.execute.tool.echo"]);
-        let bounded = caps(&["ryeos.execute.tool.*"]);
-        assert!(apply_capability_policy(
-            composed,
-            CapabilityPolicy::BoundedOverride(&bounded),
-            "i"
-        )
-        .is_err());
+    #[test]
+    fn follow_hybrid_missing_delegated_cap_rejected() {
+        // parent may execute the child but does NOT hold the delegated tool.echo
+        // the child declares → rejected (confused-deputy guard).
+        let parent = caps(&["ryeos.execute.tool.echo"]);
+        // Parent's execute authority is over the child item itself, but it lacks
+        // the *delegated* grant the child declares.
+        let out = apply_policy(
+            &["ryeos.execute.service.threads/get"],
+            &[],
+            hybrid(&parent),
+            CHILD_EXEC,
+        );
+        assert!(out.is_err());
+    }
 
-        // The global wildcard covers any valid child cap.
-        let composed = caps(&["*"]);
-        let bounded = caps(&["ryeos.execute.tool.echo", "ryeos.execute.service.threads/get"]);
-        let out = apply_capability_policy(
-            composed,
-            CapabilityPolicy::BoundedOverride(&bounded),
-            "i",
+    #[test]
+    fn follow_hybrid_admission_denied_when_parent_cannot_execute_child() {
+        // parent holds no execute authority over the child item → admission denied
+        // before any run-set is computed.
+        let parent = caps(&["ryeos.execute.tool.other"]);
+        assert!(apply_policy(&[], &[], hybrid(&parent), CHILD_EXEC).is_err());
+    }
+
+    #[test]
+    fn follow_hybrid_preserves_child_manifest_runtime_caps() {
+        // A manifest-minted runtime cap the parent does NOT hold is preserved —
+        // it's the child's own signed authority, not delegated from the parent.
+        let parent = caps(&["ryeos.execute.tool.*"]);
+        let out = apply_policy(
+            &["ryeos.execute.tool.echo"],
+            &["ryeos.get.vault.child-bundle/oauth"],
+            hybrid(&parent),
+            CHILD_EXEC,
         )
         .unwrap();
-        assert_eq!(out, bounded);
+        assert_eq!(
+            out,
+            caps(&[
+                "ryeos.execute.tool.echo",
+                "ryeos.get.vault.child-bundle/oauth"
+            ])
+        );
     }
 
     #[test]
