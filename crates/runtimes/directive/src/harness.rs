@@ -76,6 +76,7 @@ impl Harness {
         self.interrupted.clone()
     }
 
+    #[cfg(test)]
     pub fn is_interrupted(&self) -> bool {
         self.interrupted.load(Ordering::Relaxed)
     }
@@ -160,6 +161,7 @@ impl Harness {
         self.interrupts_used <= MAX_LIVE_INTERRUPTS
     }
 
+    #[cfg(test)]
     pub fn interrupts_used(&self) -> u32 {
         self.interrupts_used
     }
