@@ -1578,7 +1578,7 @@ fn run_sign(
             anyhow::bail!("--stdin-json is mutually exclusive with positional ITEM_REF values");
         }
         let parsed: StdinSignParams = serde_json::from_value(read_stdin_json()?)?;
-        (parsed.item_refs(), parsed.project_path, parsed.source)
+        parsed.into_parts()
     } else {
         if item_refs.is_empty() {
             anyhow::bail!("ITEM_REF required (or pass --stdin-json)");
@@ -1631,12 +1631,13 @@ struct StdinSignParams {
 }
 
 impl StdinSignParams {
-    fn item_refs(self) -> Vec<String> {
-        if !self.item_refs.is_empty() {
+    fn into_parts(self) -> (Vec<String>, Option<PathBuf>, String) {
+        let item_refs = if !self.item_refs.is_empty() {
             self.item_refs
         } else {
             self.item_ref.into_iter().collect()
-        }
+        };
+        (item_refs, self.project_path, self.source)
     }
 }
 
