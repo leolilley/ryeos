@@ -1631,6 +1631,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelling_follow_child_resumes_parent_on_error() {
+        // Cancellation contract for a suspended follow: cancelling the CHILD flips the
+        // parent's waiter to ready with a VISIBLE failure envelope, so the parent
+        // resumes into on_error (not a silent success). The parent itself is
+        // `continued` and not cancellable; cancelling the resume successor instead
+        // abandons the resume (handled in launch_follow_resume_successor).
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Ccancel", "Ccancel"))
+            .unwrap();
+        state.threads.mark_running("Ccancel").unwrap();
+        arm_waiting_follow(&state, "wk-cancel", "Ccancel");
+        // What threads/cancel does to the child: finalize it `cancelled`.
+        finalize_child(&state, "Ccancel", "cancelled", None);
+
+        let waiter = state
+            .state_store
+            .get_follow_waiter_by_key("wk-cancel")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiter.phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "cancelling the child must ready the parent's waiter"
+        );
+        let env = waiter
+            .terminal_envelope
+            .expect("cancelled child must store a terminal envelope");
+        assert_eq!(
+            env["success"],
+            json!(false),
+            "a cancelled child resumes the parent into on_error, not a silent success"
+        );
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(
+            env["result"]["child_status"],
+            json!("cancelled"),
+            "envelope carries the cancelled child status"
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_follow_converges_reserved_with_child_and_successor() {
         // Partial spawn: child + successor recorded (so the parent is continued), but
         // crashed before mark_follow_waiting → stuck `reserved`. Converge to waiting;
