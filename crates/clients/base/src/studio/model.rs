@@ -104,6 +104,10 @@ pub struct StudioLauncherState {
 pub struct StudioInputState {
     pub text: String,
     pub cursor: usize,
+    /// For a cyclable live filter: which declared field the buffer currently
+    /// targets (index into `feeds.fields`). 0 for single-field inputs.
+    #[serde(default)]
+    pub filter_field: usize,
 }
 
 impl StudioInputState {
@@ -728,24 +732,24 @@ impl StudioCore {
         let Some(source) = binding.source.clone() else {
             return Vec::new();
         };
-        let feeds_param = binding
+        let feeds = binding
             .input
             .as_ref()
             .and_then(|input| input.feeds.as_ref())
-            .map(|feeds| feeds.param.clone());
+            .cloned();
         let input_id = binding.input.as_ref().map(|input| input.id.clone());
         let fold = self.seat.fold();
         let mut params =
             super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
-        // LIVE filter: the buffer is a writer of one source param.
-        if let (Some(param), Some(input_id)) = (feeds_param, input_id) {
+        // LIVE filter: the buffer writes ONE source param — the active field of a
+        // cyclable filter, or the single declared param. Only the active field is
+        // ever sent, so cycling never leaves a stale param behind.
+        if let (Some(feeds), Some(input_id)) = (feeds, input_id) {
             let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
-            let text = self
-                .ui
-                .input_buffers
-                .get(&key.storage_key())
-                .map(|buffer| buffer.text.clone())
-                .unwrap_or_default();
+            let buffer = self.ui.input_buffers.get(&key.storage_key());
+            let text = buffer.map(|b| b.text.clone()).unwrap_or_default();
+            let field = buffer.map(|b| b.filter_field).unwrap_or(0);
+            let param = feeds.active_param(field).to_string();
             if let Some(object) = params.as_object_mut() {
                 object.insert(param, serde_json::Value::String(text));
             } else {
@@ -997,6 +1001,10 @@ impl StudioCore {
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
             input_is_live_filter: input.is_some_and(|i| i.is_live_filter()),
+            input_filter_fields: input
+                .filter(|i| i.is_live_filter())
+                .and_then(|i| i.feeds.as_ref())
+                .is_some_and(|f| f.field_count() > 1),
             input_has_completion: input
                 .is_some_and(|i| i.completion.is_some() || i.mentions.is_some()),
             input_can_accept_completion,
@@ -1093,6 +1101,7 @@ mod tests {
         let mut input = StudioInputState {
             text: "é".to_string(),
             cursor: 1,
+            ..Default::default()
         };
         input.insert_char('x');
         assert_eq!(input.text, "xé");

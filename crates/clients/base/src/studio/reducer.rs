@@ -296,6 +296,7 @@ impl StudioCore {
                 Vec::new()
             }
             StudioUiEvent::CycleInputTarget { forward } => self.cycle_input_target(forward),
+            StudioUiEvent::CycleFilterField { forward } => self.cycle_filter_field(forward),
             StudioUiEvent::InterruptHead => {
                 // Esc while the head thread works → cancel it through the
                 // thread-control channel (reuses the read-only + dedup guards).
@@ -832,6 +833,36 @@ impl StudioCore {
             .filter(|input| input.submits_to_route())
             .and_then(|input| input.target.as_ref())
             .map(|target| target.cycle)
+    }
+
+    /// Cycle a live-filter box to its next/previous target field (e.g. status →
+    /// kind → source). Clears the buffer — the previous field's text doesn't
+    /// apply to the new one — and refetches on the new field. No-op unless the
+    /// focused input declares more than one filter field.
+    fn cycle_filter_field(&mut self, forward: bool) -> Vec<StudioEffect> {
+        let Some((key, view_ref)) = self.focused_input_instance() else {
+            return Vec::new();
+        };
+        let count = self
+            .views
+            .get(&view_ref)
+            .and_then(|binding| binding.input.as_ref())
+            .and_then(|input| input.feeds.as_ref())
+            .map(|feeds| feeds.field_count())
+            .unwrap_or(0);
+        if count < 2 {
+            return Vec::new();
+        }
+        let buffer = self.ui.input_buffers.entry(key.storage_key()).or_default();
+        buffer.filter_field = if forward {
+            (buffer.filter_field + 1) % count
+        } else {
+            (buffer.filter_field + count - 1) % count
+        };
+        buffer.text.clear();
+        buffer.cursor = 0;
+        self.bump_generation();
+        self.effects_for_focused_feeds()
     }
 
     /// Cycle the input's route target through `[new conversation]
@@ -2489,6 +2520,50 @@ mod tests {
                     && params["thread_id"] == "T-7"
                     && params["command_type"] == "cancel"),
             "service-ref affordance must /execute with the row's args; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn cycling_the_filter_field_switches_the_fed_param_and_clears_text() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": { "view:ryeos/threads/list": {
+                    "widget": "table",
+                    "source": { "ref": "service:ui/studio/threads/list", "params": { "sort": "watch" }, "collection": "threads" },
+                    "input": { "id": "filter", "feeds": { "fields": [
+                        { "param": "status", "label": "status" },
+                        { "param": "requested_by", "label": "source" }
+                    ] } }
+                }}
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        // Type into the first field (status).
+        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'r' } });
+        assert_eq!(
+            core.focused_input_buffer().map(|b| b.text.clone()),
+            Some("r".to_string())
+        );
+
+        // Tab cycles to the next field (source): the buffer clears and the
+        // refetch now feeds requested_by, not status.
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleFilterField { forward: true },
+        });
+        assert_eq!(
+            core.focused_input_buffer().map(|b| b.text.clone()),
+            Some(String::new()),
+            "switching field clears the prior field's text"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { params, .. }
+                    if params.get("requested_by").is_some() && params.get("status").is_none())),
+            "cycled fetch feeds requested_by, not status; got {effects:?}"
         );
     }
 

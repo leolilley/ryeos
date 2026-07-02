@@ -41,12 +41,21 @@ pub async fn handle(
         .get_thread(&req.chain_root_id)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
-    match root {
+    let status = match root {
         Some(detail) => {
             ctx.require_owner(detail.requested_by.as_deref())?;
+            detail.status
         }
         None => return Err(HandlerError::NotFound),
-    }
+    };
+
+    // Deep-watch summary: the chain's status plus its chain-wide usage totals,
+    // returned alongside the events so the timeline lens can render a header
+    // (the braid carries what happened; this carries what it cost).
+    let totals = state
+        .state_store
+        .chain_usage_totals(&req.chain_root_id)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     let result = state
         .events
@@ -61,6 +70,13 @@ pub async fn handle(
     Ok(serde_json::json!({
         "events": result.events,
         "next_cursor": result.next_cursor,
+        "summary": {
+            "status": status,
+            "input_tokens": totals.input_tokens,
+            "output_tokens": totals.output_tokens,
+            "spend_usd": totals.spend_usd,
+            "turns": totals.completed_turns,
+        },
     }))
 }
 
