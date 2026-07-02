@@ -387,6 +387,19 @@ impl CallbackClient {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    pub async fn author_item(&self, request: Value) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback author_item called without an inner UDS client \
+                 (socket missing); cannot author signed project item"
+            )
+        })?;
+        client
+            .author_item(&self.thread_id, request)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Advisory: warn-and-continue OK when disconnected.
     pub async fn get_thread_by_id(&self, thread_id: &str) -> Result<Value> {
         match &self.inner {

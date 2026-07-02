@@ -38,6 +38,13 @@ pub struct RuntimeVaultDecl {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct ItemAuthorDecl {
+    pub kind: String,
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct BundleManifestSource {
     pub name: String,
     pub version: String,
@@ -51,6 +58,8 @@ pub struct BundleManifestSource {
     pub bundle_events: Vec<BundleEventDecl>,
     #[serde(default)]
     pub runtime_vault: Vec<RuntimeVaultDecl>,
+    #[serde(default)]
+    pub item_authoring: Vec<ItemAuthorDecl>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +78,8 @@ pub struct BundleManifest {
     pub bundle_events: Vec<BundleEventDecl>,
     #[serde(default)]
     pub runtime_vault: Vec<RuntimeVaultDecl>,
+    #[serde(default)]
+    pub item_authoring: Vec<ItemAuthorDecl>,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -120,6 +131,7 @@ pub fn materialize_manifest(
         uses_kinds: source.uses_kinds,
         bundle_events: source.bundle_events,
         runtime_vault: source.runtime_vault,
+        item_authoring: source.item_authoring,
     })
 }
 
@@ -772,6 +784,7 @@ typo_field: oops
             uses_kinds: vec![],
             bundle_events: vec![],
             runtime_vault: vec![],
+            item_authoring: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

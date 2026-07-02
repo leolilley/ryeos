@@ -171,6 +171,12 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
     async fn vault_list(&self, thread_id: &str, request: Value) -> Result<Value, CallbackError>;
 
+    async fn author_item(&self, _thread_id: &str, _request: Value) -> Result<Value, CallbackError> {
+        Err(CallbackError::Transport(anyhow::anyhow!(
+            "runtime.author_item callback is not implemented by this client"
+        )))
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
     async fn complete_command(

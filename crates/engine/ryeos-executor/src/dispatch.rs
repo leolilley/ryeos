@@ -2624,7 +2624,10 @@ pub(crate) fn mint_runtime_capability_caps(
     };
     let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
         .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
-    if reqs.manifest.bundle_events.is_empty() && reqs.manifest.runtime_vault.is_empty() {
+    if reqs.manifest.bundle_events.is_empty()
+        && reqs.manifest.runtime_vault.is_empty()
+        && reqs.manifest.item_authoring.is_empty()
+    {
         return Ok(Vec::new());
     }
 
@@ -2653,6 +2656,9 @@ pub(crate) fn mint_runtime_capability_caps(
         ryeos_app::vault::validate_runtime_vault_segment("namespace", &req.namespace)
             .map_err(|err| err.to_string())?;
     }
+    for req in &reqs.manifest.item_authoring {
+        ryeos_bundle::runtime_authority::validate_item_author_pattern(&req.kind, &req.namespace)?;
+    }
 
     // (2) Authority upper bound = signed generated manifest. Requirements
     // declared with no manifest backing them are a launch failure, not a
@@ -2673,6 +2679,9 @@ pub(crate) fn mint_runtime_capability_caps(
             manifest.name, effective_bundle_id
         ));
     }
+    for decl in &manifest.item_authoring {
+        ryeos_bundle::runtime_authority::validate_item_author_pattern(&decl.kind, &decl.namespace)?;
+    }
 
     // Manifest-declared caps form the upper bound. Cap strings come from the
     // manifest declarations' own constructors (`runtime_authority`), so the
@@ -2684,11 +2693,22 @@ pub(crate) fn mint_runtime_capability_caps(
     for decl in &manifest.runtime_vault {
         manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
     }
+    for decl in &manifest.item_authoring {
+        manifest_caps.extend(decl.runtime_authority_caps());
+    }
 
     // (3) Subset check + mint exactly the requested subset.
     let requested =
         ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, &effective_bundle_id);
-    let missing: Vec<String> = requested.difference(&manifest_caps).cloned().collect();
+    let missing: Vec<String> = requested
+        .iter()
+        .filter(|requested_cap| {
+            !manifest_caps.iter().any(|manifest_cap| {
+                ryeos_runtime::authorizer::cap_matches(manifest_cap, requested_cap)
+            })
+        })
+        .cloned()
+        .collect();
     if !missing.is_empty() {
         return Err(format!(
             "requested runtime capabilities are not declared in the signed manifest \
@@ -3644,6 +3664,9 @@ bundle_events:
 runtime_vault:
   - namespace: oauth
     operations: [put, get, delete, list]
+item_authoring:
+  - kind: knowledge
+    namespace: runtime-authored/*
 "#;
 
     #[test]
@@ -3757,6 +3780,56 @@ bundle_events:
                 "ryeos.get.vault.example-bundle/oauth".to_string(),
                 "ryeos.put.vault.example-bundle/oauth".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn item_authoring_requirement_can_narrow_manifest_wildcard() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "item_authoring": [
+                        { "kind": "knowledge", "namespace": "runtime-authored/foo" }
+                    ]
+                } }
+            })),
+        );
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.author.knowledge.runtime-authored/foo".to_string()],
+            "mint the requested narrow cap, not the manifest wildcard"
+        );
+    }
+
+    #[test]
+    fn item_authoring_requirement_broader_than_manifest_fails_launch() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": {
+                    "item_authoring": [
+                        { "kind": "knowledge", "namespace": "other-namespace/*" }
+                    ]
+                } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not declared in the signed manifest"),
+            "got: {err}"
         );
     }
 

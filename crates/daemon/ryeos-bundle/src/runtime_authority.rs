@@ -2,14 +2,14 @@
 //!
 //! "Runtime authority" is the set of daemon callback capabilities a **signed
 //! bundle manifest** may declare for the bundle's own running code — today
-//! bundle events and runtime vault (see
+//! bundle events, runtime vault, and daemon-authored project item writes (see
 //! `ryeos/future/tool-runtime-authority`). Per that contract, this authority is
 //! *always minted by the daemon* from the signed manifest and is **never**
 //! grantable through a composed `permissions:` block.
 //!
 //! This module is the single source of truth for that vocabulary:
 //!
-//! - the cap `kind` segments (`bundle-events`, `vault`),
+//! - the cap `kind` segments (`bundle-events`, `vault`, and ordinary item kinds),
 //! - the typed cap constructors the manifest declarations and the daemon
 //!   callback services both use to build/require caps, and
 //! - the classifier that rejects a user-composed grant which would overlap the
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::manifest::{
-    BundleEventDecl, BundleEventOperation, RuntimeVaultDecl, RuntimeVaultOperation,
+    BundleEventDecl, BundleEventOperation, ItemAuthorDecl, RuntimeVaultDecl, RuntimeVaultOperation,
 };
 
 /// Capability `kind` segment for bundle-event authority.
@@ -44,6 +44,9 @@ const AUTHORITY_SURFACES: &[(&str, &str)] = &[
     ("get", CAP_KIND_RUNTIME_VAULT),
     ("delete", CAP_KIND_RUNTIME_VAULT),
     ("list", CAP_KIND_RUNTIME_VAULT),
+    // `author` intentionally reserves every item kind: the capability shape is
+    // `ryeos.author.<kind>.<bare-id>`, so no composed grant may self-mint it.
+    ("author", "*"),
 ];
 
 impl BundleEventOperation {
@@ -86,6 +89,13 @@ pub fn runtime_vault_cap(op: &RuntimeVaultOperation, bundle_id: &str, namespace:
     )
 }
 
+/// Build the daemon-mediated item-authoring capability for `kind:namespace`.
+/// The authoring service checks this against the exact target bare-id, so
+/// wildcard support comes only from the unified authorizer.
+pub fn item_author_cap(kind: &str, namespace: &str) -> String {
+    canonical_cap(kind, namespace, "author")
+}
+
 impl BundleEventDecl {
     /// The exact caps this declaration grants the bundle `bundle_id`.
     pub fn runtime_authority_caps<'a>(
@@ -110,6 +120,13 @@ impl RuntimeVaultDecl {
     }
 }
 
+impl ItemAuthorDecl {
+    /// The exact cap this declaration grants.
+    pub fn runtime_authority_caps(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::once(item_author_cap(&self.kind, &self.namespace))
+    }
+}
+
 // ── Item-level runtime capability requirements ───────────────────────
 //
 // An item declares everything it needs under one `requires.capabilities` tree,
@@ -126,6 +143,9 @@ impl RuntimeVaultDecl {
 //           runtime_vault:
 //             - namespace: oauth
 //               operations: [get]
+//           item_authoring:
+//             - kind: knowledge
+//               namespace: runtime-authored/*
 //
 // `declared` is honored because the launcher refuses to spawn an unsigned
 // effective item — a signed item may assert its own execution authority.
@@ -171,6 +191,8 @@ pub struct ManifestCapabilityRequirements {
     pub bundle_events: Vec<BundleEventRequirement>,
     #[serde(default)]
     pub runtime_vault: Vec<RuntimeVaultRequirement>,
+    #[serde(default)]
+    pub item_authoring: Vec<ItemAuthorRequirement>,
 }
 
 /// One bundle-event requirement: an event kind plus the operations the item
@@ -192,6 +214,15 @@ pub struct RuntimeVaultRequirement {
     pub operations: Vec<RuntimeVaultOperation>,
 }
 
+/// One daemon-authored item requirement: a kind plus a bare-id namespace/pattern
+/// the runtime needs authority to create or update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemAuthorRequirement {
+    pub kind: String,
+    pub namespace: String,
+}
+
 impl BundleEventRequirement {
     /// The exact caps this requirement requests for `bundle_id`.
     pub fn requested_caps<'a>(&'a self, bundle_id: &'a str) -> impl Iterator<Item = String> + 'a {
@@ -210,6 +241,13 @@ impl RuntimeVaultRequirement {
     }
 }
 
+impl ItemAuthorRequirement {
+    /// The exact cap this requirement requests.
+    pub fn requested_caps(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::once(item_author_cap(&self.kind, &self.namespace))
+    }
+}
+
 /// The exact set of manifest-backed runtime caps `reqs` requests for
 /// `bundle_id` (the `manifest` sub-tree; `declared` caps are not minted here).
 pub fn requested_runtime_caps(
@@ -222,6 +260,9 @@ pub fn requested_runtime_caps(
     }
     for req in &reqs.manifest.runtime_vault {
         caps.extend(req.requested_caps(bundle_id));
+    }
+    for req in &reqs.manifest.item_authoring {
+        caps.extend(req.requested_caps());
     }
     caps
 }
@@ -273,6 +314,63 @@ pub fn validate_runtime_capability_requirements(
             ));
         }
     }
+    for req in &caps.manifest.item_authoring {
+        validate_item_author_pattern(&req.kind, &req.namespace)?;
+    }
+    Ok(())
+}
+
+pub fn validate_item_author_pattern(kind: &str, namespace: &str) -> Result<(), String> {
+    validate_item_kind(kind)?;
+    validate_bare_id_pattern("item_authoring namespace", namespace)
+}
+
+pub fn validate_item_kind(kind: &str) -> Result<(), String> {
+    if kind.is_empty()
+        || !kind
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "item_authoring kind must be a canonical kind segment: {kind:?}"
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_bare_id_pattern(label: &str, pattern: &str) -> Result<(), String> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if trimmed != pattern {
+        return Err(format!(
+            "{label} must not contain leading/trailing whitespace: {pattern:?}"
+        ));
+    }
+    if pattern.starts_with('/') || pattern.ends_with('/') {
+        return Err(format!(
+            "{label} must be a relative bare-id pattern: {pattern:?}"
+        ));
+    }
+    if pattern.contains('\\') {
+        return Err(format!(
+            "{label} must use '/' separators, not backslashes: {pattern:?}"
+        ));
+    }
+    for segment in pattern.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(format!(
+                "{label} contains an invalid path segment: {pattern:?}"
+            ));
+        }
+        if !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '*' | '?'))
+        {
+            return Err(format!("{label} contains invalid characters: {pattern:?}"));
+        }
+    }
     Ok(())
 }
 
@@ -304,7 +402,8 @@ pub fn composed_grant_overlaps_manifest_runtime_authority(grant: &str) -> bool {
 
 fn overlaps_surface(grant_verb: &str, grant_kind: &str) -> bool {
     AUTHORITY_SURFACES.iter().any(|(verb, kind)| {
-        (grant_verb == "*" || grant_verb == *verb) && (grant_kind == "*" || grant_kind == *kind)
+        (grant_verb == "*" || grant_verb == *verb)
+            && (grant_kind == "*" || *kind == "*" || grant_kind == *kind)
     })
 }
 
@@ -319,7 +418,7 @@ pub enum ComposedGrantError {
     /// runtime-authority requirement. Refused outright.
     Malformed { grant: String, reason: String },
     /// A well-formed grant that overlaps the manifest runtime-authority
-    /// namespace (bundle events / vault).
+    /// namespace (bundle events / vault / item authoring).
     Reserved { grant: String },
 }
 
@@ -333,7 +432,7 @@ impl std::fmt::Display for ComposedGrantError {
             ),
             ComposedGrantError::Reserved { grant } => write!(
                 f,
-                "capability '{grant}' is reserved: bundle-event and runtime-vault capabilities are \
+                "capability '{grant}' is reserved: bundle-event, runtime-vault, and item-authoring capabilities are \
                  manifest-backed runtime authority. Declare them under \
                  `requires.capabilities.manifest`, not `requires.capabilities.declared` — the \
                  signed manifest is the authority upper bound and the item selects the subset it \
@@ -390,6 +489,10 @@ mod tests {
             runtime_vault_cap(&RuntimeVaultOperation::Get, "example-bundle", "oauth"),
             "ryeos.get.vault.example-bundle/oauth"
         );
+        assert_eq!(
+            item_author_cap("knowledge", "runtime-authored/*"),
+            "ryeos.author.knowledge.runtime-authored/*"
+        );
     }
 
     #[test]
@@ -413,8 +516,11 @@ mod tests {
         for grant in [
             "ryeos.put.vault.example-bundle/oauth",
             "ryeos.scan.bundle-events.example-bundle/example_event",
+            "ryeos.author.knowledge.runtime-authored/*",
+            "ryeos.author.tool.ryeos/*",
             "ryeos.scan.bundle-events.*",
             "ryeos.put.*",
+            "ryeos.author.*",
             "ryeos.*.vault.*",
             "ryeos.put.vault", // implicit subject wildcard
             "ryeos.*",
@@ -482,6 +588,7 @@ mod tests {
         for grant in [
             "ryeos.scan.bundle-events.*",
             "ryeos.*.vault.*",
+            "ryeos.author.knowledge.*",
             "ryeos.put.*",
             "ryeos.*",
         ] {
@@ -507,6 +614,9 @@ mod tests {
                     ],
                     "runtime_vault": [
                         { "namespace": "oauth", "operations": ["get"] }
+                    ],
+                    "item_authoring": [
+                        { "kind": "knowledge", "namespace": "runtime-authored/*" }
                     ]
                 }
             }
@@ -517,6 +627,7 @@ mod tests {
             caps.into_iter().collect::<Vec<_>>(),
             vec![
                 "ryeos.append.bundle-events.arc/arc_pattern_event".to_string(),
+                "ryeos.author.knowledge.runtime-authored/*".to_string(),
                 "ryeos.get.vault.arc/oauth".to_string(),
                 "ryeos.scan.bundle-events.arc/arc_pattern_event".to_string(),
             ]

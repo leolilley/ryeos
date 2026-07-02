@@ -32,6 +32,7 @@ pub mod process;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_db;
+pub mod runtime_item_author_service;
 pub mod runtime_vault_service;
 pub mod service_registry;
 pub mod standalone_audit;
