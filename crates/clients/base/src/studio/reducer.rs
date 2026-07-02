@@ -222,20 +222,22 @@ impl StudioCore {
                 Vec::new()
             }
             StudioUiEvent::InsertInputChar { ch } => {
+                let live_filter = self.focused_input_is_live_filter();
                 let Some(buffer) = self.focused_input_buffer_mut() else {
                     return Vec::new();
                 };
                 buffer.insert_char(ch);
                 self.bump_generation();
-                self.effects_for_focused_feeds()
+                self.feeds_effects_unless_live_filter(live_filter)
             }
             StudioUiEvent::DeleteInputChar => {
+                let live_filter = self.focused_input_is_live_filter();
                 let Some(buffer) = self.focused_input_buffer_mut() else {
                     return Vec::new();
                 };
                 buffer.delete_before_cursor();
                 self.bump_generation();
-                self.effects_for_focused_feeds()
+                self.feeds_effects_unless_live_filter(live_filter)
             }
             StudioUiEvent::SetInputText { text, cursor } => {
                 let Some(buffer) = self.focused_input_buffer_mut() else {
@@ -654,6 +656,33 @@ impl StudioCore {
     /// `feeds` (the buffer is a writer of one source param). Debounce is a
     /// renderer/transport concern; the reducer emits the refetch and the
     /// binding carries `debounce_ms` for the renderer to honour.
+    /// Whether the focused input is a live filter (feeds a source, no submit).
+    fn focused_input_is_live_filter(&self) -> bool {
+        self.focused_input_instance()
+            .and_then(|(_, view_ref)| self.views.get(&view_ref))
+            .and_then(|binding| binding.input.as_ref())
+            .is_some_and(|input| input.is_live_filter())
+    }
+
+    /// Feed-refetch effects for a buffer edit, EXCEPT for a live filter — those
+    /// are debounced by the client loop (which calls [`Self::refresh_focused_feeds`]
+    /// on its tick) so typing a filter doesn't block on a daemon round-trip per
+    /// keystroke. The edit itself already applied; this only defers the fetch.
+    fn feeds_effects_unless_live_filter(&mut self, live_filter: bool) -> Vec<StudioEffect> {
+        if live_filter {
+            Vec::new()
+        } else {
+            self.effects_for_focused_feeds()
+        }
+    }
+
+    /// Public entry for the debounced feed refetch: re-derives the focused
+    /// input's source fetch from the current buffer (and resets the table
+    /// cursor). The client loop calls this once typing settles.
+    pub fn refresh_focused_feeds(&mut self) -> Vec<StudioEffect> {
+        self.effects_for_focused_feeds()
+    }
+
     fn effects_for_focused_feeds(&mut self) -> Vec<StudioEffect> {
         let Some((key, view_ref)) = self.focused_input_instance() else {
             return Vec::new();
@@ -3352,10 +3381,12 @@ mod tests {
 
         // Typing into the live filter narrows the list; the cursor must reset to
         // the top so Enter (activate) hits the first narrowed row, not a no-op
-        // pointing past the end.
+        // pointing past the end. The refetch (and reset) is debounced — the
+        // client loop calls refresh_focused_feeds once typing settles.
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::InsertInputChar { ch: 'r' },
         });
+        let _ = core.refresh_focused_feeds();
         assert_eq!(cursor(&core), 0);
 
         // With the narrowed result, the reset cursor resolves the first row.
