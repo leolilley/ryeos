@@ -613,3 +613,176 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     drop(project);
     drop(mock);
 }
+
+// ── operator follow-up continuation launches + completes the successor ──
+//
+// A directive carries no per-item `executor_id`; its launch identity is the
+// serving runtime's `native:<binary>`, captured into the resume context. This
+// pins that an operator follow-up reconstructs that identity, spawns the
+// successor, and runs it to completion: the successor reaches `completed`,
+// braids onto the predecessor, and runs a second LLM turn. State-store tests
+// only prove the successor ROW is created; this e2e exercises the actual
+// successor spawn + run.
+
+/// Poll the projection for the first thread matching `pred`, optionally waiting
+/// until it reaches a terminal status. Returns `None` if it never appears.
+async fn poll_thread(
+    projection_path: &Path,
+    pred: impl Fn(&ryeos_state::queries::ThreadRow) -> bool,
+    require_terminal: bool,
+) -> Option<ryeos_state::queries::ThreadRow> {
+    for _ in 0..120 {
+        if projection_path.exists() {
+            if let Ok(db) = ryeos_state::projection::ProjectionDb::open(projection_path) {
+                if let Ok(threads) = ryeos_state::queries::list_threads(&db, 200) {
+                    if let Some(t) = threads.into_iter().find(|t| pred(t)) {
+                        let terminal = matches!(
+                            t.status.as_str(),
+                            "completed" | "failed" | "cancelled" | "killed" | "timed_out"
+                                | "continued"
+                        );
+                        if !require_terminal || terminal {
+                            return Some(t);
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_directive_operator_follow_up_successor_completes() {
+    let mock = MockProvider::start(vec![
+        MockResponse::Text("turn one".into()),
+        MockResponse::Text("turn two".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
+    })
+    .await
+    .expect("start daemon with mock provider + standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    let project_path = project.path().to_str().unwrap().to_string();
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_directive(
+        project.path(),
+        "cont/dir",
+        "Answer {{ name }}.",
+        &[],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
+
+    // Turn one: launch the directive synchronously to completion.
+    let (status, body) = h
+        .post_execute(
+            "directive:cont/dir",
+            &project_path,
+            serde_json::json!({"name": "World"}),
+        )
+        .await
+        .expect("post /execute (turn one)");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "turn one must succeed: {body:#}"
+    );
+
+    // The settled directive thread (no upstream).
+    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let first = poll_thread(
+        &projection_path,
+        |t| t.item_ref == "directive:cont/dir" && t.upstream_thread_id.is_none(),
+        true,
+    )
+    .await
+    .expect("first directive thread reaches a terminal status");
+    let first_id = first.thread_id.clone();
+
+    // Operator follow-up via the threads.input service → creates AND launches a
+    // continuation successor. The service result rides inside the /execute
+    // envelope under `result`.
+    let (status, body) = h
+        .post_execute(
+            "service:threads/input",
+            &project_path,
+            serde_json::json!({
+                "thread": first_id.clone(),
+                "project_path": project_path.clone(),
+                "input": "continue",
+            }),
+        )
+        .await
+        .expect("post /execute (service:threads/input)");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "threads.input follow-up must be accepted: {body:#}"
+    );
+    let successor_id = body
+        .pointer("/result/thread_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("threads.input result missing successor thread_id: {body:#}"))
+        .to_string();
+    assert_ne!(successor_id, first_id, "successor must be a new thread");
+
+    // The pin: the successor must actually launch and reach `completed` — its
+    // runtime launch identity reconstructed from the captured resume context.
+    let successor = poll_thread(&projection_path, |t| t.thread_id == successor_id, true)
+        .await
+        .unwrap_or_else(|| panic!("successor {successor_id} never reached a terminal status"));
+    assert_eq!(
+        successor.upstream_thread_id.as_deref(),
+        Some(first_id.as_str()),
+        "successor must braid onto the first thread: {successor:#?}"
+    );
+    if successor.status != "completed" {
+        let stderr = h.drain_stderr_nonblocking().await;
+        let detail = h
+            .post_execute(
+                "service:threads/get",
+                &project_path,
+                serde_json::json!({"thread_id": successor_id}),
+            )
+            .await
+            .ok();
+        panic!(
+            "successor must reach `completed`; a non-completed status means launch \
+             reconstruction failed to resolve the runtime executor identity.\n\
+             row={successor:#?}\ndetail={detail:#?}\n--- daemon stderr ---\n{stderr}"
+        );
+    }
+
+    // Corroborate the second LLM turn actually ran (mock's `turn two`).
+    let (_s, detail) = h
+        .post_execute(
+            "service:threads/get",
+            &project_path,
+            serde_json::json!({"thread_id": successor_id}),
+        )
+        .await
+        .expect("threads.get successor");
+    assert!(
+        detail.to_string().contains("turn two"),
+        "successor result must surface the mock's second-turn text `turn two`: {detail:#}"
+    );
+
+    drop(project);
+    drop(mock);
+}

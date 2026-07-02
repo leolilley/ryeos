@@ -96,34 +96,6 @@ fn main() -> anyhow::Result<()> {
     let graph =
         model::GraphDefinition::from_yaml(&raw, Some(&resolved.graph_path.to_string_lossy()))?;
 
-    // Validate-as-input: a graph run carrying the reserved `validate`
-    // input returns the static analysis report instead of executing. The
-    // signal is just another execution input — it flows through the
-    // existing envelope, so no engine/daemon plumbing is involved.
-    if resolved
-        .inputs
-        .get("validate")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let report = validate_report(&graph);
-        let valid = report
-            .get("valid")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let runtime_result = RuntimeResult {
-            success: valid,
-            status: if valid { "valid" } else { "invalid" }.to_string(),
-            thread_id: resolved.thread_id.clone(),
-            result: Some(report),
-            outputs: Value::Null,
-            cost: None,
-            warnings: Vec::new(),
-        };
-        println!("{}", serde_json::to_string(&runtime_result)?);
-        return Ok(());
-    }
-
     tracing::info!(
         thread_id = %resolved.thread_id,
         graph_run_id = ?resolved.graph_run_id,
@@ -170,6 +142,42 @@ fn main() -> anyhow::Result<()> {
             )
         }
     };
+
+    // Register this process's pgid BEFORE any durable callback — the
+    // replay-events read below, and `execute()` (which can `finalize_thread`
+    // on an invalid graph) both happen after this. Without it the daemon
+    // cannot tell a live graph from a crashed one on restart and would resume
+    // a duplicate. Resume-critical: a graph that cannot register must not run.
+    rt.block_on(callback.attach_current_process())?;
+
+    // Validate-as-input: a graph run carrying the reserved `validate` input
+    // returns the static analysis report instead of executing. Runs AFTER
+    // attach so even this early-return path has recorded pid/pgid — the daemon
+    // creates a thread row and settles it from this stdout, so it must be
+    // trackable like any other managed launch.
+    if resolved
+        .inputs
+        .get("validate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let report = validate_report(&graph);
+        let valid = report
+            .get("valid")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let runtime_result = RuntimeResult {
+            success: valid,
+            status: if valid { "valid" } else { "invalid" }.to_string(),
+            thread_id: resolved.thread_id.clone(),
+            result: Some(report),
+            outputs: Value::Null,
+            cost: None,
+            warnings: Vec::new(),
+        };
+        println!("{}", serde_json::to_string(&runtime_result)?);
+        return Ok(());
+    }
 
     // V5.5 D10 resume precedence (the rule itself lives in
     // `resume::decide_resume_source` — pure function, unit-tested):
@@ -251,6 +259,8 @@ fn main() -> anyhow::Result<()> {
             "current_node": rs.current_node,
             "step_count": rs.step_count,
             "state": rs.state,
+            "accounting": rs.accounting,
+            "suppressed_errors": rs.suppressed_errors,
         });
     }
 

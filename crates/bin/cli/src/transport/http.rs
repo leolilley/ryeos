@@ -117,9 +117,9 @@ pub async fn post_json_streaming(
     url: &str,
     headers: &SignHeaders,
     body: &[u8],
-    mut on_event: impl FnMut(&SseEvent) -> bool,
+    on_event: impl FnMut(&SseEvent) -> bool,
 ) -> Result<(), CliDispatchError> {
-    let mut resp = signed_client()?
+    let resp = signed_client()?
         .post(url)
         .header("content-type", "application/json")
         .header("accept", "text/event-stream")
@@ -134,7 +134,44 @@ pub async fn post_json_streaming(
             bind: url.to_string(),
             detail: format!("request send: {e}"),
         })?;
+    read_sse_stream(resp, on_event).await
+}
 
+/// Signed GET that streams an SSE route, invoking `on_event` per complete event.
+/// Mirrors [`post_json_streaming`] but with no request body — for live route
+/// follows like a thread's event stream. No total-request timeout: a tail is
+/// long-lived by design (bounded only by the connect timeout and the caller's
+/// stop policy). Shares the same non-2xx / non-SSE handling and SSE parser.
+pub async fn get_streaming(
+    url: &str,
+    headers: &SignHeaders,
+    on_event: impl FnMut(&SseEvent) -> bool,
+) -> Result<(), CliDispatchError> {
+    let resp = signed_client()?
+        .get(url)
+        .header("accept", "text/event-stream")
+        .header("x-ryeos-key-id", &headers.key_id)
+        .header("x-ryeos-timestamp", &headers.timestamp)
+        .header("x-ryeos-nonce", &headers.nonce)
+        .header("x-ryeos-signature", &headers.signature)
+        .send()
+        .await
+        .map_err(|e| CliTransportError::Unreachable {
+            bind: url.to_string(),
+            detail: format!("request send: {e}"),
+        })?;
+    read_sse_stream(resp, on_event).await
+}
+
+/// Drive an SSE response to completion. Surfaces a non-2xx status as
+/// `HttpError` and a 2xx-but-non-SSE body as `BodyDecode` (otherwise a JSON
+/// error body would be consumed with zero frames and exit success), then drains
+/// complete events from the chunk stream, stopping early when `on_event`
+/// returns `true`. Shared by the POST and GET streaming entry points.
+async fn read_sse_stream(
+    mut resp: reqwest::Response,
+    mut on_event: impl FnMut(&SseEvent) -> bool,
+) -> Result<(), CliDispatchError> {
     let status = resp.status();
     let is_event_stream = resp
         .headers()

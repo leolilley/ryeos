@@ -19,14 +19,59 @@ pub enum ThreadDelivery {
     Unknown,
 }
 
+/// A control command submitted for an existing thread via
+/// `service:commands/submit`. Typed so the client emits a variant, not a string
+/// literal; serializes to the daemon's accepted `command_type` vocabulary
+/// (validated daemon-side in `command_service`). Note: interrupting a *running*
+/// directive is NOT one of these — that is a text-bearing live redirect via
+/// `service:threads/input` (the foot input / Alt+Enter), not a control command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadControlCommand {
+    Continue,
+    Cancel,
+    Kill,
+    Interrupt,
+}
+
+impl ThreadControlCommand {
+    /// The wire `command_type` spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Cancel => "cancel",
+            Self::Kill => "kill",
+            Self::Interrupt => "interrupt",
+        }
+    }
+}
+
+/// The fields the braid lens reads from a `cognition_out` event payload. Typed
+/// so the projection branches on a field rather than a raw JSON key. Other
+/// payload fields (turn, tokens, content, tool_calls) reach the feed through the
+/// event projection, not this struct, so they are intentionally omitted.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CognitionOutPayload {
+    /// The cognition was cut mid-flight by a live interrupt; the braid marks the
+    /// seam where it was cut and the next `cognition_in` folds.
+    #[serde(default)]
+    pub interrupted: bool,
+}
+
 /// Daemon-authored per-execution facts, surfaced both on thread projections
 /// (`thread.execution`) and on a continuation launch result — the substrate
-/// authority the client gates continuation affordances on. Mirrors the daemon
-/// `ExecutionFacts`.
+/// authority the client gates machine-continuation (`supports_continuation`) and
+/// operator-input (`supports_operator_followup`) affordances on. Mirrors the
+/// daemon `ExecutionFacts`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExecutionFacts {
     #[serde(default)]
     pub supports_continuation: bool,
+    /// `false` for machine-only kinds (graph): the kind is continuation-capable
+    /// but folds no conversation, so the operator-input affordance must gate on
+    /// this, not on `supports_continuation` alone.
+    #[serde(default)]
+    pub supports_operator_followup: bool,
 }
 
 /// The typed result of a `service:threads/input` submit

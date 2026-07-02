@@ -203,6 +203,18 @@ impl StudioCore {
                 }
                 Vec::new()
             }
+            StudioUiEvent::OpenHelp => {
+                self.ui.help_open = true;
+                self.bump_generation();
+                Vec::new()
+            }
+            StudioUiEvent::CloseHelp => {
+                if self.ui.help_open {
+                    self.ui.help_open = false;
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             StudioUiEvent::SetLauncherQuery { query } => {
                 self.ui.launcher.query = query;
                 self.ui.launcher.selected = 0;
@@ -234,7 +246,7 @@ impl StudioCore {
                 self.effects_for_focused_feeds()
             }
             StudioUiEvent::CompleteInput => {
-                let Some((key, _)) = self.focused_input_instance() else {
+                let Some((key, view_ref)) = self.focused_input_instance() else {
                     return Vec::new();
                 };
                 let buffer = self
@@ -243,16 +255,39 @@ impl StudioCore {
                     .get(&key.storage_key())
                     .cloned()
                     .unwrap_or_default();
-                let Some(records) =
-                    self.data.commands.as_ref().and_then(|data| {
-                        data.get("commands").and_then(serde_json::Value::as_array)
-                    })
-                else {
-                    return Vec::new();
-                };
-                if let Some((text, cursor)) =
-                    super::tokenize::accept_slash_completion(records, &buffer.text, buffer.cursor)
+                // An inline @-mention under the cursor wins; otherwise the
+                // line-start / command grammar. Both resolve to an optional
+                // (text, cursor) before the buffer is mutated.
+                let completed = if super::tokenize::active_mention(&buffer.text, buffer.cursor)
+                    .is_some()
                 {
+                    let records = self
+                        .views
+                        .get(&view_ref)
+                        .and_then(|binding| binding.input.as_ref())
+                        .and_then(|input| input.mentions.as_ref())
+                        .and_then(|mentions| {
+                            let response = self.data.sources.get(
+                                &super::content::mention_source_key(&view_ref, &key.input_id),
+                            )?;
+                            Some(super::content::project_mentions(mentions, response))
+                        })
+                        .unwrap_or_default();
+                    super::tokenize::accept_mention_completion(&records, &buffer.text, buffer.cursor)
+                } else {
+                    self.data
+                        .commands
+                        .as_ref()
+                        .and_then(|data| data.get("commands").and_then(serde_json::Value::as_array))
+                        .and_then(|records| {
+                            super::tokenize::accept_slash_completion(
+                                records,
+                                &buffer.text,
+                                buffer.cursor,
+                            )
+                        })
+                };
+                if let Some((text, cursor)) = completed {
                     if let Some(buffer) = self.focused_input_buffer_mut() {
                         buffer.set_text(text, cursor);
                         self.bump_generation();
@@ -273,7 +308,8 @@ impl StudioCore {
                 }
                 self.dispatch_action(StudioAction::CancelThread { thread_id: head })
             }
-            StudioUiEvent::SubmitInput => self.submit_focused_input(),
+            StudioUiEvent::SubmitInput => self.submit_focused_input(false),
+            StudioUiEvent::SubmitInputInterrupt => self.submit_focused_input(true),
             StudioUiEvent::MoveLauncherSelection { delta } => {
                 let len = filtered_launcher_items(self).len();
                 if len > 0 {
@@ -434,9 +470,8 @@ impl StudioCore {
                 );
                 self.bump_generation();
                 shown_view
-                    .and_then(|view_ref| self.emit_fetch_source_keyed(key, &view_ref))
-                    .into_iter()
-                    .collect()
+                    .map(|view_ref| self.emit_fetch_source_keyed(key, &view_ref))
+                    .unwrap_or_default()
             }
             StudioAction::ResizeFocused { direction } => {
                 if self.workspace.resize_master(direction) {
@@ -574,13 +609,16 @@ impl StudioCore {
                         },
                         params: serde_json::json!({
                             "thread_id": thread_id,
-                            "command_type": command,
+                            "command_type": command.as_str(),
                         }),
                         route_seq: None,
                         ratchet_on_thread_id: false,
                     })]
                 } else {
-                    self.notice(format!("No active thread to {command}."), StudioTone::Warn);
+                    self.notice(
+                        format!("No active thread to {}.", command.as_str()),
+                        StudioTone::Warn,
+                    );
                     Vec::new()
                 }
             }
@@ -636,7 +674,12 @@ impl StudioCore {
     /// (no submit — buffer is live), `submit: <affordance>` (fire it with
     /// `{value}`), `submit: route` (the engine route-fold: classification
     /// + route_seq + ratchet, unchanged).
-    fn submit_focused_input(&mut self) -> Vec<StudioEffect> {
+    /// `interrupt` selects the live-delivery intent for a submit that routes at a
+    /// RUNNING thread: `true` cuts the in-flight cognition (forceful redirect),
+    /// `false` steers (folds at the next turn boundary). It is carried as the
+    /// `intent` param and ignored by the daemon on non-running targets (fresh
+    /// launch / settled continuation land at boundaries by construction).
+    fn submit_focused_input(&mut self, interrupt: bool) -> Vec<StudioEffect> {
         let Some((key, view_ref)) = self.focused_input_instance() else {
             return Vec::new();
         };
@@ -673,7 +716,7 @@ impl StudioCore {
 
         // Mode 3: `submit: route` — the existing engine route-fold.
         debug_assert!(input.submits_to_route());
-        self.submit_route(&text)
+        self.submit_route(&text, interrupt)
     }
 
     /// The open conversation chains the input can target, as
@@ -686,8 +729,12 @@ impl StudioCore {
     /// via the thread-view layer). `None` = the thread isn't in the fetched
     /// data (e.g. a just-launched thread before the list refresh) or carries no
     /// execution facts — callers treat unknown optimistically, distrusting only
-    /// an explicit `Some(false)`. This is the substrate authority the cycle and
-    /// label gate on, replacing a self-declared surface flag.
+    /// an explicit `Some(false)`. Symmetric counterpart to
+    /// [`Self::thread_supports_operator_followup`] — the machine-continuation
+    /// fact. Operator surfaces gate on operator-follow-up, so this isn't gated on
+    /// in prod today; kept (and tested) as the substrate accessor for a future
+    /// machine-continuation affordance.
+    #[allow(dead_code)]
     pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
         let row = self
             .data
@@ -704,6 +751,20 @@ impl StudioCore {
         let facts: super::dto::ExecutionFacts =
             serde_json::from_value(row.get("execution")?.clone()).ok()?;
         Some(facts.supports_continuation)
+    }
+
+    /// The daemon-authored `execution.supports_operator_followup` for a thread.
+    /// Gates OPERATOR-input targeting/labels: a graph is continuation-capable but
+    /// machine-only, so it accepts no operator input even though it continues.
+    /// Same unknown-optimistic semantics as [`Self::thread_supports_continuation`]
+    /// — distrust only an explicit `Some(false)`.
+    pub(crate) fn thread_supports_operator_followup(&self, thread_id: &str) -> Option<bool> {
+        let row = self.data.threads.as_ref()?.threads.iter().find(|row| {
+            row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+        })?;
+        let facts: super::dto::ExecutionFacts =
+            serde_json::from_value(row.get("execution")?.clone()).ok()?;
+        Some(facts.supports_operator_followup)
     }
 
     fn input_target_chains(&self) -> Vec<(String, String)> {
@@ -732,11 +793,12 @@ impl StudioCore {
                 .filter_map(|x| x.get("thread_id").and_then(serde_json::Value::as_str))
                 .find(|id| !upstreams.contains(id))
                 .unwrap_or(root);
-            // Only offer chains whose head can actually be continued — gate on
-            // the substrate's `execution.supports_continuation`, not a surface
-            // flag. Distrust only an explicit `false`; unknown stays offered
-            // (the daemon refuses a real non-continuation submit anyway).
-            if self.thread_supports_continuation(head) == Some(false) {
+            // Only offer chains whose head accepts OPERATOR input — gate on
+            // `execution.supports_operator_followup`, not `supports_continuation`
+            // (a graph continues by machine but takes no operator input).
+            // Distrust only an explicit `false`; unknown stays offered (the
+            // daemon refuses a real non-followup submit anyway).
+            if self.thread_supports_operator_followup(head) == Some(false) {
                 continue;
             }
             out.push((root.to_string(), head.to_string()));
@@ -855,7 +917,7 @@ impl StudioCore {
     /// route-fold. Behaviour (slash/plain, route_seq, read-only/empty) is
     /// unchanged; it is now reached through the `input` grammar instead of
     /// the deleted Input dock special-case.
-    fn submit_route(&mut self, text: &str) -> Vec<StudioEffect> {
+    fn submit_route(&mut self, text: &str, interrupt: bool) -> Vec<StudioEffect> {
         if self.is_read_only() {
             self.notice("This session is read-only.", StudioTone::Warn);
             return Vec::new();
@@ -916,6 +978,13 @@ impl StudioCore {
                         params["input"] = serde_json::Value::String(plain);
                         if let Some(thread) = &route.thread {
                             params["thread"] = serde_json::Value::String(thread.clone());
+                        }
+                        // Live-delivery intent for a running-thread target. Only
+                        // set for interrupt; steer is the daemon default (and the
+                        // wire-compatible value for older daemons). Ignored by the
+                        // daemon on non-running targets.
+                        if interrupt {
+                            params["intent"] = serde_json::Value::String("interrupt".to_string());
                         }
                         vec![self.emit(StudioEffectKind::Invoke {
                             target: super::effect::InvokeRef::Ref { item_ref },
@@ -1349,7 +1418,7 @@ impl StudioCore {
             .collect();
         targets
             .into_iter()
-            .filter_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
             .collect()
     }
 
@@ -1468,6 +1537,32 @@ impl StudioCore {
                         );
                         return Vec::new();
                     }
+                    if outcome.delivery == Some(super::dto::ThreadDelivery::Submitted) {
+                        // Live fold into a RUNNING thread: the stimulus was
+                        // delivered as a new cognition_in on the SAME thread — no
+                        // new thread, so no ratchet and no "launched" copy. Clear
+                        // the buffer and keep the route where it is; the live tail
+                        // shows the folded turn. A notice present here means a
+                        // degradation (interrupt → steer); surface it as a warning.
+                        self.clear_focused_input();
+                        let degraded = outcome.notice.is_some();
+                        self.notice(
+                            outcome.notice.unwrap_or_else(|| match outcome.thread_id.as_deref()
+                            {
+                                Some(id) => format!("Input delivered to {id}."),
+                                None => "Input delivered.".to_string(),
+                            }),
+                            if degraded {
+                                StudioTone::Warn
+                            } else {
+                                StudioTone::Good
+                            },
+                        );
+                        let mut effects =
+                            vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+                        effects.extend(self.effects_for_hint("thread"));
+                        return effects;
+                    }
                     self.clear_focused_input();
                     let Some(thread_id) = outcome.thread_id.clone() else {
                         self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
@@ -1492,7 +1587,10 @@ impl StudioCore {
                         // carries them (an operator continuation does; a fresh
                         // async launch doesn't — unknown stays eligible, and the
                         // daemon refuses a real non-continuation continue).
-                        let result_supports = outcome.execution.map(|e| e.supports_continuation);
+                        // Operator-input targeting: ratchet only onto a successor
+                        // that accepts OPERATOR follow-up (a graph continues by
+                        // machine but takes no operator input).
+                        let result_supports = outcome.execution.map(|e| e.supports_operator_followup);
                         let targets = *ratchet_on_thread_id && result_supports != Some(false);
                         if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
                             let mut route = fold.input_route();
@@ -2588,6 +2686,283 @@ mod tests {
     }
 
     #[test]
+    fn sections_view_assembles_one_group_per_section_from_its_own_source() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.docks.left.as_mut().unwrap().visible = true;
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "sections",
+                "sections": [
+                    {
+                        "title": "Threads",
+                        "source": { "ref": "service:ui/studio/threads", "collection": "rows" },
+                        "projection": { "primary": "thread_id", "meta": "status" }
+                    },
+                    {
+                        "title": "Bundles",
+                        "source": { "ref": "service:ui/studio/bundles", "collection": "rows" },
+                        "projection": { "primary": "name", "meta": "version" }
+                    }
+                ]
+            }),
+        );
+        // Each section's response lands under its own per-section key.
+        core.data.sources.insert(
+            crate::studio::content::section_source_key("dock:left", 0),
+            serde_json::json!({ "rows": [
+                { "thread_id": "T-ab", "status": "running" },
+                { "thread_id": "T-cd", "status": "done" }
+            ]}),
+        );
+        core.data.sources.insert(
+            crate::studio::content::section_source_key("dock:left", 1),
+            serde_json::json!({ "rows": [ { "name": "studio", "version": "v1.0.0" } ]}),
+        );
+
+        let vm = build_view_model(&core);
+        let dock = vm.workspace.docks.left.expect("left dock");
+        match dock.view {
+            crate::studio::view_model::StudioViewVm::Sections { sections, .. } => {
+                assert_eq!(sections.len(), 2);
+                assert_eq!(sections[0].title, "Threads");
+                assert_eq!(sections[0].count, 2);
+                assert_eq!(sections[0].rows[0].primary, "T-ab");
+                assert_eq!(sections[0].rows[0].meta.as_deref(), Some("running"));
+                assert_eq!(sections[1].title, "Bundles");
+                assert_eq!(sections[1].count, 1);
+                assert_eq!(sections[1].rows[0].primary, "studio");
+                assert_eq!(sections[1].rows[0].meta.as_deref(), Some("v1.0.0"));
+            }
+            other => panic!("expected bound sections dock view, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {
+        use crate::studio::view_model::{
+            action_for_focused_row, StudioLayoutNodeVm, StudioViewVm,
+        };
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/studio/status"],
+                "views": {
+                    "view:ryeos/studio/status": {
+                        "widget": "sections",
+                        "affordances": [{
+                            "id": "aim-input",
+                            "label": "Aim",
+                            "invoke": { "plane": "ui", "facet": "input.route", "merge": { "thread": "{record.thread_id}" } }
+                        }],
+                        "sections": [
+                            { "title": "Threads", "source": { "ref": "service:threads/list", "collection": "threads" }, "projection": { "primary": "thread_id" }, "activate": "aim-input" },
+                            { "title": "Bundles", "source": { "ref": "service:bundle/list", "collection": "bundles" }, "projection": { "primary": "name" } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let tile = core.workspace.focused_tile;
+        let key = tile.0.to_string();
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 0),
+            serde_json::json!({ "threads": [ { "thread_id": "T-ab" }, { "thread_id": "T-cd" } ]}),
+        );
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 1),
+            serde_json::json!({ "bundles": [ { "name": "studio" } ]}),
+        );
+
+        fn find_tile_view(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+            match node {
+                StudioLayoutNodeVm::Tile { view, .. } => Some(view),
+                StudioLayoutNodeVm::Split { first, second, .. } => {
+                    find_tile_view(first).or_else(|| find_tile_view(second))
+                }
+            }
+        }
+        let selected_primaries = |core: &StudioCore| -> Vec<String> {
+            let vm = build_view_model(core);
+            let root = vm.workspace.root.expect("layout root");
+            match find_tile_view(&root).expect("tile view") {
+                StudioViewVm::Sections { sections, .. } => sections
+                    .iter()
+                    .flat_map(|s| &s.rows)
+                    .filter(|r| r.selected)
+                    .map(|r| r.primary.clone())
+                    .collect(),
+                other => panic!("expected sections view, got {other:?}"),
+            }
+        };
+
+        // Flat cursor 0 = the first Threads row; its section's activation fires
+        // carrying that row's record.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 0 },
+        });
+        assert_eq!(selected_primaries(&core), vec!["T-ab".to_string()]);
+        match action_for_focused_row(&core).expect("threads row activates") {
+            StudioAction::InvokeAffordance { affordance_id, record, .. } => {
+                assert_eq!(affordance_id, "aim-input");
+                assert_eq!(record["thread_id"], "T-ab");
+            }
+            other => panic!("expected aim-input invoke, got {other:?}"),
+        }
+
+        // Flat cursor 2 = the first Bundles row (Threads contributed 2). Bundles
+        // declares no activation, so the point resolves a row but no action.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 2 },
+        });
+        assert_eq!(selected_primaries(&core), vec!["studio".to_string()]);
+        assert!(
+            action_for_focused_row(&core).is_none(),
+            "a bundles row has no section activation"
+        );
+    }
+
+    #[test]
+    fn folding_a_section_collapses_it_to_a_single_header_point() {
+        use crate::studio::view_model::{StudioLayoutNodeVm, StudioViewVm};
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/studio/status"],
+                "views": {
+                    "view:ryeos/studio/status": {
+                        "widget": "sections",
+                        "sections": [
+                            { "title": "Threads", "source": { "ref": "service:threads/list", "collection": "threads" }, "projection": { "primary": "thread_id" } },
+                            { "title": "Bundles", "source": { "ref": "service:bundle/list", "collection": "bundles" }, "projection": { "primary": "name" } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let tile = core.workspace.focused_tile;
+        let key = tile.0.to_string();
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 0),
+            serde_json::json!({ "threads": [ { "thread_id": "T-ab" }, { "thread_id": "T-cd" } ]}),
+        );
+        core.data.sources.insert(
+            crate::studio::content::section_source_key(&key, 1),
+            serde_json::json!({ "bundles": [ { "name": "studio" } ]}),
+        );
+
+        fn tile_sections(
+            core: &StudioCore,
+        ) -> (Vec<crate::studio::view_model::StudioSectionVm>, Option<usize>) {
+            fn find(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+                match node {
+                    StudioLayoutNodeVm::Tile { view, .. } => Some(view),
+                    StudioLayoutNodeVm::Split { first, second, .. } => {
+                        find(first).or_else(|| find(second))
+                    }
+                }
+            }
+            let vm = build_view_model(core);
+            match find(&vm.workspace.root.expect("root")).expect("tile view") {
+                StudioViewVm::Sections {
+                    sections,
+                    fold_section,
+                    ..
+                } => (sections.clone(), *fold_section),
+                other => panic!("expected sections, got {other:?}"),
+            }
+        }
+
+        // Fold section 0 (Threads).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetFold {
+                tile_id: key.clone(),
+                section: 0,
+                collapsed: true,
+            },
+        });
+        let (sections, _) = tile_sections(&core);
+        assert!(sections[0].collapsed, "threads is collapsed");
+        assert_eq!(sections[0].count, 2, "collapsed header still reports count");
+        assert!(sections[0].rows.is_empty(), "collapsed rows are hidden");
+        assert!(!sections[1].collapsed);
+        assert_eq!(sections[1].rows.len(), 1);
+
+        // The collapsed section now occupies one flat point: its header at
+        // index 0. The point there marks the header (no row) and folds it.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 0 },
+        });
+        let (sections, fold_section) = tile_sections(&core);
+        assert!(sections[0].header_selected, "collapsed header carries the point");
+        assert_eq!(fold_section, Some(0), "fold key would toggle threads");
+
+        // Flat index 1 is now the first Bundles row (Threads contributes one
+        // header point, not two rows).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 1 },
+        });
+        let (sections, fold_section) = tile_sections(&core);
+        assert!(!sections[0].header_selected);
+        assert!(sections[1].rows[0].selected, "point lands on the bundles row");
+        assert_eq!(fold_section, Some(1));
+    }
+
+    #[test]
+    fn help_overlay_toggles_through_the_view_model() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // The catalogue is always present (discovery); only `open` toggles.
+        assert!(!build_view_model(&core).help.open);
+        assert!(!build_view_model(&core).help.entries.is_empty());
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::OpenHelp,
+        });
+        assert!(build_view_model(&core).help.open);
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CloseHelp,
+        });
+        assert!(!build_view_model(&core).help.open);
+    }
+
+    #[test]
+    fn sections_view_without_a_loaded_source_shows_an_empty_group() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.ui.docks.left.as_mut().unwrap().visible = true;
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "sections",
+                "sections": [{
+                    "title": "Threads",
+                    "source": { "ref": "service:ui/studio/threads", "collection": "rows" },
+                    "projection": { "primary": "thread_id" }
+                }]
+            }),
+        );
+        // No source seeded → the section is present but empty (count 0), not a
+        // placeholder: the surface is up, the data just hasn't arrived.
+        let vm = build_view_model(&core);
+        match vm.workspace.docks.left.expect("left dock").view {
+            crate::studio::view_model::StudioViewVm::Sections { sections, .. } => {
+                assert_eq!(sections.len(), 1);
+                assert_eq!(sections[0].count, 0);
+                assert!(sections[0].rows.is_empty());
+            }
+            other => panic!("expected sections dock view, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn status_bar_exposes_principal_and_surface() {
         let core = StudioCore::new(session(), BrowserViewport::default(), 0);
         let envelope = core.envelope(Vec::new());
@@ -2860,33 +3235,47 @@ mod tests {
     }
 
     #[test]
-    fn thread_supports_continuation_reads_execution_facts() {
+    fn thread_execution_facts_accessors() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.data.threads = Some(StudioThreadsDto {
             threads: vec![
-                serde_json::json!({ "thread_id": "T-a", "execution": { "supports_continuation": true } }),
+                // directive: continuation + operator follow-up.
+                serde_json::json!({ "thread_id": "T-a",
+                    "execution": { "supports_continuation": true, "supports_operator_followup": true } }),
+                // graph: machine continuation, NO operator follow-up.
+                serde_json::json!({ "thread_id": "T-g",
+                    "execution": { "supports_continuation": true, "supports_operator_followup": false } }),
                 serde_json::json!({ "thread_id": "T-b", "execution": { "supports_continuation": false } }),
                 serde_json::json!({ "thread_id": "T-c" }), // no execution facts
             ],
         });
         assert_eq!(core.thread_supports_continuation("T-a"), Some(true));
+        assert_eq!(core.thread_supports_operator_followup("T-a"), Some(true));
+        assert_eq!(core.thread_supports_continuation("T-g"), Some(true));
+        assert_eq!(
+            core.thread_supports_operator_followup("T-g"),
+            Some(false),
+            "graph is machine-only"
+        );
         assert_eq!(core.thread_supports_continuation("T-b"), Some(false));
         assert_eq!(core.thread_supports_continuation("T-c"), None, "missing facts → unknown");
+        assert_eq!(core.thread_supports_operator_followup("T-c"), None);
         assert_eq!(core.thread_supports_continuation("T-missing"), None);
     }
 
     #[test]
-    fn cycle_input_target_excludes_non_continuation_chain() {
+    fn cycle_input_target_excludes_machine_only_chain() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_service_route(&mut core);
-        // Two single-thread chains: one continuation-capable, one not (per the
-        // substrate's execution facts). Only the capable one is a valid target.
+        // Two single-thread chains: one accepts operator follow-up, one is
+        // machine-only (a graph — continuation-capable but no operator input).
+        // Only the operator-followup chain is a valid input target.
         core.data.threads = Some(StudioThreadsDto {
             threads: vec![
                 serde_json::json!({ "thread_id": "T-yes", "chain_root_id": "T-yes",
-                    "execution": { "supports_continuation": true } }),
+                    "execution": { "supports_continuation": true, "supports_operator_followup": true } }),
                 serde_json::json!({ "thread_id": "T-no", "chain_root_id": "T-no",
-                    "execution": { "supports_continuation": false } }),
+                    "execution": { "supports_continuation": true, "supports_operator_followup": false } }),
             ],
         });
         // New → the continuation-capable chain (T-no is never offered).
@@ -3087,6 +3476,46 @@ mod tests {
     }
 
     #[test]
+    fn plain_submit_carries_no_interrupt_intent() {
+        // Steer is the daemon default → the wire omits `intent` entirely
+        // (backward-compatible with older daemons).
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        set_focused_input(&mut core, "steer me");
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInput,
+        });
+        let Some(StudioEffectKind::Invoke { params, .. }) =
+            effects.first().map(|e| &e.kind)
+        else {
+            panic!("expected an Invoke effect");
+        };
+        assert_eq!(params["input"], "steer me");
+        assert!(params.get("intent").is_none(), "steer must not set intent");
+    }
+
+    #[test]
+    fn interrupt_submit_sets_interrupt_intent() {
+        // Alt+Enter → SubmitInputInterrupt injects intent=interrupt so a running
+        // thread cuts its current cognition.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        set_focused_input(&mut core, "stop, do X");
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInputInterrupt,
+        });
+        let Some(StudioEffectKind::Invoke { params, .. }) =
+            effects.first().map(|e| &e.kind)
+        else {
+            panic!("expected an Invoke effect");
+        };
+        assert_eq!(params["input"], "stop, do X");
+        assert_eq!(params["intent"], "interrupt");
+    }
+
+    #[test]
     fn complete_input_accepts_top_slash_candidate() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core);
@@ -3108,6 +3537,47 @@ mod tests {
             core.focused_input_buffer().unwrap().cursor,
             "/thread ".len()
         );
+    }
+
+    #[test]
+    fn complete_input_accepts_top_mention() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // An input declaring an @-mention source (projected from threads).
+        core.views.insert(
+            "view:ryeos/input".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "widget": "text",
+                "input": {
+                    "id": "line",
+                    "submit": "route",
+                    "mentions": {
+                        "ref": "service:threads/list",
+                        "collection": "threads",
+                        "reference": "thread_id",
+                        "label": "item_ref"
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        // The refs land under the mention source key via the generic fetch.
+        core.data.sources.insert(
+            crate::studio::content::mention_source_key("view:ryeos/input", "line"),
+            serde_json::json!({ "threads": [
+                { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
+                { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
+            ]}),
+        );
+        set_focused_input(&mut core, "look @T-a");
+
+        // Cursor sits in an @-mention with a match → Tab can accept it.
+        assert!(core.key_context().input_can_accept_completion);
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CompleteInput,
+        });
+        assert!(effects.is_empty());
+        assert_eq!(focused_input_text(&core), "look @T-ab ");
     }
 
     #[test]
@@ -4646,7 +5116,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
-                    command: "interrupt".to_string(),
+                    command: crate::studio::dto::ThreadControlCommand::Interrupt,
                 },
             },
         });
@@ -4669,7 +5139,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
-                    command: "interrupt".to_string(),
+                    command: crate::studio::dto::ThreadControlCommand::Interrupt,
                 },
             },
         });

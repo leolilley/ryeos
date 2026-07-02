@@ -3,14 +3,19 @@
 //! The seat's ground verb lands here. The service owns the delivery
 //! decision; clients never know there are two mechanisms:
 //!
-//! - no `thread` / settled thread → launch the profile directive as a
-//!   chained-resume turn (`previous_thread_id`); each turn is a new
-//!   thread in the chain — continuity is the chain, not an entity;
-//! - live thread → structured refusal in v1 (the runtime-command
-//!   delivery path is the attention-design upgrade).
+//! - no `thread` / settled completed-or-failed thread → launch the profile
+//!   directive as a chained-resume turn (`previous_thread_id`); each turn is a
+//!   new thread in the chain — continuity is the chain, not an entity;
+//! - running directive thread → fold the operator input into the in-flight
+//!   loop as a new `cognition_in` (steer at the next turn boundary, or after a
+//!   forced interrupt) via the live-input queue; the runtime drains and
+//!   persists it through `runtime.poll_input`;
+//! - otherwise (not-yet-running, or a settled non-continuable status) →
+//!   structured refusal.
 //!
 //! Submit result contract (input-design.md):
 //! `{ thread_id?, delivery: launched|submitted|refused, notice? }`.
+//! A live fold returns `submitted` with the SAME `thread_id` (no new thread).
 
 use std::sync::Arc;
 
@@ -20,9 +25,10 @@ use serde_json::{json, Value};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::live_input_queue::EnqueueOutcome;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_state::objects::ThreadStatus;
+use ryeos_state::objects::{LiveInputIntent, LiveInput, ThreadStatus};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +45,11 @@ pub struct Request {
     /// Project root for resolution.
     #[serde(default)]
     pub project_path: Option<String>,
+    /// Delivery intent for a *running* directive thread. Ignored on the
+    /// launch / chained-resume paths (those land at turn boundaries by
+    /// construction). Omitted by older clients → cooperative `Steer`.
+    #[serde(default)]
+    pub intent: LiveInputIntent,
 }
 
 fn is_settled(status: &str) -> bool {
@@ -67,29 +78,46 @@ fn is_continuable(status: &str) -> bool {
     )
 }
 
-/// Decide whether a follow-up can braid onto `predecessor`, or must be refused.
-/// Returns the refusal notice, or `None` to proceed. Pure over the few fields the
-/// decision needs, so it is unit-testable without a daemon and runs synchronously.
+/// Where a follow-up to an existing thread lands, decided purely from status.
+#[derive(Debug, PartialEq, Eq)]
+enum FollowUpDecision {
+    /// Running thread → fold the input into its in-flight loop (live).
+    Live,
+    /// Settled completed/failed turn → braid a successor (chained-resume).
+    Continue,
+    /// Not deliverable; carries the operator-facing notice.
+    Refuse(String),
+}
+
+/// Classify a follow-up by the predecessor's STATUS only (kind eligibility is
+/// decided separately, since it needs daemon policy). Pure, so it is
+/// unit-testable without a daemon and runs synchronously.
 ///
-/// This decides ELIGIBILITY only (live source / non-continuable status). It does
-/// NOT refuse merely because a successor already exists: an idempotent
-/// double-submit is deduped downstream by fingerprint in
-/// `create_or_get_operator_continuation` (same input → same successor; different
-/// input → conflict), which returns the real successor id either way.
-fn follow_up_refusal(status: &str, thread_id: &str) -> Option<String> {
+/// This decides delivery TARGET, not idempotency: it does NOT refuse merely
+/// because a successor already exists — an idempotent double-submit is deduped
+/// downstream by fingerprint in `create_or_get_operator_continuation` (same
+/// input → same successor; different input → conflict).
+fn classify_follow_up(status: &str, thread_id: &str) -> FollowUpDecision {
+    if ThreadStatus::from_str_lossy(status) == Some(ThreadStatus::Running) {
+        // A running thread folds operator input as a new cognition_in — steered
+        // at the next turn boundary, or after a forced interrupt.
+        return FollowUpDecision::Live;
+    }
     if !is_settled(status) {
-        // Live run: runtime-command delivery is a service upgrade
-        // (attention-design); refuse honestly rather than queue silently.
-        return Some(format!(
-            "thread {thread_id} is {status}; live delivery is not supported yet"
+        // created / accepted / pending: no live loop to steer yet, and no
+        // settled turn to braid onto. Refuse honestly; the operator retries
+        // once it is running or has finished.
+        return FollowUpDecision::Refuse(format!(
+            "thread {thread_id} is {status}; operator input needs a running thread \
+             or a completed/failed turn to continue"
         ));
     }
     if !is_continuable(status) {
-        return Some(format!(
+        return FollowUpDecision::Refuse(format!(
             "thread {thread_id} is {status}; a follow-up can only continue a completed or failed turn"
         ));
     }
-    None
+    FollowUpDecision::Continue
 }
 
 pub async fn handle(
@@ -101,6 +129,16 @@ pub async fn handle(
     if req.input.trim().is_empty() {
         return Err(HandlerError::BadRequest("input is empty".to_string()));
     }
+
+    // Full daemon-authored execution facts for a kind — every arm returns both
+    // so the client gates the operator-input affordance on
+    // `supports_operator_followup`, not on `supports_continuation` alone.
+    let exec_facts = |kind: &str| {
+        json!({
+            "supports_continuation": state.threads.supports_continuation_for_kind(kind),
+            "supports_operator_followup": state.threads.supports_operator_followup_for_kind(kind),
+        })
+    };
 
     // Resolve the prior turn, if the route carries one. Eligibility only — a
     // live source or a non-continuable settled status is refused; an existing
@@ -114,19 +152,15 @@ pub async fn handle(
                 .map_err(|e| HandlerError::Internal(e.to_string()))?
                 .ok_or(HandlerError::NotFound)?;
             ctx.require_owner(detail.requested_by.as_deref())?;
-            if let Some(notice) = follow_up_refusal(&detail.status, &detail.thread_id) {
-                return Ok(json!({
-                    "thread_id": Value::Null,
-                    "delivery": "refused",
-                    "notice": notice,
-                }));
-            }
-            // Daemon-authored continuation authority, enforced at the API
-            // boundary: a source whose KIND cannot chain-fold (e.g. graph) is an
-            // EXPECTED refusal, not a server fault. The lifecycle guard would
-            // also reject it, but that surfaces as a 500; refuse cleanly here so
-            // a stale/third-party client that skipped the client-side gate gets
-            // a structured `refused` with authoritative execution facts.
+
+            // Kind eligibility, enforced at the API boundary, applies to BOTH
+            // live delivery and settled continuation: a kind that cannot
+            // chain-fold (e.g. graph), or that self-continues by machine only,
+            // has nowhere to put operator input. Refuse cleanly with
+            // authoritative execution facts rather than letting the lifecycle
+            // guard surface a 500. (Decided before status so a stale/third-party
+            // client that skipped the client-side gate gets a structured
+            // refusal regardless of whether the thread is live or settled.)
             if !state.threads.supports_continuation_for_kind(&detail.kind) {
                 return Ok(json!({
                     "thread_id": Value::Null,
@@ -135,10 +169,106 @@ pub async fn handle(
                         "thread {} is kind '{}', which does not support continuation",
                         detail.thread_id, detail.kind
                     ),
-                    "execution": { "supports_continuation": false },
+                    "execution": exec_facts(&detail.kind),
                 }));
             }
-            Some(detail)
+            if !state
+                .threads
+                .supports_operator_followup_for_kind(&detail.kind)
+            {
+                return Ok(json!({
+                    "thread_id": Value::Null,
+                    "delivery": "refused",
+                    "notice": format!(
+                        "thread {} is kind '{}', which self-continues by machine only \
+                         and does not accept operator follow-up",
+                        detail.thread_id, detail.kind
+                    ),
+                    "execution": exec_facts(&detail.kind),
+                }));
+            }
+
+            match classify_follow_up(&detail.status, &detail.thread_id) {
+                // Running, eligible directive: fold operator input into the
+                // in-flight loop. Enqueue first (so the input is present when
+                // the runtime next polls), then — for an interrupt — nudge the
+                // runtime to cut its current cognition.
+                FollowUpDecision::Live => {
+                    let input =
+                        LiveInput::new(req.input.clone(), req.intent);
+                    match state.live_input.enqueue(&detail.thread_id, input) {
+                        EnqueueOutcome::Accepted { .. } => {}
+                        EnqueueOutcome::Full { pending } => {
+                            return Ok(json!({
+                                "thread_id": Value::Null,
+                                "delivery": "refused",
+                                "notice": format!(
+                                    "thread {} already has {} operator input(s) pending; \
+                                     wait for them to fold",
+                                    detail.thread_id, pending
+                                ),
+                                "execution": exec_facts(&detail.kind),
+                            }));
+                        }
+                        EnqueueOutcome::Closed => {
+                            // Finalized between the status read and the enqueue.
+                            // The live window closed; resubmitting takes the
+                            // settled continuation path.
+                            return Ok(json!({
+                                "thread_id": Value::Null,
+                                "delivery": "refused",
+                                "notice": format!(
+                                    "thread {} finalized before the input could be delivered; \
+                                     resubmit to continue",
+                                    detail.thread_id
+                                ),
+                                "execution": exec_facts(&detail.kind),
+                            }));
+                        }
+                    }
+
+                    // Interrupt: cut the in-flight cognition. The input is
+                    // already enqueued, so on any signal failure we degrade to a
+                    // cooperative steer (it still folds at the next boundary).
+                    let mut notice = Value::Null;
+                    if req.intent.is_interrupt() {
+                        let outcome = match detail.runtime.pgid {
+                            Some(pgid) => {
+                                ryeos_app::process::interrupt_process_group(pgid)
+                            }
+                            None => ryeos_app::process::SignalResult::MissingPgid,
+                        };
+                        if outcome != ryeos_app::process::SignalResult::Delivered {
+                            notice = json!(format!(
+                                "interrupt not delivered ({}); steering instead — \
+                                 input folds at the next turn boundary",
+                                outcome.as_str()
+                            ));
+                            tracing::warn!(
+                                thread_id = %detail.thread_id,
+                                signal = %outcome.as_str(),
+                                "live interrupt signal not delivered; degraded to steer"
+                            );
+                        }
+                    }
+
+                    return Ok(json!({
+                        "thread_id": detail.thread_id,
+                        "delivery": "submitted",
+                        "notice": notice,
+                        "execution": exec_facts(&detail.kind),
+                    }));
+                }
+                FollowUpDecision::Refuse(notice) => {
+                    return Ok(json!({
+                        "thread_id": Value::Null,
+                        "delivery": "refused",
+                        "notice": notice,
+                        "execution": exec_facts(&detail.kind),
+                    }));
+                }
+                FollowUpDecision::Continue => Some(detail),
+            }
         }
     };
 
@@ -213,6 +343,17 @@ pub async fn handle(
         usage_subject: None,
         usage_subject_asserted_by: None,
     };
+    // Inherit the predecessor's runtime identity so the successor reconstructs
+    // the same launch without a per-item executor_id (delegate kinds carry none).
+    // `executor_ref` comes straight off the predecessor row; `runtime_ref` from
+    // its captured launch metadata, when present.
+    let prior_runtime_ref = state
+        .state_store
+        .get_launch_metadata(&previous.thread_id)
+        .ok()
+        .flatten()
+        .and_then(|m| m.resume_context)
+        .and_then(|rc| rc.runtime_ref);
     // Operator launch context, seeded atomically with the edge so the row is
     // relaunchable the instant it exists. Caps left empty: the operator launch
     // re-derives them fresh (it is an explicit action, not a pinned relaunch).
@@ -233,6 +374,8 @@ pub async fn handle(
         }),
         execution_hints: Default::default(),
         effective_caps: Vec::new(),
+        executor_ref: Some(previous.executor_ref.clone()),
+        runtime_ref: prior_runtime_ref,
     };
     let project_path_str = project_path.as_path().to_string_lossy();
     let fingerprint = ryeos_app::thread_lifecycle::continuation_request_fingerprint(
@@ -274,12 +417,6 @@ pub async fn handle(
         });
     };
 
-    // Daemon-authored continuation authority for the actual successor the
-    // client will ratchet `route.thread` to — computed from that successor's
-    // own kind in every arm.
-    let successor_supports_continuation = |kind: &str| {
-        json!({ "supports_continuation": state.threads.supports_continuation_for_kind(kind) })
-    };
 
     use ryeos_app::thread_lifecycle::OperatorContinuation;
     match outcome {
@@ -289,7 +426,7 @@ pub async fn handle(
                 "thread_id": detail.thread_id,
                 "delivery": "launched",
                 "notice": Value::Null,
-                "execution": successor_supports_continuation(&detail.kind),
+                "execution": exec_facts(&detail.kind),
             }))
         }
         OperatorContinuation::Existing(detail) => {
@@ -302,7 +439,7 @@ pub async fn handle(
                 "thread_id": detail.thread_id,
                 "delivery": "launched",
                 "notice": Value::Null,
-                "execution": successor_supports_continuation(&detail.kind),
+                "execution": exec_facts(&detail.kind),
             }))
         }
         OperatorContinuation::Conflict(detail) => Ok(json!({
@@ -313,7 +450,7 @@ pub async fn handle(
                  follow that thread or start a new chain",
                 previous.thread_id, detail.thread_id
             ),
-            "execution": successor_supports_continuation(&detail.kind),
+            "execution": exec_facts(&detail.kind),
         })),
     }
 }
@@ -366,25 +503,47 @@ mod tests {
     }
 
     #[test]
-    fn continuable_predecessor_proceeds() {
-        // Eligibility passes for completed/failed sources. An already-continued
+    fn continuable_predecessor_continues() {
+        // Completed/failed sources braid a successor. An already-continued
         // source is NOT pre-refused here — the create-or-get dedups by fingerprint.
-        assert!(follow_up_refusal("completed", "T-1").is_none());
-        assert!(follow_up_refusal("failed", "T-1").is_none());
+        assert_eq!(
+            classify_follow_up("completed", "T-1"),
+            FollowUpDecision::Continue
+        );
+        assert_eq!(
+            classify_follow_up("failed", "T-1"),
+            FollowUpDecision::Continue
+        );
     }
 
     #[test]
-    fn live_source_is_refused() {
-        let notice = follow_up_refusal("running", "T-1").expect("live run refused");
-        assert!(notice.contains("live delivery"), "got: {notice}");
+    fn running_source_is_live() {
+        // A running thread is no longer refused — it folds operator input live.
+        assert_eq!(classify_follow_up("running", "T-1"), FollowUpDecision::Live);
+    }
+
+    #[test]
+    fn not_yet_running_source_is_refused() {
+        // created / accepted / pending have no live loop and no settled turn.
+        for status in ["created", "accepted", "pending"] {
+            match classify_follow_up(status, "T-1") {
+                FollowUpDecision::Refuse(notice) => {
+                    assert!(notice.contains("needs a running thread"), "got: {notice}");
+                }
+                other => panic!("{status} must be refused, got {other:?}"),
+            }
+        }
     }
 
     #[test]
     fn settled_non_continuable_source_is_refused() {
-        for status in ["cancelled", "killed", "timed_out"] {
-            let notice = follow_up_refusal(status, "T-1")
-                .unwrap_or_else(|| panic!("{status} must be refused"));
-            assert!(notice.contains("can only continue"), "got: {notice}");
+        for status in ["cancelled", "killed", "timed_out", "continued"] {
+            match classify_follow_up(status, "T-1") {
+                FollowUpDecision::Refuse(notice) => {
+                    assert!(notice.contains("can only continue"), "got: {notice}");
+                }
+                other => panic!("{status} must be refused, got {other:?}"),
+            }
         }
     }
 }

@@ -7,12 +7,12 @@ use serde_json::{json, Value};
 
 use super::arch_check;
 use super::launch_envelope::{
-    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
+    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{
     apply_caller_limit_overrides, apply_execution_policy_overrides, compute_effective_limits,
-    load_limits_config,
+    load_limits_config, merge_header_limits,
 };
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
@@ -665,9 +665,40 @@ pub(crate) fn derive_effective_caps(
     composed.policy_fact_string_seq(POLICY_FACT_EFFECTIVE_CAPS)
 }
 
+/// How a managed runtime launch should treat checkpoint state. One axis (distinct
+/// from `reconcile::ResumeKind`, which is the dispatch route). Encoding the three
+/// legal cases as an enum makes the illegal "both machine-continuation AND
+/// same-thread" state unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointResumeMode {
+    /// Fresh launch / operator follow-up: cold start, no resume env.
+    None,
+    /// Autonomous machine continuation successor: copy the PREDECESSOR's
+    /// checkpoint into this (new) thread's dir, then inject `RYEOS_RESUME=1`.
+    MachineContinuation,
+    /// Same-thread crash recovery: resume from this thread's OWN checkpoint
+    /// (already in its dir — no copy), then inject `RYEOS_RESUME=1`.
+    SameThread,
+}
+
+impl CheckpointResumeMode {
+    fn injects_resume_env(self) -> bool {
+        matches!(self, Self::MachineContinuation | Self::SameThread)
+    }
+
+    fn copies_predecessor_checkpoint(self) -> bool {
+        matches!(self, Self::MachineContinuation)
+    }
+}
+
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
     pub executor_ref: &'a str,
+    /// The serving runtime's canonical ref (`runtime:<name>`) for a managed
+    /// runtime-registry launch (directive / graph); `None` for direct subprocess
+    /// launches. Persisted into the `ResumeContext` so a continuation successor
+    /// reattaches the same runtime identity rather than re-resolving the default.
+    pub runtime_ref: Option<&'a str>,
     pub acting_principal: &'a str,
     pub resolved: &'a ResolvedExecutionRequest,
     pub project_path: &'a Path,
@@ -678,6 +709,10 @@ pub struct BuildAndLaunchParams<'a> {
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
+    /// Trusted parent execution context carried out-of-band from schema-driven
+    /// dispatch. Present for callback-dispatched child launches; absent for
+    /// roots and same-braid continuations.
+    pub parent_execution_context: Option<&'a crate::dispatch::ParentExecutionContext>,
     /// Machine continuation: fold the chain and resume with NO new stimulus.
     /// `false` for fresh launches and operator follow-ups (which inject their
     /// `parameters` as the opening stimulus); `true` only for an autonomous
@@ -692,6 +727,10 @@ pub struct BuildAndLaunchParams<'a> {
     /// snapshot-pinned continuation resolves against the captured version).
     /// `None` for fresh launches, which use the freshly-resolved caps.
     pub captured_effective_caps: Option<&'a [String]>,
+    /// How this managed launch treats checkpoint state — see
+    /// [`CheckpointResumeMode`]. Drives `RYEOS_RESUME=1` injection and predecessor
+    /// copy-forward, and only for replay-aware (`native_resume`) kinds.
+    pub checkpoint_resume_mode: CheckpointResumeMode,
 }
 
 /// Drop guard that finalizes a created thread as `failed` if `build_and_launch`
@@ -768,6 +807,7 @@ async fn run_claimed_thread_row(
     let BuildAndLaunchParams {
         state,
         executor_ref,
+        runtime_ref,
         acting_principal,
         resolved,
         project_path,
@@ -777,8 +817,10 @@ async fn run_claimed_thread_row(
         required_envelope_fields,
         pre_minted_thread_id: _,
         previous_thread_id,
+        parent_execution_context,
         suppress_stimulus,
         captured_effective_caps,
+        checkpoint_resume_mode,
     } = params;
     let engine = provenance.request_engine();
     tracing::info!(
@@ -830,46 +872,11 @@ async fn run_claimed_thread_row(
         )
     })?;
     let limits_config = limits_config.unwrap_or_default();
-    let requested_limits =
-        apply_execution_policy_overrides(&limits_config.defaults, &execution_policy);
-    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
-    let hard_limits = compute_effective_limits(
-        Some(&requested_limits),
-        &limits_config.defaults,
-        &limits_config.caps,
-        None,
-        0,
-    );
-    let duration_source = if parameters.get("timeout").is_some() {
-        "caller param `timeout`".to_string()
-    } else {
-        execution_policy
-            .timeout
-            .as_ref()
-            .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
-    };
-    let turns_source = if parameters.get("max_steps").is_some() {
-        "caller param `max_steps`".to_string()
-    } else {
-        execution_policy
-            .max_steps
-            .as_ref()
-            .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
-    };
-    tracing::info!(
-        item_ref = %resolved.item_ref,
-        duration_seconds = hard_limits.duration_seconds,
-        duration_source,
-        duration_cap = ?limits_config.caps.duration_seconds,
-        turns = hard_limits.turns,
-        turns_source = %turns_source,
-        turns_cap = ?limits_config.caps.turns,
-        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
-        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
-        "native launch execution policy resolved"
-    );
+    // Hard limits are computed AFTER the resolution pipeline below (see
+    // "compute effective limits"), so the directive-authored header `limits:`
+    // can be overlaid onto defaults BELOW execution-policy/caller overrides.
+    // The composed header is not available until resolution runs; `hard_limits`
+    // is still produced before the TTL / envelope consumers further down.
 
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback
@@ -918,6 +925,65 @@ async fn run_claimed_thread_row(
         references_edges = resolution.references_edges.len(),
         effective_trust_class = ?resolution.effective_trust_class,
         "resolution pipeline complete"
+    );
+
+    // Compute effective limits now that the composed header is resolved.
+    // The item's authored `limits:` (from the composed view, any kind) overlays
+    // its named fields onto the project defaults; omitted fields inherit. The
+    // merge is at the JSON level, so the executor names no limit field here.
+    // Precedence: defaults → header → execution policy → caller → caps → parent.
+    let base_limits = match resolution.composed.composed.get("limits") {
+        Some(v) if !v.is_null() => merge_header_limits(&limits_config.defaults, v)?,
+        _ => limits_config.defaults.clone(),
+    };
+    let requested_limits = apply_execution_policy_overrides(&base_limits, &execution_policy);
+    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
+    // Parent budget/depth inheritance is trusted control-plane data carried
+    // out-of-band (callback token → DispatchRequest). It is never read from
+    // action parameters, so runtimes and graph authors cannot spoof it.
+    // Missing/empty/null parent limits means "no parent clamp" — never
+    // deserialize `{}` into a zero-valued HardLimits, since 0 reads as "no
+    // limit" and `min(x, 0)` would erase the child's limits.
+    let parent_limits = parent_limits_from_context(parent_execution_context)?;
+    // Current launch depth (position in the spawn tree). Callback children use
+    // trusted parent depth + 1; roots and same-braid continuations launch at 0.
+    let current_depth = launch_depth_from_context(parent_execution_context);
+    let hard_limits = compute_effective_limits(
+        Some(&requested_limits),
+        &limits_config.defaults,
+        &limits_config.caps,
+        parent_limits.as_ref(),
+    );
+    let duration_source = if parameters.get("timeout").is_some() {
+        "caller param `timeout`".to_string()
+    } else {
+        execution_policy
+            .timeout
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    let turns_source = if parameters.get("max_steps").is_some() {
+        "caller param `max_steps`".to_string()
+    } else {
+        execution_policy
+            .max_steps
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    tracing::info!(
+        item_ref = %resolved.item_ref,
+        duration_seconds = hard_limits.duration_seconds,
+        duration_source,
+        duration_cap = ?limits_config.caps.duration_seconds,
+        turns = hard_limits.turns,
+        turns_source = %turns_source,
+        turns_cap = ?limits_config.caps.turns,
+        header_limits_present = resolution.composed.composed.get("limits").is_some_and(|v| !v.is_null()),
+        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
+        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
+        "native launch execution policy resolved"
     );
 
     // ── Launch augmentations ──────────────────────────────────────
@@ -1048,39 +1114,131 @@ async fn run_claimed_thread_row(
         }
     }
 
-    // Seed THIS thread's launch identity so a continuation successor of it can be
-    // relaunched later (machine handoff / reconciler) with no live request. Only
-    // for continuation-capable kinds; uses the REAL composed `effective_caps`
-    // (unlike `spawn_item`, which captures empty caps). Warn-not-fail: a fresh
-    // launch still works, and the continuation path fails loudly later if the
-    // identity is absent. The clobber-preserving attach keeps this against the
-    // runtime's later empty self-attach.
-    if state
+    // The serving runtime (captured ref, else the kind's default). A runtime that
+    // declares `native_resume` is replay-aware: allocate its per-thread checkpoint
+    // dir so the spawn can inject `RYEOS_CHECKPOINT_DIR` and reconcile can reason
+    // about restart-safe state.
+    // Resolve via the REQUEST engine (a malformed/unregistered captured
+    // runtime_ref is an error, never silently the kind default — that could
+    // switch binary / envelope / native_resume policy).
+    let native_resume = engine
+        .runtimes
+        // ITEM kind (`graph`), not the thread-profile kind (`graph_run`):
+        // runtimes are registered by the kind they serve and resolve_for_launch
+        // verifies serves == kind.
+        .resolve_for_launch(runtime_ref, &resolved.resolved_item.kind)
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .native_resume
+        .clone();
+    // Replay-aware runtimes get a per-thread checkpoint dir. If allocation fails,
+    // FAIL the launch rather than spawn a replay-aware process with no checkpoint
+    // env (the finalize-on-drop guard records a failed thread).
+    let checkpoint_dir: Option<std::path::PathBuf> = if native_resume.is_some() {
+        let dir = state
+            .config
+            .app_root
+            .join("threads")
+            .join(&thread_id)
+            .join("checkpoints");
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "failed to allocate checkpoint dir for replay-aware runtime `{}`: {e}",
+                resolved.item_ref
+            ))
+        })?;
+        Some(dir)
+    } else {
+        None
+    };
+
+    // A machine continuation of a replay-aware kind resumes from the
+    // predecessor's checkpoint: copy it into this successor's dir and flag the
+    // spawn so `RYEOS_RESUME=1` is injected and the runtime resumes mid-run.
+    // A machine continuation with no predecessor checkpoint cannot resume — fail
+    // rather than cold-start (which would re-run the graph from the beginning).
+    // Both a machine-continuation successor and a same-thread crash recovery
+    // resume from a checkpoint (RYEOS_RESUME=1 — `injects_resume_env`). They
+    // differ on WHICH checkpoint: a machine successor copies the PREDECESSOR's
+    // forward into its own dir (`copies_predecessor_checkpoint`); a same-thread
+    // resume reads its OWN dir (already populated) — so copy-forward is gated on
+    // the mode, not on `is_resume`.
+    let is_resume = checkpoint_resume_mode.injects_resume_env() && native_resume.is_some();
+    if checkpoint_resume_mode.copies_predecessor_checkpoint() && native_resume.is_some() {
+        let prev = previous_thread_id.ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no predecessor thread",
+                resolved.item_ref
+            ))
+        })?;
+        let succ_dir = checkpoint_dir.as_deref().ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}` has no checkpoint dir",
+                resolved.item_ref
+            ))
+        })?;
+        let prev_dir = state
+            .config
+            .app_root
+            .join("threads")
+            .join(prev)
+            .join("checkpoints");
+        let copied = ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir)
+            .map_err(|e| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
+            })?;
+        if !copied {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "machine continuation of `{}`: predecessor `{prev}` has no checkpoint to resume from",
+                resolved.item_ref
+            )));
+        }
+    }
+
+    // Seed launch metadata for continuation-capable kinds (the launch identity a
+    // successor relaunches from — REAL composed `effective_caps`, unlike
+    // `spawn_item`) AND for replay-aware runtimes (the `native_resume` +
+    // `checkpoint_dir` reconcile reads on restart). These are independent: a graph
+    // is replay-aware before its continuation flag is set. Warn-not-fail: a fresh
+    // launch still works; the relevant path fails loudly later if identity is absent.
+    let supports_continuation = state
         .threads
         .kind_profiles()
         .get(&resolved.kind)
-        .is_some_and(|p| p.supports_continuation)
-    {
-        let resume_context = ryeos_app::launch_metadata::ResumeContext {
-            kind: resolved.kind.clone(),
-            item_ref: resolved.item_ref.clone(),
-            launch_mode: resolved.launch_mode.clone(),
-            parameters: parameters.clone(),
-            project_context: resolved.plan_context.project_context.clone(),
-            original_snapshot_hash: None,
-            current_site_id: resolved.current_site_id.clone(),
-            origin_site_id: resolved.origin_site_id.clone(),
-            requested_by: resolved.plan_context.requested_by.clone(),
-            execution_hints: resolved.plan_context.execution_hints.clone(),
-            effective_caps: effective_caps.clone(),
-        };
-        let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
-            .with_resume_context(resume_context);
+        .is_some_and(|p| p.supports_continuation);
+    if supports_continuation || native_resume.is_some() {
+        let mut metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default();
+        if supports_continuation {
+            metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
+                kind: resolved.kind.clone(),
+                item_ref: resolved.item_ref.clone(),
+                launch_mode: resolved.launch_mode.clone(),
+                parameters: parameters.clone(),
+                project_context: resolved.plan_context.project_context.clone(),
+                original_snapshot_hash: None,
+                current_site_id: resolved.current_site_id.clone(),
+                origin_site_id: resolved.origin_site_id.clone(),
+                requested_by: resolved.plan_context.requested_by.clone(),
+                execution_hints: resolved.plan_context.execution_hints.clone(),
+                effective_caps: effective_caps.clone(),
+                // Capture the actual launch identity so a continuation successor of
+                // a delegate kind (directive / graph) can reconstruct how to launch
+                // without a per-item `executor_id`.
+                executor_ref: Some(executor_ref.to_string()),
+                runtime_ref: runtime_ref.map(str::to_string),
+            });
+        }
+        if let Some(nr) = native_resume.clone() {
+            metadata = metadata.with_native_resume(nr);
+        }
+        if let Some(ckpt) = checkpoint_dir.clone() {
+            metadata = metadata.with_checkpoint_dir(ckpt);
+        }
         if let Err(e) = state.state_store.seed_launch_metadata(&thread_id, &metadata) {
             tracing::warn!(
                 thread_id = %thread_id,
                 error = %e,
-                "failed to seed continuation launch identity"
+                "failed to seed launch metadata"
             );
         }
     }
@@ -1155,6 +1313,8 @@ async fn run_claimed_thread_row(
         // ref), so token-claimed caps and minted caps cannot diverge.
         effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
+        serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
+        current_depth,
     );
 
     // 6b. Build inventory the launching kind asked for. The engine
@@ -1237,11 +1397,14 @@ async fn run_claimed_thread_row(
             operator_trusted_keys_dir,
         },
         EnvelopeRequest {
-            inputs: parameters.clone(),
+            // Strip runtime-control fields from prompt inputs. Parent
+            // budget/depth now travels out-of-band, but rejecting prompt leaks
+            // here keeps forged caller/action fields from becoming model input.
+            inputs: prompt_inputs_from_parameters(parameters),
             previous_thread_id: previous_thread_id.map(str::to_string),
-            parent_thread_id: None,
+            parent_thread_id: parent_execution_context.map(|ctx| ctx.parent_thread_id.clone()),
             parent_capabilities: None,
-            depth: 0,
+            depth: current_depth,
             suppress_stimulus,
         },
         EnvelopePolicy {
@@ -1326,6 +1489,7 @@ async fn run_claimed_thread_row(
         .and_then(|preflight| preflight.env_var.clone());
     let app_root_owned = state.config.app_root.clone();
     let cas_root_owned = state.config.app_root.join("cas");
+    let checkpoint_dir_owned = checkpoint_dir.clone();
 
     let spawn_result = tokio::task::spawn_blocking(move || {
         spawn_runtime(SpawnRuntimeParams {
@@ -1342,6 +1506,11 @@ async fn run_claimed_thread_row(
             roots: runtime_roots,
             app_root: &app_root_owned,
             cas_root: &cas_root_owned,
+            checkpoint_dir: checkpoint_dir_owned.as_deref(),
+            // A machine continuation of a replay-aware kind resumes from the
+            // predecessor's copied-forward checkpoint; a fresh launch writes a
+            // cold one.
+            is_resume,
         })
     })
     .await
@@ -1364,13 +1533,21 @@ async fn run_claimed_thread_row(
     let runtime_result = match spawn_result {
         Ok(result) => result,
         Err(err) => {
-            // Pre-runtime failure: launcher finalizes as failed
+            // Pre-runtime failure (provider/secret resolution, materialization,
+            // builder): record the real cause into `error` — the ONLY field the
+            // terminal `thread_failed` braid event persists — not `result`,
+            // which is dropped. Without this the operator only ever sees a bare
+            // "failed" and is locked out of why the thread died. `{err:#}` keeps
+            // the full cause chain (e.g. "missing required secret …").
             let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
                 thread_id: thread_id.clone(),
                 status: "failed".to_string(),
-                outcome_code: None,
-                result: Some(json!({"error": err.to_string()})),
-                error: None,
+                outcome_code: Some("pre_runtime_failure".to_string()),
+                result: None,
+                error: Some(json!({
+                    "code": "pre_runtime_failure",
+                    "message": format!("{err:#}"),
+                })),
                 metadata: None,
                 artifacts: Vec::new(),
                 final_cost: None,
@@ -1682,13 +1859,21 @@ async fn launch_claimed_successor(
     // its own kind, restores principal / hints / sites verbatim).
     let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
 
-    // Envelope-field requirements come from the successor kind's runtime entry.
+    // Envelope-field requirements come from the runtime entry. Prefer the
+    // predecessor's captured `runtime_ref` (by-ref) so a continued thread keeps
+    // the exact runtime it launched under; a captured-but-bad ref is an error,
+    // never a silent switch to the kind default.
     let required_envelope_fields = state
         .engine
         .runtimes
-        .lookup_for(&params.resolved.resolved_item.kind)
-        .map(|runtime| runtime.yaml.required_envelope_fields.clone())
-        .unwrap_or_default();
+        .resolve_for_launch(
+            resume.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        )
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .required_envelope_fields
+        .clone();
 
     // Machine: fold the chain with NO new stimulus, and pin authority to the
     // predecessor's captured caps. Operator: inject the seeded input as the
@@ -1703,6 +1888,9 @@ async fn launch_claimed_successor(
         BuildAndLaunchParams {
             state,
             executor_ref: &params.resolved.executor_ref,
+            // Propagate the predecessor's runtime identity so this successor
+            // re-seeds the same runtime for the NEXT continuation turn.
+            runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &params.acting_principal,
             resolved: &params.resolved,
             project_path: &project_path,
@@ -1712,12 +1900,176 @@ async fn launch_claimed_successor(
             required_envelope_fields: &required_envelope_fields,
             pre_minted_thread_id: None,
             previous_thread_id: Some(&previous_thread_id),
+            parent_execution_context: None,
             suppress_stimulus,
             captured_effective_caps,
+            checkpoint_resume_mode: match mode {
+                SuccessorMode::Machine => CheckpointResumeMode::MachineContinuation,
+                SuccessorMode::Operator => CheckpointResumeMode::None,
+            },
         },
         successor,
     )
     .await
+}
+
+/// Inner half of a SAME-THREAD native-resume crash recovery, run once the claim
+/// is held: rebuild the execution from this thread's own seeded `ResumeContext`
+/// and re-run the existing row through the managed runtime path (which builds the
+/// `LaunchEnvelope` the runtime needs — `spawn_item` cannot). Mirrors
+/// `launch_claimed_successor`, but it is the SAME thread (no upstream/braid), so
+/// `previous_thread_id` is `None`, there is no copy-forward, and `RYEOS_RESUME=1`
+/// makes the runtime load its OWN checkpoint.
+async fn launch_claimed_native_resume(
+    state: &AppState,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let thread_id = thread.thread_id.clone();
+    let resume = state
+        .state_store
+        .get_launch_metadata(&thread_id)?
+        .and_then(|m| m.resume_context)
+        .ok_or_else(|| {
+            anyhow::anyhow!("native resume: {thread_id} has no captured ResumeContext")
+        })?;
+
+    let project_path = match &resume.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
+        other => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "native resume: snapshot-pinned resume not supported yet \
+                 (project_context = {other:?})"
+            )));
+        }
+    };
+
+    let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
+
+    let required_envelope_fields = state
+        .engine
+        .runtimes
+        .resolve_for_launch(
+            resume.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        )
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
+        .yaml
+        .required_envelope_fields
+        .clone();
+
+    run_claimed_thread_row(
+        BuildAndLaunchParams {
+            state,
+            executor_ref: &params.resolved.executor_ref,
+            runtime_ref: resume.runtime_ref.as_deref(),
+            acting_principal: &params.acting_principal,
+            resolved: &params.resolved,
+            project_path: &project_path,
+            provenance: &params.provenance,
+            parameters: &params.parameters,
+            metadata_required_secrets: &params.resolved.resolved_item.metadata.required_secrets,
+            required_envelope_fields: &required_envelope_fields,
+            pre_minted_thread_id: None,
+            // SAME thread, not a successor — no chain braid.
+            previous_thread_id: None,
+            parent_execution_context: None,
+            // Crash resume folds no new stimulus; it reloads its own checkpoint.
+            suppress_stimulus: true,
+            // Pin the captured authority verbatim (same as a machine relaunch).
+            captured_effective_caps: Some(resume.effective_caps.as_slice()),
+            checkpoint_resume_mode: CheckpointResumeMode::SameThread,
+        },
+        thread,
+    )
+    .await
+}
+
+/// Claim-guarded entry for a SAME-THREAD native-resume crash recovery (the
+/// reconciler's `NativeResume` for a runtime-registry kind, e.g. graph). Claims
+/// the launch lease (so only one launcher acts), skips a thread that already
+/// reached a terminal status, then rebuilds + re-runs through the managed path.
+/// The resume-attempt budget is enforced upstream by `reconcile::decide_resume`.
+pub async fn launch_existing_native_resume(
+    state: AppState,
+    thread_id: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let claimed_by = format!("daemon:{}", std::process::id());
+    match state.state_store.claim_thread_launch(
+        thread_id,
+        &claim_id,
+        &claimed_by,
+        SUCCESSOR_LAUNCH_LEASE_MS,
+    )? {
+        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
+        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+        }
+    }
+
+    let thread = match state.threads.get_thread(thread_id) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(thread_id, &claim_id);
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "native resume: thread not found: {thread_id}"
+            )));
+        }
+        Err(e) => {
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(thread_id, &claim_id);
+            return Err(e.into());
+        }
+    };
+
+    // A terminal thread is already done (a duplicate trigger or a stale-lease
+    // reclaim of a settled row) — release and skip without finalizing. A
+    // non-terminal (crashed `running`/`created`) row is the resume target.
+    if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+        .is_some_and(|s| s.is_terminal())
+    {
+        let _ = state
+            .state_store
+            .release_thread_launch_claim(thread_id, &claim_id);
+        return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
+    }
+
+    // A still-`running` row whose process group is ALIVE is not crashed — this is
+    // a duplicate trigger or a stale-lease reclaim of a live launch. Skip rather
+    // than spawn a duplicate runtime. (reconcile already gates on liveness; this
+    // keeps the launcher safe if called twice or if the lease expires under a
+    // long-running resume.)
+    if thread.status == ryeos_state::objects::ThreadStatus::Running.as_str() {
+        if let Some(pgid) = thread.runtime.pgid {
+            if ryeos_app::process::pgid_alive(pgid) {
+                let _ = state
+                    .state_store
+                    .release_thread_launch_claim(thread_id, &claim_id);
+                return Ok(SuccessorLaunchOutcome::Skipped("live_process"));
+            }
+        }
+    }
+
+    let result = launch_claimed_native_resume(&state, thread).await;
+    let _ = state
+        .state_store
+        .release_thread_launch_claim(thread_id, &claim_id);
+
+    match result {
+        Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
+        Err(e) => {
+            crate::dispatch::finalize_method_thread_if_needed(
+                &state,
+                thread_id,
+                "failed",
+                Some(json!({ "error": e.to_string() })),
+            );
+            Err(e)
+        }
+    }
 }
 
 struct SpawnRuntimeParams<'a> {
@@ -1734,6 +2086,13 @@ struct SpawnRuntimeParams<'a> {
     roots: ryeos_app::env_contract::DaemonRootEnv,
     app_root: &'a Path,
     cas_root: &'a Path,
+    /// Daemon-allocated checkpoint dir for a replay-aware (`native_resume`)
+    /// runtime; `Some` injects `RYEOS_CHECKPOINT_DIR` so the runtime writes
+    /// restart-safe state. `None` for runtimes that declare no `native_resume`.
+    checkpoint_dir: Option<&'a Path>,
+    /// Inject `RYEOS_RESUME=1` so a replay-aware runtime loads its checkpoint
+    /// instead of cold-starting.
+    is_resume: bool,
 }
 
 fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
@@ -1751,6 +2110,8 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
         roots,
         app_root,
         cas_root,
+        checkpoint_dir,
+        is_resume,
     } = params;
     let secret_map: std::collections::BTreeMap<String, String> =
         vault_bindings.iter().cloned().collect();
@@ -1798,7 +2159,24 @@ fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<RuntimeResult> {
             ryeos_app::env_contract::EnvSourceDetail::ProtocolInjection { source },
         ))
     });
-    let protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
+    let mut protocol_bindings: Vec<_> = protocol_bindings.collect::<Result<Vec<_>>>()?;
+    // Replay-aware runtimes: surface the daemon-allocated checkpoint dir (and the
+    // resume flag) so the runtime writes / reloads restart-safe state via
+    // `ryeos_runtime::CheckpointWriter`.
+    if let Some(ckpt) = checkpoint_dir {
+        protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
+            "RYEOS_CHECKPOINT_DIR",
+            ckpt.display().to_string(),
+            ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
+        ));
+        if is_resume {
+            protocol_bindings.push(ryeos_app::env_contract::EnvBinding::new(
+                "RYEOS_RESUME",
+                "1",
+                ryeos_app::env_contract::EnvSourceDetail::DaemonResume,
+            ));
+        }
+    }
 
     let declared_secret_bindings = secret_map
         .iter()
@@ -1880,9 +2258,43 @@ fn normalize_runtime_terminal_status(status: &str) -> &'static str {
     }
 }
 
+fn parent_limits_from_context(
+    parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
+) -> anyhow::Result<Option<HardLimits>> {
+    let parent_limits_value = parent_execution_context.map(|ctx| &ctx.hard_limits);
+    parent_limits_value
+        .filter(|v| match v {
+            Value::Null => false,
+            Value::Object(m) => !m.is_empty(),
+            _ => true,
+        })
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("failed to parse parent_limits: {e}"))
+}
+
+fn launch_depth_from_context(
+    parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
+) -> u32 {
+    parent_execution_context
+        .map(|ctx| ctx.depth.saturating_add(1))
+        .unwrap_or(0)
+}
+
+fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
+    let mut inputs = parameters.clone();
+    if let Some(obj) = inputs.as_object_mut() {
+        for k in ryeos_runtime::callback::RESERVED_CONTROL_KEYS {
+            obj.remove(*k);
+        }
+    }
+    inputs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::limits::{LimitCaps, LimitValues};
 
     #[test]
     fn host_triple_matches_rustc_host() {
@@ -2075,5 +2487,103 @@ mod tests {
         assert!(is_runtime_terminal_status("timed_out"));
         assert!(!is_runtime_terminal_status("created"));
         assert!(!is_runtime_terminal_status("running"));
+    }
+
+    #[test]
+    fn parent_context_clamps_child_limits_and_increments_spawn_depth() {
+        let parent_hard_limits = HardLimits {
+            turns: 6,
+            tokens: 1_000,
+            spend_usd: 0.25,
+            spawns: 2,
+            depth: 3,
+            duration_seconds: 45,
+        };
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: serde_json::to_value(&parent_hard_limits).unwrap(),
+            depth: 4,
+        };
+
+        let parent_limits = parent_limits_from_context(Some(&ctx))
+            .expect("parent hard limits parse")
+            .expect("parent hard limits present");
+        let requested = LimitValues {
+            turns: 20,
+            tokens: 20_000,
+            spend_usd: 2.0,
+            spawns: 10,
+            depth: 8,
+            duration_seconds: 300,
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps::default(),
+            Some(&parent_limits),
+        );
+
+        assert_eq!(hard.turns, 6);
+        assert_eq!(hard.tokens, 1_000);
+        assert_eq!(hard.spend_usd, 0.25);
+        assert_eq!(hard.spawns, 2);
+        assert_eq!(hard.depth, 3);
+        assert_eq!(hard.duration_seconds, 45);
+        assert_eq!(launch_depth_from_context(Some(&ctx)), 5);
+    }
+
+    #[test]
+    fn absent_parent_context_is_root_or_same_braid_launch() {
+        assert!(parent_limits_from_context(None).unwrap().is_none());
+        assert_eq!(launch_depth_from_context(None), 0);
+    }
+
+    #[test]
+    fn empty_parent_limits_do_not_zero_erase_child_limits() {
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: json!({}),
+            depth: 2,
+        };
+
+        assert!(parent_limits_from_context(Some(&ctx)).unwrap().is_none());
+        assert_eq!(launch_depth_from_context(Some(&ctx)), 3);
+    }
+
+    #[test]
+    fn malformed_parent_limits_fail_loudly() {
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: json!({"turns": "not-a-number"}),
+            depth: 0,
+        };
+
+        let err = parent_limits_from_context(Some(&ctx)).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse parent_limits"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn forged_parent_control_params_are_not_launch_context_or_prompt_input() {
+        let params = json!({
+            "task": "keep this",
+            "parent_limits": {"turns": 1},
+            "parent_thread_id": "T-forged",
+            "depth": 99,
+            "continuation": {"seed": "forged"}
+        });
+
+        assert!(
+            parent_limits_from_context(None).unwrap().is_none(),
+            "parent clamp must come only from trusted ParentExecutionContext"
+        );
+        assert_eq!(
+            launch_depth_from_context(None),
+            0,
+            "forged params must not affect launch depth"
+        );
+        assert_eq!(prompt_inputs_from_parameters(&params), json!({"task": "keep this"}));
     }
 }

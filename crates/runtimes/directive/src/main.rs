@@ -143,6 +143,13 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         &thread_auth_token,
     );
 
+    // Register this process's pgid BEFORE any durable callback — the resume
+    // replay read, `append_event(thread_continued)`, and the opening
+    // `emit_stimulus` below all happen after this. Without it the daemon
+    // cannot tell a live runtime from a crashed one on restart and would
+    // resume a duplicate. Resume-critical: must precede all work.
+    callback.attach_current_process().await?;
+
     let provider_snapshot: ResolvedProviderSnapshot =
         serde_json::from_value(envelope.provider_snapshot.clone().ok_or_else(|| {
             anyhow::anyhow!(
@@ -192,6 +199,21 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             tracing::info!("received SIGTERM, cancellation requested");
         });
     }
+
+    // Wire SIGUSR1 → harness interrupt flag (live intervention). This MUST set
+    // the flag at signal-DELIVERY time, not at async-task-poll time: the runner
+    // clears any stale interrupt at the turn boundary before streaming, so a
+    // signal delivered between turns has to be visible to that boundary clear.
+    // A tokio::signal task sets the flag only when the task is next polled, which
+    // can land AFTER the boundary clear — the flag would then cut the fresh
+    // cognition (stale-interrupt race). `signal_hook::flag::register` installs a
+    // synchronous handler that stores `true` into the shared atomic the instant
+    // the signal arrives (an atomic store is async-signal-safe), closing that
+    // race. It coexists with tokio's SIGTERM handler via signal-hook-registry and
+    // stays armed for the process lifetime (repeatable). SIGTERM keeps its async
+    // task: a late cancel only finalizes later, it never cuts-then-continues.
+    signal_hook::flag::register(signal_hook::consts::SIGUSR1, harness.interrupted_flag())
+        .context("failed to register SIGUSR1 live-interrupt flag")?;
     let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     let hooks = bootstrap_output.config.hooks.clone();
@@ -275,6 +297,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 thread_id: envelope.thread_id.clone(),
                 hooks,
                 outputs: bootstrap_output.config.outputs,
+                continuation: bootstrap_output.config.continuation,
+                context_threshold_ratio: bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .context_threshold_ratio,
                 sampling,
             },
         )
@@ -350,6 +377,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             thread_id: envelope.thread_id.clone(),
             hooks,
             outputs: bootstrap_output.config.outputs,
+            continuation: bootstrap_output.config.continuation,
+            context_threshold_ratio: bootstrap_output
+                .config
+                .continuation_runtime
+                .context_threshold_ratio,
             sampling,
         })
     };

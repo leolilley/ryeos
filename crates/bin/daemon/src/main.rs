@@ -340,6 +340,10 @@ async fn main() -> Result<()> {
         event_streams.clone(),
     )?);
     threads.set_scheduler_db(scheduler_db.clone(), config.app_root.clone());
+    // Operator live-input queue, shared between the `threads.input` enqueue
+    // path (via AppState) and lifecycle finalization (closes a thread's entry).
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(CommandService::new(
         state_store.clone(),
         kind_profiles.clone(),
@@ -393,6 +397,7 @@ async fn main() -> Result<()> {
         ),
         identity: Arc::new(identity),
         threads,
+        live_input,
         events,
         event_streams,
         commands,
@@ -507,12 +512,15 @@ async fn main() -> Result<()> {
 
     // Write daemon.json so tools can discover the daemon.
     // This is the discovery contract — fail if we can't write it.
+    let build = ryeos_app::build_info::get();
     let daemon_info = ryeos_node::DaemonMetadata {
         pid: Some(std::process::id()),
         uds_path: Some(config.uds_path.clone()),
         bind: Some(actual_bind.to_string()),
         started_at: Some(lillux::time::iso8601_now()),
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        version: Some(build.version.to_string()),
+        revision: Some(build.revision.to_string()),
+        build_date: Some(build.build_date.to_string()),
         app_root: config.app_root.clone(),
     };
     let daemon_json_path = config.app_root.join("daemon.json");
@@ -601,6 +609,28 @@ async fn main() -> Result<()> {
                             "reconcile: successor launch failed"
                         );
                     }
+                }
+                return;
+            }
+            // NativeResume routing. A runtime-registry kind (e.g. graph) captured
+            // a `runtime_ref` and MUST resume through the managed launch path,
+            // which builds the `LaunchEnvelope` the runtime reads from stdin — the
+            // executor-chain `run_existing_detached`/`spawn_item` path below cannot
+            // build one. A tool-subprocess native_resume (no `runtime_ref`) keeps
+            // that path.
+            if intent.resume_context.runtime_ref.is_some() {
+                if let Err(err) =
+                    ryeos_executor::execution::launch::launch_existing_native_resume(
+                        st,
+                        &intent.thread_id,
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        thread_id = %intent.thread_id,
+                        error = %err,
+                        "resume: managed native resume failed"
+                    );
                 }
                 return;
             }
@@ -707,7 +737,11 @@ async fn main() -> Result<()> {
 }
 
 fn drain_running_threads(state: &AppState) {
-    let threads = match state.state_store.list_threads_by_status(&["running"]) {
+    // Include `created`: a runtime registers its pgid (attach_process) BEFORE
+    // it marks running, so there is a brief `created` + live-pgid window. The
+    // kill loop below only acts on rows with `Some(pgid)`, so unlaunched
+    // `created` rows (no pgid) are untouched.
+    let threads = match state.state_store.list_threads_by_status(&["created", "running"]) {
         Ok(threads) => threads,
         Err(err) => {
             tracing::warn!(error = %err, "failed to list running threads during shutdown");
@@ -859,6 +893,8 @@ async fn run_service_standalone(
         events.clone(),
         event_streams.clone(),
     )?);
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,
@@ -884,6 +920,7 @@ async fn run_service_standalone(
         ),
         identity: Arc::new(identity),
         threads,
+        live_input,
         events,
         event_streams,
         commands,

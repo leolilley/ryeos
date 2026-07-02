@@ -40,6 +40,14 @@ pub struct ThreadLifecycleService {
     current_site_id: String,
     scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
     app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
+    /// Operator live-input staging, shared with `AppState`. Wired once after
+    /// construction (`set_live_input_queue`) so the existing constructor call
+    /// sites stay unchanged. Finalization closes the per-thread entry after the
+    /// terminal state write so no queued input survives a terminal status and
+    /// late enqueues are refused (see `live_input_queue`). Absent in tests
+    /// that don't wire it — the persist-path running-guard still prevents any
+    /// `cognition_in` append after terminal regardless.
+    live_input: std::sync::RwLock<Option<Arc<crate::live_input_queue::LiveInputQueue>>>,
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -90,6 +98,11 @@ pub struct ThreadMarkRunningParams {
 pub struct ThreadAttachProcessParams {
     pub thread_id: String,
     pub pid: i64,
+    /// Process-group id. The UDS `runtime.attach_process` wire reports `pid`
+    /// only (the runtime knows its pid, not its group), so this defaults to 0
+    /// and is derived daemon-side via `process::pgid_of`. Direct in-process
+    /// callers (the detached spawn path) set it explicitly.
+    #[serde(default)]
     pub pgid: i64,
     #[serde(default)]
     pub metadata: Option<Value>,
@@ -115,20 +128,28 @@ pub struct ThreadChainResult {
 /// Daemon-authored execution facts decorated onto a client-facing thread
 /// projection. These are kind-policy values (mirroring what lifecycle
 /// enforcement already consults), composed here in the lifecycle layer — the
-/// persistence module (`state_store`) stays free of kind-policy vocabulary. The
-/// client gates continuation affordances on `supports_continuation` rather than
-/// on a self-declared surface flag.
+/// persistence module (`state_store`) stays free of kind-policy vocabulary. A
+/// client gates machine-continuation affordances on `supports_continuation` and
+/// operator-input affordances on `supports_operator_followup`, rather than on a
+/// self-declared surface flag.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ExecutionFacts {
-    /// Whether this thread's kind can chain-fold a continuation successor.
+    /// Whether this thread's kind can continue into a successor — chain-fold for
+    /// conversation kinds, checkpoint resume (machine) for graph.
     pub supports_continuation: bool,
+    /// Whether an OPERATOR follow-up (`threads.input`) can continue this kind.
+    /// `false` for machine-only kinds (graph) even when `supports_continuation`
+    /// is `true`, so a client gates the operator-input affordance on this rather
+    /// than on `supports_continuation` alone.
+    pub supports_operator_followup: bool,
 }
 
 /// A `ThreadDetail` projection decorated with daemon-authored
 /// [`ExecutionFacts`]. The detail's fields serialize flat alongside an
-/// `execution` object, so a client gates the continuation affordance on
-/// `execution.supports_continuation` (substrate authority for the actual
-/// target thread) rather than a self-declared surface flag.
+/// `execution` object, so a client gates affordances on
+/// `execution.{supports_continuation, supports_operator_followup}` (substrate
+/// authority for the actual target thread) rather than a self-declared surface
+/// flag.
 #[derive(Debug, Serialize)]
 pub struct ThreadView {
     #[serde(flatten)]
@@ -318,7 +339,26 @@ impl ThreadLifecycleService {
             current_site_id: format!("site:{hostname}"),
             scheduler_db: std::sync::RwLock::new(None),
             app_root: std::sync::RwLock::new(None),
+            live_input: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Wire the shared operator live-input queue. Called once after
+    /// construction with the same `Arc` held by `AppState`, so finalization can
+    /// close a thread's entry. Mirrors `set_scheduler_db`.
+    pub fn set_live_input_queue(
+        &self,
+        queue: Arc<crate::live_input_queue::LiveInputQueue>,
+    ) {
+        *self.live_input.write().unwrap() = Some(queue);
+    }
+
+    /// Close a thread's live-input entry at terminal, if a queue is wired.
+    /// Clears any queued inputs and rejects future enqueues. No-op when unset.
+    fn close_live_input(&self, thread_id: &str) {
+        if let Some(queue) = self.live_input.read().unwrap().as_ref() {
+            queue.close(thread_id);
+        }
     }
 
     /// Publish persisted lifecycle records to live subscribers after the
@@ -484,9 +524,15 @@ impl ThreadLifecycleService {
             .get_thread(source_thread_id)?
             .ok_or_else(|| anyhow!("continuation source thread not found: {source_thread_id}"))?;
 
+        // OPERATOR follow-up gate: the source kind must accept operator input,
+        // not merely support (machine) continuation. A graph self-continues by
+        // machine only, so it is refused here even though it IS continuable.
         let profile = self.kind_profiles().get(&source.kind);
-        if !profile.is_some_and(|p| p.supports_continuation) {
-            bail!("continuation is not supported for kind '{}'", source.kind);
+        if !profile.is_some_and(|p| p.supports_continuation && p.supports_operator_followup) {
+            bail!(
+                "operator follow-up is not supported for kind '{}'",
+                source.kind
+            );
         }
 
         // An operator follow-up braids onto a SETTLED turn (completed/failed) and
@@ -664,6 +710,11 @@ impl ThreadLifecycleService {
             },
         )?;
         self.publish_records(&persisted);
+        // Terminal: no queued operator input may survive, and a late enqueue
+        // racing this finalize must be refused. Close after the terminal state
+        // write (above), so the queue `closed` tombstone and the persist-path
+        // running-guard together bound the race from either ordering.
+        self.close_live_input(thread_id);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
@@ -742,6 +793,9 @@ impl ThreadLifecycleService {
             },
         )?;
         self.publish_records(&persisted);
+        // Terminal: close the live-input entry after the terminal state write
+        // (see `finalize_from_completion` for the race rationale).
+        self.close_live_input(&params.thread_id);
 
         let terminal_status = normalize_terminal_status(&params.status)?;
         self.update_scheduler_fire_on_thread_terminal(
@@ -852,9 +906,24 @@ impl ThreadLifecycleService {
             .is_some_and(|p| p.supports_continuation)
     }
 
+    /// Whether an operator follow-up (`threads.input`) can continue this kind.
+    /// Operator follow-up IMPLIES continuation — a kind that cannot continue at
+    /// all cannot accept operator input — so the effective fact is
+    /// `supports_continuation && supports_operator_followup`. That prevents a
+    /// non-continuable kind (which defaults `supports_operator_followup: true`)
+    /// from projecting the contradictory `{continuation: false, followup: true}`.
+    /// A graph is `{continuation: true, followup: false}` (machine only). Unknown
+    /// kinds fail closed.
+    pub fn supports_operator_followup_for_kind(&self, kind: &str) -> bool {
+        self.kind_profiles()
+            .get(kind)
+            .is_some_and(|p| p.supports_continuation && p.supports_operator_followup)
+    }
+
     fn execution_facts(&self, kind: &str) -> ExecutionFacts {
         ExecutionFacts {
             supports_continuation: self.supports_continuation_for_kind(kind),
+            supports_operator_followup: self.supports_operator_followup_for_kind(kind),
         }
     }
 
@@ -1426,6 +1495,12 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     // the checkpoint/resume bindings.
     let mut allocated_checkpoint_dir: Option<std::path::PathBuf> = None;
     let mut resume_env_for_first_native_resume: Option<Vec<EnvBinding>> = None;
+    // This is the executor-chain spawn path: native_resume here is the
+    // SUBPROCESS/tool form declared via the `native_resume` decorate handler
+    // (`spec.execution.native_resume`). A runtime-registry kind (graph) declares
+    // native_resume on its runtime YAML and resumes through the managed
+    // `spawn_runtime` path instead (it needs a LaunchEnvelope this path can't
+    // build), so it never reaches here.
     if let Some(ts_dir) = thread_state_dir {
         for node in &plan.nodes {
             if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
@@ -1582,6 +1657,12 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),
                 execution_hints: resolved.plan_context.execution_hints.clone(),
+                // Subprocess (`spawn_item`) path: the executor identity is the
+                // tool's own `executor_ref`; there is no serving runtime, so
+                // `runtime_ref` stays `None`. (Runtime-registry launches capture
+                // both in `launch::run_claimed_thread_row`.)
+                executor_ref: Some(resolved.executor_ref.clone()),
+                runtime_ref: None,
                 // V5.5 P2: subprocess terminator has no permissions
                 // composition step, so resumed callbacks inherit the
                 // same deny-all posture the original spawn had. Native

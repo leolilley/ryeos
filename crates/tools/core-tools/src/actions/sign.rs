@@ -567,6 +567,12 @@ impl BatchReport {
     pub fn total(&self) -> usize {
         self.validated.len() + self.signed.len() + self.failed.len()
     }
+
+    pub fn extend(&mut self, other: Self) {
+        self.validated.extend(other.validated);
+        self.signed.extend(other.signed);
+        self.failed.extend(other.failed);
+    }
 }
 
 /// One per-item outcome inside a `BatchReport`.

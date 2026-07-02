@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-13T10:31:03Z:e3f2341147fe03698e9a4345dd4c4256f129fa1d91bc5db8e1b17e0634291e95:0x4n+8OGmZtxf7O9Wcw0YUTqj0FgOy2OFa+f9Mi1Jk/knHhUzJaeq1K2bk1OtZhPmz0c5M9NLXpwtFVPRTCzCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-30T00:10:25Z:26894147dae7cb7fc8ca7df2135d46b02a23010d8925ef31a0f271fddedea85c:evr8uNbq2fTIumt4oMPbPUkpBSi8aJW0HRKOusZfqZD/YcUpyQ3suwADXgmKuJLajQ4pn4+EEfqo6T2NdXyCAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: items-space
 version: "1.0.0"
 description: The item space - signed content across system, user, and project
 
-widget: rows
+widget: table
 source:
   ref: service:ui/studio/items/list
   params:
@@ -11,13 +11,22 @@ source:
     project_path: ""
   collection: items
 projections:
-  primary: canonical_ref
-  meta: kind
+  columns:
+    - label: item
+      field: canonical_ref
+    - label: kind
+      field: item_kind
+    - label: space
+      field: space
+    - label: trust
+      field: trust.class
   tone:
-    field: trust
+    field: trust.class
     map:
       trusted: good
       untrusted: danger
+      unsigned: warn
+      unknown: neutral
     default: neutral
 selection:
   activate: inspect

@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::content::{ProjectedRecord, TimelineRole};
+use super::dto::CognitionOutPayload;
 use super::effect::StudioEffect;
 use super::event::StudioAction;
 use super::model::StudioCore;
@@ -143,8 +144,8 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
 
     for record in records {
         // Plumbing/stream lifecycle events are the substrate's bookkeeping,
-        // not conversation — drop them so the feed reads as a chat. Outcomes
-        // (completed/failed/cancelled) and usage still render via
+        // not cognition — drop them so the feed reads as the cognition braid.
+        // Outcomes (completed/failed/cancelled) and usage still render via
         // execution_entry; cognition and tool calls still render via roles.
         if is_plumbing_event(&record) {
             continue;
@@ -154,6 +155,49 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
         if let Some(entry) = execution_entry(&record) {
             flush_flow(&mut pending_flow, &mut entries);
             entries.push(entry);
+            continue;
+        }
+        // `cognition_in` arrives in two shapes: the run-opening *stimulus*
+        // (`{content}`) and a per-turn marker (`{turn}`). The stimulus is the
+        // operator's turn-opening message — render its content (accent), read
+        // straight from the raw event so a binding that only projects `turn`
+        // can't drop it to raw JSON. The bare turn marker carries no content
+        // and falls through to its boundary separator below.
+        if feed_event_type(&record) == Some(FeedEventType::CognitionIn) {
+            if let Some(content) = record
+                .raw
+                .get("payload")
+                .and_then(|payload| payload.get("content"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|content| !content.is_empty())
+            {
+                flush_flow(&mut pending_flow, &mut entries);
+                entries.push(StudioTimelineEntryVm::Line {
+                    primary: content.to_string(),
+                    meta: None,
+                    tone: StudioTone::Accent,
+                    action: None,
+                });
+                continue;
+            }
+        }
+        // A `cognition_out` cut short by a live interrupt: render whatever partial
+        // content it produced (normal tone — it is real, if truncated, cognition),
+        // then a seam separator marking where the cognition was cut and the next
+        // `cognition_in` folds in. Read from the raw event because `cognition_out`
+        // is projected by role, not a FeedEventType.
+        if is_interrupted_cognition_out(&record) {
+            flush_flow(&mut pending_flow, &mut entries);
+            if !record.primary.trim().is_empty() {
+                entries.push(StudioTimelineEntryVm::Block {
+                    text: record.primary.clone(),
+                    tone: tone_from_name(record.tone.as_deref()),
+                });
+            }
+            entries.push(StudioTimelineEntryVm::Separator {
+                label: "interrupted".to_string(),
+            });
             continue;
         }
         match record.role {
@@ -271,24 +315,102 @@ fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
     }
 }
 
-/// Substrate bookkeeping that is noise in a conversation view: thread/stream
-/// lifecycle and ephemeral progress. Dropped from the feed entirely — the
-/// outcome (`thread_completed`/`failed`/`cancelled`), usage, cognition, and
-/// tool calls carry the meaning. Mirrors the live tail's ignored set in
-/// `apply_thread_tail`, so replay and live agree on what's hidden.
-fn is_plumbing_event(record: &ProjectedRecord) -> bool {
-    matches!(
-        record.raw.get("event_type").and_then(Value::as_str),
-        Some(
-            "thread_created"
-                | "thread_started"
-                | "stream_opened"
-                | "stream_closed"
-                | "stream_snapshot"
-                | "cognition_reasoning"
-                | "graph_foreach_iteration"
+/// The braid event types the feed gives special treatment. Parsed once from
+/// the raw `event_type` string — the only place the wire spelling lives — so
+/// the rest of the feed matches a closed enum, never scattered string
+/// literals. Anything not listed (`parse` → `None`) falls through to the
+/// role/projection rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedEventType {
+    CognitionIn,
+    CognitionOut,
+    ThreadCompleted,
+    ThreadFailed,
+    ThreadCancelled,
+    ThreadKilled,
+    ThreadTimedOut,
+    ChildThreadSpawned,
+    ThreadUsage,
+    ThreadCreated,
+    ThreadStarted,
+    ThreadContinued,
+    StreamOpened,
+    StreamClosed,
+    StreamSnapshot,
+    CognitionReasoning,
+    GraphForeachIteration,
+}
+
+impl FeedEventType {
+    fn parse(event_type: &str) -> Option<Self> {
+        Some(match event_type {
+            "cognition_in" => Self::CognitionIn,
+            "cognition_out" => Self::CognitionOut,
+            "thread_completed" => Self::ThreadCompleted,
+            "thread_failed" => Self::ThreadFailed,
+            "thread_cancelled" => Self::ThreadCancelled,
+            "thread_killed" => Self::ThreadKilled,
+            "thread_timed_out" => Self::ThreadTimedOut,
+            "child_thread_spawned" => Self::ChildThreadSpawned,
+            "thread_usage" => Self::ThreadUsage,
+            "thread_created" => Self::ThreadCreated,
+            "thread_started" => Self::ThreadStarted,
+            "thread_continued" => Self::ThreadContinued,
+            "stream_opened" => Self::StreamOpened,
+            "stream_closed" => Self::StreamClosed,
+            "stream_snapshot" => Self::StreamSnapshot,
+            "cognition_reasoning" => Self::CognitionReasoning,
+            "graph_foreach_iteration" => Self::GraphForeachIteration,
+            _ => return None,
+        })
+    }
+
+    /// Substrate bookkeeping that is noise in the braid view: thread/
+    /// stream lifecycle and ephemeral progress. Dropped from the feed entirely
+    /// — the outcome (completed/failed/cancelled), usage, cognition, and tool
+    /// calls carry the meaning. Mirrors the live tail's ignored set in
+    /// `apply_thread_tail`, so replay and live agree on what's hidden.
+    fn is_plumbing(self) -> bool {
+        matches!(
+            self,
+            Self::ThreadCreated
+                | Self::ThreadStarted
+                | Self::ThreadContinued
+                | Self::StreamOpened
+                | Self::StreamClosed
+                | Self::StreamSnapshot
+                | Self::CognitionReasoning
+                | Self::GraphForeachIteration
         )
-    )
+    }
+}
+
+/// The recognized feed event type of a record, if any.
+fn feed_event_type(record: &ProjectedRecord) -> Option<FeedEventType> {
+    record
+        .raw
+        .get("event_type")
+        .and_then(Value::as_str)
+        .and_then(FeedEventType::parse)
+}
+
+fn is_plumbing_event(record: &ProjectedRecord) -> bool {
+    feed_event_type(record).is_some_and(FeedEventType::is_plumbing)
+}
+
+/// Whether a record is a `cognition_out` sealed by a live interrupt — a
+/// cognition cut mid-flight. The event type is matched via the `FeedEventType`
+/// enum, and the payload is deserialized into the typed [`CognitionOutPayload`]
+/// rather than read by raw JSON key.
+fn is_interrupted_cognition_out(record: &ProjectedRecord) -> bool {
+    if feed_event_type(record) != Some(FeedEventType::CognitionOut) {
+        return false;
+    }
+    record
+        .raw
+        .get("payload")
+        .and_then(|payload| serde_json::from_value::<CognitionOutPayload>(payload.clone()).ok())
+        .is_some_and(|payload| payload.interrupted)
 }
 
 /// Build a legible entry for thread-execution milestone events (lifecycle,
@@ -299,11 +421,11 @@ fn is_plumbing_event(record: &ProjectedRecord) -> bool {
 /// for every other event so the role-based handling still applies. Best-effort
 /// on payload fields — never panics on a missing/odd shape.
 fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
-    let event_type = record.raw.get("event_type")?.as_str()?;
     let payload = record.raw.get("payload");
-    let (primary, meta, tone) = match event_type {
-        "thread_completed" => ("completed".to_string(), None, StudioTone::Good),
-        "thread_failed" => (
+    let event = feed_event_type(record)?;
+    let (primary, meta, tone) = match event {
+        FeedEventType::ThreadCompleted => ("completed".to_string(), None, StudioTone::Good),
+        FeedEventType::ThreadFailed => (
             match failure_reason(payload) {
                 Some(reason) => format!("failed — {reason}"),
                 None => "failed".to_string(),
@@ -311,21 +433,21 @@ fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
             None,
             StudioTone::Danger,
         ),
-        "thread_cancelled" => ("cancelled".to_string(), None, StudioTone::Warn),
-        "thread_killed" => ("killed".to_string(), None, StudioTone::Danger),
-        "thread_timed_out" => ("timed out".to_string(), None, StudioTone::Warn),
-        "child_thread_spawned" => (
+        FeedEventType::ThreadCancelled => ("cancelled".to_string(), None, StudioTone::Warn),
+        FeedEventType::ThreadKilled => ("killed".to_string(), None, StudioTone::Danger),
+        FeedEventType::ThreadTimedOut => ("timed out".to_string(), None, StudioTone::Warn),
+        FeedEventType::ChildThreadSpawned => (
             "forked subthread".to_string(),
             payload.and_then(child_thread_ref),
             StudioTone::Accent,
         ),
-        "thread_usage" => (usage_summary(payload?)?, None, StudioTone::Neutral),
+        FeedEventType::ThreadUsage => (usage_summary(payload?)?, None, StudioTone::Neutral),
         _ => return None,
     };
     // A forked subthread is navigable: activating it aims the route at the
     // child so the feed re-projects to that subthread's braid.
-    let action = match event_type {
-        "child_thread_spawned" => meta
+    let action = match event {
+        FeedEventType::ChildThreadSpawned => meta
             .clone()
             .map(|thread_id| StudioAction::AimThread { thread_id }),
         _ => None,
@@ -490,6 +612,60 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_cognition_out_renders_partial_then_a_seam() {
+        // A cognition cut by a live interrupt: its partial content renders as a
+        // block, then an `interrupted` seam marks where it was cut.
+        let mut rec = raw_record(json!({
+            "event_type": "cognition_out",
+            "payload": { "content": "starting to read the", "interrupted": true }
+        }));
+        rec.primary = "starting to read the".to_string();
+        rec.role = TimelineRole::Flow;
+
+        let entries = timeline_entries(vec![rec]);
+        assert_eq!(entries.len(), 2, "partial block + seam");
+        assert!(
+            matches!(&entries[0], StudioTimelineEntryVm::Block { text, .. } if text == "starting to read the"),
+            "partial content renders as a block"
+        );
+        assert!(
+            matches!(&entries[1], StudioTimelineEntryVm::Separator { label } if label == "interrupted"),
+            "a seam separator marks the cut"
+        );
+    }
+
+    #[test]
+    fn interrupted_cognition_out_with_no_content_is_just_a_seam() {
+        // Cut before any text streamed → no block, just the seam.
+        let rec = raw_record(json!({
+            "event_type": "cognition_out",
+            "payload": { "interrupted": true }
+        }));
+        let entries = timeline_entries(vec![rec]);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], StudioTimelineEntryVm::Separator { label } if label == "interrupted"));
+    }
+
+    #[test]
+    fn completed_cognition_out_has_no_seam() {
+        // A normal (uninterrupted) cognition_out folds to a flow block, never a seam.
+        let mut rec = raw_record(json!({
+            "event_type": "cognition_out",
+            "payload": { "content": "done" }
+        }));
+        rec.primary = "done".to_string();
+        rec.role = TimelineRole::Flow;
+
+        let entries = timeline_entries(vec![rec]);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, StudioTimelineEntryVm::Separator { label } if label == "interrupted")),
+            "no seam for a completed cognition"
+        );
+    }
+
+    #[test]
     fn execution_entry_carries_failure_message() {
         // Real shape: state_store surfaces the reason under `error` in the
         // thread_failed event payload (+ a stable outcome_code).
@@ -576,6 +752,7 @@ mod tests {
         let entries = timeline_entries(vec![
             raw_record(json!({ "event_type": "thread_created" })),
             raw_record(json!({ "event_type": "thread_started" })),
+            raw_record(json!({ "event_type": "thread_continued", "payload": {} })),
             raw_record(json!({ "event_type": "stream_opened" })),
             raw_record(json!({ "event_type": "stream_closed" })),
             raw_record(json!({ "event_type": "thread_completed" })),
@@ -677,6 +854,25 @@ mod tests {
             entry,
             Some(StudioTimelineEntryVm::Line { action: None, .. })
         ));
+    }
+
+    #[test]
+    fn cognition_in_content_renders_as_the_stimulus_line() {
+        // The run-opening stimulus ({content}) is the operator's message —
+        // render it as an accent line, never a turn boundary and never raw JSON
+        // (the binding only projects {turn}, so this is read from the raw event).
+        let entries = timeline_entries(vec![raw_record(json!({
+            "event_type": "cognition_in",
+            "payload": { "content": "hello there" }
+        }))]);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [StudioTimelineEntryVm::Line { primary, tone, .. }]
+                    if primary == "hello there" && matches!(tone, StudioTone::Accent)
+            ),
+            "stimulus content renders as an accent line: {entries:?}"
+        );
     }
 
     /// End-to-end coalescer contract: the SHIPPED chain/timeline projection

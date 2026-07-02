@@ -50,6 +50,8 @@ pub struct DirectiveHeader {
     pub context: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub hooks: Option<Vec<Value>>,
+    #[serde(default)]
+    pub continuation: ContinuationConfig,
 }
 
 /// Allow-list of composed-view top-level keys the runtime decodes
@@ -58,7 +60,14 @@ pub struct DirectiveHeader {
 /// dispatcher, augmentations) and is read directly off
 /// `KindComposedView` by the daemon, not by the runtime.
 pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
-    "name", "extends", "model", "limits", "outputs", "context", "hooks",
+    "name",
+    "extends",
+    "model",
+    "limits",
+    "outputs",
+    "context",
+    "hooks",
+    "continuation",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +85,117 @@ pub struct LimitsSpec {
     pub depth: Option<u32>,
     #[serde(default)]
     pub duration_seconds: Option<u64>,
+}
+
+/// What a directive does at the context-window continuation boundary.
+///
+/// `false` or absent → **stop** (finalize): take one final turn to emit declared
+/// outputs, then finalize; never spawn a successor. This is the default — a
+/// directive that does not opt in stops at its budget.
+///
+/// An object → **self-continue**: the same directive resumes across segments
+/// carrying `carry_turns` recent turns. Opt-in. (`true` = enabled with
+/// defaults.) Untagged so `continuation: false` and `continuation: {…}` both
+/// parse from the header.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ContinuationConfig {
+    Flag(bool),
+    Enabled(ContinuationEnabled),
+}
+
+impl Default for ContinuationConfig {
+    fn default() -> Self {
+        ContinuationConfig::Flag(false)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuationEnabled {
+    /// Declared *intent* for how many recent complete turns carry into the
+    /// successor. `None` = use the resolved default. The default and the cap are
+    /// NOT defined here — they live with every other limit in the runtime limits
+    /// config (`.ai/config/ryeos-runtime/limits.yaml` via the executor's
+    /// `LimitsConfig`) and are resolved/clamped at launch, exactly like a header
+    /// `limits:` value. Keeping the numbers out of this file avoids scattering
+    /// limit config across the tree.
+    #[serde(default)]
+    pub carry_turns: Option<u32>,
+}
+
+impl ContinuationConfig {
+    pub fn enabled(&self) -> bool {
+        match self {
+            ContinuationConfig::Flag(b) => *b,
+            ContinuationConfig::Enabled(_) => true,
+        }
+    }
+
+    /// The directive's DECLARED `carry_turns` intent, if any. Resolved against
+    /// [`ContinuationRuntimeConfig`] (default + cap) at launch.
+    pub fn declared_carry_turns(&self) -> Option<u32> {
+        match self {
+            ContinuationConfig::Enabled(e) => e.carry_turns,
+            ContinuationConfig::Flag(_) => None,
+        }
+    }
+}
+
+/// Directive-runtime continuation *behavior* config, loaded by the runtime from
+/// `ryeos-runtime/continuation` (defaults if absent) — the same mechanism as
+/// `ryeos-runtime/execution`. These govern the runtime's continuation boundary
+/// and resume, so they live where the runtime loads its own config, NOT in the
+/// executor's hard-limit resolution (which would force threading them back
+/// through the launch envelope). Defaults are the one canonical place for these
+/// values; `.ai/config/ryeos-runtime/continuation` overrides them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuationRuntimeConfig {
+    /// Kind-schema metadata header round-trip (parity with other typed configs).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Fraction of the model context window at which the continuation boundary
+    /// is reached.
+    #[serde(default = "default_context_threshold_ratio")]
+    pub context_threshold_ratio: f64,
+    /// Default recent turns carried into a self-continue successor.
+    #[serde(default = "default_carry_turns")]
+    pub carry_turns_default: u32,
+    /// Upper bound a directive's declared `carry_turns` is clamped to.
+    #[serde(default = "default_carry_turns_cap")]
+    pub carry_turns_cap: u32,
+}
+
+fn default_context_threshold_ratio() -> f64 {
+    0.9
+}
+fn default_carry_turns() -> u32 {
+    8
+}
+fn default_carry_turns_cap() -> u32 {
+    32
+}
+
+impl Default for ContinuationRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            category: None,
+            context_threshold_ratio: default_context_threshold_ratio(),
+            carry_turns_default: default_carry_turns(),
+            carry_turns_cap: default_carry_turns_cap(),
+        }
+    }
+}
+
+impl ContinuationRuntimeConfig {
+    /// Resolve a directive's declared `carry_turns`: fall back to the configured
+    /// default, then clamp to the configured cap.
+    pub fn resolve_carry_turns(&self, declared: Option<u32>) -> u32 {
+        declared
+            .unwrap_or(self.carry_turns_default)
+            .min(self.carry_turns_cap)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +276,10 @@ pub struct BootstrapConfig {
     pub context_positions: HashMap<String, Vec<String>>,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
+    #[serde(default)]
+    pub continuation: ContinuationConfig,
+    #[serde(default)]
+    pub continuation_runtime: ContinuationRuntimeConfig,
     #[serde(skip)]
     pub risk_policy: Option<crate::harness::RiskPolicy>,
 }

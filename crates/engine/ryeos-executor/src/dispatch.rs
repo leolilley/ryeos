@@ -65,6 +65,21 @@ use crate::executor::{
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 
+/// Trusted parent execution context carried out-of-band through schema-driven
+/// dispatch.
+///
+/// This is not user/action params. Callback dispatch fills it from the
+/// validated server-side callback capability, and only managed runtime launches
+/// consume it for parent budget/depth inheritance. Tool/service terminators
+/// ignore it, so the dispatch layer does not need kind-prefix checks and action
+/// params are not polluted with runtime-control keys.
+#[derive(Debug, Clone)]
+pub struct ParentExecutionContext {
+    pub parent_thread_id: String,
+    pub hard_limits: Value,
+    pub depth: u32,
+}
+
 /// Single source of truth for the `runtime:` ref kind discriminator.
 /// Used in two narrow places (B1 cap gate, B4 resolve special-case)
 /// where the kind name carries dispatch semantics that come from the
@@ -121,6 +136,10 @@ pub struct DispatchRequest<'a> {
     /// chain). Set by daemon-internal callers (the thread-input service);
     /// never populated from raw HTTP request bodies.
     pub previous_thread_id: Option<String>,
+    /// Trusted parent context for callback-dispatched child executions. This is
+    /// consumed only if schema-driven dispatch reaches a managed runtime launch;
+    /// in-process services and terminal tools ignore it.
+    pub parent_execution_context: Option<ParentExecutionContext>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -1056,6 +1075,8 @@ pub(crate) async fn dispatch_method(
         child_provenance,
         None,
         Some(canonical_ref.to_string()),
+        serde_json::Value::Null,
+        0,
     );
 
     // 9. Mint the thread-auth token now, so BOTH the callback and
@@ -1342,15 +1363,26 @@ fn map_method_error(
 pub(crate) fn finalize_params(
     thread_id: &str,
     status: &str,
-    result: Option<Value>,
+    payload: Option<Value>,
 ) -> ryeos_app::thread_lifecycle::ThreadFinalizeParams {
     use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+    use ryeos_state::objects::ThreadStatus;
+    // A failed thread's payload is its cause → route it to `error` (which the
+    // terminal braid event persists, and the feed reads) instead of burying it
+    // in `result` (which the event drops), leaving the operator with a bare
+    // "failed". A non-failure terminal's payload is its result.
+    let is_failure = ThreadStatus::from_str_lossy(status).is_some_and(|s| s.is_failure());
+    let (result, error) = if is_failure {
+        (None, payload)
+    } else {
+        (payload, None)
+    };
     ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: status.to_string(),
         outcome_code: None,
         result,
-        error: None,
+        error,
         metadata: None,
         artifacts: Vec::new(),
         final_cost: None,
@@ -1481,7 +1513,13 @@ pub async fn dispatch_service(
                 state,
                 None,
             )
-            .await?;
+            .await
+            // `execute_service_verified` maps a handler's typed `HandlerError`
+            // (e.g. ownership → NotFound) to a `DispatchError` and returns it
+            // through `anyhow`. Recover that typed error here so it keeps its
+            // HTTP status — a blanket `?` would re-wrap it as `Internal` (500),
+            // dropping the 404/409/etc. that the route path preserves.
+            .map_err(|e| e.downcast::<DispatchError>().unwrap_or_else(DispatchError::Internal))?;
             let envelope = serde_json::json!({
                 "thread": {
                     "thread_id": result.audit_thread_id,
@@ -1860,6 +1898,10 @@ async fn dispatch_managed_subprocess(
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         executor_ref: &prepared.executor_ref,
+        // The serving runtime's canonical ref, captured so a continuation
+        // successor reattaches the same runtime identity (not just the kind's
+        // current default).
+        runtime_ref: Some(&runtime_ref),
         acting_principal,
         resolved: &prepared.resolved,
         project_path,
@@ -1869,11 +1911,14 @@ async fn dispatch_managed_subprocess(
         required_envelope_fields: &prepared.required_envelope_fields,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
+        parent_execution_context: request.parent_execution_context.as_ref(),
         // Fresh launches and operator follow-ups inject their inputs as the
         // opening stimulus; only an autonomous machine continuation suppresses it.
         suppress_stimulus: false,
         // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
         captured_effective_caps: None,
+        // Fresh launch: cold start, no checkpoint resume.
+        checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
     })
     .await
     .map_err(|e| match &e {
@@ -2185,6 +2230,9 @@ async fn dispatch_tool_subprocess(
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
         provenance: request.provenance.clone(),
+        // Fresh dispatch: no captured runtime ref. The thread's runtime identity
+        // is captured in launch metadata; resume reads it back from there.
+        runtime_ref: None,
     };
 
     if request.launch_mode == "detached" {
@@ -2871,6 +2919,26 @@ mod tests {
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
     use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+
+    #[test]
+    fn finalize_params_routes_failure_cause_to_error_not_result() {
+        // Failure terminals (failed/killed/timed_out) carry a cause → it must
+        // land in `error` (which the terminal braid event persists) not
+        // `result` (dropped), so the feed shows the reason, not a bare "failed".
+        for status in ["failed", "killed", "timed_out"] {
+            let p = finalize_params("T-x", status, Some(serde_json::json!({ "error": "boom" })));
+            assert_eq!(p.error, Some(serde_json::json!({ "error": "boom" })), "{status}");
+            assert!(p.result.is_none(), "{status}");
+        }
+
+        // Non-failure terminals carry a result, not an error — including ones
+        // the old `status == "completed"` compare would have misrouted.
+        for status in ["completed", "continued", "cancelled"] {
+            let p = finalize_params("T-y", status, Some(serde_json::json!({ "ok": true })));
+            assert_eq!(p.result, Some(serde_json::json!({ "ok": true })), "{status}");
+            assert!(p.error.is_none(), "{status}");
+        }
+    }
 
     fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[71u8; 32])

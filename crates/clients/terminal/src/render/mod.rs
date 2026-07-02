@@ -14,6 +14,7 @@
 //! traversal, the empty-center backdrop, view dispatch.
 
 mod chrome;
+mod help;
 mod input;
 mod launcher;
 mod primitives;
@@ -107,6 +108,11 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
         // the palette on top at full brightness.
         primitives::dim_surface(&mut surface);
         launcher::draw_launcher(&mut surface, vm);
+    } else if vm.help.open {
+        // The keys overlay is a sibling scrim — never stacked with the
+        // launcher (the keymap makes them mutually exclusive).
+        primitives::dim_surface(&mut surface);
+        help::draw_help(&mut surface, vm);
     }
 
     surface
@@ -206,6 +212,14 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         widgets::scene::draw_scene(surface, rect, scene);
         return;
     }
+    if let StudioViewVm::Sections { sections, .. } = view {
+        widgets::sections::draw_sections(surface, rect, sections);
+        return;
+    }
+    if let StudioViewVm::Table { columns, rows, .. } = view {
+        widgets::table::draw_table(surface, rect, columns, rows);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
         StudioViewVm::Rows { .. } => unreachable!("rows views return above"),
@@ -213,6 +227,8 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         StudioViewVm::Map { .. } | StudioViewVm::Atlas { .. } => {
             unreachable!("scene views return above")
         }
+        StudioViewVm::Sections { .. } => unreachable!("sections views return above"),
+        StudioViewVm::Table { .. } => unreachable!("table views return above"),
         StudioViewVm::Placeholder { title, message } => {
             lines.push(title.clone());
             lines.push(message.clone());

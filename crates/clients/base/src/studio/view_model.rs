@@ -18,6 +18,8 @@ pub struct StudioViewModel {
     pub presentation: StudioPresentationVm,
     pub workspace: StudioWorkspaceVm,
     pub launcher: StudioLauncherVm,
+    #[serde(default)]
+    pub help: StudioHelpVm,
     pub overlays: Vec<StudioOverlayVm>,
     pub notices: Vec<StudioNoticeVm>,
 }
@@ -323,10 +325,69 @@ pub enum StudioViewVm {
     Atlas {
         scene: StudioSceneModel,
     },
+    /// A foldable multi-section list — the magit-style status surface: one
+    /// widget over many datasets, each section a titled, collapsible group of
+    /// rows. The engine knows the `sections` widget vocabulary; the specific
+    /// sections (threads/bundles/node/…) are declared by the bound view, never
+    /// named here (no fire-sword). Rows reuse `StudioRowVm`, so per-row actions
+    /// come for free.
+    Sections {
+        title: String,
+        sections: Vec<StudioSectionVm>,
+        /// The section the point sits in — what a fold key toggles. `None`
+        /// when there is no point (empty view).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fold_section: Option<usize>,
+    },
+    /// A real column table — the typed list surface for the non-chat lenses
+    /// (threads/bundles/schedules/…): aligned cells under headers rather than
+    /// the rows widget's primary/secondary/meta. The engine knows the `table`
+    /// widget vocabulary; the columns + their field projections are declared by
+    /// the bound view (no fire-sword). Rows carry per-row actions like the rows
+    /// widget.
+    Table {
+        title: String,
+        columns: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<String>,
+        #[serde(default)]
+        affordance_hints: Vec<String>,
+        rows: Vec<StudioTableRowVm>,
+    },
     Placeholder {
         title: String,
         message: String,
     },
+}
+
+/// One row of a `Table` view: a cell per declared column, plus the per-row
+/// tone/action/selection the rows widget also carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioTableRowVm {
+    pub id: String,
+    pub cells: Vec<String>,
+    pub tone: StudioTone,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<StudioAction>,
+    #[serde(default)]
+    pub selected: bool,
+}
+
+/// One titled, collapsible group within a `Sections` view. `count` is the
+/// section's total even when `collapsed` hides the rows, so the header can
+/// report it without the rows being present.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioSectionVm {
+    pub title: String,
+    pub count: usize,
+    #[serde(default)]
+    pub collapsed: bool,
+    /// The point is on this section's header. Only a collapsed section's
+    /// header is a point (it has no visible rows to land on); the highlight
+    /// lets the operator see what a fold key would re-expand.
+    #[serde(default)]
+    pub header_selected: bool,
+    pub rows: Vec<StudioRowVm>,
 }
 
 // The timeline entry shapes live in `super::timeline`; re-exported here so
@@ -349,6 +410,21 @@ pub struct StudioLauncherVm {
     pub selected: usize,
     pub hint: String,
     pub items: Vec<StudioLauncherItemVm>,
+}
+
+/// The keys/help overlay: a static catalogue of the global key bindings,
+/// grouped by category. A meta-overlay (discoverability), not braid content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StudioHelpVm {
+    pub open: bool,
+    pub entries: Vec<StudioHelpEntryVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioHelpEntryVm {
+    pub category: String,
+    pub keys: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -410,6 +486,7 @@ pub fn build_view_model(core: &StudioCore) -> StudioViewModel {
         chrome,
         workspace,
         launcher: launcher(core),
+        help: help(core),
         overlays: Vec::new(),
         notices: core.notices_vm(),
     }
@@ -878,6 +955,99 @@ fn bound_view_vm_keyed(
                 scene: build_scene_model(core, atlas, None, None),
             };
         }
+        "sections" => {
+            // A sections view reads one source per section (keyed by
+            // section_source_key), not the single per-tile response below — so
+            // it assembles here, ahead of the source-required arms.
+            let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
+            if binding.sections.is_empty() {
+                return StudioViewVm::Placeholder {
+                    title,
+                    message: "sections view declares no sections".to_string(),
+                };
+            }
+            // One flat point list walks top-down across sections: an expanded
+            // section contributes its rows, a collapsed section contributes a
+            // single header point (so it stays addressable to re-expand). The
+            // tile cursor addresses that flat index; `fold_section` is the
+            // section the point lands in — what a fold key toggles.
+            let folds = collapsed;
+            let mut flat = 0usize;
+            let mut fold_section = None;
+            let mut sections = Vec::with_capacity(binding.sections.len());
+            for (index, section) in binding.sections.iter().enumerate() {
+                let is_collapsed = folds.is_some_and(|set| set.contains(&index));
+                // Row activation per section: the section names an affordance
+                // (in the host binding's `affordances`) the same way the rows
+                // widget's `selection.activate` does — validated identically.
+                let activate = section.activate.as_ref().filter(|affordance_id| {
+                    binding
+                        .affordances
+                        .iter()
+                        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id.as_str()))
+                        .is_some_and(|affordance| {
+                            super::content::validate_affordance_placeholders(
+                                affordance,
+                                super::content::Producer::Selection,
+                            )
+                            .is_ok()
+                        })
+                });
+                let key = super::content::section_source_key(source_key, index);
+                let records = core
+                    .data
+                    .sources
+                    .get(&key)
+                    .map(|response| super::content::project_section(section, response))
+                    .unwrap_or_default();
+                let count = records.len();
+                let mut header_selected = false;
+                let mut rows = Vec::new();
+                if is_collapsed {
+                    // The collapsed section is one point: its header.
+                    if cursor == Some(flat) {
+                        header_selected = true;
+                        fold_section = Some(index);
+                    }
+                    flat += 1;
+                } else {
+                    rows.reserve(count);
+                    for record in records {
+                        let selected = cursor == Some(flat);
+                        if selected {
+                            fold_section = Some(index);
+                        }
+                        flat += 1;
+                        rows.push(StudioRowVm {
+                            id: format!("{view_ref}#{index}#{}", rows.len()),
+                            primary: record.primary,
+                            secondary: None,
+                            meta: record.meta,
+                            kind: None,
+                            action: activate.map(|affordance_id| StudioAction::InvokeAffordance {
+                                view_ref: view_ref.to_string(),
+                                affordance_id: affordance_id.clone(),
+                                record: record.raw.clone(),
+                            }),
+                            tone: tone_from_name(record.tone.as_deref()),
+                            selected,
+                        });
+                    }
+                }
+                sections.push(StudioSectionVm {
+                    title: section.title.clone(),
+                    count,
+                    collapsed: is_collapsed,
+                    header_selected,
+                    rows,
+                });
+            }
+            return StudioViewVm::Sections {
+                title,
+                sections,
+                fold_section,
+            };
+        }
         _ => {}
     }
     let response = core.data.sources.get(source_key);
@@ -906,27 +1076,7 @@ fn bound_view_vm_keyed(
             ),
         },
         ("rows", Some(response)) => {
-            // Row activation is explicit: the view names the affordance via
-            // `selection.activate` (no implicit "first affordance"). The
-            // named affordance must be supplied by the `record` producer
-            // (binding-time validation) or row activation is unbound.
-            let activate_affordance = binding
-                .selection
-                .as_ref()
-                .map(|selection| selection.activate.clone())
-                .filter(|affordance_id| {
-                    binding
-                        .affordances
-                        .iter()
-                        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id))
-                        .is_some_and(|affordance| {
-                            super::content::validate_affordance_placeholders(
-                                affordance,
-                                super::content::Producer::Selection,
-                            )
-                            .is_ok()
-                        })
-                });
+            let activate_affordance = activate_affordance(binding);
             let rows = super::content::project_records(binding, response)
                 .into_iter()
                 .enumerate()
@@ -983,6 +1133,39 @@ fn bound_view_vm_keyed(
                 fold_section,
             }
         }
+        ("table", Some(response)) => {
+            // The typed list surface: columns + per-column field projections,
+            // declared by the binding (the engine knows only the `table`
+            // widget). Row activation is the same explicit `selection.activate`
+            // affordance the rows widget uses.
+            let activate_affordance = activate_affordance(binding);
+            let columns = super::content::table_columns(binding);
+            let column_labels = columns.iter().map(|col| col.label.clone()).collect();
+            let rows = super::content::project_table(binding, response, &columns)
+                .into_iter()
+                .enumerate()
+                .map(|(index, record)| StudioTableRowVm {
+                    id: format!("{view_ref}#{index}"),
+                    cells: record.cells,
+                    tone: tone_from_name(record.tone.as_deref()),
+                    action: activate_affordance.as_ref().map(|affordance_id| {
+                        StudioAction::InvokeAffordance {
+                            view_ref: view_ref.to_string(),
+                            affordance_id: affordance_id.clone(),
+                            record: record.raw.clone(),
+                        }
+                    }),
+                    selected: cursor == Some(index),
+                })
+                .collect();
+            StudioViewVm::Table {
+                title,
+                columns: column_labels,
+                provenance: Some(view_ref.to_string()),
+                affordance_hints: affordance_hints(binding),
+                rows,
+            }
+        }
         ("key_value" | "text", Some(response)) => {
             let rows = super::content::project_detail(binding, response)
                 .into_iter()
@@ -1011,6 +1194,31 @@ fn bound_view_vm_keyed(
             message: format!("widget `{other}` is not supported by this renderer"),
         },
     }
+}
+
+/// The affordance a row's activation invokes, shared by the rows and table
+/// widgets. Activation is explicit — the view names it via `selection.activate`
+/// (no implicit "first affordance") — and the named affordance must be
+/// supplied by the `record` producer (binding-time validation) or activation is
+/// unbound (`None`).
+fn activate_affordance(binding: &super::content::ViewBinding) -> Option<String> {
+    binding
+        .selection
+        .as_ref()
+        .map(|selection| selection.activate.clone())
+        .filter(|affordance_id| {
+            binding
+                .affordances
+                .iter()
+                .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id))
+                .is_some_and(|affordance| {
+                    super::content::validate_affordance_placeholders(
+                        affordance,
+                        super::content::Producer::Selection,
+                    )
+                    .is_ok()
+                })
+        })
 }
 
 fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
@@ -1063,12 +1271,13 @@ fn input_vm(
         .map(|label| format!("→ {label}"))
         .unwrap_or_else(|| derived_target_label(core, view_ref, input, &route));
 
-    // Completion suggestions come from the input's `completion` source.
-    let completion = input_completion(core, input, &text);
+    // Completion suggestions: an inline @-mention hint when the cursor is in
+    // one, else the input's `/` command grammar.
+    let completion = input_completion(core, view_ref, input, &text, cursor);
     let hint = completion
         .first()
         .cloned()
-        .unwrap_or_else(|| "Shift+Enter submit · / for commands".to_string());
+        .unwrap_or_else(|| "Shift+Enter submit · / for commands · @ for refs".to_string());
 
     let has_route_target =
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
@@ -1107,18 +1316,18 @@ fn derived_target_label(
     }
     // `submit: route` — render the seat route truthfully (the target the
     // next submit lands on). "continuing" only when the input declares
-    // conversation targeting AND the targeted thread actually supports
-    // continuation per the substrate (`execution.supports_continuation` from
+    // conversation targeting AND the targeted thread actually accepts OPERATOR
+    // follow-up per the substrate (`execution.supports_operator_followup` from
     // the fetched projections — distrust only an explicit `false`, so a
     // just-launched thread not yet in the list still reads as continuing). A
-    // route with a stray `thread` on a non-targeting or non-continuation
-    // thread is not a conversation. No keybinding copy here; an author
+    // route with a stray `thread` on a non-targeting or machine-only thread
+    // (e.g. graph) is not a conversation. No keybinding copy here; an author
     // overrides the whole strip via `target_label`.
     match (&route.invoke, &route.thread) {
         (None, _) => "no target — surface declares no route".to_string(),
         (Some(_), Some(thread))
             if input.target.is_some()
-                && core.thread_supports_continuation(thread) != Some(false) =>
+                && core.thread_supports_operator_followup(thread) != Some(false) =>
         {
             format!("→ continuing {thread}")
         }
@@ -1170,9 +1379,26 @@ fn affordance_invoke_target(
 /// candidates; pure projection over open JSON.
 fn input_completion(
     core: &StudioCore,
+    view_ref: &str,
     input: &super::content::InputBlock,
     text: &str,
+    cursor: usize,
 ) -> Vec<String> {
+    // Inline @-mention: when the cursor is in an @-token, the hint lists
+    // matching refs from the declared mentions source.
+    if let Some(mentions) = input.mentions.as_ref() {
+        if super::tokenize::active_mention(text, cursor).is_some() {
+            let records = core
+                .data
+                .sources
+                .get(&super::content::mention_source_key(view_ref, &input.id))
+                .map(|response| super::content::project_mentions(mentions, response))
+                .unwrap_or_default();
+            return super::tokenize::mention_hint(&records, text, cursor)
+                .into_iter()
+                .collect();
+        }
+    }
     let Some(completion) = input.completion.as_ref() else {
         return Vec::new();
     };
@@ -1401,20 +1627,28 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
-    if core.seat.fold().input_route().thread.is_some() {
+    if let Some(head) = core.seat.fold().input_route().thread {
+        // "continue" is an operator follow-up — gate it on the substrate fact so
+        // a machine-only thread (graph) doesn't offer an operator continue the
+        // daemon refuses. "cancel" (terminate) applies to any active thread.
+        //
+        // No command-style "interrupt" item: the operator interrupts a running
+        // directive by submitting text with Alt+Enter (a live cognition_in
+        // redirect via threads/input) — "Interrupt" is reserved for that. The old
+        // commands/submit "interrupt" was inert for directives (nothing claims it)
+        // and only muddied the meaning.
+        use crate::studio::dto::ThreadControlCommand;
+        let operator_continuable = core.thread_supports_operator_followup(&head) != Some(false);
         for (label, command) in [
-            ("Interrupt thread", "interrupt"),
-            ("Continue thread", "continue"),
-            ("Cancel thread", "cancel"),
+            ("Continue thread", ThreadControlCommand::Continue),
+            ("Cancel thread", ThreadControlCommand::Cancel),
         ] {
             items.push(StudioLauncherItemVm {
                 label: label.to_string(),
                 hint: "active thread".to_string(),
-                action: StudioAction::SubmitThreadCommand {
-                    command: command.to_string(),
-                },
+                action: StudioAction::SubmitThreadCommand { command },
                 secondary_action: None,
-                enabled: true,
+                enabled: command != ThreadControlCommand::Continue || operator_continuable,
             });
         }
     }
@@ -1433,11 +1667,11 @@ fn inspect_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
 }
 
 fn focused_selection_hint(core: &StudioCore) -> Option<String> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
-    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let row = focused_rows(core, view, tile_id).get(cursor)?.clone();
-    Some(row.secondary.or(row.meta).unwrap_or(row.primary))
+    if let Some(row) = focused_selected_row(core) {
+        return Some(row.secondary.or(row.meta).unwrap_or(row.primary));
+    }
+    // Table lens: the first cell is the row's identifier.
+    focused_selected_table_row(core).and_then(|row| row.cells.into_iter().next())
 }
 
 fn short_principal(value: &str) -> String {
@@ -1490,6 +1724,38 @@ fn launcher(core: &StudioCore) -> StudioLauncherVm {
     }
 }
 
+/// The keys overlay catalogue — the canonical global bindings, mirroring
+/// `studio_key_command`. Static content (no per-state filtering): the overlay
+/// is for discovery, so it always lists the full vocabulary.
+fn help(core: &StudioCore) -> StudioHelpVm {
+    let entry = |category: &str, keys: &str, description: &str| StudioHelpEntryVm {
+        category: category.to_string(),
+        keys: keys.to_string(),
+        description: description.to_string(),
+    };
+    StudioHelpVm {
+        open: core.ui.help_open,
+        entries: vec![
+            entry("Move", "↑ / ↓", "Move the point through rows; else move focus"),
+            entry("Move", "← / →", "Fold / unfold the section under the point; else move focus"),
+            entry("Act", "Enter", "Activate the selected row (or steer-submit when typing)"),
+            entry("Act", "Alt+Enter", "Submit as an interrupt — cut the running thread's turn and redirect"),
+            entry("Act", "Tab / ⇧Tab", "Accept completion, else cycle the route target"),
+            entry("Act", "Esc", "Cancel a running thread; else close the lens"),
+            entry("Input", "type", "The foot input is always live — text routes at the directive"),
+            entry("Lenses", "Ctrl+K", "Open the lens launcher (swap the center lens)"),
+            entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
+            entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
+            entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
+            entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
+            entry("Layout", "Alt+T / Alt+B", "Toggle the top / bottom status bar"),
+            entry("App", "Alt+Q", "Close the focused lens"),
+            entry("App", "Ctrl+C", "Quit"),
+            entry("App", "?", "Show / hide this help"),
+        ],
+    }
+}
+
 fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
     // Dynamic tiling: the algorithm owns the tree; tiles offer no
     // manual splits. Closing the last tile returns home.
@@ -1518,20 +1784,45 @@ pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> 
                 _ => None,
             });
     }
-    let cursor = selected_cursor(core, tile_id).unwrap_or(0);
-    let rows = focused_rows(core, view, tile_id);
-    rows.get(cursor).and_then(|row| row.action.clone())
+    if let Some(action) = focused_selected_row(core).and_then(|row| row.action) {
+        return Some(action);
+    }
+    // Table lens: rows carry the same activation affordance, on a distinct VM.
+    focused_selected_table_row(core).and_then(|row| row.action)
 }
 
-/// Rows of the focused tile, regardless of how it is bound. Bound views
-/// project their fetched source; the thread view projects the threads
-/// DTO; ambient views have no rows.
-fn focused_rows(core: &StudioCore, view: &ViewSpec, tile_id: TileId) -> Vec<StudioRowVm> {
-    // Scene widgets (graph/atlas) render an Atlas/Map VM, not Rows, so the
-    // non-Rows fallback already yields no rows for them.
+/// The row under the point in the focused tile, if the point is on a row. The
+/// rows widget indexes by the flat cursor; sections carry the selection on the
+/// row VM itself (the point may instead be on a collapsed header → no row).
+/// Scene widgets (graph/atlas) have no rows.
+fn focused_selected_row(core: &StudioCore) -> Option<StudioRowVm> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
     match bound_view_vm(core, tile_id, &view.view_ref) {
-        StudioViewVm::Rows { rows, .. } => rows,
-        _ => Vec::new(),
+        StudioViewVm::Rows { rows, .. } => {
+            let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+            rows.into_iter().nth(cursor)
+        }
+        StudioViewVm::Sections { sections, .. } => sections
+            .into_iter()
+            .flat_map(|section| section.rows)
+            .find(|row| row.selected),
+        _ => None,
+    }
+}
+
+/// The table row under the point in the focused tile. Table rows are a distinct
+/// VM (`StudioTableRowVm`, columnar cells) from the rows widget, so they need
+/// their own selection projection — same flat cursor, different shape.
+fn focused_selected_table_row(core: &StudioCore) -> Option<StudioTableRowVm> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    match bound_view_vm(core, tile_id, &view.view_ref) {
+        StudioViewVm::Table { rows, .. } => {
+            let cursor = selected_cursor(core, tile_id).unwrap_or(0);
+            rows.into_iter().nth(cursor)
+        }
+        _ => None,
     }
 }
 
@@ -1951,6 +2242,154 @@ mod tests {
     }
 
     #[test]
+    fn actual_threads_list_binding_projects_a_table() {
+        use crate::studio::content::{project_table, table_columns, ViewBinding};
+        let binding: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
+        ))
+        .unwrap();
+        assert_eq!(binding.widget, "table");
+        let columns = table_columns(&binding);
+        assert_eq!(
+            columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
+            ["thread", "item", "status", "created"]
+        );
+        let rows = project_table(
+            &binding,
+            &json!({ "threads": [
+                { "thread_id": "T-ab", "item_ref": "directive:ops/base", "status": "running", "created_at": "2026-06-29T00:00:00Z" },
+                { "thread_id": "T-cd", "item_ref": "directive:ops/scan", "status": "failed",  "created_at": "2026-06-28T00:00:00Z" }
+            ]}),
+            &columns,
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].cells,
+            ["T-ab", "directive:ops/base", "running", "2026-06-29T00:00:00Z"]
+        );
+        // Tone reuses the shared status→tone block the rows widget would.
+        assert_eq!(rows[0].tone.as_deref(), Some("accent"));
+        assert_eq!(rows[1].tone.as_deref(), Some("danger"));
+        // The raw record is preserved for affordance interpolation.
+        assert_eq!(rows[0].raw["thread_id"], "T-ab");
+    }
+
+    #[test]
+    fn actual_items_space_binding_projects_renamed_and_nested_fields() {
+        use crate::studio::content::{project_table, project_tone, table_columns, ViewBinding};
+        let binding: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/items/space.yaml"
+        ))
+        .unwrap();
+        assert_eq!(binding.widget, "table");
+        let columns = table_columns(&binding);
+        assert_eq!(
+            columns.iter().map(|c| c.field.as_str()).collect::<Vec<_>>(),
+            ["canonical_ref", "item_kind", "space", "trust.class"]
+        );
+        let record = json!({
+            "canonical_ref": "directive:ryeos/ops/base",
+            "item_kind": "directive",
+            "space": "system",
+            "trust": { "class": "trusted" }
+        });
+        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns);
+        assert_eq!(rows.len(), 1);
+        // The real field is `item_kind` (not `kind`) and trust is a nested
+        // object (`trust.class`, not a bare string) — both were silently dead
+        // under the rows widget's projection; the table binding resolves them.
+        assert_eq!(
+            rows[0].cells,
+            ["directive:ryeos/ops/base", "directive", "system", "trusted"]
+        );
+        // The nested tone path maps the same way.
+        assert_eq!(rows[0].tone.as_deref(), Some("good"));
+        assert_eq!(
+            project_tone(&record, &binding.projections).as_deref(),
+            Some("good")
+        );
+    }
+
+    #[test]
+    fn table_flat_cursor_selects_a_row_and_resolves_its_activation() {
+        use crate::studio::event::{StudioEvent, StudioUiEvent};
+        use crate::studio::model::{BrowserSession, BrowserViewport};
+        let session = BrowserSession {
+            effective_surface: Some(json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "table",
+                        "source": { "ref": "service:threads/list", "collection": "threads" },
+                        "projections": {
+                            "columns": [
+                                { "label": "thread", "field": "thread_id" },
+                                { "label": "status", "field": "status" }
+                            ],
+                            "tone": { "field": "status", "map": { "running": "accent" }, "default": "neutral" }
+                        },
+                        "selection": { "activate": "inspect" },
+                        "affordances": [{
+                            "id": "inspect",
+                            "label": "Inspect",
+                            "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
+                        }]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let key = core.workspace.focused_tile.0.to_string();
+        core.data.sources.insert(
+            key.clone(),
+            json!({ "threads": [
+                { "thread_id": "T-ab", "status": "running" },
+                { "thread_id": "T-cd", "status": "running" }
+            ]}),
+        );
+
+        fn find_tile_view(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
+            match node {
+                StudioLayoutNodeVm::Tile { view, .. } => Some(view),
+                StudioLayoutNodeVm::Split { first, second, .. } => {
+                    find_tile_view(first).or_else(|| find_tile_view(second))
+                }
+            }
+        }
+        let selected_cells = |core: &StudioCore| -> Vec<Vec<String>> {
+            let vm = build_view_model(core);
+            let root = vm.workspace.root.expect("layout root");
+            match find_tile_view(&root).expect("tile view") {
+                StudioViewVm::Table { rows, .. } => rows
+                    .iter()
+                    .filter(|r| r.selected)
+                    .map(|r| r.cells.clone())
+                    .collect(),
+                other => panic!("expected table view, got {other:?}"),
+            }
+        };
+
+        // Flat cursor 1 = the second row; activation carries that row's record.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 1 },
+        });
+        assert_eq!(
+            selected_cells(&core),
+            vec![vec!["T-cd".to_string(), "running".to_string()]]
+        );
+        match action_for_focused_row(&core).expect("table row activates") {
+            StudioAction::InvokeAffordance { affordance_id, record, .. } => {
+                assert_eq!(affordance_id, "inspect");
+                assert_eq!(record["thread_id"], "T-cd");
+            }
+            other => panic!("expected inspect invoke, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn append_live_delta_adds_trailing_cursor_block_for_head_thread() {
         let mut core = StudioCore::default();
         core.seat.append_facet(
@@ -2169,6 +2608,48 @@ mod tests {
         assert!(
             input.completion.is_empty(),
             "no completion source -> no suggestions"
+        );
+    }
+
+    #[test]
+    fn completion_shows_mention_refs_inside_an_at_token() {
+        let mut core = input_session(json!({
+            "widget": "text",
+            "input": {
+                "id": "line",
+                "submit": "route",
+                "mentions": {
+                    "ref": "service:threads/list",
+                    "collection": "threads",
+                    "reference": "thread_id",
+                    "label": "item_ref"
+                }
+            }
+        }));
+        core.data.sources.insert(
+            crate::studio::content::mention_source_key("view:ryeos/input", "line"),
+            json!({ "threads": [
+                { "thread_id": "T-ab", "item_ref": "directive:ops/base" },
+                { "thread_id": "T-cd", "item_ref": "directive:demo/chat" }
+            ]}),
+        );
+        core.ui.input_buffers.insert(
+            crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
+                .storage_key(),
+            crate::studio::model::StudioInputState {
+                text: "ping @directive".to_string(),
+                cursor: "ping @directive".len(),
+            },
+        );
+        let vm = build_view_model(&core);
+        let input = vm.workspace.docks.bottom.unwrap().input.unwrap();
+        assert!(
+            input
+                .completion
+                .iter()
+                .any(|s| s.contains("directive:ops/base") && s.contains("directive:demo/chat")),
+            "mention hint lists matching refs by label: {:?}",
+            input.completion
         );
     }
 }

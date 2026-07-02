@@ -149,6 +149,19 @@ pub struct ResumeContext {
     /// deny-all.
     #[serde(default)]
     pub effective_caps: Vec<String>,
+    /// Persisted executor identity (`native:<binary>`) of the runtime that
+    /// launched this thread. Runtime-registry (delegate) kinds — directive,
+    /// graph — carry no item `executor_id`, so a continuation successor
+    /// reconstructs its launch identity from this. Captured at fresh managed
+    /// launch; preferred over re-deriving from the registry so a later default
+    /// change cannot silently switch runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor_ref: Option<String>,
+    /// Persisted canonical ref (`runtime:<name>`) of the runtime that launched
+    /// this thread, so a successor reattaches by-ref rather than re-resolving
+    /// the default for the kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_ref: Option<String>,
 }
 
 fn default_execution_hints() -> ExecutionHints {
@@ -206,6 +219,14 @@ impl RuntimeLaunchMetadata {
     /// Set the daemon-allocated checkpoint directory.
     pub fn with_checkpoint_dir(mut self, dir: PathBuf) -> Self {
         self.checkpoint_dir = Some(dir);
+        self
+    }
+
+    /// Set the replay-aware `native_resume` policy. Runtime-registry launches
+    /// read it from the serving runtime's YAML; the subprocess path reads it
+    /// from the spec.
+    pub fn with_native_resume(mut self, spec: NativeResumeSpec) -> Self {
+        self.native_resume = Some(spec);
         self
     }
 
@@ -368,6 +389,8 @@ mod tests {
             requested_by: local_principal(),
             execution_hints: ExecutionHints::default(),
             effective_caps: vec!["ryeos.execute.tool.test".to_string()],
+            executor_ref: Some("native:test-runtime".to_string()),
+            runtime_ref: Some("runtime:test".to_string()),
         };
         let m = RuntimeLaunchMetadata::default().with_resume_context(ctx);
         let json = serde_json::to_string(&m).unwrap();

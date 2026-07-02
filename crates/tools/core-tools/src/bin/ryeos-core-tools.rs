@@ -33,9 +33,9 @@ struct Cli {
 enum Cmd {
     /// Sign a Rye item by canonical ref after path-anchoring validation.
     Sign {
-        /// Canonical ref of the item to sign.
-        #[arg(value_name = "ITEM_REF")]
-        item_ref: Option<String>,
+        /// Canonical refs or `.ai/...` paths of the items to sign.
+        #[arg(value_name = "ITEM_REF", num_args = 0..)]
+        item_refs: Vec<String>,
 
         /// Project root (parent of `.ai/`).
         #[arg(long)]
@@ -494,10 +494,10 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Sign {
-            item_ref,
+            item_refs,
             project,
             source,
-        } => run_sign(item_ref, project, source, cli.stdin_json),
+        } => run_sign(item_refs, project, source, cli.stdin_json),
         Cmd::Build {
             bundle_source,
             registry_roots,
@@ -1566,29 +1566,47 @@ fn records_to_json(records: Vec<ryeos_state::BundleEventRecord>) -> serde_json::
 }
 
 fn run_sign(
-    item_ref: Option<String>,
+    item_refs: Vec<String>,
     project: Option<PathBuf>,
     source: String,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_tools::actions::sign::{run_sign, SignSource};
+    use ryeos_tools::actions::sign::{run_sign, BatchReport, ItemOutcome, SignSource};
 
-    let (item_ref, project_arg, source_str) = if stdin_json {
-        if item_ref.is_some() {
-            anyhow::bail!("--stdin-json is mutually exclusive with positional ITEM_REF");
+    let (item_refs, project_arg, source_str) = if stdin_json {
+        if !item_refs.is_empty() {
+            anyhow::bail!("--stdin-json is mutually exclusive with positional ITEM_REF values");
         }
         let parsed: StdinSignParams = serde_json::from_value(read_stdin_json()?)?;
-        (parsed.item_ref, parsed.project_path, parsed.source)
+        (parsed.item_refs(), parsed.project_path, parsed.source)
     } else {
-        let ir =
-            item_ref.ok_or_else(|| anyhow::anyhow!("ITEM_REF required (or pass --stdin-json)"))?;
-        (ir, project, source)
+        if item_refs.is_empty() {
+            anyhow::bail!("ITEM_REF required (or pass --stdin-json)");
+        }
+        (item_refs, project, source)
     };
+
+    if item_refs.is_empty() {
+        anyhow::bail!("ITEM_REF required (or pass item_ref/item_refs in stdin JSON)");
+    }
 
     let source = SignSource::parse(&source_str)?;
     let project = project_arg.or_else(|| std::env::current_dir().ok());
 
-    let batch = run_sign(&item_ref, project.as_deref(), source)?;
+    let mut batch = BatchReport::default();
+    let batch_mode = item_refs.len() > 1;
+    for item_ref in item_refs {
+        match run_sign(&item_ref, project.as_deref(), source) {
+            Ok(report) => batch.extend(report),
+            Err(e) if batch_mode => batch.failed.push(ItemOutcome {
+                item_ref,
+                signature: None,
+                error: Some(format!("{e:#}")),
+                warnings: Vec::new(),
+            }),
+            Err(e) => return Err(e),
+        }
+    }
     println!("{}", serde_json::to_string_pretty(&batch)?);
     if !batch.is_total_success() {
         anyhow::bail!(
@@ -1602,11 +1620,24 @@ fn run_sign(
 
 #[derive(serde::Deserialize)]
 struct StdinSignParams {
-    item_ref: String,
+    #[serde(default, deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
+    item_refs: Vec<String>,
+    #[serde(default)]
+    item_ref: Option<String>,
     #[serde(default)]
     project_path: Option<PathBuf>,
     #[serde(default = "default_source")]
     source: String,
+}
+
+impl StdinSignParams {
+    fn item_refs(self) -> Vec<String> {
+        if !self.item_refs.is_empty() {
+            self.item_refs
+        } else {
+            self.item_ref.into_iter().collect()
+        }
+    }
 }
 
 fn default_source() -> String {

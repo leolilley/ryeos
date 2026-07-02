@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent,
-    ToolSchema,
+    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig,
+    StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -18,9 +18,10 @@ use ryeos_runtime::TerminalCompletion;
 
 /// Free-form breadcrumb passed to `request_continuation` for logs only.
 /// Continuation is autonomous by construction — this is NOT a typed reason the
-/// substrate keys off; `State::Continued` has exactly one cause (the per-thread
-/// turn limit), so it is a fixed string, not an enum.
-const CONTINUATION_LOG_REASON: &str = "turn_limit";
+/// substrate keys off; `State::Continued` has exactly one cause (the live
+/// context window approaching the model limit), so it is a fixed string, not an
+/// enum.
+const CONTINUATION_LOG_REASON: &str = "context_window";
 
 #[derive(Debug)]
 pub enum State {
@@ -98,6 +99,9 @@ pub struct Runner {
     /// arguments before finalization. `None` = no outputs declared,
     /// any arguments accepted.
     directive_outputs: Option<Vec<OutputSpec>>,
+    /// What to do at the context-window continuation boundary: disabled
+    /// (default) → stop with current state; enabled → self-continue.
+    continuation_config: ContinuationConfig,
     /// LLM sampling parameters from the directive's `model.sampling`.
     /// Passed to the provider adapter for inclusion in request body.
     /// `None` = use provider defaults.
@@ -183,6 +187,9 @@ pub struct RunnerConfig {
     pub budget: BudgetTracker,
     pub callback: CallbackClient,
     pub context_window: u64,
+    /// Fraction of the context window at which the continuation boundary fires;
+    /// from the directive runtime's `ryeos-runtime/continuation` config.
+    pub context_threshold_ratio: f64,
     pub provider_config: crate::directive::ProviderConfig,
     pub provider_id: String,
     /// Profile name that matched during daemon preflight.
@@ -194,6 +201,7 @@ pub struct RunnerConfig {
     pub thread_id: String,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
+    pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
 }
 
@@ -207,6 +215,7 @@ impl Runner {
             budget,
             callback,
             context_window,
+            context_threshold_ratio,
             provider_config,
             provider_id,
             execution,
@@ -214,6 +223,7 @@ impl Runner {
             thread_id,
             hooks,
             outputs,
+            continuation,
             sampling,
             matched_profile,
             config_hash,
@@ -242,7 +252,7 @@ impl Runner {
             harness,
             budget,
             callback,
-            continuation: ContinuationCheck::new(context_window),
+            continuation: ContinuationCheck::new(context_window, context_threshold_ratio),
             result_guard: ResultGuard::new(),
             provider_config,
             provider_id,
@@ -254,6 +264,7 @@ impl Runner {
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
+            continuation_config: continuation,
             sampling,
             http_client: reqwest::Client::builder()
                 .pool_max_idle_per_host(8)
@@ -289,6 +300,53 @@ impl Runner {
         &self.tools
     }
 
+    /// Drain operator inputs staged for this running thread and fold each as a
+    /// `cognition_in` (user-role) message into the in-flight `messages`. The
+    /// daemon has ALREADY persisted them as durable `cognition_in` (running-
+    /// guarded) before returning, so this only updates the live wire-fold;
+    /// `messages` and the braid stay consistent. Returns whether anything was
+    /// folded.
+    ///
+    /// Resume-critical: a poll error is NOT swallowed. Because the daemon persists
+    /// drained inputs before returning, a lost/failed response means we cannot
+    /// know whether input was persisted-but-unfolded; continuing would answer with
+    /// a transcript missing that input. Erroring stops the loop instead — a resume
+    /// re-folds any persisted `cognition_in` from the braid.
+    ///
+    /// Drained ONLY at safe turn boundaries (never between an assistant tool-call
+    /// message and its tool results), so the folded wire history is well-formed.
+    async fn poll_pending_input(&mut self) -> Result<bool, String> {
+        let inputs = self
+            .callback
+            .poll_input()
+            .await
+            .map_err(|e| format!("resume-critical callback poll_input failed: {e}"))?;
+        if inputs.is_empty() {
+            return Ok(false);
+        }
+        for s in &inputs {
+            self.messages.push(ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!(s.content)),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
+        tracing::info!(folded = inputs.len(), "folded operator inputs as cognition_in");
+        Ok(true)
+    }
+
+    /// Whether another provider turn can actually start now (hard cap + budget +
+    /// limits). Gates the pre-finalize steer drain: draining persists a durable
+    /// `cognition_in`, so we must NOT drain when no turn remains — that would
+    /// leave the input unanswered and turn a clean completion into a limit
+    /// failure. A late steer stays queued and is cleared at finalize; the operator
+    /// resubmits it as a settled continuation.
+    fn can_start_another_turn(&self, turn: u32, max_turns: u32) -> bool {
+        turn < max_turns && !self.budget.is_exhausted() && self.harness.check_limits().is_ok()
+    }
+
     pub async fn run(&mut self) -> RuntimeResult {
         let mut guard = RunGuard { finalized: false };
         let mut state = State::Init;
@@ -305,6 +363,10 @@ impl Runner {
         loop {
             state = match state {
                 State::Init => {
+                    // pid/pgid is registered earlier, in `run_with_envelope`
+                    // right after the callback client is built — BEFORE any
+                    // durable callback — so the daemon can always tell a live
+                    // runtime from a crashed one.
                     if let Err(e) = self.callback.mark_running().await {
                         state = State::Errored {
                             error: format!("resume-critical callback mark_running failed: {e}"),
@@ -327,6 +389,17 @@ impl Runner {
                         state = State::Errored {
                             error: "max turns reached".to_string(),
                         };
+                        continue;
+                    }
+                    // Steer drain (between-turns boundary): fold any operator
+                    // inputs staged since the last cognition before calling the
+                    // provider. Also folds the input that accompanied a live
+                    // interrupt (the interrupt arm routes back through here).
+                    // Limits already passed above, so a turn WILL start — a fold
+                    // here is always answered. Resume-critical: a poll error stops
+                    // the loop rather than answering with input we may have dropped.
+                    if let Err(e) = self.poll_pending_input().await {
+                        state = State::Errored { error: e };
                         continue;
                     }
                     State::CallingProvider
@@ -352,6 +425,15 @@ impl Runner {
                     }
 
                     let cancel_flag = self.harness.cancelled_flag();
+                    // Clear any interrupt requested OUTSIDE active streaming (e.g.
+                    // during tool dispatch or between turns): that input has
+                    // already been folded as a steer, so a stale flag must not
+                    // immediately cut — and seal an empty — the upcoming cognition.
+                    // Only an interrupt arriving DURING this stream (after this
+                    // reset) cuts it. An interrupt only makes sense against an
+                    // in-progress generation.
+                    self.harness.take_interrupt();
+                    let interrupt_flag = self.harness.interrupted_flag();
                     // Filter tools by effective_caps so the LLM only sees
                     // tools it can actually call (saves context, avoids the
                     // "model names a tool the dispatcher would reject" path).
@@ -392,11 +474,15 @@ impl Runner {
                             turn,
                             sampling: self.sampling.as_ref(),
                             cancel_flag: Some(cancel_flag),
+                            interrupt_flag: Some(interrupt_flag),
                         },
                     )
                     .await
                     {
-                        Ok((resp, events)) => {
+                        Ok(crate::provider_adapter::StreamOutcome::Completed {
+                            response: resp,
+                            events,
+                        }) => {
                             let input_tok = resp.usage.as_ref().map_or(0, |u| u.input_tokens);
                             let output_tok = resp.usage.as_ref().map_or(0, |u| u.output_tokens);
                             let usd = self.compute_cost(input_tok, output_tok);
@@ -472,6 +558,81 @@ impl Runner {
                             // diagnostic-only — message.tool_calls and
                             // message.content are the source of truth.
                             State::Streaming { events }
+                        }
+                        Ok(crate::provider_adapter::StreamOutcome::Cancelled) => {
+                            // SIGTERM cut the stream — finalize cancelled. The
+                            // attempt completed no cognition: no usage settlement,
+                            // no cognition_out.
+                            State::Cancelled
+                        }
+                        Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                            partial_message,
+                            events,
+                        }) => {
+                            // Live interrupt (SIGUSR1) cut the in-flight cognition.
+                            // Surface any provider warnings from the partial stream
+                            // (the diagnostic State::Streaming pass is skipped on the
+                            // interrupt path, so scrape them here) before sealing.
+                            for ev in &events {
+                                if let StreamEvent::Warning { code, message } = ev {
+                                    tracing::warn!(
+                                        code = %code,
+                                        message = %message,
+                                        "provider warning during interrupted stream"
+                                    );
+                                    warnings.push(format!("provider warning: [{code}] {message}"));
+                                }
+                            }
+                            // Observe-and-reset the flag so this SIGUSR1 cuts
+                            // exactly one cognition.
+                            self.harness.take_interrupt();
+                            // DECISION 1: an interrupted attempt is not a completed
+                            // turn — refund so the redirect's fresh cognition stays
+                            // within `limits.turns` (record_turn ran at entry).
+                            self.harness.refund_turn();
+                            // Runaway backstop (separate from the refunded turn).
+                            if !self.harness.record_interrupt() {
+                                state = State::Errored {
+                                    error: "live interrupt limit exceeded".to_string(),
+                                };
+                                continue;
+                            }
+
+                            // Seal the partial as a transcript-bearing
+                            // cognition_out{interrupted:true} (content/reasoning
+                            // only, no tool_calls) so the braid holds an honest,
+                            // foldable consequence — then mirror it into the live
+                            // wire-fold so the redirect has context.
+                            let partial_value = match serde_json::to_value(&partial_message) {
+                                Ok(v) => Some(v),
+                                Err(e) => {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "serialize interrupted partial message: {e}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+                            };
+                            if let Err(e) = self
+                                .callback
+                                .emit_turn_interrupted(turn, partial_value)
+                                .await
+                            {
+                                state = State::Errored {
+                                    error: format!(
+                                        "resume-critical callback emit_turn_interrupted failed: {e}"
+                                    ),
+                                };
+                                continue;
+                            }
+                            self.messages.push(partial_message);
+
+                            // Back to the between-turns boundary: CheckingLimits
+                            // folds the queued input (DECISION 2: if the poll is
+                            // empty, a fresh cognition still runs with no new input)
+                            // and runs the redirect cognition. Does NOT finalize.
+                            State::CheckingLimits
                         }
                         Err(e) => State::Errored {
                             error: e.to_string(),
@@ -576,7 +737,30 @@ impl Runner {
                                 }
                             } else if has_content || msg.content.is_some() {
                                 let content = msg.content.unwrap_or(Value::Null);
-                                State::Finalizing { result: content }
+                                // Steer pre-finalize drain (finding C): a no-tool
+                                // content response is about to finalize. If an
+                                // operator input is pending, fold it and take
+                                // another turn instead — steering beats finalize.
+                                // Content path only (never between a tool-call
+                                // message and its tool results).
+                                //
+                                // Guard: only drain if another turn can actually
+                                // start. Draining persists a durable cognition_in;
+                                // draining with no turn left would strand it
+                                // unanswered AND turn a clean completion into a
+                                // limit failure. When no turn remains, finalize —
+                                // the late input stays queued (cleared at finalize)
+                                // and the operator resubmits as a settled
+                                // continuation.
+                                if self.can_start_another_turn(turn, max_turns) {
+                                    match self.poll_pending_input().await {
+                                        Ok(true) => State::CheckingLimits,
+                                        Ok(false) => State::Finalizing { result: content },
+                                        Err(e) => State::Errored { error: e },
+                                    }
+                                } else {
+                                    State::Finalizing { result: content }
+                                }
                             } else {
                                 State::CheckingContinuation
                             }
@@ -1086,24 +1270,36 @@ impl Runner {
 
                 State::CheckingContinuation => {
                     let threshold = self.continuation.threshold();
-                    let estimated = self
+                    // Measure the LIVE context window (post-trim messages), NOT
+                    // cumulative chain spend — the threshold is a per-call
+                    // quantity; comparing it to lifetime budget latches the
+                    // check true and re-forks every successor.
+                    let live_context = self
                         .continuation
-                        .estimate_total_tokens(&self.messages, Some(&self.budget.cost()));
-                    tracing::info!(estimated, threshold, "checking continuation");
+                        .estimate_live_context_tokens(&self.messages);
+                    tracing::info!(live_context, threshold, "checking continuation");
                     if self
                         .continuation
-                        .should_continue(&self.messages, Some(&self.budget.cost()))
+                        .should_continue_live_context(&self.messages)
                     {
-                        // Context-window overflow → ask daemon to spawn
-                        // a chained thread carrying the current
-                        // transcript. This is the ONLY terminal path
-                        // out of CheckingContinuation; otherwise we
-                        // loop back to the agent loop for the next LLM
-                        // turn (see comment below — the previous code
-                        // finalized here, which short-circuited
-                        // multi-turn tool-call dialogues after the
-                        // very first tool dispatch).
-                        State::Continued
+                        // Context-window continuation boundary. Enabled: self-
+                        // continue (fork a chained successor of the same
+                        // directive). Disabled (default): STOP here with the
+                        // current state — no nudge, no granted turn, no output
+                        // enforcement. Emitting outputs before the boundary is the
+                        // directive's job; the runtime does not do it for them.
+                        // (Enabled is plain chain-fold for now; the hook/seed/
+                        // carry_turns substrate is a later chunk.)
+                        if self.continuation_config.enabled() {
+                            State::Continued
+                        } else {
+                            let result = self
+                                .messages
+                                .last()
+                                .and_then(|m| m.content.clone())
+                                .unwrap_or(Value::Null);
+                            State::Finalizing { result }
+                        }
                     } else {
                         // Loop back to the limits + provider call.
                         // Reaching CheckingContinuation means the prior
@@ -1339,9 +1535,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1379,9 +1577,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1427,9 +1627,11 @@ mod tests {
             tools: vec![],
             system_prompt: Some("You are helpful".to_string()),
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1473,9 +1675,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1513,9 +1717,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1569,9 +1775,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(100.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "zen".to_string(),
             matched_profile: None,
@@ -1617,9 +1825,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(100.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "zen".to_string(),
             matched_profile: None,

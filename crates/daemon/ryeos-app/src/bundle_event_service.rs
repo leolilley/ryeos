@@ -226,6 +226,8 @@ mod tests {
             provenance: ExecutionProvenance::root_live_fs(PathBuf::from("/tmp/test"), engine),
             effective_bundle_id: effective_bundle_id.map(str::to_string),
             item_ref: Some("tool:example-bundle/send".into()),
+            hard_limits: serde_json::Value::Null,
+            depth: 0,
         }
     }
 

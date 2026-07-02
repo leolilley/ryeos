@@ -4,9 +4,10 @@
 //! (only internal, non-continuable profiles), so they can pin the projection
 //! WIRING but always observe `supports_continuation: false`. This integration
 //! test loads the actual shipped kind schemas — where `directive_run`
-//! (`supports_continuation: true`) and `graph_run` (`supports_continuation:
-//! false`) live — and asserts the daemon-authored `execution.supports_continuation`
-//! reflects the true/false contrast through `threads.get` and `threads.list`.
+//! (continuation + operator follow-up) and `graph_run` (machine continuation,
+//! NO operator follow-up) live — and asserts the daemon-authored
+//! `execution.{supports_continuation, supports_operator_followup}` reflect that
+//! contrast through `threads.get` and `threads.list`.
 //!
 //! This is the honest form of the contrast: it asserts the values the bundle
 //! actually ships, not a synthetic profile injected by a test constructor.
@@ -113,9 +114,14 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
         dir["execution"]["supports_continuation"], true,
         "directive_run is continuable in the standard bundle: {dir:#?}"
     );
+    assert_eq!(
+        dir["execution"]["supports_operator_followup"], true,
+        "directive_run accepts operator follow-up: {dir:#?}"
+    );
 
-    // graph_run ships `supports_continuation: false` (chain-fold would corrupt
-    // its frontier), so it must NOT advertise continuation.
+    // graph_run is machine-continuable (segment-budget cut + checkpoint resume)
+    // but folds no conversation, so it advertises continuation WITHOUT operator
+    // follow-up.
     threads
         .create_thread(&create_params("T-graph", "graph_run"))
         .unwrap();
@@ -128,8 +134,12 @@ fn get_thread_view_reflects_real_kind_continuation_authority() {
     .unwrap();
     assert_eq!(graph["kind"], "graph_run");
     assert_eq!(
-        graph["execution"]["supports_continuation"], false,
-        "graph_run must not advertise continuation: {graph:#?}"
+        graph["execution"]["supports_continuation"], true,
+        "graph_run is machine-continuable: {graph:#?}"
+    );
+    assert_eq!(
+        graph["execution"]["supports_operator_followup"], false,
+        "graph_run refuses operator follow-up: {graph:#?}"
     );
 }
 
@@ -145,14 +155,34 @@ fn thread_list_reflects_real_kind_continuation_authority() {
 
     let listing = threads.list_threads_filtered(100, None).unwrap();
     let rows = listing["threads"].as_array().expect("threads array");
-    let supports = |id: &str| {
+    let fact = |id: &str, key: &str| {
         rows.iter()
             .find(|r| r["thread_id"] == id)
             .unwrap_or_else(|| panic!("row {id} missing from list: {listing:#?}"))["execution"]
-            ["supports_continuation"]
+            [key]
             .clone()
     };
 
-    assert_eq!(supports("T-dir"), true, "directive_run row continuable");
-    assert_eq!(supports("T-graph"), false, "graph_run row not continuable");
+    // directive: continuation + operator follow-up.
+    assert_eq!(
+        fact("T-dir", "supports_continuation"),
+        true,
+        "directive_run row continuable"
+    );
+    assert_eq!(
+        fact("T-dir", "supports_operator_followup"),
+        true,
+        "directive_run row accepts operator follow-up"
+    );
+    // graph: machine continuation, NO operator follow-up.
+    assert_eq!(
+        fact("T-graph", "supports_continuation"),
+        true,
+        "graph_run row machine-continuable"
+    );
+    assert_eq!(
+        fact("T-graph", "supports_operator_followup"),
+        false,
+        "graph_run row refuses operator follow-up"
+    );
 }

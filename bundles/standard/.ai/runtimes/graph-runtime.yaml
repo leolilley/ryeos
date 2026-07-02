@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:06Z:0263436069711f1ab799dd786a940bd62c1b90ff532bc435702e6c6f353b57e1:bMHg5++UjZNcNvnacuzKOvsS/S+tf3KWidNyyh9P3rntRCu1SpQRgOqrgBlb52EDXgEruOCJoPHig3lT5Xt9Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-25T23:46:16Z:86ea7ebf6086e7cb52029417f0ac46af77459b8cf2ad4b2c508facf0273007f3:ZEBc7kxCAxVEtzqEM3fOD4hY+gs0T/rswUgHPJ886DCLjyCKcbjaSWRJuumBB/zJAY83IPswkaYECNhWWNpGAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: graph
 default: true
@@ -7,3 +7,6 @@ abi_version: "v1"
 required_caps:
   - runtime.execute
 description: "Interprets graph workflows"
+# Replay-aware: the walker checkpoints its frontier so a crashed graph run
+# resumes from its last checkpoint (defaults: 30s interval, 1 auto-resume).
+native_resume: true

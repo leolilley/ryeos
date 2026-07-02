@@ -78,6 +78,11 @@ pub struct ViewBinding {
     pub input: Option<InputBlock>,
     #[serde(default)]
     pub affordances: Vec<Value>,
+    /// Sections for the `sections` widget: each a titled group with its own
+    /// source + projection, fetched and projected independently. Empty for
+    /// every non-sections widget.
+    #[serde(default)]
+    pub sections: Vec<SectionBinding>,
     #[serde(default)]
     pub refresh: Value,
     /// The view item's canonical ref (provenance chrome).
@@ -147,6 +152,11 @@ pub struct InputBlock {
     /// Optional suggestion source (rows over a service).
     #[serde(default)]
     pub completion: Option<InputCompletion>,
+    /// Optional inline `@`-mention source: substrate refs (items/threads/
+    /// files) to mention mid-text, projected to {ref,label}. Distinct from
+    /// `completion` (the line-start `/` command grammar).
+    #[serde(default)]
+    pub mentions: Option<InputMentions>,
     /// Enter behaviour: an affordance id, or the reserved `route` value.
     #[serde(default)]
     pub submit: Option<String>,
@@ -192,6 +202,58 @@ pub struct InputCompletion {
     pub collection: Option<String>,
 }
 
+/// An inline `@`-mention source: a refs collection projected to the inserted
+/// reference and an optional hint label. Separate from `completion` (the
+/// line-start `/` grammar) — mentions are inline and over substrate refs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputMentions {
+    #[serde(rename = "ref")]
+    pub item_ref: String,
+    #[serde(default)]
+    pub collection: Option<String>,
+    /// Source-record field whose value is inserted as the mention reference.
+    pub reference: String,
+    /// Optional source-record field shown in the completion hint.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// The data-store key a view's `@`-mention source response lands under —
+/// derived identically by the fetch emitter and the reader, so the generic
+/// `FetchSource` path carries mentions with no bespoke effect.
+pub fn mention_source_key(view_ref: &str, input_id: &str) -> String {
+    format!("mentions\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// Project a mentions source response into normalized `{ref,label}` records the
+/// `@`-completion matchers consume: pull the collection, map each record's
+/// declared `reference`/`label` fields. Records missing the ref field drop out.
+pub fn project_mentions(mentions: &InputMentions, response: &Value) -> Vec<Value> {
+    let records: &[Value] = mentions
+        .collection
+        .as_deref()
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    records
+        .iter()
+        .filter_map(|record| {
+            let reference = field_text(record, &mentions.reference)?;
+            let mut obj = serde_json::Map::new();
+            obj.insert("ref".to_string(), Value::String(reference));
+            if let Some(label) = mentions
+                .label
+                .as_deref()
+                .and_then(|field| field_text(record, field))
+            {
+                obj.insert("label".to_string(), Value::String(label));
+            }
+            Some(Value::Object(obj))
+        })
+        .collect()
+}
+
 /// The reserved `submit:` value meaning "dispatch through the engine's
 /// existing route-fold" (the chat box).
 pub const SUBMIT_ROUTE: &str = "route";
@@ -223,6 +285,28 @@ pub struct SourceBinding {
     /// text).
     #[serde(default)]
     pub collection: Option<String>,
+}
+
+/// One section of a `sections` view: a titled group with its own source and
+/// single projection, fetched and projected independently of its siblings.
+/// Sections share the host view's `affordances`; `activate` names which one a
+/// row in this section fires (wired in a later increment).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SectionBinding {
+    pub title: String,
+    pub source: SourceBinding,
+    #[serde(default)]
+    pub projection: Value,
+    #[serde(default)]
+    pub activate: Option<String>,
+}
+
+/// The per-section source key for a `sections` view: the host key (tile id or
+/// dock key) plus the section index. Each section's source response lands
+/// under its own key so the resolver reads them back independently. Both the
+/// fetch emitter and the resolver derive section keys through this one helper.
+pub fn section_source_key(base: &str, index: usize) -> String {
+    format!("{base}#section{index}")
 }
 
 /// Flat field path lookup: `payload.delta` walks objects, never arrays.
@@ -273,26 +357,24 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
     let primary = if role == TimelineRole::Flow && projected_primary.is_none() {
         String::new()
     } else {
-        projected_primary.clone().unwrap_or_else(|| compact(record))
+        projected_primary.clone().unwrap_or_else(|| {
+            // A declared projection that misses must NOT dump raw event JSON
+            // into the feed. Degrade to the record's `event_type` (its honest
+            // kind) when it is an event; only non-event records (rows over a
+            // service) fall back to compact JSON. The full record stays in
+            // `raw` for an inspector.
+            record
+                .get("event_type")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| compact(record))
+        })
     };
     let meta = projection
         .get("meta")
         .and_then(Value::as_str)
         .and_then(|path| field_text(record, path));
-    let tone = projection.get("tone").and_then(|tone| {
-        let field = tone.get("field").and_then(Value::as_str)?;
-        let Some(value) = field_text(record, field) else {
-            return tone
-                .get("missing")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-        };
-        tone.get("map")
-            .and_then(|map| map.get(&value))
-            .and_then(Value::as_str)
-            .or_else(|| tone.get("default").and_then(Value::as_str))
-            .map(str::to_string)
-    });
+    let tone = project_tone(record, projection);
     let pair_key = match role {
         TimelineRole::PairOpen | TimelineRole::PairClose => projection
             .get("pair_key")
@@ -314,6 +396,95 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
         pair_key,
         raw: record.clone(),
     }
+}
+
+/// Map a record to a tone name via a `tone: {field, map, default, missing}`
+/// projection block. Shared by rows/timeline (`project_record`) and the table
+/// widget, so a table colours its rows by the same status→tone rule a rows view
+/// would. Absent block / unmapped value → `None` (renderer's neutral).
+pub fn project_tone(record: &Value, projection: &Value) -> Option<String> {
+    let tone = projection.get("tone")?;
+    let field = tone.get("field").and_then(Value::as_str)?;
+    let Some(value) = field_text(record, field) else {
+        return tone
+            .get("missing")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    };
+    tone.get("map")
+        .and_then(|map| map.get(&value))
+        .and_then(Value::as_str)
+        .or_else(|| tone.get("default").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// One declared column of a `table` view: a header label and the record field
+/// it projects. `projections.columns` is the ordered list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableColumn {
+    pub label: String,
+    pub field: String,
+}
+
+/// The columns a `table` view declares — `projections.columns`, each
+/// `{label, field}` (label defaults to the field path). A column missing a
+/// field is skipped; absent `columns` → empty (the table renders headerless).
+pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
+    binding
+        .projections
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|cols| {
+            cols.iter()
+                .filter_map(|col| {
+                    let field = col.get("field").and_then(Value::as_str)?;
+                    let label = col.get("label").and_then(Value::as_str).unwrap_or(field);
+                    Some(TableColumn {
+                        label: label.to_string(),
+                        field: field.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One projected table row: a cell per column (in column order), the row tone,
+/// and the raw record kept for affordance interpolation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectedTableRow {
+    pub cells: Vec<String>,
+    pub tone: Option<String>,
+    pub raw: Value,
+}
+
+/// Project a table source response: pull the collection (same shape as
+/// `project_records`), then one cell per declared column. Row tone reuses the
+/// shared `projections.tone` block. Missing cells degrade to empty strings.
+pub fn project_table(
+    binding: &ViewBinding,
+    response: &Value,
+    columns: &[TableColumn],
+) -> Vec<ProjectedTableRow> {
+    let records: &[Value] = binding
+        .source
+        .as_ref()
+        .and_then(|s| s.collection.as_deref())
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    records
+        .iter()
+        .map(|record| ProjectedTableRow {
+            cells: columns
+                .iter()
+                .map(|col| field_text(record, &col.field).unwrap_or_default())
+                .collect(),
+            tone: project_tone(record, &binding.projections),
+            raw: record.clone(),
+        })
+        .collect()
 }
 
 /// Project a rows/timeline source response: pull the collection, apply
@@ -349,6 +520,27 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
             project_record(record, projection)
         })
         .collect()
+}
+
+/// Project one section's source response into records, applying the section's
+/// single projection (no per-event-kind blocks — that's `project_records`).
+/// A section with a `collection` is a list source: one row per record. A
+/// section without one is a *detail* source: the whole response is a single
+/// record — one row — so a sections view can carry a singular status line
+/// (e.g. node status) beside its list sections.
+pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
+    match section.source.collection.as_deref() {
+        Some(path) => field_path(response, path)
+            .and_then(Value::as_array)
+            .map(|records| {
+                records
+                    .iter()
+                    .map(|record| project_record(record, &section.projection))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => vec![project_record(response, &section.projection)],
+    }
 }
 
 /// Project a key_value detail: `projections.detail` is a list of field
@@ -717,6 +909,71 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn project_record_missing_primary_degrades_to_event_type_not_raw_json() {
+        // An event whose declared projection primary is absent must degrade to
+        // its event_type (the honest kind), never a raw-JSON dump of the whole
+        // event into the feed.
+        let record = json!({ "event_type": "thread_continued", "payload": {} });
+        let projection = json!({ "primary": "payload.previous_thread_id", "role": "boundary" });
+        let projected = project_record(&record, &projection);
+        assert_eq!(projected.primary, "thread_continued");
+        assert!(
+            !projected.primary.starts_with('{'),
+            "never raw JSON: {}",
+            projected.primary
+        );
+    }
+
+    #[test]
+    fn project_record_non_event_missing_primary_still_compacts() {
+        // A non-event record (rows over a service) has no event_type, so the
+        // honest fallback remains the compact record — unchanged behavior.
+        let record = json!({ "id": "x", "label": "y" });
+        let projection = json!({ "primary": "missing.field" });
+        let projected = project_record(&record, &projection);
+        assert!(
+            projected.primary.starts_with('{'),
+            "non-event degrades to compact: {}",
+            projected.primary
+        );
+    }
+
+    #[test]
+    fn project_section_list_source_yields_one_row_per_record() {
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Threads",
+            "source": { "ref": "service:threads/list", "collection": "threads" },
+            "projection": { "primary": "thread_id", "meta": "status" }
+        }))
+        .unwrap();
+        let response = json!({ "threads": [
+            { "thread_id": "T-ab", "status": "running" },
+            { "thread_id": "T-cd", "status": "done" }
+        ]});
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].primary, "T-ab");
+        assert_eq!(rows[0].meta.as_deref(), Some("running"));
+        assert_eq!(rows[1].primary, "T-cd");
+    }
+
+    #[test]
+    fn project_section_detail_source_yields_a_single_row() {
+        // No collection → the whole response is one record (e.g. node status).
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Node",
+            "source": { "ref": "service:system/status" },
+            "projection": { "primary": "version", "meta": "site_id" }
+        }))
+        .unwrap();
+        let response = json!({ "version": "1.0.0", "site_id": "node-xyz", "uptime": 42 });
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "1.0.0");
+        assert_eq!(rows[0].meta.as_deref(), Some("node-xyz"));
     }
 
     #[test]

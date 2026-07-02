@@ -22,6 +22,15 @@ use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::TerminalCompletion;
 
+/// Schema version of the graph checkpoint payload. Bump on any incompatible
+/// change to the written fields; the resume parser rejects an unknown version.
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+
+/// Free-form breadcrumb passed to `request_continuation` when a segment budget
+/// is exhausted. For logs only — the substrate keys off the thread lineage, not
+/// this string.
+const SEGMENT_CONTINUATION_REASON: &str = "graph segment step budget exhausted";
+
 /// Running cost accumulator for a single graph execution. Owned by the
 /// walker behind a `Mutex` (like `warnings`) so cost can be recorded with
 /// `&self` from `commit_step` — the single state-mutation point.
@@ -32,7 +41,7 @@ use ryeos_runtime::TerminalCompletion;
 /// billing/reporting must therefore NOT sum `final_cost` across a thread
 /// tree, or nested executions are double-counted. Parent graph cost is a
 /// rollup/display figure.
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct GraphAccounting {
     /// Aggregate across every cost-bearing node. `None` until the first
     /// node reports cost, so a pure-tool graph finalizes `cost: None`
@@ -329,10 +338,10 @@ impl Walker {
             "graph loaded"
         );
 
-        // Reset per-run accounting so a Walker reused across multiple
-        // `execute` calls does not carry stale cost from a prior run.
-        // (NOTE: resume does not yet restore pre-resume cost — a resumed
-        // run reports only post-resume cost. See `write_checkpoint`.)
+        // Reset per-run accounting so a Walker reused across multiple `execute`
+        // calls does not carry stale cost from a prior run. If this is a resumed
+        // run, the checkpoint accounting snapshot is restored below from
+        // `resume_state`, so pre-checkpoint cost is preserved.
         *self.accounting.lock().unwrap() = GraphAccounting::default();
 
         let mut guard = RunGuard { finalized: false };
@@ -384,10 +393,10 @@ impl Walker {
         }
 
         // D16: the daemon enforces capabilities at the callback boundary.
-        // The walker does NOT self-police. One source of truth, one gate.
-        // graph_permissions composer). The daemon enforces caps at the
-        // callback boundary — the walker does NOT self-police. One
-        // source of truth, one gate (the daemon).
+        // The walker does NOT self-police. The daemon enforces caps at the
+        // callback boundary and carries parent budget/depth out-of-band on the
+        // callback token. `exec_ctx` remains a local execution descriptor for
+        // walker helpers; it is not injected into action params.
 
         let exec_ctx = context::execution_context_from_envelope(
             params
@@ -395,9 +404,16 @@ impl Walker {
                 .and_then(|v| v.as_str())
                 .map(String::from),
             params.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            json!({}),
+            // Graph-local hard limits. Child budget inheritance no longer flows
+            // through action params; the daemon supplies trusted parent context
+            // from the callback token when the callback dispatch reaches a
+            // managed child launch.
+            params.get("hard_limits").cloned().unwrap_or_else(|| json!({})),
         );
 
+        // pid/pgid is registered earlier, in `main.rs` right after the callback
+        // client is built — BEFORE any durable callback or this `execute()` —
+        // so the daemon can always tell a live graph from a crashed one.
         let r = self.client.mark_running().await;
         self.record_callback_warning("mark_running", r.map(|_| ()));
 
@@ -431,6 +447,33 @@ impl Walker {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
                 state = resume_val.get("state").cloned().unwrap_or(json!({}));
+                // Restore accumulated cost so post-resume cost adds to the
+                // pre-checkpoint total instead of restarting at zero. A corrupt
+                // snapshot degrades to fresh accounting (under-bills) rather than
+                // failing an otherwise-correct resume.
+                if let Some(acc_val) = resume_val.get("accounting").filter(|v| !v.is_null()) {
+                    match serde_json::from_value::<GraphAccounting>(acc_val.clone()) {
+                        Ok(acc) => *self.accounting.lock().unwrap() = acc,
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "failed to restore accounting from checkpoint; starting fresh"
+                        ),
+                    }
+                }
+                // Restore suppressed errors accumulated before the checkpoint so
+                // the resumed run's final error count/list is complete. A corrupt
+                // snapshot degrades to empty rather than failing the resume.
+                if let Some(se_val) =
+                    resume_val.get("suppressed_errors").filter(|v| !v.is_null())
+                {
+                    match serde_json::from_value::<Vec<ErrorRecord>>(se_val.clone()) {
+                        Ok(se) => suppressed_errors = se,
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "failed to restore suppressed_errors from checkpoint; starting empty"
+                        ),
+                    }
+                }
                 tracing::info!(
                     node = %current,
                     step,
@@ -459,7 +502,14 @@ impl Walker {
         // ── F3 main loop: run_node_body → commit_step ───────────
         // Every iteration produces exactly one StepOutcome and routes
         // through commit_step. ALL persistence happens there.
-        while step < cfg.max_steps {
+        //
+        // `step` is cumulative across the continuation chain (restored on
+        // resume); `steps_this_segment` is per-thread and bounds one segment
+        // before the walker cuts a machine continuation. A `None` segment budget
+        // ⇒ run until a terminal node or `max_steps`.
+        let segment_limit = cfg.segment_steps.unwrap_or(u32::MAX);
+        let mut steps_this_segment: u32 = 0;
+        while step < cfg.max_steps && steps_this_segment < segment_limit {
             let node = match cfg.nodes.get(&current) {
                 Some(n) => n,
                 None => {
@@ -526,33 +576,105 @@ impl Walker {
                 } => {
                     current = next_node;
                     step = next_step;
+                    steps_this_segment += 1;
                 }
                 CommitResult::Terminate(result) => return result,
             }
         }
 
-        // Max steps exceeded — terminal via commit_step.
-        let outcome = StepOutcome::Terminal {
-            status: "max_steps_exceeded",
-            error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
-        };
-        match self
-            .commit_step(CommitStepInput {
-                graph_run_id: &graph_run_id,
-                step,
-                current: "",
-                state: &mut state,
-                receipts: &mut receipts,
-                suppressed_errors: &mut suppressed_errors,
-                outcome,
-                guard: &mut guard,
-                hook_list: &hook_list,
-                inputs: &inputs,
-            })
+        // Budget exhausted without reaching a terminal node. The hard ceiling
+        // fails; a segment-budget cut (step < max_steps) hands off to a machine
+        // continuation successor that resumes from the checkpoint the last
+        // commit_step wrote (pointing at `current`).
+        if step >= cfg.max_steps {
+            let outcome = StepOutcome::Terminal {
+                status: "max_steps_exceeded",
+                error: Some(format!("exceeded max_steps ({})", cfg.max_steps)),
+            };
+            return match self
+                .commit_step(CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: "",
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    hook_list: &hook_list,
+                    inputs: &inputs,
+                })
+                .await
+            {
+                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                CommitResult::Terminate(result) => result,
+            };
+        }
+
+        // Segment budget exhausted: cut a machine continuation. A failed handoff
+        // settles the thread as a terminal error rather than leaving it
+        // `continued` with no successor.
+        if let Err(e) = self
+            .client
+            .request_continuation(Some(SEGMENT_CONTINUATION_REASON))
             .await
         {
-            CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
-            CommitResult::Terminate(result) => result,
+            let outcome = StepOutcome::Terminal {
+                status: "error",
+                error: Some(format!("continuation handoff failed: {e}")),
+            };
+            return match self
+                .commit_step(CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: &current,
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    hook_list: &hook_list,
+                    inputs: &inputs,
+                })
+                .await
+            {
+                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                CommitResult::Terminate(result) => result,
+            };
+        }
+
+        // Handoff accepted: settle `continued` WITHOUT the terminal lifecycle
+        // (no GraphCompleted, no finalize-as-completed). The daemon settles the
+        // thread to Continued and launches the successor off this status. The
+        // checkpoint already written by the last commit_step is the resume point.
+        guard.finalized = true;
+        let (agg_cost, node_costs) = {
+            let acc = self.accounting.lock().unwrap();
+            (acc.total.clone(), acc.nodes.clone())
+        };
+        GraphResult {
+            success: false,
+            graph_id: self.graph.graph_id.clone(),
+            definition_ref: self.graph.definition_ref.clone(),
+            definition_hash: self.graph.definition_hash.clone(),
+            graph_run_id: graph_run_id.clone(),
+            status: "continued".into(),
+            steps: step,
+            state: state.clone(),
+            result: None,
+            errors_suppressed: if suppressed_errors.is_empty() {
+                None
+            } else {
+                Some(suppressed_errors.len())
+            },
+            errors: if suppressed_errors.is_empty() {
+                None
+            } else {
+                Some(suppressed_errors.clone())
+            },
+            error: None,
+            cost: agg_cost,
+            node_costs,
         }
     }
 
@@ -1012,6 +1134,7 @@ impl Walker {
                             &next_node,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1113,6 +1236,7 @@ impl Walker {
                             next_node,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1199,6 +1323,7 @@ impl Walker {
                             next_node,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1274,6 +1399,7 @@ impl Walker {
                             target,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1298,6 +1424,7 @@ impl Walker {
                                     &next_node,
                                     next_step,
                                     state,
+                                    suppressed_errors,
                                     guard,
                                     hook_list,
                                 )
@@ -1399,6 +1526,7 @@ impl Walker {
                             target,
                             next_step,
                             state,
+                            suppressed_errors,
                             guard,
                             hook_list,
                         )
@@ -1422,6 +1550,7 @@ impl Walker {
                                     &next_node,
                                     next_step,
                                     state,
+                                    suppressed_errors,
                                     guard,
                                     hook_list,
                                 )
@@ -1639,11 +1768,12 @@ impl Walker {
         next_node: &str,
         next_step: u32,
         state: &Value,
+        suppressed_errors: &[ErrorRecord],
         guard: &mut RunGuard,
         _hook_list: &[Value],
     ) -> CommitResult {
         if let Err(e) = self
-            .write_checkpoint(graph_run_id, next_node, next_step, state)
+            .write_checkpoint(graph_run_id, next_node, next_step, state, suppressed_errors)
             .await
         {
             // Checkpoint failure is a hard error — resume correctness
@@ -1843,29 +1973,64 @@ impl Walker {
 
     /// Write a local checkpoint using the daemon-provided CheckpointWriter.
     ///
-    /// LIMITATION: the checkpoint persists cursor/step/state only — NOT the
-    /// `GraphAccounting` aggregate. A run resumed from a checkpoint
-    /// therefore reports only the cost spent AFTER resume; cost spent
-    /// before the checkpoint is not reconstructed. Persisting accounting
-    /// here (or rebuilding it from durable node receipts) is deferred.
+    /// Persists the versioned payload: cursor/step/state plus snapshots of the
+    /// `GraphAccounting` aggregate and `suppressed_errors`, so a resumed run
+    /// reconstructs cost and non-fatal error history from before the checkpoint
+    /// (both restored in `execute` from `resume_state`).
     async fn write_checkpoint(
         &self,
         graph_run_id: &str,
         next_node: &str,
         next_step: u32,
         state: &Value,
+        suppressed_errors: &[ErrorRecord],
     ) -> anyhow::Result<()> {
         let Some(writer) = &self.checkpoint else {
             return Ok(());
         };
 
+        // Accounting is interior-mutable on the walker; snapshot it under the
+        // lock (no await) so resume restores accumulated cost instead of
+        // restarting it at zero and under-billing the pre-checkpoint work.
+        let accounting = {
+            let acc = self.accounting.lock().unwrap();
+            serde_json::to_value(&*acc).unwrap_or(Value::Null)
+        };
         writer.write(&json!({
+            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
             "graph_run_id": graph_run_id,
             "current_node": next_node,
             "step_count": next_step,
             "state": state,
+            "accounting": accounting,
+            "suppressed_errors": suppressed_errors,
             "written_at": lillux::time::iso8601_now(),
-        }))
+        }))?;
+
+        // Test-only crash-injection hook (prod-inert: fires ONLY when
+        // `RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT` is set, which only the
+        // graph crash-recovery e2e sets — and that name only reaches this
+        // process because the daemon env allowlist lets it through). Once the
+        // checkpoint for `next_node` is durably written, park forever so a
+        // harness can SIGKILL the daemon with this thread's row still
+        // `running`, kill this orphaned process group, and then exercise the
+        // daemon's startup-reconcile native-resume path. The resumed launch
+        // injects `RYEOS_RESUME=1` (`is_resume()`), so this hook never fires on
+        // the resume pass: the walker proceeds from the checkpoint cursor to
+        // completion. Gated on `next_node` (the resume cursor), so the test
+        // names the node the graph should resume *into*.
+        if !CheckpointWriter::is_resume()
+            && std::env::var("RYEOS_GRAPH_TEST_BLOCK_AFTER_CHECKPOINT")
+                .ok()
+                .as_deref()
+                == Some(next_node)
+        {
+            // Park forever without depending on the tokio `time` feature:
+            // a never-resolving future suspends this task until the process
+            // is killed by the harness.
+            std::future::pending::<()>().await;
+        }
+        Ok(())
     }
 }
 
@@ -2102,6 +2267,7 @@ mod tests {
             env_requires: Vec::new(),
             state: None,
             max_concurrency: None,
+            segment_steps: None,
         }
     }
 
@@ -2963,6 +3129,35 @@ config:
         let result = w.execute(json!({}), None).await;
         assert!(!result.success);
         assert_eq!(result.status, "max_steps_exceeded");
+    }
+
+    #[tokio::test]
+    async fn segment_steps_cuts_machine_continuation() {
+        // With segment_steps=1 the first step advances and the per-thread budget
+        // is hit before a terminal node — the walker cuts a machine continuation
+        // (request_continuation succeeds) and settles `continued` rather than
+        // running on toward max_steps. The successor would resume from the
+        // checkpoint the last commit_step wrote.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: loop
+  max_steps: 100
+  segment_steps: 1
+  nodes:
+    loop:
+      action: {item_id: "tool:test/noop"}
+      next:
+        type: unconditional
+        to: loop
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![json!({})]);
+        let result = w.execute(json!({}), None).await;
+        assert_eq!(result.status, "continued", "got: {result:?}");
+        assert!(!result.success);
+        assert_eq!(result.steps, 1, "one step ran before the segment cut");
     }
 
     #[test]
@@ -4023,6 +4218,17 @@ config:
         let contents = std::fs::read_to_string(&checkpoint_file).unwrap();
         let cp: Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(cp["current_node"], "fast_path");
+        // S5: payload is versioned and carries an accounting snapshot so resume
+        // restores accumulated cost rather than restarting it at zero. `total`
+        // may be null (no cost-bearing node yet); `nodes` is always an array.
+        assert_eq!(cp["schema_version"], GRAPH_CHECKPOINT_SCHEMA_VERSION);
+        let accounting = cp
+            .get("accounting")
+            .expect("checkpoint must carry an accounting snapshot");
+        assert!(
+            accounting["nodes"].is_array(),
+            "accounting.nodes must be an array: {accounting}"
+        );
     }
 
     /// Foreach node must emit per-iteration events (graph_foreach_iteration)

@@ -40,6 +40,9 @@ pub struct StudioKeyEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StudioKeyContext {
     pub launcher_open: bool,
+    /// The keys/help overlay is open — any dismiss key closes it; everything
+    /// else is swallowed so the overlay is modal.
+    pub help_open: bool,
     pub input_visible: bool,
     /// The focused input has a non-empty buffer. Plain Enter then submits
     /// (the chat convention) rather than activating a row — terminals
@@ -80,6 +83,9 @@ pub enum StudioKeyCommand {
 pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> StudioKeyCommand {
     if context.launcher_open {
         return launcher_key_command(event);
+    }
+    if context.help_open {
+        return help_key_command(event);
     }
 
     match event.key {
@@ -127,6 +133,16 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
             ui(StudioUiEvent::InterruptHead)
         }
         StudioKey::Escape if event.modifiers.none() => action(StudioAction::CloseFocused),
+        // Alt+Enter submits as a forceful INTERRUPT (cut the running thread's
+        // in-flight cognition and redirect); plain Enter steers. Checked first so
+        // the modifier wins over the plain-submit arm below.
+        StudioKey::Enter
+            if context.input_visible
+                && context.input_has_text
+                && event.modifiers.alt_only() =>
+        {
+            ui(StudioUiEvent::SubmitInputInterrupt)
+        }
         // Plain Enter submits when you're typing in the input (chat
         // convention); Shift+Enter also submits where the terminal can
         // send it. An empty input lets plain Enter activate a row.
@@ -180,6 +196,12 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
             ui(StudioUiEvent::CompleteInput)
         }
         StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
+        // `?` opens the keys overlay — but only with an empty input, so it
+        // still types into a message you're composing (the chat convention;
+        // the always-present foot input owns plain chars otherwise).
+        StudioKey::Char('?') if event.modifiers.none() && !context.input_has_text => {
+            ui(StudioUiEvent::OpenHelp)
+        }
         StudioKey::Char(ch)
             if context.input_visible
                 && !event.modifiers.ctrl
@@ -187,6 +209,19 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
                 && !event.modifiers.meta =>
         {
             ui(StudioUiEvent::InsertInputChar { ch })
+        }
+        _ => StudioKeyCommand::Ignore,
+    }
+}
+
+/// The keys overlay is modal: any dismiss key (Esc, `?`, `q`, Enter) closes
+/// it, Ctrl+C still quits, and every other key is swallowed.
+fn help_key_command(event: StudioKeyEvent) -> StudioKeyCommand {
+    match event.key {
+        StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
+        StudioKey::Escape | StudioKey::Enter => ui(StudioUiEvent::CloseHelp),
+        StudioKey::Char(c) if event.modifiers.none() && (c == '?' || c == 'q') => {
+            ui(StudioUiEvent::CloseHelp)
         }
         _ => StudioKeyCommand::Ignore,
     }
@@ -320,6 +355,7 @@ mod tests {
     fn context(launcher_open: bool, input_visible: bool) -> StudioKeyContext {
         StudioKeyContext {
             launcher_open,
+            help_open: false,
             input_visible,
             input_has_text: false,
             input_has_completion: false,
@@ -332,6 +368,7 @@ mod tests {
     fn context_typing() -> StudioKeyContext {
         StudioKeyContext {
             launcher_open: false,
+            help_open: false,
             input_visible: true,
             input_has_text: true,
             input_has_completion: false,
@@ -479,6 +516,30 @@ mod tests {
     }
 
     #[test]
+    fn alt_enter_submits_as_interrupt_plain_enter_steers() {
+        let alt_enter = StudioKeyEvent {
+            key: StudioKey::Enter,
+            modifiers: StudioKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        assert!(matches!(
+            studio_key_command(alt_enter, context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::SubmitInputInterrupt
+            }
+        ));
+        // Plain Enter with text steers (default intent).
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Enter), context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::SubmitInput
+            }
+        ));
+    }
+
+    #[test]
     fn tab_precedence_completion_vs_targeting() {
         // No target, has completion that can accept → Tab completes (1 & 4).
         let complete_ctx = StudioKeyContext {
@@ -560,6 +621,58 @@ mod tests {
                 event: StudioUiEvent::ActivateFocused
             }
         ));
+    }
+
+    #[test]
+    fn question_mark_opens_help_only_with_an_empty_input() {
+        // Empty input → `?` opens the keys overlay.
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Char('?')), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::OpenHelp
+            }
+        ));
+        // Mid-message → `?` is just a character (the foot input owns it).
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Char('?')), context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::InsertInputChar { ch: '?' }
+            }
+        ));
+    }
+
+    #[test]
+    fn help_overlay_is_modal_and_dismissible() {
+        let help_ctx = StudioKeyContext {
+            help_open: true,
+            ..context(false, true)
+        };
+        for k in [
+            StudioKey::Escape,
+            StudioKey::Enter,
+            StudioKey::Char('?'),
+            StudioKey::Char('q'),
+        ] {
+            assert!(
+                matches!(
+                    studio_key_command(key(k), help_ctx),
+                    StudioKeyCommand::Ui {
+                        event: StudioUiEvent::CloseHelp
+                    }
+                ),
+                "{k:?} should close the help overlay"
+            );
+        }
+        // Any other key is swallowed (the overlay is modal)…
+        assert_eq!(
+            studio_key_command(key(StudioKey::Char('x')), help_ctx),
+            StudioKeyCommand::Ignore
+        );
+        // …but Ctrl+C still quits.
+        assert_eq!(
+            studio_key_command(ctrl('c'), help_ctx),
+            StudioKeyCommand::Quit
+        );
     }
 
     #[test]

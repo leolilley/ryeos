@@ -172,6 +172,7 @@ fn build_app_state(
         ),
         identity: Arc::new(identity),
         threads,
+        live_input: Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new()),
         events,
         event_streams,
         commands,

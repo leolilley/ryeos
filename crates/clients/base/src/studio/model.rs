@@ -290,6 +290,10 @@ pub struct StudioUiState {
     pub filters: StudioFilters,
     pub files: StudioFilesState,
     pub launcher: StudioLauncherState,
+    /// The keys/help overlay is open. A meta-overlay (not conversation
+    /// content), so it is modal like the launcher, unlike braid entries.
+    #[serde(default)]
+    pub help_open: bool,
     /// Transient input buffers, keyed layout-neutrally by
     /// `InputBufferKey::storage_key()`. A buffer belongs to a view
     /// instance, not a placement; the same view rendered twice has
@@ -325,6 +329,7 @@ impl Default for StudioUiState {
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
             launcher: StudioLauncherState::default(),
+            help_open: false,
             input_buffers: BTreeMap::new(),
             docks: StudioDockState::default(),
             atlas: AtlasUiStateVm::default(),
@@ -566,14 +571,32 @@ impl StudioCore {
             self.emit(StudioEffectKind::FetchCommands),
         ];
         for (tile_id, view_ref) in bound_tiles {
-            if let Some(effect) = self.emit_fetch_source(tile_id, &view_ref) {
-                effects.push(effect);
-            }
+            effects.extend(self.emit_fetch_source(tile_id, &view_ref));
         }
         for (key, view_ref) in self.visible_dock_views() {
-            if let Some(effect) = self.emit_fetch_source_keyed(key, &view_ref) {
-                effects.push(effect);
-            }
+            effects.extend(self.emit_fetch_source_keyed(key, &view_ref));
+        }
+        // @-mention sources: fetch the refs each input declares, keyed so the
+        // reader (key_context / CompleteInput) reads them back. A generic
+        // FetchSource, so clients need no bespoke handling.
+        let mention_fetches: Vec<(String, String)> = self
+            .views
+            .iter()
+            .filter_map(|(view_ref, binding)| {
+                let input = binding.input.as_ref()?;
+                let mentions = input.mentions.as_ref()?;
+                Some((
+                    super::content::mention_source_key(view_ref, &input.id),
+                    mentions.item_ref.clone(),
+                ))
+            })
+            .collect();
+        for (key, source_ref) in mention_fetches {
+            effects.push(self.emit(StudioEffectKind::FetchSource {
+                tile_id: key,
+                source_ref,
+                params: serde_json::json!({}),
+            }));
         }
         for (tile_id, query, kind) in tile_item_fetches {
             effects.push(self.emit(StudioEffectKind::FetchItems {
@@ -632,17 +655,18 @@ impl StudioCore {
             .collect();
         targets
             .into_iter()
-            .filter_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
             .collect()
     }
 
-    /// Emit the generic source fetch for a bound view tile, resolving
-    /// `@facet:` params against the seat fold (explicit references only).
+    /// Emit the source fetch(es) for a bound view tile, resolving `@facet:`
+    /// params against the seat fold (explicit references only). One effect for
+    /// a single-source widget; one per section for a `sections` widget.
     pub fn emit_fetch_source(
         &mut self,
         tile_id: crate::ids::TileId,
         view_ref: &str,
-    ) -> Option<StudioEffect> {
+    ) -> Vec<StudioEffect> {
         self.emit_fetch_source_keyed(tile_id.0.to_string(), view_ref)
     }
 
@@ -650,47 +674,89 @@ impl StudioCore {
     /// stable string keys (e.g. `dock:left`). The same key addresses the
     /// instance's transient input buffer: a view declaring `input.feeds`
     /// injects its buffer text into the named source param before fetch.
+    ///
+    /// A `sections` view fetches one source per section, each under its own
+    /// `section_source_key` so the resolver reads them independently; sections
+    /// carry no input buffer, so only the single-source path injects `feeds`.
     pub fn emit_fetch_source_keyed(
         &mut self,
         source_key: String,
         view_ref: &str,
-    ) -> Option<StudioEffect> {
-        let binding = self.views.get(view_ref)?;
-        let source = binding.source.clone()?;
+    ) -> Vec<StudioEffect> {
+        let Some(binding) = self.views.get(view_ref) else {
+            return Vec::new();
+        };
+        if binding.widget == "sections" {
+            let sections = binding.sections.clone();
+            let fold = self.seat.fold();
+            let resolved: Vec<(String, super::content::SourceBinding, serde_json::Value)> = sections
+                .iter()
+                .enumerate()
+                .map(|(index, section)| {
+                    let params = super::content::resolve_params(&section.source.params, |key| {
+                        fold.get(key).cloned()
+                    });
+                    (
+                        super::content::section_source_key(&source_key, index),
+                        section.source.clone(),
+                        params,
+                    )
+                })
+                .collect();
+            return resolved
+                .into_iter()
+                .filter_map(|(key, source, params)| self.build_fetch_source(key, &source, params))
+                .collect();
+        }
+        let Some(source) = binding.source.clone() else {
+            return Vec::new();
+        };
+        let feeds_param = binding
+            .input
+            .as_ref()
+            .and_then(|input| input.feeds.as_ref())
+            .map(|feeds| feeds.param.clone());
+        let input_id = binding.input.as_ref().map(|input| input.id.clone());
         let fold = self.seat.fold();
         let mut params =
             super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
         // LIVE filter: the buffer is a writer of one source param.
-        if let Some(feeds) = binding
-            .input
-            .as_ref()
-            .and_then(|input| input.feeds.as_ref())
-        {
-            if let Some(input_id) = binding.input.as_ref().map(|input| input.id.clone()) {
-                let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
-                let text = self
-                    .ui
-                    .input_buffers
-                    .get(&key.storage_key())
-                    .map(|buffer| buffer.text.clone())
-                    .unwrap_or_default();
-                if let Some(object) = params.as_object_mut() {
-                    object.insert(feeds.param.clone(), serde_json::Value::String(text));
-                } else {
-                    params = serde_json::json!({ feeds.param.clone(): text });
-                }
+        if let (Some(param), Some(input_id)) = (feeds_param, input_id) {
+            let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
+            let text = self
+                .ui
+                .input_buffers
+                .get(&key.storage_key())
+                .map(|buffer| buffer.text.clone())
+                .unwrap_or_default();
+            if let Some(object) = params.as_object_mut() {
+                object.insert(param, serde_json::Value::String(text));
+            } else {
+                params = serde_json::json!({ param: text });
             }
         }
-        // A source param that references a facet which isn't set yet (e.g.
-        // the inspector's `@facet:selection.item` before anything is
-        // selected) resolves to null. There is nothing to fetch — skip
-        // rather than dispatch a null arg the op rejects (a 500).
+        self.build_fetch_source(source_key, &source, params)
+            .into_iter()
+            .collect()
+    }
+
+    /// Emit one `FetchSource` for a resolved (key, source, params) triple, or
+    /// skip when a param references an unset facet (e.g. the inspector's
+    /// `@facet:selection.item` before anything is selected): that resolves to
+    /// null — nothing to fetch — and dispatching the null arg the op rejects
+    /// is a 500, not an empty view.
+    fn build_fetch_source(
+        &mut self,
+        source_key: String,
+        source: &super::content::SourceBinding,
+        params: serde_json::Value,
+    ) -> Option<StudioEffect> {
         if facet_param_unresolved(&source.params, &params) {
             return None;
         }
         Some(self.emit(StudioEffectKind::FetchSource {
             tile_id: source_key,
-            source_ref: source.item_ref,
+            source_ref: source.item_ref.clone(),
             params,
         }))
     }
@@ -871,7 +937,7 @@ impl StudioCore {
         // result (cursor at end, leading single `/`, a matching record) —
         // the same predicate `CompleteInput` acts on, so Tab never dispatches
         // a no-op completion when it could cycle the target instead.
-        let input_can_accept_completion = input
+        let slash_can_accept = input
             .and_then(|i| i.completion.as_ref())
             .filter(|c| c.item_ref == "service:commands/list")
             .and_then(|_| {
@@ -885,11 +951,32 @@ impl StudioCore {
                 super::tokenize::accept_slash_completion(records, &text, cursor).is_some()
             });
 
+        // A mention can accept now iff the cursor sits in an `@`-token and the
+        // declared mentions source has a matching ref — the same predicate
+        // `CompleteInput` acts on, so Tab completes a mention rather than
+        // cycling the target or no-op-ing.
+        let mention_can_accept = focused
+            .as_ref()
+            .and_then(|(key, view_ref)| {
+                let mentions = self.views.get(view_ref)?.input.as_ref()?.mentions.as_ref()?;
+                let (_, partial) = super::tokenize::active_mention(&text, cursor)?;
+                let response = self
+                    .data
+                    .sources
+                    .get(&super::content::mention_source_key(view_ref, &key.input_id))?;
+                let records = super::content::project_mentions(mentions, response);
+                (!super::tokenize::mention_completion(&records, partial).is_empty()).then_some(())
+            })
+            .is_some();
+        let input_can_accept_completion = slash_can_accept || mention_can_accept;
+
         super::keymap::StudioKeyContext {
             launcher_open: self.ui.launcher.open,
+            help_open: self.ui.help_open,
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
-            input_has_completion: input.is_some_and(|i| i.completion.is_some()),
+            input_has_completion: input
+                .is_some_and(|i| i.completion.is_some() || i.mentions.is_some()),
             input_can_accept_completion,
             // Targeting retargets the route, so it's only exposed for a
             // route-submit input (defense-in-depth; content validation also
@@ -994,6 +1081,48 @@ mod tests {
         input.delete_before_cursor();
         assert_eq!(input.text, "é");
         assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn sections_view_emits_one_fetch_per_section_under_distinct_keys() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/studio/status"],
+                "views": {
+                    "view:ryeos/studio/status": {
+                        "widget": "sections",
+                        "sections": [
+                            { "title": "Threads", "source": { "ref": "service:ui/studio/threads", "collection": "rows" }, "projection": { "primary": "thread_id" } },
+                            { "title": "Bundles", "source": { "ref": "service:ui/studio/bundles", "collection": "rows" }, "projection": { "primary": "name" } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let fetches: Vec<(String, String)> = core
+            .initial_effects()
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchSource {
+                    tile_id,
+                    source_ref,
+                    ..
+                } => Some((tile_id.clone(), source_ref.clone())),
+                _ => None,
+            })
+            .collect();
+        // One fetch per section, in section order, each addressing its own service.
+        assert_eq!(fetches.len(), 2, "one fetch per section: {fetches:?}");
+        assert_eq!(fetches[0].1, "service:ui/studio/threads");
+        assert_eq!(fetches[1].1, "service:ui/studio/bundles");
+        // Distinct per-section keys so the resolver reads each independently.
+        assert!(fetches[0].0.ends_with("#section0"), "{fetches:?}");
+        assert!(fetches[1].0.ends_with("#section1"), "{fetches:?}");
+        assert_ne!(fetches[0].0, fetches[1].0);
     }
 
     #[test]
