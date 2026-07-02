@@ -4648,6 +4648,73 @@ config:
         assert_eq!(rec.dispatch_count(), 0);
     }
 
+    const TWO_FOLLOW_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch1
+  nodes:
+    fetch1:
+      follow: true
+      action: {item_id: "directive:child1", params: {}}
+      next: {type: unconditional, to: fetch2}
+    fetch2:
+      follow: true
+      action: {item_id: "directive:child2", params: {}}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+
+    #[tokio::test]
+    async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
+        // fetch1 (follow) → fetch2 (follow) → done. Each follow node suspends; after
+        // consuming its child result the graph advances to the NEXT follow node and
+        // suspends again, then finally completes.
+
+        // Pass 1: suspend at the first follow node.
+        let (w1, rec1) = make_recording_walker(make_graph(TWO_FOLLOW_YAML), vec![], None);
+        let r1 = w1.execute(json!({}), Some("gr-seq".to_string())).await;
+        assert_eq!(r1.status, "continued");
+        assert_eq!(rec1.recorded_follow_requests()[0].follow_node, "fetch1");
+
+        // Pass 2: resume fetch1 with its child result → advance to fetch2 → suspend
+        // there (a DISTINCT follow handoff, at the next step).
+        let (w2, rec2) = make_recording_walker(make_graph(TWO_FOLLOW_YAML), vec![], None);
+        let resume1 = json!({
+            "resume_state": {
+                "current_node": "fetch1",
+                "step_count": 0,
+                "state": {},
+                "graph_run_id": "gr-seq",
+                "pending_follow": { "follow_node": "fetch1", "step_count": 0, "graph_run_id": "gr-seq" },
+                "follow_result": { "result": "child1 done" },
+            }
+        });
+        let r2 = w2.execute(resume1, Some("gr-seq".to_string())).await;
+        assert_eq!(r2.status, "continued", "must suspend again at the second follow node");
+        let req2 = rec2.recorded_follow_requests();
+        assert_eq!(req2.len(), 1, "resuming fetch1 issues exactly one new handoff (fetch2)");
+        assert_eq!(req2[0].follow_node, "fetch2", "the second suspend is at fetch2");
+        let fetch2_step = req2[0].step_count;
+
+        // Pass 3: resume fetch2 with its child result → the graph completes.
+        let (w3, _rec3) = make_recording_walker(make_graph(TWO_FOLLOW_YAML), vec![], None);
+        let resume2 = json!({
+            "resume_state": {
+                "current_node": "fetch2",
+                "step_count": fetch2_step,
+                "state": {},
+                "graph_run_id": "gr-seq",
+                "pending_follow": { "follow_node": "fetch2", "step_count": fetch2_step, "graph_run_id": "gr-seq" },
+                "follow_result": { "result": "child2 done" },
+            }
+        });
+        let r3 = w3.execute(resume2, Some("gr-seq".to_string())).await;
+        assert_eq!(r3.status, "completed", "after both follow nodes resume, the graph completes");
+        assert!(r3.success);
+    }
+
     /// Assert the R3 fence order for an action-success step:
     /// graph_step_started → tool_call_start → tool_call_result → graph_step_completed
     /// followed (on advance) by checkpoint, and finally GraphCompleted on terminal.
