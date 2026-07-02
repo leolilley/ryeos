@@ -7,6 +7,16 @@ pub struct ExecutionContext {
     pub depth: u32,
 }
 
+impl ExecutionContext {
+    pub fn as_context_value(&self) -> Value {
+        serde_json::json!({
+            "parent_thread_id": self.parent_thread_id.clone(),
+            "limits": self.limits.clone(),
+            "depth": self.depth,
+        })
+    }
+}
+
 /// Build ExecutionContext from envelope fields.
 ///
 /// D16: the walker no longer self-polices permissions — the daemon

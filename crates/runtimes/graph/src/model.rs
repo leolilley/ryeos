@@ -311,6 +311,7 @@ pub struct WalkContext {
     pub state: Value,
     pub inputs: Value,
     pub result: Option<Value>,
+    pub execution: Option<Value>,
 }
 
 impl WalkContext {
@@ -320,6 +321,9 @@ impl WalkContext {
         ctx.insert("inputs".into(), self.inputs.clone());
         if let Some(ref r) = self.result {
             ctx.insert("result".into(), r.clone());
+        }
+        if let Some(ref execution) = self.execution {
+            ctx.insert("_execution".into(), execution.clone());
         }
         ctx.insert("_now".into(), Value::String(lillux::time::iso8601_now()));
         ctx.insert(

@@ -1288,8 +1288,8 @@ impl Runner {
                         // current state — no nudge, no granted turn, no output
                         // enforcement. Emitting outputs before the boundary is the
                         // directive's job; the runtime does not do it for them.
-                        // (Enabled is plain chain-fold for now; the hook/seed/
-                        // carry_turns substrate is a later chunk.)
+                        // (Enabled is plain chain-fold; resume applies the
+                        // resolved carry_turns policy when folding history.)
                         if self.continuation_config.enabled() {
                             State::Continued
                         } else {

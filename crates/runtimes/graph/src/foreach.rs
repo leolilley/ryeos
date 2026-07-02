@@ -87,6 +87,7 @@ pub async fn run_foreach_sequential(
             state: effective_state,
             inputs: inputs.clone(),
             result: None,
+            execution: exec_ctx.map(|ctx| ctx.as_context_value()),
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
 
@@ -212,6 +213,7 @@ pub async fn run_foreach_parallel(
             state: state.clone(),
             inputs: inputs.clone(),
             result: None,
+            execution: Some(exec_ctx.as_context_value()),
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
         let action = match &node.action {

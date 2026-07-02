@@ -226,6 +226,7 @@ struct CommitStepInput<'a> {
     pub guard: &'a mut RunGuard,
     pub hook_list: &'a [Value],
     pub inputs: &'a Value,
+    pub execution: &'a Value,
 }
 
 struct CommitTerminalInput<'a> {
@@ -241,6 +242,7 @@ struct CommitTerminalInput<'a> {
     /// Graph inputs, threaded so a return node's `output` template can
     /// resolve `${inputs.*}` (not just `${state.*}`).
     pub inputs: &'a Value,
+    pub execution: &'a Value,
 }
 
 impl Walker {
@@ -408,8 +410,12 @@ impl Walker {
             // through action params; the daemon supplies trusted parent context
             // from the callback token when the callback dispatch reaches a
             // managed child launch.
-            params.get("hard_limits").cloned().unwrap_or_else(|| json!({})),
+            params
+                .get("hard_limits")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
         );
+        let execution_context = exec_ctx.as_context_value();
 
         // pid/pgid is registered earlier, in `main.rs` right after the callback
         // client is built — BEFORE any durable callback or this `execute()` —
@@ -463,9 +469,7 @@ impl Walker {
                 // Restore suppressed errors accumulated before the checkpoint so
                 // the resumed run's final error count/list is complete. A corrupt
                 // snapshot degrades to empty rather than failing the resume.
-                if let Some(se_val) =
-                    resume_val.get("suppressed_errors").filter(|v| !v.is_null())
-                {
+                if let Some(se_val) = resume_val.get("suppressed_errors").filter(|v| !v.is_null()) {
                     match serde_json::from_value::<Vec<ErrorRecord>>(se_val.clone()) {
                         Ok(se) => suppressed_errors = se,
                         Err(e) => tracing::warn!(
@@ -531,6 +535,7 @@ impl Walker {
                             guard: &mut guard,
                             hook_list: &hook_list,
                             inputs: &inputs,
+                            execution: &execution_context,
                         })
                         .await
                     {
@@ -567,6 +572,7 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
+                    execution: &execution_context,
                 })
                 .await
             {
@@ -603,6 +609,7 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
+                    execution: &execution_context,
                 })
                 .await
             {
@@ -635,6 +642,7 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
+                    execution: &execution_context,
                 })
                 .await
             {
@@ -695,6 +703,7 @@ impl Walker {
             suppressed_errors,
         } = ctx;
         let start = Instant::now();
+        let execution = exec_ctx.as_context_value();
 
         match node.node_type {
             NodeType::Return => StepOutcome::Terminal {
@@ -704,7 +713,7 @@ impl Walker {
 
             NodeType::Gate => {
                 // Gate: evaluate conditions and pick a branch target.
-                let target = edges::evaluate_next(node, state, inputs);
+                let target = edges::evaluate_next(node, state, inputs, Some(&execution));
                 StepOutcome::GateTaken { target }
             }
 
@@ -714,6 +723,7 @@ impl Walker {
                     state: state.clone(),
                     inputs: inputs.clone(),
                     result: None,
+                    execution: Some(execution.clone()),
                 };
                 let over_val = match ryeos_runtime::interpolate(
                     &Value::String(over_expr.to_string()),
@@ -828,7 +838,7 @@ impl Walker {
                     }
                 }
 
-                let next = edges::evaluate_next(node, state, inputs);
+                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
                 StepOutcome::ForeachDone {
                     results,
                     collect_key: node.collect.clone(),
@@ -878,11 +888,12 @@ impl Walker {
             graph_run_id: _graph_run_id,
             suppressed_errors: _suppressed_errors,
         } = ctx;
+        let execution = exec_ctx.as_context_value();
         let action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 // Action node with no action — treat as terminal.
-                let next = edges::evaluate_next(node, state, inputs);
+                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
                 return match next {
                     Some(n) => StepOutcome::ActionOk {
                         item_id: String::new(),
@@ -917,6 +928,7 @@ impl Walker {
             state: state.clone(),
             inputs: inputs.clone(),
             result: None,
+            execution: Some(execution.clone()),
         };
 
         let interpolated_action =
@@ -1044,6 +1056,7 @@ impl Walker {
                             state: state.clone(),
                             inputs: inputs.clone(),
                             result: Some(val.clone()),
+                            execution: Some(execution.clone()),
                         };
                         match ryeos_runtime::interpolate(assign_tpl, &assign_ctx.as_context()) {
                             Ok(interpolated) => Some(interpolated),
@@ -1065,7 +1078,8 @@ impl Walker {
                     }
                     None => None,
                 };
-                let next = edges::evaluate_next_with_result(node, state, inputs, &val);
+                let next =
+                    edges::evaluate_next_with_result(node, state, inputs, &val, Some(&execution));
                 StepOutcome::ActionOk {
                     item_id: dispatched_item_id,
                     result: val,
@@ -1099,6 +1113,7 @@ impl Walker {
             guard,
             hook_list,
             inputs,
+            execution,
         } = input;
         match outcome {
             StepOutcome::Terminal { status, error } => {
@@ -1113,6 +1128,7 @@ impl Walker {
                     hook_list,
                     current_node_id: current,
                     inputs,
+                    execution,
                 })
                 .await
             }
@@ -1152,6 +1168,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1254,6 +1271,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1341,6 +1359,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1415,6 +1434,7 @@ impl Walker {
                             self.graph.config.nodes.get(current).unwrap(),
                             state,
                             inputs,
+                            Some(execution),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -1442,6 +1462,7 @@ impl Walker {
                                     hook_list,
                                     current_node_id: current,
                                     inputs,
+                                    execution,
                                 })
                                 .await
                             }
@@ -1459,6 +1480,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1542,6 +1564,7 @@ impl Walker {
                             self.graph.config.nodes.get(current).unwrap(),
                             state,
                             inputs,
+                            Some(execution),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -1568,6 +1591,7 @@ impl Walker {
                                     hook_list,
                                     current_node_id: current,
                                     inputs,
+                                    execution,
                                 })
                                 .await
                             }
@@ -1585,6 +1609,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1608,6 +1633,7 @@ impl Walker {
             hook_list: _hook_list,
             current_node_id,
             inputs,
+            execution,
         } = input;
         let (success, status) = match base_status {
             "completed" => {
@@ -1642,6 +1668,7 @@ impl Walker {
                         state: state.clone(),
                         inputs: inputs.clone(),
                         result: None,
+                        execution: Some(execution.clone()),
                     };
                     // `tpl` is a `Value` (scalar, map, or list);
                     // `interpolate` recurses through all of them.
@@ -2155,7 +2182,11 @@ mod tests {
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
@@ -3841,7 +3872,11 @@ config:
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
