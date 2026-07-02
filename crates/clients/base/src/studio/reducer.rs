@@ -1564,6 +1564,37 @@ impl StudioCore {
                     // Typed submit result: { thread_id?, delivery, notice?, execution? }.
                     let outcome: super::dto::LaunchOutcome =
                         serde_json::from_value(data.clone()).unwrap_or_default();
+                    // A plain service-ref invoke (row management like cancel) is
+                    // NOT a launch: it targets a service other than threads/input,
+                    // carries no `delivery`, no route_seq, and never ratchets.
+                    // Reading its result as a launch outcome would clear the
+                    // focused filter and falsely claim "Thread launched" — so
+                    // handle it as a plain service success: refresh the list/braid
+                    // and preserve the focused input.
+                    let service_ref = match &expected {
+                        StudioEffectKind::Invoke {
+                            target: super::effect::InvokeRef::Ref { item_ref },
+                            route_seq: None,
+                            ratchet_on_thread_id: false,
+                            ..
+                        } if item_ref.as_str() != "service:threads/input" => Some(item_ref.clone()),
+                        _ => None,
+                    };
+                    if let Some(item_ref) = service_ref.filter(|_| outcome.delivery.is_none()) {
+                        let notice = match item_ref.as_str() {
+                            "service:ui/studio/thread/cancel" | "service:threads/cancel" => outcome
+                                .thread_id
+                                .as_deref()
+                                .map(|id| format!("Cancelled {id}."))
+                                .unwrap_or_else(|| "Cancelled.".to_string()),
+                            _ => effect_success_notice(&expected, &data),
+                        };
+                        self.notice(notice, StudioTone::Good);
+                        let mut effects =
+                            vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+                        effects.extend(self.effects_for_hint("thread"));
+                        return effects;
+                    }
                     if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
                         // A refused delivery (non-continuation target, settled
                         // status, or duplicate-submit conflict) delivered
@@ -2459,6 +2490,72 @@ mod tests {
                     && params["command_type"] == "cancel"),
             "service-ref affordance must /execute with the row's args; got {effects:?}"
         );
+    }
+
+    #[test]
+    fn service_ref_cancel_result_refreshes_without_launch_semantics() {
+        use crate::studio::effect::{InvokeRef, StudioEffectResult, StudioEffectResultKind};
+        // A focused list lens with a live filter and typed text.
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": { "view:ryeos/threads/list": {
+                    "widget": "table",
+                    "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                    "input": { "id": "filter", "feeds": { "param": "status" } }
+                }}
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'r' } });
+        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'u' } });
+        assert_eq!(
+            core.focused_input_buffer().map(|b| b.text.clone()),
+            Some("ru".to_string())
+        );
+
+        // A service-ref cancel invoke (as the row Cancel affordance emits) whose
+        // result looks superficially like a launch outcome ({thread_id, status}).
+        let effect = core.emit(StudioEffectKind::Invoke {
+            target: InvokeRef::Ref {
+                item_ref: "service:ui/studio/thread/cancel".to_string(),
+            },
+            params: serde_json::json!({ "thread_id": "T-7" }),
+            route_seq: None,
+            ratchet_on_thread_id: false,
+        });
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-7", "status": "cancelled" })),
+                error: None,
+            },
+        });
+
+        // The focused filter buffer is PRESERVED (a launch would have cleared it).
+        assert_eq!(
+            core.focused_input_buffer().map(|b| b.text.clone()),
+            Some("ru".to_string()),
+            "cancel must not clear the focused filter"
+        );
+        // The route is NOT ratcheted onto the cancelled thread.
+        assert!(core.seat.fold().input_route().thread.is_none());
+        // A thread-list refresh is emitted.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(&e.kind, StudioEffectKind::FetchThreads { .. })),
+            "cancel refreshes the thread list; got {effects:?}"
+        );
+        // The notice reads as a cancel, not a false launch.
+        let notice = core.ui.notices.last().expect("a notice");
+        assert!(notice.message.contains("Cancelled"), "got {:?}", notice.message);
+        assert!(!notice.message.contains("launched"), "got {:?}", notice.message);
     }
 
     #[test]
