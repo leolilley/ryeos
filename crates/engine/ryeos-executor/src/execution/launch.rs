@@ -1953,6 +1953,13 @@ async fn launch_successor_inner(
         }
     }
 
+    // Chain root captured BEFORE `successor` moves into launch_claimed_successor: a
+    // continuation successor can itself sit in a followed child chain, so a failed
+    // launch (budget-exhausted or pre-run defect) that finalizes it must wake the
+    // followed parent — same liveness class as the follow-child / native-resume
+    // paths. `finalize_failed_and_kick_follow` is a no-op kick for non-follow chains.
+    let successor_chain_root_id = successor.chain_root_id.clone();
+
     // Attempt budget — MACHINE path only. Enforced HERE, after a successful claim
     // and the `created` check, so a lost claim (`AlreadyClaimed`) or a
     // non-launchable row never burns it. Bounds the TOTAL auto-launch attempts per
@@ -1973,13 +1980,13 @@ async fn launch_successor_inner(
         };
         let max = ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS;
         if attempts >= max {
-            crate::dispatch::finalize_method_thread_if_needed(
+            finalize_failed_and_kick_follow(
                 &state,
                 successor_id,
-                "failed",
-                Some(json!({
+                &successor_chain_root_id,
+                json!({
                     "error": format!("continuation auto-launch budget exhausted ({attempts}/{max})")
-                })),
+                }),
             );
             let _ = state
                 .state_store
@@ -2008,11 +2015,12 @@ async fn launch_successor_inner(
             // the successor stuck at `created`. `run_claimed_thread_row` already
             // finalizes in-run failures, and finalize-if-needed is idempotent, so
             // finalizing here covers the pre-run case too without double-finalizing.
-            crate::dispatch::finalize_method_thread_if_needed(
+            // Kick too: this successor may sit in a followed child chain.
+            finalize_failed_and_kick_follow(
                 &state,
                 successor_id,
-                "failed",
-                Some(json!({ "error": e.to_string() })),
+                &successor_chain_root_id,
+                json!({ "error": e.to_string() }),
             );
             Err(e)
         }
@@ -2266,6 +2274,11 @@ pub async fn launch_existing_native_resume(
         }
     }
 
+    // Capture the chain root BEFORE `thread` moves into the launcher: a native-
+    // resume target can itself be a follow child, and a failed relaunch finalizes it
+    // (flipping the awaiting waiter to `ready`) — so the parent must be kicked here
+    // too, not left for the next restart.
+    let child_chain_root_id = thread.chain_root_id.clone();
     let result = launch_claimed_native_resume(&state, thread).await;
     let _ = state
         .state_store
@@ -2274,11 +2287,11 @@ pub async fn launch_existing_native_resume(
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
         Err(e) => {
-            crate::dispatch::finalize_method_thread_if_needed(
+            finalize_failed_and_kick_follow(
                 &state,
                 thread_id,
-                "failed",
-                Some(json!({ "error": e.to_string() })),
+                &child_chain_root_id,
+                json!({ "error": e.to_string() }),
             );
             Err(e)
         }
@@ -2469,29 +2482,45 @@ pub async fn launch_follow_child(
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
         Err(e) => {
-            crate::dispatch::finalize_method_thread_if_needed(
+            // A pre-run failure flips the waiter to `ready` (degraded failure);
+            // finalize + kick so the parent resumes live. The child is its own chain
+            // root, so its id is the chain root the waiter keys on.
+            finalize_failed_and_kick_follow(
                 &state,
                 child_id,
-                "failed",
-                Some(json!({ "error": e.to_string() })),
+                child_id,
+                json!({ "error": e.to_string() }),
             );
             Err(e)
         }
     }
 }
 
+/// Finalize a thread as failed on a pre-run / relaunch defect, then wake any follow
+/// parent waiting on its chain. A no-op kick for non-follow threads. Used by EVERY
+/// launch error path that can finalize a follow child (fresh follow-child launch,
+/// native-resume relaunch) so a child that dies during (re)launch never leaves its
+/// parent suspended until the next restart. Pass `child_chain_root_id` captured
+/// BEFORE the `ThreadDetail` is moved into the launcher.
+pub fn finalize_failed_and_kick_follow(
+    state: &AppState,
+    thread_id: &str,
+    child_chain_root_id: &str,
+    error: Value,
+) {
+    crate::dispatch::finalize_method_thread_if_needed(state, thread_id, "failed", Some(error));
+    kick_follow_resume_if_ready(state, child_chain_root_id);
+}
+
 /// If `child_chain_root_id`'s just-recorded terminal flipped a follow waiter to
 /// `ready`, fire the parent-resume launch NOW (claim-guarded; a no-op otherwise).
-/// Called from the finalize paths that carry a runtime terminal — the self-finalize
-/// UDS handler and the executor-supervised fallback — so a followed parent wakes
-/// live, not only at the next startup reconcile. Spawns the launch detached so the
-/// finalize path (and its held locks) is never blocked on the parent's whole resume.
-///
-/// GAP (must not survive past the sync-poll retirement): the GENERIC finalize path
-/// (operator cancel, pre-run failure) flips the waiter but does NOT kick here, so a
-/// follow child killed that way leaves the parent suspended until the next daemon
-/// restart drives `reconcile_follow`. Closing it means kicking from every finalize
-/// site (or signalling up from `record_follow_child_terminal`).
+/// Called from EVERY live finalize path a follow child can reach — the self-finalize
+/// UDS handler, the executor-supervised fallback, the operator-cancel handler, and
+/// the pre-run launch-failure arm — so a followed parent wakes live regardless of
+/// how the child terminated, not only at the next startup `reconcile_follow`. Spawns
+/// the launch detached so the finalize path (and its held locks) is never blocked on
+/// the parent's whole resume. The waiter's `ready` state is the signal, so a
+/// redundant call is a cheap claim-guarded no-op.
 pub fn kick_follow_resume_if_ready(state: &AppState, child_chain_root_id: &str) {
     let waiter = match state
         .state_store
@@ -2665,11 +2694,16 @@ pub async fn launch_follow_resume_successor(
         // not-created branch below).
         Ok(skipped) => Ok(skipped),
         Err(e) => {
-            crate::dispatch::finalize_method_thread_if_needed(
+            // A failed parent-resume finalizes the successor. If THIS parent chain is
+            // itself the child of an OUTER follow (nested follow), that finalize flips
+            // the outer waiter to ready — so kick it. The follow-resume successor
+            // lives in the parent's chain, so the parent chain root IS its chain root.
+            // No-op for a non-nested resume.
+            finalize_failed_and_kick_follow(
                 &state,
                 &successor_id,
-                "failed",
-                Some(json!({ "error": e.to_string() })),
+                &waiter.parent_chain_root_id,
+                json!({ "error": e.to_string() }),
             );
             Err(e)
         }

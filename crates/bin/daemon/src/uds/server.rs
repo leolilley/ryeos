@@ -1472,6 +1472,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_failed_and_kick_readies_follow_waiter() {
+        // Regression: BOTH launch error paths (fresh follow-child launch AND
+        // native-resume relaunch) finalize a failed follow child through
+        // finalize_failed_and_kick_follow. Its finalize half must flip a waiting
+        // follow waiter to `ready` so the kick has something to drive — otherwise a
+        // relaunch failure leaves the parent suspended until the next restart.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cnr", "Cnr"))
+            .unwrap();
+        state.threads.mark_running("Cnr").unwrap();
+        arm_waiting_follow(&state, "wk-nr", "Cnr");
+
+        ryeos_executor::execution::launch::finalize_failed_and_kick_follow(
+            &state,
+            "Cnr",
+            "Cnr",
+            json!({ "error": "resume rebuild failed" }),
+        );
+
+        // The finalize half readied the waiter (synchronous; the kick is a detached
+        // spawn that hasn't run yet). A hung waiter here == the bug Oracle flagged.
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-nr")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "a failed follow-child (re)launch must ready the waiter for the parent resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_successor_budget_failure_readies_follow_waiter() {
+        // launch_successor_inner's budget-exhausted path must ready a followed
+        // parent's waiter (via finalize_failed_and_kick_follow) — else a follow child
+        // whose continuation successor can't relaunch strands the parent. Modeled
+        // with a successor row awaited by a follow waiter; the finalize+kick code path
+        // is identical whether or not it sits deeper in a chain.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Ssucc", "Ssucc"))
+            .unwrap();
+        // Exhaust the per-successor auto-launch budget.
+        for _ in 0..ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS {
+            state.state_store.bump_resume_attempts("Ssucc").unwrap();
+        }
+        // A parent follow waiter awaits this successor's chain.
+        arm_waiting_follow(&state, "wk-succ", "Ssucc");
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_successor(
+            state.clone(),
+            "Ssucc",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => {
+                panic!("a budget-exhausted successor must not launch")
+            }
+        };
+        assert_eq!(reason, "budget_exhausted");
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-succ")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "a budget-exhausted continuation successor in a followed chain must ready the waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_recovers_terminal_unrecorded_child() {
+        // Crash window: the child chain reached a terminal that was persisted, but
+        // the waiter was never flipped (record_follow_child_terminal never ran).
+        // reconcile() skips terminal threads, so reconcile_follow must recover it →
+        // ready → resume, or the parent hangs forever.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cterm", "Cterm"))
+            .unwrap();
+        state.threads.mark_running("Cterm").unwrap();
+        // RAW state-store finalize bypasses record_follow_child_terminal, leaving the
+        // waiter `waiting` — exactly the crash window.
+        state
+            .state_store
+            .finalize_thread(
+                "Cterm",
+                &ryeos_app::state_store::FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(json!({ "answer": 42 })),
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                },
+            )
+            .unwrap();
+        arm_waiting_follow(&state, "wk-term", "Cterm");
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-term")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::WAITING,
+            "precondition: waiter is still waiting (terminal not recorded)"
+        );
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::Resume { follow_key } if follow_key == "wk-term"
+            )),
+            "a terminal-but-unrecorded child must be recovered to a resume, got {actions:?}"
+        );
+        let waiter = state
+            .state_store
+            .get_follow_waiter_by_key("wk-term")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiter.phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "recovery must flip the waiter to ready"
+        );
+        // The synthesized envelope is a VISIBLE degraded FAILURE (so the parent
+        // resumes into on_error, not a silent empty success), and carries the
+        // persisted child status/result for diagnostics.
+        let env = waiter
+            .terminal_envelope
+            .expect("recovered waiter must carry a terminal envelope");
+        assert_eq!(env["success"], json!(false), "degraded recovery is failure-shaped");
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(
+            env["result"]["child_status"],
+            json!("completed"),
+            "envelope carries the persisted child status"
+        );
+        assert_eq!(
+            env["result"]["child_result"],
+            json!({ "answer": 42 }),
+            "envelope carries the persisted child result"
+        );
+    }
+
+    #[tokio::test]
     async fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter() {
         // Blocker-1 recovery: a `resuming` waiter whose VALID follow-resume successor
         // was claimed + run by another launcher (e.g. a native-resume intent) must be

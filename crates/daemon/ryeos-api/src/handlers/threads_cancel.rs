@@ -110,6 +110,15 @@ pub async fn handle(
     // `finalize_thread` persists then publishes the `thread_cancelled`
     // event, so live subscribers receive it directly.
 
+    // If the cancelled thread was a followed child's chain terminal, its finalize
+    // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —
+    // kick the parent resume live so it does not wait for the next daemon restart.
+    // A no-op for a non-follow thread.
+    ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+        &state,
+        &finalized.chain_root_id,
+    );
+
     Ok(json!({
         "thread_id": req.thread_id,
         "status": finalized.status,

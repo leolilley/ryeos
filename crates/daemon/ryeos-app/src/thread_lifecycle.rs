@@ -927,6 +927,58 @@ impl ThreadLifecycleService {
         }
     }
 
+    /// Recover a `waiting` follow waiter whose child chain already reached a
+    /// non-continued terminal but was never recorded — the crash window between
+    /// persisting the child's terminal and `record_follow_child_terminal`.
+    /// `reconcile` proper cannot catch it (it skips terminal threads), so without
+    /// this the parent hangs forever. Synthesizes a DEGRADED FAILURE envelope from
+    /// the persisted terminal record (canonical outputs/warnings are gone after a
+    /// restart) and flips the waiter to `ready`. Returns the `follow_key` if it
+    /// flipped, so the caller can drive the parent resume; `None` if the chain is not
+    /// yet terminal or no `waiting` waiter awaits it.
+    pub fn recover_terminal_follow_child(
+        &self,
+        child_chain_root_id: &str,
+    ) -> Result<Option<String>> {
+        let waiter = match self
+            .state_store
+            .get_follow_waiter_by_child_chain(child_chain_root_id)?
+        {
+            Some(w) if w.phase == crate::runtime_db::follow_phase::WAITING => w,
+            _ => return Ok(None),
+        };
+        let chain = match self.get_chain(child_chain_root_id)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        // The chain tail the parent awaits: a NON-continued terminal thread
+        // (`continued` links are intermediate handoffs of the child's own chain).
+        let terminal = chain.threads.iter().map(|v| &v.thread).find(|t| {
+            t.status != ryeos_state::objects::ThreadStatus::Continued.as_str()
+                && ryeos_state::objects::ThreadStatus::from_str_lossy(&t.status)
+                    .is_some_and(|s| s.is_terminal())
+        });
+        let terminal = match terminal {
+            Some(t) => t,
+            // Chain not yet terminal — reconcile's native resume / the finalize kick
+            // still own it; nothing to recover here.
+            None => return Ok(None),
+        };
+        let (result, error) = self
+            .get_thread_result(&terminal.thread_id)?
+            .map(|r| (r.result, r.error))
+            .unwrap_or((None, None));
+        let envelope =
+            degraded_follow_envelope(&terminal.status, result.as_ref(), error.as_ref(), None);
+        let flipped = self.state_store.mark_follow_child_terminal(
+            child_chain_root_id,
+            &terminal.thread_id,
+            &terminal.status,
+            &envelope,
+        )?;
+        Ok(flipped.then_some(waiter.follow_key))
+    }
+
     fn update_scheduler_fire_on_thread_terminal(
         &self,
         thread_id: &str,

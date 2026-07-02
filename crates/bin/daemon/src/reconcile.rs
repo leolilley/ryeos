@@ -577,6 +577,9 @@ pub enum FollowReconcileAction {
 ///   else be finalized failed) — relaunch it here via `launch_follow_child`. A
 ///   launched-then-crashed child (native_resume set) is recovered by `reconcile`'s
 ///   native resume instead, so it is left alone.
+/// - `waiting` + child chain already terminal-but-unrecorded: the crash window
+///   between finalize-persist and `record_follow_child_terminal`. Recovered via
+///   `recover_terminal_follow_child` (degraded envelope) → `ready` → resume.
 /// - `reserved`: a pre-`waiting` partial-spawn window, left for a later sweep.
 pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> {
     use ryeos_app::runtime_db::follow_phase;
@@ -609,9 +612,40 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
                             child_thread_id: child_id,
                         });
                     }
-                    // Launching (created + live pgid), running, or terminal: the
-                    // native-resume / finalize-kick / launch-in-flight paths own it.
-                    Ok(_) => {}
+                    // Not pre-launch. Launching (created + live pgid) or running are
+                    // owned by reconcile's native resume / the finalize kick. But the
+                    // child chain may have reached a NON-continued terminal that was
+                    // never recorded — the crash window between finalize-persist and
+                    // record_follow_child_terminal, which reconcile proper skips
+                    // (terminal threads) and would else hang the parent forever.
+                    // Recover it: synthesize the terminal → flip the waiter ready →
+                    // drive the parent resume.
+                    Ok(Some(_)) => {
+                        let chain_root = w
+                            .child_chain_root_id
+                            .as_deref()
+                            .unwrap_or(child_id.as_str());
+                        match state.threads.recover_terminal_follow_child(chain_root) {
+                            Ok(Some(follow_key)) => {
+                                tracing::info!(
+                                    follow_key = %follow_key,
+                                    "follow child chain terminal but unrecorded — recovered, collecting parent-resume"
+                                );
+                                actions.push(FollowReconcileAction::Resume { follow_key });
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!(
+                                follow_key = %w.follow_key,
+                                error = %e,
+                                "follow terminal-child recovery failed"
+                            ),
+                        }
+                    }
+                    Ok(None) => tracing::warn!(
+                        follow_key = %w.follow_key,
+                        child_thread_id = %child_id,
+                        "waiting follow waiter's child row is missing"
+                    ),
                     Err(e) => tracing::warn!(
                         follow_key = %w.follow_key,
                         error = %e,
