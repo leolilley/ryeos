@@ -2506,6 +2506,7 @@ async fn dispatch_via_method_executor(
         usage_subject: request.usage_subject.clone(),
         usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         previous_thread_id: request.previous_thread_id.clone(),
+        parent_execution_context: request.parent_execution_context.clone(),
     };
 
     // Re-enter dispatch on the target ref. Boxed: this closes a recursion cycle
