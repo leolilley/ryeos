@@ -43,6 +43,7 @@ pub async fn run(
         output_derived,
         meta_output_derived,
         per_position_budget,
+        runtime_config,
     ) = match decl {
         LaunchAugmentationDecl::ComposeContextPositions {
             target_kind,
@@ -51,6 +52,7 @@ pub async fn run(
             output_derived,
             meta_output_derived,
             per_position_budget,
+            runtime_config,
         } => (
             target_kind,
             target_method,
@@ -58,6 +60,7 @@ pub async fn run(
             output_derived,
             meta_output_derived,
             per_position_budget,
+            runtime_config,
         ),
     };
 
@@ -195,6 +198,17 @@ pub async fn run(
         ryeos_runtime::method_wire::MethodCallResult,
         LaunchAugmentationError,
     > = async {
+        let runtime_config =
+            crate::dispatch::method_runtime_config_snapshot(
+                target_kind,
+                runtime_config,
+                &engine_roots,
+                state,
+            )
+                .map_err(|e| {
+                    LaunchAugmentationError::RuntimeRegistry(format!("runtime config: {e}"))
+                })?;
+
         let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
             schema_version: 1,
             kind: target_kind.clone(),
@@ -205,6 +219,7 @@ pub async fn run(
                 token: cap.token.clone(),
             },
             project_root: project_path.to_path_buf(),
+            runtime_config,
             payload,
         };
 
@@ -317,14 +332,20 @@ pub async fn run(
     // 14. Extract rendered contexts + metadata and write them into the
     //     parent's composed view. A serialization failure here must also
     //     finalize the child as failed, not leave it dangling.
-    let output = batch_result.output.clone().unwrap_or_default();
     let write_result = (|| -> Result<(), LaunchAugmentationError> {
-        let rendered_positions = extract_rendered_positions(&output);
+        let output = batch_result.output.as_ref().ok_or_else(|| {
+            LaunchAugmentationError::ProjectionInvariant {
+                reason: format!(
+                    "child {target_kind}/{target_method} succeeded without an output payload"
+                ),
+            }
+        })?;
+        let rendered_positions = extract_rendered_positions(output, &positions)?;
         resolution.composed.derived.insert(
             output_derived.clone(),
             serde_json::to_value(&rendered_positions)?,
         );
-        let meta = extract_rendered_meta(&output);
+        let meta = extract_rendered_meta(output, &positions)?;
         resolution
             .composed
             .derived
@@ -435,43 +456,81 @@ fn write_empty(resolution: &mut ResolutionOutput, output_derived: &str, meta_out
         .insert(meta_output_derived.to_string(), json!({}));
 }
 
-/// Extract rendered position strings from the child's output.
-fn extract_rendered_positions(output: &Value) -> BTreeMap<String, String> {
-    let mut result = BTreeMap::new();
-    let rendered = output
+fn rendered_output_object<'a>(
+    output: &'a Value,
+) -> Result<&'a serde_json::Map<String, Value>, LaunchAugmentationError> {
+    output
         .get("rendered")
         .and_then(|v| v.as_object())
-        .into_iter()
-        .flatten();
+        .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
+            reason: format!("child output must contain object field `rendered`, got {output}"),
+        })
+}
 
-    for (position, data) in rendered {
+fn validate_rendered_positions_exact(
+    rendered: &serde_json::Map<String, Value>,
+    expected_positions: &BTreeMap<String, Vec<String>>,
+) -> Result<(), LaunchAugmentationError> {
+    for position in rendered.keys() {
+        if !expected_positions.contains_key(position) {
+            return Err(LaunchAugmentationError::ProjectionInvariant {
+                reason: format!("child output contained unexpected rendered position `{position}`"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Extract rendered position strings from the child's output.
+fn extract_rendered_positions(
+    output: &Value,
+    expected_positions: &BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, String>, LaunchAugmentationError> {
+    let mut result = BTreeMap::new();
+    let rendered = rendered_output_object(output)?;
+    validate_rendered_positions_exact(rendered, expected_positions)?;
+
+    for position in expected_positions.keys() {
+        let data = rendered.get(position).ok_or_else(|| {
+            LaunchAugmentationError::ProjectionInvariant {
+                reason: format!("child output missing rendered position `{position}`"),
+            }
+        })?;
         let content = data
             .get("content")
             .and_then(|v| v.as_str())
-            .unwrap_or("")
+            .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
+                reason: format!("child output rendered position `{position}` missing string `content`"),
+            })?
             .to_string();
         result.insert(position.clone(), content);
     }
 
-    result
+    Ok(result)
 }
 
 /// Extract per-position metadata from the child's output.
-fn extract_rendered_meta(output: &Value) -> BTreeMap<String, Value> {
+fn extract_rendered_meta(
+    output: &Value,
+    expected_positions: &BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, Value>, LaunchAugmentationError> {
     let mut result = BTreeMap::new();
-    let rendered = output
-        .get("rendered")
-        .and_then(|v| v.as_object())
-        .into_iter()
-        .flatten();
+    let rendered = rendered_output_object(output)?;
+    validate_rendered_positions_exact(rendered, expected_positions)?;
 
-    for (position, data) in rendered {
-        if let Some(composition) = data.get("composition") {
-            result.insert(position.clone(), composition.clone());
-        } else {
-            result.insert(position.clone(), data.clone());
-        }
+    for position in expected_positions.keys() {
+        let data = rendered.get(position).ok_or_else(|| {
+            LaunchAugmentationError::ProjectionInvariant {
+                reason: format!("child output missing rendered position `{position}`"),
+            }
+        })?;
+        let composition = data.get("composition").ok_or_else(|| {
+            LaunchAugmentationError::ProjectionInvariant {
+                reason: format!("child output rendered position `{position}` missing `composition`"),
+            }
+        })?;
+        result.insert(position.clone(), composition.clone());
     }
 
-    result
+    Ok(result)
 }

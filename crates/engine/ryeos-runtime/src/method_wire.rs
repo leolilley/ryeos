@@ -9,6 +9,7 @@
 //! daemon can import it without depending on a kind-specific library.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::envelope::EnvelopeCallback;
@@ -27,6 +28,12 @@ pub struct MethodCallEnvelope {
     pub thread_id: String,
     pub callback: EnvelopeCallback,
     pub project_root: PathBuf,
+    /// Daemon-resolved runtime/operator config snapshots keyed by the invoked
+    /// method's declared config name. Runtimes consume these directly instead
+    /// of re-reading `.ai/config`, preserving the daemon's trust and layering
+    /// decisions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runtime_config: BTreeMap<String, serde_json::Value>,
     /// Method-specific payload; deserialized by the runtime binary.
     pub payload: serde_json::Value,
 }

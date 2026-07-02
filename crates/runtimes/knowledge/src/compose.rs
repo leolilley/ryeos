@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 
 use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, SingleRootPayload, VerifiedItem};
 
-use crate::budget::estimate_tokens;
 use crate::frontmatter::strip_frontmatter;
 use crate::ordering::{extends_first, OrderedItem};
 use crate::render::render_item;
+use crate::token_estimation::ResolvedTokenEstimator;
 use crate::types::{
     ComposeArgs, ComposeContextPayload, ComposeEdge, ComposeEdgeKind, ComposeItem, ComposeMeta,
     ComposeOutput, ComposePayload, KnowledgeError, OmissionReason, OmittedItem, RenderedContexts,
@@ -17,7 +17,18 @@ use crate::types::{
 
 /// Single-root compose. Walks the graph from root_ref, strips frontmatter,
 /// renders items in extends-first order within the token budget.
-pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError> {
+pub fn compose(
+    payload: &ComposePayload,
+    runtime_config: &BTreeMap<String, serde_json::Value>,
+) -> Result<ComposeOutput, KnowledgeError> {
+    let estimator = ResolvedTokenEstimator::from_runtime_config(runtime_config)?;
+    compose_inner(payload, &estimator)
+}
+
+fn compose_inner(
+    payload: &ComposePayload,
+    estimator: &ResolvedTokenEstimator,
+) -> Result<ComposeOutput, KnowledgeError> {
     let root_ref = &payload.root.root_ref;
     let items_by_ref = &payload.root.items_by_ref;
     let edges = &payload.root.edges;
@@ -71,10 +82,10 @@ pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError
 
         // Render
         let rendered = render_item(item.role, &item.ref_id, &body);
-        let item_tokens = estimate_tokens(&rendered);
+        let item_tokens = estimator.estimate(&rendered);
 
         // Budget check
-        if tokens_used + item_tokens > budget {
+        if tokens_used.saturating_add(item_tokens) > budget {
             items_omitted.push(OmittedItem {
                 item_id: item.ref_id.clone(),
                 reason: OmissionReason::OverBudget,
@@ -98,6 +109,7 @@ pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError
     Ok(ComposeOutput {
         content,
         composition: ComposeMeta {
+            token_estimator: estimator.metadata().clone(),
             resolved_items,
             items_omitted,
             edges: compose_edges,
@@ -115,7 +127,9 @@ pub fn compose(payload: &ComposePayload) -> Result<ComposeOutput, KnowledgeError
 /// emitted in an earlier position are excluded from later positions.
 pub fn compose_positions(
     payload: &ComposeContextPayload,
+    runtime_config: &BTreeMap<String, serde_json::Value>,
 ) -> Result<RenderedContexts, KnowledgeError> {
+    let estimator = ResolvedTokenEstimator::from_runtime_config(runtime_config)?;
     let position_order = determine_position_order(&payload.roots_by_position);
     let mut already_emitted: BTreeSet<String> = BTreeSet::new();
     let mut rendered = BTreeMap::new();
@@ -190,7 +204,7 @@ pub fn compose_positions(
                     },
                 };
 
-                let result = compose(&compose_payload)?;
+                let result = compose_inner(&compose_payload, &estimator)?;
 
                 // Add newly emitted refs to tracking
                 for item in &result.composition.resolved_items {
@@ -211,6 +225,7 @@ pub fn compose_positions(
             RenderedPosition {
                 content: combined_content,
                 composition: ComposeMeta {
+                    token_estimator: estimator.metadata().clone(),
                     resolved_items: combined_items,
                     items_omitted: combined_omitted,
                     edges: combined_edges,
@@ -309,6 +324,16 @@ mod tests {
         }
     }
 
+    fn default_runtime_config() -> BTreeMap<String, serde_json::Value> {
+        runtime_config(serde_json::json!({
+            "policy": {"provider": "heuristic", "chars_per_token": 4.0, "reserve_ratio": 0.10}
+        }))
+    }
+
+    fn runtime_config(token_estimation: serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+        BTreeMap::from([("token_estimation".to_string(), token_estimation)])
+    }
+
     #[test]
     fn compose_single_root_no_edges() {
         let mut items = BTreeMap::new();
@@ -327,7 +352,7 @@ mod tests {
             },
         };
 
-        let result = compose(&payload).unwrap();
+        let result = compose(&payload, &default_runtime_config()).unwrap();
         assert!(result.content.contains("Root body"));
         assert_eq!(result.composition.resolved_items.len(), 1);
         assert_eq!(
@@ -355,7 +380,7 @@ mod tests {
             },
         };
 
-        let result = compose(&payload).unwrap();
+        let result = compose(&payload, &default_runtime_config()).unwrap();
         assert!(result.content.contains("Parent body"));
         assert!(result.content.contains("Root body"));
         // Parent (extends) should appear before root (primary)
@@ -383,7 +408,7 @@ mod tests {
             },
         };
 
-        let result = compose(&payload).unwrap();
+        let result = compose(&payload, &default_runtime_config()).unwrap();
         assert!(result.content.contains("Root body"));
         assert!(result.content.contains("Ref body"));
     }
@@ -407,7 +432,7 @@ mod tests {
             },
         };
 
-        let result = compose(&payload).unwrap();
+        let result = compose(&payload, &default_runtime_config()).unwrap();
         assert!(!result.content.contains("Ref body"));
         assert_eq!(result.composition.items_omitted.len(), 1);
         assert_eq!(
@@ -435,9 +460,93 @@ mod tests {
             },
         };
 
-        let result = compose(&payload).unwrap();
+        let result = compose(&payload, &default_runtime_config()).unwrap();
         // The root might fit but the big reference won't
         assert!(result.composition.items_omitted.len() >= 1);
+    }
+
+    #[test]
+    fn compose_includes_item_at_exact_budget_boundary() {
+        let body = "Boundary body ".repeat(20);
+        let rendered = render_item(ComposeRole::Primary, "root", &body);
+        let exact_budget = crate::budget::estimate_tokens(&rendered);
+
+        let mut items = BTreeMap::new();
+        items.insert("root".to_string(), make_item("root", &body).1);
+
+        let payload = ComposePayload {
+            root: SingleRootPayload {
+                root_ref: "root".to_string(),
+                items_by_ref: items,
+                edges: vec![],
+            },
+            args: ComposeArgs {
+                token_budget: exact_budget,
+                exclude_refs: vec![],
+                position: None,
+            },
+        };
+
+        let result = compose(&payload, &default_runtime_config()).unwrap();
+        assert_eq!(result.composition.resolved_items.len(), 1);
+        assert_eq!(result.tokens_remaining, 0);
+    }
+
+    #[test]
+    fn compose_omits_item_one_token_over_budget() {
+        let body = "Boundary body ".repeat(20);
+        let rendered = render_item(ComposeRole::Primary, "root", &body);
+        let exact_budget = crate::budget::estimate_tokens(&rendered);
+
+        let mut items = BTreeMap::new();
+        items.insert("root".to_string(), make_item("root", &body).1);
+
+        let payload = ComposePayload {
+            root: SingleRootPayload {
+                root_ref: "root".to_string(),
+                items_by_ref: items,
+                edges: vec![],
+            },
+            args: ComposeArgs {
+                token_budget: exact_budget - 1,
+                exclude_refs: vec![],
+                position: None,
+            },
+        };
+
+        let result = compose(&payload, &default_runtime_config()).unwrap();
+        assert!(result.composition.resolved_items.is_empty());
+        assert!(result
+            .composition
+            .items_omitted
+            .iter()
+            .any(|o| o.item_id == "root" && o.reason == OmissionReason::OverBudget));
+    }
+
+    #[test]
+    fn compose_reports_token_estimator_metadata() {
+        let mut items = BTreeMap::new();
+        items.insert("root".to_string(), make_item("root", "Root body").1);
+
+        let payload = ComposePayload {
+            root: SingleRootPayload {
+                root_ref: "root".to_string(),
+                items_by_ref: items,
+                edges: vec![],
+            },
+            args: ComposeArgs {
+                token_budget: 1000,
+                exclude_refs: vec![],
+                position: None,
+            },
+        };
+
+        let runtime_config = runtime_config(serde_json::json!({
+            "policy": {"provider": "heuristic", "chars_per_token": 2.0, "reserve_ratio": 0.0}
+        });
+        let result = compose(&payload, &runtime_config).unwrap();
+        assert_eq!(result.composition.token_estimator.provider, "heuristic");
+        assert_eq!(result.composition.token_estimator.chars_per_token, Some(2.0));
     }
 
     #[test]
@@ -489,7 +598,7 @@ mod tests {
             default_budget: 1000,
         };
 
-        let result = compose_positions(&payload).unwrap();
+        let result = compose_positions(&payload, &default_runtime_config()).unwrap();
 
         // "shared" should appear in system
         let system = result.rendered.get("system").unwrap();
@@ -504,5 +613,27 @@ mod tests {
             .items_omitted
             .iter()
             .any(|o| o.item_id == "shared" && o.reason == OmissionReason::Excluded));
+    }
+
+    #[test]
+    fn compose_positions_reports_token_estimator_metadata() {
+        let mut items = BTreeMap::new();
+        items.insert("root".to_string(), make_item("root", "Root content").1);
+
+        let payload = ComposeContextPayload {
+            items_by_ref: items,
+            edges: vec![],
+            roots_by_position: BTreeMap::from([("before".to_string(), vec!["root".to_string()])]),
+            per_position_budget: BTreeMap::from([("before".to_string(), 1000)]),
+            default_budget: 1000,
+        };
+        let runtime_config = runtime_config(serde_json::json!({
+            "policy": {"provider": "heuristic", "chars_per_token": 2.0, "reserve_ratio": 0.0}
+        });
+
+        let result = compose_positions(&payload, &runtime_config).unwrap();
+        let before = result.rendered.get("before").unwrap();
+        assert_eq!(before.composition.token_estimator.provider, "heuristic");
+        assert_eq!(before.composition.token_estimator.chars_per_token, Some(2.0));
     }
 }

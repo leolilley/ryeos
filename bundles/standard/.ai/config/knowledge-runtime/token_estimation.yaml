@@ -1,0 +1,6 @@
+# ryeos:signed:2026-07-02T06:20:26Z:7ca4bb342bb8e8834dd382852a41f0ad7cda10d4fb21afa660b000afc7ec9b16:xUXMeJz4uVWz1e/xq62sRuN4HZRJs8mRlYPPYEkxjdHcgQKtSs0/k1KocDId0fNyPINW7F42y++2785P0if6BA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+category: knowledge-runtime
+policy:
+  provider: heuristic
+  chars_per_token: 4.0
+  reserve_ratio: 0.10

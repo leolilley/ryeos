@@ -1,8 +1,9 @@
 //! Token budget estimation.
 
-/// Estimate token count using chars/4 with 10% safety reserve.
+/// Estimate token count using the default knowledge heuristic.
 pub fn estimate_tokens(text: &str) -> usize {
-    // chars/4 with 10% safety reserve, floor of 1
+    // Exact default behavior: chars/4 with 10% safety reserve, integer
+    // floor, minimum 1. Counts Unicode scalar values, not bytes.
     let raw = text.chars().count();
     if raw == 0 {
         return 1;
@@ -37,6 +38,21 @@ mod tests {
     fn known_value() {
         // 40 chars → 40 * 11 / 40 = 11 tokens
         let text = "a".repeat(40);
+        assert_eq!(estimate_tokens(&text), 11);
+    }
+
+    #[test]
+    fn boundary_values_use_integer_floor() {
+        assert_eq!(estimate_tokens(&"a".repeat(39)), 10);
+        assert_eq!(estimate_tokens(&"a".repeat(40)), 11);
+        assert_eq!(estimate_tokens(&"a".repeat(41)), 11);
+    }
+
+    #[test]
+    fn unicode_counts_chars_not_bytes() {
+        let text = "🦀".repeat(40);
+        assert_eq!(text.len(), 160);
+        assert_eq!(text.chars().count(), 40);
         assert_eq!(estimate_tokens(&text), 11);
     }
 }
