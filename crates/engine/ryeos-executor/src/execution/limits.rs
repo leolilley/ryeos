@@ -1,6 +1,3 @@
-use std::path::Path;
-
-use anyhow::Context as _;
 use ryeos_engine::execution_policy::ResolvedExecutionPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,6 +8,8 @@ use super::launch_envelope::HardLimits;
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
     #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
     pub defaults: LimitValues,
     #[serde(default)]
     pub caps: LimitCaps,
@@ -19,9 +18,18 @@ pub struct LimitsConfig {
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
+            category: None,
             defaults: LimitValues::default(),
             caps: LimitCaps::default(),
         }
+    }
+}
+
+impl LimitsConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        self.defaults.validate("limits.defaults")?;
+        self.caps.validate("limits.caps")?;
+        Ok(())
     }
 }
 
@@ -55,6 +63,12 @@ impl Default for LimitValues {
     }
 }
 
+impl LimitValues {
+    fn validate(&self, source: &str) -> anyhow::Result<()> {
+        validate_spend_usd(self.spend_usd, &format!("{source}.spend_usd"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LimitCaps {
@@ -66,23 +80,41 @@ pub struct LimitCaps {
     pub duration_seconds: Option<u64>,
 }
 
+impl LimitCaps {
+    fn validate(&self, source: &str) -> anyhow::Result<()> {
+        if let Some(spend_usd) = self.spend_usd {
+            validate_spend_usd(spend_usd, &format!("{source}.spend_usd"))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_spend_usd(value: f64, source: &str) -> anyhow::Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(anyhow::anyhow!(
+            "{source} must be finite and non-negative, got {value}"
+        ));
+    }
+    Ok(())
+}
+
 fn default_turns() -> u32 {
-    25
+    0
 }
 fn default_tokens() -> u64 {
-    200_000
+    0
 }
 fn default_spend() -> f64 {
-    2.0
+    0.0
 }
 fn default_spawns() -> u32 {
-    10
+    0
 }
 fn default_depth() -> u32 {
-    5
+    0
 }
 fn default_duration() -> u64 {
-    300
+    0
 }
 
 pub fn compute_effective_limits(
@@ -144,7 +176,8 @@ fn sentinel_clamp<T: Copy + PartialOrd + Default>(value: T, bound: T) -> T {
 
 /// Overlay a partial header `limits:` JSON object onto base defaults, returning
 /// the merged [`LimitValues`]. Present header keys win; omitted keys inherit
-/// `base` (the project's `limits.yaml` defaults, not built-in constants).
+/// `base` (the project's directive-runtime `limits.yaml` defaults, not built-in
+/// constants).
 /// Merges at the JSON level so no limit field is named here — the field set
 /// lives only in `LimitValues`.
 pub fn merge_header_limits(base: &LimitValues, header: &Value) -> anyhow::Result<LimitValues> {
@@ -159,44 +192,26 @@ pub fn merge_header_limits(base: &LimitValues, header: &Value) -> anyhow::Result
         m.insert(k.clone(), v.clone());
     }
     let result: LimitValues = serde_json::from_value(merged)?;
-    // A non-finite or negative spend cap silently disables enforcement (the
+    // A non-finite or negative spend value silently disables enforcement (the
     // harness only acts when `spend_usd > 0.0`), so reject it at the source.
-    if !result.spend_usd.is_finite() || result.spend_usd < 0.0 {
-        return Err(anyhow::anyhow!(
-            "limits.spend_usd must be finite and non-negative, got {}",
-            result.spend_usd
-        ));
-    }
+    result.validate("limits")?;
     Ok(result)
 }
 
-/// Load limits config from the project's `.ai/config/ryeos-runtime/limits.yaml`.
+/// Load limits config from project/bundle config roots.
 ///
 /// Returns `Ok(None)` if the file doesn't exist (limits config is optional).
 /// Returns `Err` if the file exists but is malformed — no silent fallback.
-pub fn load_limits_config(project_root: &Path) -> anyhow::Result<Option<LimitsConfig>> {
-    let config_path = project_root
-        .join(".ai")
-        .join("config")
-        .join("ryeos-runtime")
-        .join("limits.yaml");
-
-    if !config_path.is_file() {
-        return Ok(None);
+pub fn load_limits_config_from_loader(
+    loader: &ryeos_runtime::verified_loader::VerifiedLoader,
+) -> anyhow::Result<Option<LimitsConfig>> {
+    let config = loader
+        .load_config_strict::<LimitsConfig>("directive-runtime/limits")
+        .map_err(|e| anyhow::anyhow!("limits config: {e}"))?;
+    if let Some(config) = &config {
+        config.validate()?;
     }
-
-    let contents = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("limits config: cannot read {}", config_path.display()))?;
-
-    let config: LimitsConfig = serde_yaml::from_str(&contents).with_context(|| {
-        format!(
-            "limits config: malformed YAML in {} — fix the file or \
-             remove it to use built-in defaults",
-            config_path.display()
-        )
-    })?;
-
-    Ok(Some(config))
+    Ok(config)
 }
 
 pub fn apply_execution_policy_overrides(
@@ -264,6 +279,17 @@ mod tests {
         let base = LimitValues::default();
         let err = merge_header_limits(&base, &serde_json::json!("nope")).unwrap_err();
         assert!(err.to_string().contains("must be an object"), "got {err}");
+    }
+
+    #[test]
+    fn merge_header_limits_rejects_negative_spend() {
+        let base = LimitValues::default();
+        let err = merge_header_limits(&base, &serde_json::json!({ "spend_usd": -1.0 }))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be finite and non-negative"),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -425,8 +451,40 @@ mod tests {
 
     #[test]
     fn load_limits_config_missing_file_returns_none() {
-        let config = load_limits_config(Path::new("/nonexistent")).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            tmp.path().join("project"),
+            vec![],
+            &tmp.path().join("operator/.ai/config/keys/trusted"),
+        );
+        let config = load_limits_config_from_loader(&loader).unwrap();
         assert!(config.is_none(), "missing file should return Ok(None)");
+    }
+
+    #[test]
+    fn load_limits_config_rejects_invalid_spend_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let config_dir = ryeos_engine::roots::RuntimeRoot::new(project.clone())
+            .config()
+            .join("directive-runtime");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("limits.yaml"),
+            "defaults: {}\ncaps:\n  spend_usd: -1.0\n",
+        )
+        .unwrap();
+
+        let loader = ryeos_runtime::verified_loader::VerifiedLoader::new(
+            project,
+            vec![],
+            &tmp.path().join("operator/.ai/config/keys/trusted"),
+        );
+        let err = load_limits_config_from_loader(&loader).unwrap_err();
+        assert!(
+            err.to_string().contains("must be finite and non-negative"),
+            "got {err}"
+        );
     }
 
     #[test]

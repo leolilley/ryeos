@@ -116,7 +116,7 @@ pub struct ContinuationEnabled {
     /// Declared *intent* for how many recent complete turns carry into the
     /// successor. `None` = use the resolved default. The default and the cap are
     /// NOT defined here — they live with every other limit in the runtime limits
-    /// config (`.ai/config/ryeos-runtime/limits.yaml` via the executor's
+    /// config (`.ai/config/directive-runtime/limits.yaml` via the executor's
     /// `LimitsConfig`) and are resolved/clamped at launch, exactly like a header
     /// `limits:` value. Keeping the numbers out of this file avoids scattering
     /// limit config across the tree.

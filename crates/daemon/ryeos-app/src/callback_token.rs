@@ -230,13 +230,21 @@ const MAX_LAUNCH_TTL_SECS: u64 = 7 * 24 * 3600;
 /// end, so a TTL that tracks the run's duration is the correct lifetime; a
 /// generous absolute backstop bounds the pathological zombie case.
 ///
-/// CAVEAT: a run whose effective `duration_seconds` exceeds
-/// [`MAX_LAUNCH_TTL_SECS`] (7 days) would re-expose the original divergence
-/// (token expiring before the run finalizes). If runs are ever allowed past that
-/// ceiling, clamp the effective runtime timeout to `MAX_LAUNCH_TTL_SECS - margin`
-/// instead of raising it silently here.
+/// A `duration_seconds` value of 0 is the launch hard-limit sentinel for
+/// "unlimited". The token still needs an explicit authority lifetime, so it gets
+/// the absolute launch-token backstop rather than the short default TTL.
+///
+/// CAVEAT: a run whose effective finite `duration_seconds` exceeds
+/// [`MAX_LAUNCH_TTL_SECS`] (7 days), or an unlimited run that actually lives
+/// that long, can outlive callback authority. Longer runs need renewal rather
+/// than a silent larger constant here.
 pub fn launch_token_ttl(duration_seconds: Option<u64>) -> Duration {
-    let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
+    let Some(secs) = duration_seconds else {
+        return Duration::from_secs(DEFAULT_CALLBACK_TTL_SECS + LAUNCH_TTL_MARGIN_SECS);
+    };
+    if secs == 0 {
+        return Duration::from_secs(MAX_LAUNCH_TTL_SECS);
+    }
     Duration::from_secs(
         secs.saturating_add(LAUNCH_TTL_MARGIN_SECS)
             .min(MAX_LAUNCH_TTL_SECS),
@@ -667,6 +675,17 @@ mod tests {
             Duration::from_secs(MAX_LAUNCH_TTL_SECS)
         );
         assert!(MAX_LAUNCH_TTL_SECS > 3600);
+    }
+
+    #[test]
+    fn launch_token_ttl_zero_duration_uses_backstop() {
+        // Launch hard-limits use 0 as the unlimited sentinel. The run token must
+        // not collapse unlimited runtime authority to only the finalization
+        // margin.
+        assert_eq!(
+            launch_token_ttl(Some(0)),
+            Duration::from_secs(MAX_LAUNCH_TTL_SECS)
+        );
     }
 
     #[test]

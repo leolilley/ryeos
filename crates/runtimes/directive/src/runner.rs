@@ -392,15 +392,14 @@ impl Runner {
     /// leave the input unanswered and turn a clean completion into a limit
     /// failure. A late steer stays queued and is cleared at finalize; the operator
     /// resubmits it as a settled continuation.
-    fn can_start_another_turn(&self, turn: u32, max_turns: u32) -> bool {
-        turn < max_turns && !self.budget.is_exhausted() && self.harness.check_limits().is_ok()
+    fn can_start_another_turn(&self) -> bool {
+        !self.budget.is_exhausted() && self.harness.check_limits().is_ok()
     }
 
     pub async fn run(&mut self) -> RuntimeResult {
         let mut guard = RunGuard { finalized: false };
         let mut state = State::Init;
         let mut turn = self.initial_turn;
-        let max_turns = 100;
         // Collected non-fatal callback failures. P2.2 — runtime no
         // longer silently drops `append_event` errors; everything that
         // would have hit `let _ = ...` is now recorded here and
@@ -432,12 +431,6 @@ impl Runner {
                             continue;
                         }
                         state = State::Errored { error: e };
-                        continue;
-                    }
-                    if turn >= max_turns {
-                        state = State::Errored {
-                            error: "max turns reached".to_string(),
-                        };
                         continue;
                     }
                     // Steer drain (between-turns boundary): fold any operator
@@ -801,7 +794,7 @@ impl Runner {
                                 // the late input stays queued (cleared at finalize)
                                 // and the operator resubmits as a settled
                                 // continuation.
-                                if self.can_start_another_turn(turn, max_turns) {
+                                if self.can_start_another_turn() {
                                     match self.poll_pending_input().await {
                                         Ok(true) => State::CheckingLimits,
                                         Ok(false) => State::Finalizing { result: content },

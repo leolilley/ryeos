@@ -12,7 +12,7 @@ use super::launch_envelope::{
 };
 use super::limits::{
     apply_caller_limit_overrides, apply_execution_policy_overrides, compute_effective_limits,
-    load_limits_config, merge_header_limits,
+    load_limits_config_from_loader, merge_header_limits,
 };
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
@@ -865,7 +865,10 @@ async fn run_claimed_thread_row(
             project_path.display()
         )
     })?;
-    let limits_config = load_limits_config(project_path).with_context(|| {
+    let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let config_loader = build_verified_loader_for_thread(&engine_roots, &operator_trusted_keys_dir)
+        .context("building verified loader for execution limits config")?;
+    let limits_config = load_limits_config_from_loader(&config_loader).with_context(|| {
         format!(
             "loading limits config for project {}",
             project_path.display()
@@ -961,7 +964,7 @@ async fn run_claimed_thread_row(
             .timeout
             .as_ref()
             .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+            .unwrap_or_else(|| "directive-runtime/limits.yaml defaults or built-in default".to_string())
     };
     let turns_source = if parameters.get("max_steps").is_some() {
         "caller param `max_steps`".to_string()
@@ -970,7 +973,7 @@ async fn run_claimed_thread_row(
             .max_steps
             .as_ref()
             .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+            .unwrap_or_else(|| "directive-runtime/limits.yaml defaults or built-in default".to_string())
     };
     tracing::info!(
         item_ref = %resolved.item_ref,
@@ -1332,7 +1335,6 @@ async fn run_claimed_thread_row(
     //     only carries opaque envelope field names; executor owns the
     //     `provider_snapshot` LaunchEnvelope contract and resolves it here.
     let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
-    let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
     let provider_preflight = if requires_provider_snapshot(required_envelope_fields) {
         Some(resolve_provider_preflight(
             &resolution.composed,
