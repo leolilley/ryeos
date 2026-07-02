@@ -2426,6 +2426,7 @@ mod tests {
         assert_eq!(status_tone("continued"), StudioTone::Good);
         assert_eq!(status_tone("failed"), StudioTone::Danger);
         assert_eq!(status_tone("killed"), StudioTone::Danger);
+        assert_eq!(status_tone("timed_out"), StudioTone::Danger);
         assert_eq!(status_tone("cancelled"), StudioTone::Warn);
         // An unrecognized status folds to Unknown → neutral, not a panic.
         assert_eq!(status_tone("some_future_status"), StudioTone::Neutral);

@@ -536,3 +536,30 @@ pub struct StudioRawContentDto {
     #[serde(default)]
     pub truncated: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_status_parses_serdes_and_folds_unknown() {
+        // from_wire: exact substrate spellings, and a multi-word one.
+        assert_eq!(ThreadStatus::from_wire("timed_out"), ThreadStatus::TimedOut);
+        assert_eq!(ThreadStatus::from_wire("running"), ThreadStatus::Running);
+        // Unrecognized folds to Unknown (both via from_wire and serde `other`).
+        assert_eq!(ThreadStatus::from_wire("nonsense"), ThreadStatus::Unknown);
+        assert_eq!(
+            serde_json::from_value::<ThreadStatus>(serde_json::json!("nonsense")).unwrap(),
+            ThreadStatus::Unknown
+        );
+        // snake_case round-trip on the wire spelling.
+        assert_eq!(
+            serde_json::to_value(ThreadStatus::TimedOut).unwrap(),
+            serde_json::json!("timed_out")
+        );
+        assert_eq!(
+            serde_json::from_value::<ThreadStatus>(serde_json::json!("timed_out")).unwrap(),
+            ThreadStatus::TimedOut
+        );
+    }
+}
