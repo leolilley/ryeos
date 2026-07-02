@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
 
@@ -35,6 +36,12 @@ pub struct CallbackCapability {
     pub effective_bundle_id: Option<String>,
     /// Root item ref that minted this callback token, used for attribution.
     pub item_ref: Option<String>,
+    /// Parent thread's resolved hard limits, serialized by the launcher. The
+    /// daemon passes this through out-of-band on callback-dispatched child
+    /// launches so runtimes cannot spoof parent budget inheritance.
+    pub hard_limits: Value,
+    /// Parent thread's current spawn-tree depth. Children launch at `depth + 1`.
+    pub depth: u32,
 }
 
 pub struct CallbackCapabilityStore {
@@ -70,6 +77,8 @@ impl CallbackCapabilityStore {
             provenance,
             None,
             None,
+            Value::Null,
+            0,
         )
     }
 
@@ -82,6 +91,8 @@ impl CallbackCapabilityStore {
         provenance: ExecutionProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
+        hard_limits: Value,
+        depth: u32,
     ) -> CallbackCapability {
         let random_bytes: [u8; 32] = rand::random();
         let hex = lillux::cas::sha256_hex(&random_bytes);
@@ -101,6 +112,8 @@ impl CallbackCapabilityStore {
             provenance,
             effective_bundle_id,
             item_ref,
+            hard_limits,
+            depth,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -386,6 +399,39 @@ mod tests {
     }
 
     #[test]
+    fn generate_with_context_round_trips_parent_limits_and_depth() {
+        let store = CallbackCapabilityStore::new();
+        let hard_limits = serde_json::json!({
+            "turns": 6,
+            "tokens": 1000,
+            "spend_usd": 0.25,
+            "spawns": 2,
+            "depth": 3,
+            "duration_seconds": 45,
+        });
+        let cap = store.generate_with_context(
+            "T-parent",
+            PathBuf::from("/project"),
+            Duration::from_secs(300),
+            vec!["ryeos.*".to_string()],
+            provenance(PathBuf::from("/project")),
+            Some("bundle-123".to_string()),
+            Some("directive:team/parent".to_string()),
+            hard_limits.clone(),
+            4,
+        );
+
+        let validated = store
+            .validate(&cap.token, "T-parent", PathBuf::from("/project").as_path())
+            .unwrap();
+        assert_eq!(validated.thread_id, "T-parent");
+        assert_eq!(validated.hard_limits, hard_limits);
+        assert_eq!(validated.depth, 4);
+        assert_eq!(validated.effective_bundle_id.as_deref(), Some("bundle-123"));
+        assert_eq!(validated.item_ref.as_deref(), Some("directive:team/parent"));
+    }
+
+    #[test]
     fn validate_rejects_unknown_token() {
         let store = CallbackCapabilityStore::new();
         let err = store
@@ -564,6 +610,8 @@ mod tests {
             ),
             effective_bundle_id: None,
             item_ref: None,
+            hard_limits: serde_json::Value::Null,
+            depth: 0,
         };
 
         let cloned = cap.clone();

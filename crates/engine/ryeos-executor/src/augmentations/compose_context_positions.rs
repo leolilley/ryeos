@@ -172,6 +172,8 @@ pub async fn run(
         child_provenance,
         None,
         Some(format!("{target_kind}://{target_method}")),
+        serde_json::Value::Null,
+        0,
     );
 
     // 8. Mint thread auth token (runtime expects RYEOSD_THREAD_AUTH_TOKEN).

@@ -156,6 +156,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             usage_subject: None,
             usage_subject_asserted_by: None,
             previous_thread_id: None,
+            parent_execution_context: None,
         };
 
         let result = ryeos_executor::dispatch::dispatch(

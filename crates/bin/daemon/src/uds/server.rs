@@ -1540,6 +1540,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let append = dispatch(
@@ -1595,6 +1597,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let caller_bundle_id = dispatch(
@@ -1629,6 +1633,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            serde_json::Value::Null,
+            0,
         );
         let missing_cap = dispatch(
             rpc(
@@ -1670,6 +1676,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let put = dispatch(
@@ -1754,6 +1762,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let caller_bundle_id = dispatch(
@@ -1787,6 +1797,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
         let missing_cap = dispatch(
             rpc(
@@ -1818,6 +1830,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
         let other_bundle = dispatch(
             rpc(

@@ -65,6 +65,21 @@ use crate::executor::{
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 
+/// Trusted parent execution context carried out-of-band through schema-driven
+/// dispatch.
+///
+/// This is not user/action params. Callback dispatch fills it from the
+/// validated server-side callback capability, and only managed runtime launches
+/// consume it for parent budget/depth inheritance. Tool/service terminators
+/// ignore it, so the dispatch layer does not need kind-prefix checks and action
+/// params are not polluted with runtime-control keys.
+#[derive(Debug, Clone)]
+pub struct ParentExecutionContext {
+    pub parent_thread_id: String,
+    pub hard_limits: Value,
+    pub depth: u32,
+}
+
 /// Single source of truth for the `runtime:` ref kind discriminator.
 /// Used in two narrow places (B1 cap gate, B4 resolve special-case)
 /// where the kind name carries dispatch semantics that come from the
@@ -121,6 +136,10 @@ pub struct DispatchRequest<'a> {
     /// chain). Set by daemon-internal callers (the thread-input service);
     /// never populated from raw HTTP request bodies.
     pub previous_thread_id: Option<String>,
+    /// Trusted parent context for callback-dispatched child executions. This is
+    /// consumed only if schema-driven dispatch reaches a managed runtime launch;
+    /// in-process services and terminal tools ignore it.
+    pub parent_execution_context: Option<ParentExecutionContext>,
 }
 
 /// Check the schema-derived `DispatchCapabilities` for the matched
@@ -1056,6 +1075,8 @@ pub(crate) async fn dispatch_method(
         child_provenance,
         None,
         Some(canonical_ref.to_string()),
+        serde_json::Value::Null,
+        0,
     );
 
     // 9. Mint the thread-auth token now, so BOTH the callback and
@@ -1900,6 +1921,7 @@ async fn dispatch_managed_subprocess(
         required_envelope_fields: &prepared.required_envelope_fields,
         pre_minted_thread_id: request.pre_minted_thread_id.as_deref(),
         previous_thread_id: request.previous_thread_id.as_deref(),
+        parent_execution_context: request.parent_execution_context.as_ref(),
         // Fresh launches and operator follow-ups inject their inputs as the
         // opening stimulus; only an autonomous machine continuation suppresses it.
         suppress_stimulus: false,

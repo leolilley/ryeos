@@ -297,6 +297,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 thread_id: envelope.thread_id.clone(),
                 hooks,
                 outputs: bootstrap_output.config.outputs,
+                continuation: bootstrap_output.config.continuation,
+                context_threshold_ratio: bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .context_threshold_ratio,
                 sampling,
             },
         )
@@ -372,6 +377,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             thread_id: envelope.thread_id.clone(),
             hooks,
             outputs: bootstrap_output.config.outputs,
+            continuation: bootstrap_output.config.continuation,
+            context_threshold_ratio: bootstrap_output
+                .config
+                .continuation_runtime
+                .context_threshold_ratio,
             sampling,
         })
     };

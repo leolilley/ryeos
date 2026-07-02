@@ -156,6 +156,33 @@ pub fn bind_argv_with_command(
             .iter()
             .filter(|slot| !obj.contains_key(&normalise_key(&slot.field)))
             .collect();
+        if unset_slots.len() == 1 {
+            let slot = unset_slots[0];
+            if command
+                .arguments
+                .iter()
+                .any(|arg| {
+                    arg.name == slot.field
+                        && arg.arity == crate::CommandArgumentArity::Variadic
+                        && arg.kind == slot.matcher
+                })
+                && positionals
+                    .iter()
+                    .all(|arg| positional_matches(slot.matcher, arg))
+            {
+                obj.insert(
+                    normalise_key(&slot.field),
+                    serde_json::Value::Array(
+                        positionals
+                            .iter()
+                            .map(|arg| serde_json::Value::String(arg.clone()))
+                            .collect(),
+                    ),
+                );
+                apply_command_defaults(&mut value, command);
+                return Ok(value);
+            }
+        }
         if unset_slots.len() != positionals.len() {
             continue;
         }
@@ -577,6 +604,41 @@ mod tests {
 
         let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command)).unwrap();
         assert_eq!(result["item_ref"], "tool:agent-kiwi/*");
+    }
+
+    #[test]
+    fn command_variadic_form_binds_multiple_positionals_to_array() {
+        let mut command = test_command(
+            vec!["sign".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![crate::CommandArgumentSlot {
+                    field: "item_refs".into(),
+                    matcher: crate::CommandArgumentKind::String,
+                }],
+            }],
+        );
+        command.arguments.push(crate::CommandArgumentDef {
+            name: "item_refs".into(),
+            kind: crate::CommandArgumentKind::String,
+            positional: 1,
+            required: true,
+            arity: crate::CommandArgumentArity::Variadic,
+            description: None,
+        });
+
+        let result = bind_argv_with_command(
+            &[
+                ".ai/directives/a.md".into(),
+                ".ai/directives/b.md".into(),
+            ],
+            Some(&command),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["item_refs"],
+            serde_json::json!([".ai/directives/a.md", ".ai/directives/b.md"])
+        );
     }
 
     #[test]

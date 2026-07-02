@@ -393,10 +393,10 @@ impl Walker {
         }
 
         // D16: the daemon enforces capabilities at the callback boundary.
-        // The walker does NOT self-police. One source of truth, one gate.
-        // graph_permissions composer). The daemon enforces caps at the
-        // callback boundary — the walker does NOT self-police. One
-        // source of truth, one gate (the daemon).
+        // The walker does NOT self-police. The daemon enforces caps at the
+        // callback boundary and carries parent budget/depth out-of-band on the
+        // callback token. `exec_ctx` remains a local execution descriptor for
+        // walker helpers; it is not injected into action params.
 
         let exec_ctx = context::execution_context_from_envelope(
             params
@@ -404,7 +404,11 @@ impl Walker {
                 .and_then(|v| v.as_str())
                 .map(String::from),
             params.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            json!({}),
+            // Graph-local hard limits. Child budget inheritance no longer flows
+            // through action params; the daemon supplies trusted parent context
+            // from the callback token when the callback dispatch reaches a
+            // managed child launch.
+            params.get("hard_limits").cloned().unwrap_or_else(|| json!({})),
         );
 
         // pid/pgid is registered earlier, in `main.rs` right after the callback

@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig, StreamEvent,
-    ToolSchema,
+    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig,
+    StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -18,9 +18,10 @@ use ryeos_runtime::TerminalCompletion;
 
 /// Free-form breadcrumb passed to `request_continuation` for logs only.
 /// Continuation is autonomous by construction — this is NOT a typed reason the
-/// substrate keys off; `State::Continued` has exactly one cause (the per-thread
-/// turn limit), so it is a fixed string, not an enum.
-const CONTINUATION_LOG_REASON: &str = "turn_limit";
+/// substrate keys off; `State::Continued` has exactly one cause (the live
+/// context window approaching the model limit), so it is a fixed string, not an
+/// enum.
+const CONTINUATION_LOG_REASON: &str = "context_window";
 
 #[derive(Debug)]
 pub enum State {
@@ -98,6 +99,9 @@ pub struct Runner {
     /// arguments before finalization. `None` = no outputs declared,
     /// any arguments accepted.
     directive_outputs: Option<Vec<OutputSpec>>,
+    /// What to do at the context-window continuation boundary: disabled
+    /// (default) → stop with current state; enabled → self-continue.
+    continuation_config: ContinuationConfig,
     /// LLM sampling parameters from the directive's `model.sampling`.
     /// Passed to the provider adapter for inclusion in request body.
     /// `None` = use provider defaults.
@@ -183,6 +187,9 @@ pub struct RunnerConfig {
     pub budget: BudgetTracker,
     pub callback: CallbackClient,
     pub context_window: u64,
+    /// Fraction of the context window at which the continuation boundary fires;
+    /// from the directive runtime's `ryeos-runtime/continuation` config.
+    pub context_threshold_ratio: f64,
     pub provider_config: crate::directive::ProviderConfig,
     pub provider_id: String,
     /// Profile name that matched during daemon preflight.
@@ -194,6 +201,7 @@ pub struct RunnerConfig {
     pub thread_id: String,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
+    pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
 }
 
@@ -207,6 +215,7 @@ impl Runner {
             budget,
             callback,
             context_window,
+            context_threshold_ratio,
             provider_config,
             provider_id,
             execution,
@@ -214,6 +223,7 @@ impl Runner {
             thread_id,
             hooks,
             outputs,
+            continuation,
             sampling,
             matched_profile,
             config_hash,
@@ -242,7 +252,7 @@ impl Runner {
             harness,
             budget,
             callback,
-            continuation: ContinuationCheck::new(context_window),
+            continuation: ContinuationCheck::new(context_window, context_threshold_ratio),
             result_guard: ResultGuard::new(),
             provider_config,
             provider_id,
@@ -254,6 +264,7 @@ impl Runner {
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
+            continuation_config: continuation,
             sampling,
             http_client: reqwest::Client::builder()
                 .pool_max_idle_per_host(8)
@@ -1259,24 +1270,36 @@ impl Runner {
 
                 State::CheckingContinuation => {
                     let threshold = self.continuation.threshold();
-                    let estimated = self
+                    // Measure the LIVE context window (post-trim messages), NOT
+                    // cumulative chain spend — the threshold is a per-call
+                    // quantity; comparing it to lifetime budget latches the
+                    // check true and re-forks every successor.
+                    let live_context = self
                         .continuation
-                        .estimate_total_tokens(&self.messages, Some(&self.budget.cost()));
-                    tracing::info!(estimated, threshold, "checking continuation");
+                        .estimate_live_context_tokens(&self.messages);
+                    tracing::info!(live_context, threshold, "checking continuation");
                     if self
                         .continuation
-                        .should_continue(&self.messages, Some(&self.budget.cost()))
+                        .should_continue_live_context(&self.messages)
                     {
-                        // Context-window overflow → ask daemon to spawn
-                        // a chained thread carrying the current
-                        // transcript. This is the ONLY terminal path
-                        // out of CheckingContinuation; otherwise we
-                        // loop back to the agent loop for the next LLM
-                        // turn (see comment below — the previous code
-                        // finalized here, which short-circuited
-                        // multi-turn tool-call dialogues after the
-                        // very first tool dispatch).
-                        State::Continued
+                        // Context-window continuation boundary. Enabled: self-
+                        // continue (fork a chained successor of the same
+                        // directive). Disabled (default): STOP here with the
+                        // current state — no nudge, no granted turn, no output
+                        // enforcement. Emitting outputs before the boundary is the
+                        // directive's job; the runtime does not do it for them.
+                        // (Enabled is plain chain-fold for now; the hook/seed/
+                        // carry_turns substrate is a later chunk.)
+                        if self.continuation_config.enabled() {
+                            State::Continued
+                        } else {
+                            let result = self
+                                .messages
+                                .last()
+                                .and_then(|m| m.content.clone())
+                                .unwrap_or(Value::Null);
+                            State::Finalizing { result }
+                        }
                     } else {
                         // Loop back to the limits + provider call.
                         // Reaching CheckingContinuation means the prior
@@ -1512,9 +1535,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1552,9 +1577,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1600,9 +1627,11 @@ mod tests {
             tools: vec![],
             system_prompt: Some("You are helpful".to_string()),
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1646,9 +1675,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1686,9 +1717,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(1.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "openai".to_string(),
             matched_profile: None,
@@ -1742,9 +1775,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(100.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "zen".to_string(),
             matched_profile: None,
@@ -1790,9 +1825,11 @@ mod tests {
             tools: vec![],
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
             budget: BudgetTracker::new(100.0),
             callback: make_callback(),
             context_window: 200_000,
+            context_threshold_ratio: 0.9,
             provider_config: provider,
             provider_id: "zen".to_string(),
             matched_profile: None,

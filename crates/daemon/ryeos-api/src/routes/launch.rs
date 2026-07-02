@@ -185,6 +185,7 @@ pub(crate) fn spawn_dispatch_launch(
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id,
+            parent_execution_context: None,
         };
 
         match ryeos_executor::dispatch::dispatch(

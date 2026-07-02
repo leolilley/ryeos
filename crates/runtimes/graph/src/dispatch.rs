@@ -75,7 +75,7 @@ impl ActionSuccess {
 
 #[tracing::instrument(
     name = "tool:execute",
-    skip(client, action, exec_ctx),
+    skip(client, action, _exec_ctx),
     fields(
         thread_id = %thread_id,
         tool_name = tracing::field::Empty,
@@ -86,22 +86,9 @@ pub async fn dispatch_action(
     action: &Value,
     thread_id: &str,
     project_path: &str,
-    exec_ctx: Option<&ExecutionContext>,
+    _exec_ctx: Option<&ExecutionContext>,
 ) -> anyhow::Result<ActionOutcome> {
-    let mut action = action.clone();
-
-    if let Some(ctx) = exec_ctx {
-        let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
-        let thread = action
-            .get("thread")
-            .and_then(|v| v.as_str())
-            .unwrap_or("inline");
-        // Inject parent context for child-spawning executes only
-        if item_id.starts_with("directive:") || item_id.starts_with("graph:") || thread != "inline"
-        {
-            inject_parent_context(&mut action, ctx);
-        }
-    }
+    let action = action.clone();
 
     let item_id = action.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
     tracing::Span::current().record("tool_name", item_id);
@@ -389,29 +376,6 @@ fn excerpt(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}… [truncated]")
     }
-}
-
-fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
-    let Some(map) = action.as_object_mut() else {
-        return;
-    };
-
-    // Ensure params exists as an object
-    if !map.contains_key("params") || !map["params"].is_object() {
-        map.insert("params".into(), json!({}));
-    }
-    let params = map
-        .get_mut("params")
-        .and_then(Value::as_object_mut)
-        .unwrap();
-
-    if let Some(ref parent_id) = ctx.parent_thread_id {
-        params.entry("parent_thread_id").or_insert(json!(parent_id));
-    }
-    if !ctx.limits.is_null() {
-        params.entry("parent_limits").or_insert(ctx.limits.clone());
-    }
-    params.entry("depth").or_insert(json!(ctx.depth + 1));
 }
 
 #[allow(clippy::only_used_in_recursion)]
@@ -750,6 +714,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graph_dispatch_does_not_inject_parent_context_for_budgeted_children() {
+        let cases = ["directive:team/child", "graph:team/subgraph"];
+        for item_id in cases {
+            let last = Arc::new(Mutex::new(None));
+            let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+                Arc::new(CapturingClient { last: last.clone() });
+            let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
+
+            let action = json!({
+                "item_id": item_id,
+                "params": {"user_input": "kept"},
+            });
+            dispatch_action(&client, &action, "T-test", "/project", None)
+                .await
+                .expect("dispatch ok");
+
+            let forwarded = last.lock().unwrap().take().expect("action captured");
+            assert_eq!(forwarded.params, json!({"user_input": "kept"}));
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_call_block_fails_loudly() {
         let client = make_mock_client(vec![]);
         let action = json!({
@@ -764,20 +750,6 @@ mod tests {
             err.to_string().contains("invalid `call` block"),
             "got: {err}"
         );
-    }
-
-    #[test]
-    fn inject_parent_context_into_params() {
-        let mut action = json!({"item_id": "directive:test", "params": {}});
-        let ctx = ExecutionContext {
-            parent_thread_id: Some("T-parent".to_string()),
-            limits: json!({"turns": 10}),
-            depth: 2,
-        };
-        inject_parent_context(&mut action, &ctx);
-        assert_eq!(action["params"]["parent_thread_id"], "T-parent");
-        assert_eq!(action["params"]["depth"], 3);
-        assert_eq!(action["params"]["parent_limits"]["turns"], 10);
     }
 
     #[tokio::test]
