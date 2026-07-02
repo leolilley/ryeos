@@ -12,6 +12,7 @@ mod graph;
 mod ordering;
 mod query;
 mod render;
+mod token_estimation;
 mod types;
 mod validate;
 
@@ -26,7 +27,11 @@ use types::KnowledgeError;
 /// on `envelope.method`. The method's typed payload is parsed inside the
 /// handler; a non-object or wrong-shaped payload surfaces as `InvalidArg`.
 fn dispatch_method(envelope: &MethodCallEnvelope) -> MethodCallResult {
-    match dispatch::dispatch(&envelope.method, envelope.payload.clone()) {
+    match dispatch::dispatch(
+        &envelope.method,
+        envelope.payload.clone(),
+        &envelope.runtime_config,
+    ) {
         Ok(value) => MethodCallResult::success(envelope, value),
         Err(e) => MethodCallResult::failure(envelope, knowledge_to_batch_error(e)),
     }
@@ -108,6 +113,7 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
                     thread_id,
                     callback: envelope.callback.clone(),
                     project_root: envelope.project_root.clone(),
+                    runtime_config: envelope.runtime_config.clone(),
                     payload: serde_json::Value::Null,
                 },
                 MethodCallError::MethodFailed {
@@ -177,6 +183,7 @@ mod tests {
                 token: "tat-test".into(),
             },
             project_root: std::path::PathBuf::from("/tmp/proj"),
+            runtime_config: std::collections::BTreeMap::new(),
             payload,
         }
     }

@@ -10,6 +10,7 @@
 //! vocabulary and no payload-retagging step.
 
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::types::{
     ComposeContextPayload, ComposePayload, GraphPayload, KnowledgeError, QueryPayload,
@@ -17,7 +18,7 @@ use crate::types::{
 };
 use crate::{compose, graph, query, validate};
 
-type MethodHandler = fn(Value) -> Result<Value, KnowledgeError>;
+type MethodHandler = fn(Value, &BTreeMap<String, Value>) -> Result<Value, KnowledgeError>;
 
 /// Single dispatch point: wire method name → handler.
 ///
@@ -27,7 +28,11 @@ type MethodHandler = fn(Value) -> Result<Value, KnowledgeError>;
 /// invocation or schema/runtime skew. Report it — never silently no-op.
 /// Keyed strictly off `method` (the envelope field), so a payload that happens
 /// to carry a `"method"` key cannot influence which handler runs.
-pub fn dispatch(method: &str, payload: Value) -> Result<Value, KnowledgeError> {
+pub fn dispatch(
+    method: &str,
+    payload: Value,
+    runtime_config: &BTreeMap<String, Value>,
+) -> Result<Value, KnowledgeError> {
     let handler: MethodHandler = match method {
         "compose" => method_compose,
         "compose_positions" => method_compose_positions,
@@ -41,7 +46,7 @@ pub fn dispatch(method: &str, payload: Value) -> Result<Value, KnowledgeError> {
             })
         }
     };
-    handler(payload)
+    handler(payload, runtime_config)
 }
 
 /// Deserialize a method payload into its typed shape; a malformed/wrong-shaped
@@ -60,27 +65,42 @@ fn to_json<T: serde::Serialize>(value: T) -> Result<Value, KnowledgeError> {
     serde_json::to_value(value).map_err(|e| KnowledgeError::Internal(e.to_string()))
 }
 
-fn method_compose(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_compose(
+    payload: Value,
+    runtime_config: &BTreeMap<String, Value>,
+) -> Result<Value, KnowledgeError> {
     let p: ComposePayload = parse_payload("compose", payload)?;
-    to_json(compose::compose(&p)?)
+    to_json(compose::compose(&p, runtime_config)?)
 }
 
-fn method_compose_positions(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_compose_positions(
+    payload: Value,
+    runtime_config: &BTreeMap<String, Value>,
+) -> Result<Value, KnowledgeError> {
     let p: ComposeContextPayload = parse_payload("compose_positions", payload)?;
-    to_json(compose::compose_positions(&p)?)
+    to_json(compose::compose_positions(&p, runtime_config)?)
 }
 
-fn method_query(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_query(
+    payload: Value,
+    _runtime_config: &BTreeMap<String, Value>,
+) -> Result<Value, KnowledgeError> {
     let p: QueryPayload = parse_payload("query", payload)?;
     to_json(query::query(&p)?)
 }
 
-fn method_graph(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_graph(
+    payload: Value,
+    _runtime_config: &BTreeMap<String, Value>,
+) -> Result<Value, KnowledgeError> {
     let p: GraphPayload = parse_payload("graph", payload)?;
     to_json(graph::graph(&p)?)
 }
 
-fn method_validate(payload: Value) -> Result<Value, KnowledgeError> {
+fn method_validate(
+    payload: Value,
+    _runtime_config: &BTreeMap<String, Value>,
+) -> Result<Value, KnowledgeError> {
     let p: ValidatePayload = parse_payload("validate", payload)?;
     to_json(validate::validate(&p)?)
 }
@@ -90,11 +110,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn dispatch_without_config(method: &str, payload: Value) -> Result<Value, KnowledgeError> {
+        dispatch(method, payload, &BTreeMap::new())
+    }
+
+    fn dispatch_with_token_config(method: &str, payload: Value) -> Result<Value, KnowledgeError> {
+        let runtime_config = BTreeMap::from([(
+            "token_estimation".to_string(),
+            json!({"policy": {"provider": "heuristic", "chars_per_token": 4.0, "reserve_ratio": 0.10}}),
+        )]);
+        dispatch(method, payload, &runtime_config)
+    }
+
     // ── active-handler smoke tests (routing + real wire shape) ──────────
 
     #[test]
     fn query_dispatches_and_reads_args() {
-        let out = dispatch(
+        let out = dispatch_without_config(
             "query",
             json!({"items_by_ref": {}, "edges": [], "args": {"query": "needle", "limit": 3}}),
         )
@@ -106,7 +138,7 @@ mod tests {
     fn validate_dispatches_and_reads_nested_roots() {
         // Proves `args.roots` still flows (regression for the earlier
         // nested-roots bug) AND that the method routes to validate.
-        let out = dispatch(
+        let out = dispatch_without_config(
             "validate",
             json!({"items_by_ref": {}, "edges": [], "args": {"roots": ["k/a"]}}),
         )
@@ -120,7 +152,7 @@ mod tests {
 
     #[test]
     fn graph_dispatches_on_empty_corpus() {
-        let out = dispatch(
+        let out = dispatch_without_config(
             "graph",
             json!({"items_by_ref": {}, "edges": [], "args": {}}),
         )
@@ -139,7 +171,7 @@ mod tests {
 
     #[test]
     fn compose_dispatches() {
-        let out = dispatch(
+        let out = dispatch_with_token_config(
             "compose",
             json!({
                 "root_ref": "k/a",
@@ -156,7 +188,7 @@ mod tests {
     fn compose_positions_dispatches_top_level_shape() {
         // Augmentation payload: top-level roots_by_position/budgets, NOT
         // inputs-nested.
-        let out = dispatch(
+        let out = dispatch_with_token_config(
             "compose_positions",
             json!({
                 "items_by_ref": {"k/a": trusted_item("---\ntitle: A\n---\nbody")},
@@ -177,7 +209,8 @@ mod tests {
         // Any method without a handler — a typo or a name the runtime does
         // not implement — hits the single unknown arm.
         for method in ["bogus", "snapshot", "index"] {
-            let err = dispatch(method, json!({})).expect_err("undeclared method must error");
+            let err = dispatch_without_config(method, json!({}))
+                .expect_err("undeclared method must error");
             assert!(
                 matches!(err, KnowledgeError::InvalidArg { .. }),
                 "{method}: {err:?}"
@@ -192,7 +225,7 @@ mod tests {
         // A payload carrying a top-level "method" must NOT override the
         // dispatched method. This routes as validate (per the `method`
         // argument), not query.
-        let out = dispatch(
+        let out = dispatch_without_config(
             "validate",
             json!({
                 "method": "query",
@@ -212,7 +245,8 @@ mod tests {
 
     #[test]
     fn non_object_payload_is_invalid_arg() {
-        let err = dispatch("query", json!("not an object")).expect_err("must error");
+        let err = dispatch_without_config("query", json!("not an object"))
+            .expect_err("must error");
         assert!(
             matches!(err, KnowledgeError::InvalidArg { .. }),
             "got: {err:?}"

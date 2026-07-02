@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
+use crate::token_estimation::TokenEstimatorMetadata;
+
 // Methods are dispatched by wire method name in `dispatch.rs` (keyed off
 // `MethodCallEnvelope.method`), each parsing its own typed payload below.
 // Generic requests come from schema-declared methods; augmentation-private
@@ -41,6 +43,7 @@ pub struct ComposeOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComposeMeta {
+    pub token_estimator: TokenEstimatorMetadata,
     pub resolved_items: Vec<ComposeItem>,
     pub items_omitted: Vec<OmittedItem>,
     pub edges: Vec<ComposeEdge>,
@@ -251,6 +254,9 @@ pub enum KnowledgeError {
 
     #[error("frontmatter parse failure for {item_id}: {reason}")]
     FrontmatterParse { item_id: String, reason: String },
+
+    #[error("token estimation failed: {0}")]
+    TokenEstimation(String),
 
     #[error("internal: {0}")]
     Internal(String),
