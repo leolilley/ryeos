@@ -1292,6 +1292,13 @@ mod tests {
 
     /// Arm a `waiting` follow waiter (key `wk`) whose child chain is `child`.
     fn arm_waiting_follow(state: &AppState, wk: &str, child: &str) {
+        arm_waiting_follow_succ(state, wk, child, "S");
+    }
+
+    /// Like [`arm_waiting_follow`] but with an explicit successor id. Use this when
+    /// a single test arms MORE than one waiter — `follow_waiter.parent_successor_thread_id`
+    /// is UNIQUE (a successor belongs to exactly one follow), so each must differ.
+    fn arm_waiting_follow_succ(state: &AppState, wk: &str, child: &str, successor: &str) {
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -1305,7 +1312,10 @@ mod tests {
             })
             .unwrap();
         state.state_store.set_follow_child(wk, child, child).unwrap();
-        state.state_store.set_follow_parent_successor(wk, "S").unwrap();
+        state
+            .state_store
+            .set_follow_parent_successor(wk, successor)
+            .unwrap();
         state.state_store.mark_follow_waiting(wk).unwrap();
     }
 
@@ -1330,37 +1340,134 @@ mod tests {
     async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
         let (_tmp, state) = setup_app_state();
         // A still-waiting waiter: its child chain has not been recorded terminal, so
-        // the parent resume is not yet drivable — no intent.
-        arm_waiting_follow(&state, "wk-waiting", "CW");
+        // the parent resume is not yet drivable — no intent. (Distinct successors:
+        // parent_successor_thread_id is UNIQUE.)
+        arm_waiting_follow_succ(&state, "wk-waiting", "CW", "S-w");
         // A waiter whose child chain reached terminal (flipped `waiting → ready`):
         // the parent resume IS drivable — one intent.
-        arm_waiting_follow(&state, "wk-ready", "CR");
+        arm_waiting_follow_succ(&state, "wk-ready", "CR", "S-r");
         state
             .state_store
             .mark_follow_child_terminal("CR", "CR", "completed", &json!({"success": true}))
             .unwrap();
         // A waiter whose resume was interrupted mid-flight (`resuming`) — re-driven,
         // so it too must be collected.
-        arm_waiting_follow(&state, "wk-resuming", "CX");
+        arm_waiting_follow_succ(&state, "wk-resuming", "CX", "S-x");
         state
             .state_store
             .mark_follow_child_terminal("CX", "CX", "completed", &json!({"success": true}))
             .unwrap();
         state.state_store.mark_follow_resuming("wk-resuming").unwrap();
 
-        let intents = crate::reconcile::reconcile_follow(&state).unwrap();
-        let keys: Vec<&str> = intents.iter().map(|i| i.follow_key.as_str()).collect();
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        let resume_keys: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::reconcile::FollowReconcileAction::Resume { follow_key } => {
+                    Some(follow_key.as_str())
+                }
+                _ => None,
+            })
+            .collect();
         assert!(
-            keys.contains(&"wk-ready"),
-            "a ready waiter must yield a parent-resume intent, got {keys:?}"
+            resume_keys.contains(&"wk-ready"),
+            "a ready waiter must yield a parent-resume action, got {resume_keys:?}"
         );
         assert!(
-            keys.contains(&"wk-resuming"),
-            "a resuming waiter must yield a parent-resume intent, got {keys:?}"
+            resume_keys.contains(&"wk-resuming"),
+            "a resuming waiter must yield a parent-resume action, got {resume_keys:?}"
         );
         assert!(
-            !keys.contains(&"wk-waiting"),
-            "a still-waiting waiter must NOT yield an intent, got {keys:?}"
+            !resume_keys.contains(&"wk-waiting"),
+            "a still-waiting waiter (no child row) must NOT yield a resume action, got {resume_keys:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_relaunches_pre_launch_child() {
+        // Crash in the pre-launch window: the waiter is durably `waiting` but the
+        // detached child launch never ran, so the child row is still `created`.
+        // reconcile_follow must collect a relaunch (reconcile() proper skips it
+        // rather than finalize-failing it).
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cpre", "Cpre"))
+            .unwrap();
+        arm_waiting_follow(&state, "wk-pre", "Cpre");
+        assert_eq!(
+            state.threads.get_thread("Cpre").unwrap().unwrap().status,
+            ryeos_state::objects::ThreadStatus::Created.as_str(),
+            "child must be created (never launched) for this window"
+        );
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        let relaunch: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
+                    Some(child_thread_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relaunch,
+            vec!["Cpre"],
+            "a waiting waiter with a created (never-launched) child must yield a relaunch, got {relaunch:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_does_not_relaunch_child_with_attached_pgid() {
+        // A pgid attaches BEFORE the row flips created→running (launch in flight).
+        // Such a child must NOT be relaunched — that would spawn a duplicate.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Catt", "Catt"))
+            .unwrap();
+        state
+            .threads
+            .attach_process(&ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
+                thread_id: "Catt".to_string(),
+                pid: 424242,
+                pgid: 424242,
+                metadata: None,
+                launch_metadata: Default::default(),
+            })
+            .unwrap();
+        arm_waiting_follow(&state, "wk-att", "Catt");
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::RelaunchChild { .. }
+            )),
+            "a child with an attached pgid (launch in flight) must NOT be relaunched, got {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_does_not_relaunch_running_child() {
+        // A running child is recovered by reconcile()'s native-resume path, not a
+        // fresh follow relaunch.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Crun", "Crun"))
+            .unwrap();
+        state.threads.mark_running("Crun").unwrap();
+        arm_waiting_follow(&state, "wk-run", "Crun");
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::RelaunchChild { .. }
+            )),
+            "a running child must NOT be follow-relaunched, got {actions:?}"
         );
     }
 

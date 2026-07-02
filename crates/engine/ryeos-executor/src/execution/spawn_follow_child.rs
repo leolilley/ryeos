@@ -336,11 +336,20 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let launch_state = state.clone();
     let launch_child_id = child_thread_id.clone();
     let launch_provenance = cap.provenance.clone_for_borrowed_child();
+    // Parent execution ceiling from the VALIDATED cap (never `child_parameters`),
+    // so the child is clamped to the parent's hard limits and launches at parent
+    // depth + 1 — the same context a normal callback-dispatched child receives.
+    let launch_parent_context = crate::dispatch::ParentExecutionContext {
+        parent_thread_id: cap.thread_id.clone(),
+        hard_limits: cap.hard_limits.clone(),
+        depth: cap.depth,
+    };
     tokio::spawn(async move {
         if let Err(e) = crate::execution::launch::launch_follow_child(
             launch_state,
             &launch_child_id,
             Some(launch_provenance),
+            Some(launch_parent_context),
         )
         .await
         {

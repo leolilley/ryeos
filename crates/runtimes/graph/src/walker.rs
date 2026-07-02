@@ -1255,6 +1255,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await;
                 }
@@ -1314,6 +1315,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }

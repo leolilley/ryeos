@@ -27,6 +27,42 @@ fn continuation_shape(thread: &ThreadDetail) -> bool {
             .is_some_and(|m| m.resume_context.is_some())
 }
 
+/// A follow CHILD row that provably NEVER launched — the pre-launch crash window.
+/// Shared by `reconcile`'s skip and `reconcile_follow`'s relaunch so they agree
+/// exactly. All of:
+///   - status `created` (not yet running),
+///   - NO attached pgid — a launch attaches the process group BEFORE flipping the
+///     row to `running`, so a present pgid means a launch is in flight or ran (a
+///     duplicate relaunch would spawn a second child),
+///   - NO `native_resume` policy — set only once the launch runs (a launched-then-
+///     crashed child carries it and is recovered by the native-resume path),
+///   - it is some non-cleared waiter's child chain root.
+/// A row failing any clause is left to the normal `reconcile` / native-resume /
+/// finalize paths — never skipped here and never relaunched.
+fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> bool {
+    if thread.status != ThreadStatus::Created.as_str() {
+        return false;
+    }
+    if thread.runtime.pgid.is_some() {
+        return false;
+    }
+    if thread
+        .runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|m| m.native_resume.as_ref())
+        .is_some()
+    {
+        return false;
+    }
+    matches!(
+        state
+            .state_store
+            .get_follow_waiter_by_child_chain(&thread.chain_root_id),
+        Ok(Some(w)) if w.child_thread_id.as_deref() == Some(thread.thread_id.as_str())
+    )
+}
+
 /// Machine-only proof that `successor` is an autonomous MACHINE continuation of
 /// `upstream` (not an operator follow-up): the source was settled `continued` and
 /// points back at this successor. A machine handoff settles the source to
@@ -364,6 +400,18 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
             }
         }
 
+        // A follow CHILD row created but never launched (crash in the pre-launch
+        // window) has no native_resume policy yet, so `decide_resume` below would
+        // finalize it failed. Leave it to `reconcile_follow`, which relaunches it
+        // fresh via `launch_follow_child`.
+        if is_pending_follow_child(state, thread) {
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                "follow child stranded pre-launch — leaving for reconcile_follow relaunch"
+            );
+            continue;
+        }
+
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
             Err(err) => {
@@ -506,48 +554,75 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     Ok(intents)
 }
 
-/// One follow waiter whose parent-resume successor is ready to launch (the followed
-/// child's terminal envelope is stored). Collected at startup and driven
-/// post-listener, mirroring [`ResumeIntent`] — the launch itself owns the claim.
+/// A follow-recovery action collected at startup and driven post-listener (the
+/// launch itself owns the claim, so a race with the live path is a benign skip).
 #[derive(Debug, Clone)]
-pub struct FollowResumeIntent {
-    pub follow_key: String,
+pub enum FollowReconcileAction {
+    /// A waiter whose parent-resume successor is ready to launch (child terminal
+    /// stored): `ready`/`resuming`. Driven by `launch_follow_resume_successor`.
+    Resume { follow_key: String },
+    /// A `waiting` waiter whose CHILD row was created but never launched (crash in
+    /// the pre-launch window). Driven by `launch_follow_child(.., None, None)` — a
+    /// fresh detached launch with no parent clamp (reconcile parity).
+    RelaunchChild { child_thread_id: String },
 }
 
-/// Startup crash-recovery for daemon-managed follow: drive the PARENT-resume half.
+/// Startup crash-recovery for daemon-managed follow.
 ///
-/// The child chain itself is recovered by [`reconcile`] proper (a follow child is a
-/// normal thread — native-resume kinds resume, others finalize failed), and its
-/// terminal flips the awaiting waiter to `ready` through the finalize path. What a
-/// crash strands is the parent resume: a waiter left `ready` (child result stored,
-/// successor never launched) or `resuming` (launch interrupted mid-flight). Both
-/// are re-driven by `launch_follow_resume_successor`, idempotent by `follow_key`.
-///
-/// `waiting` waiters need nothing here — the live finalize kick, or a child
-/// recovered by `reconcile`, drives them once the child reaches terminal.
-/// `reserved` is a pre-`waiting` partial-spawn window, left for a later sweep.
-pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowResumeIntent>> {
+/// - `ready`/`resuming`: the child terminal is stored but the parent resume never
+///   ran (or was interrupted) → drive `launch_follow_resume_successor`.
+/// - `waiting` + child row still `created`: the detached child launch never ran
+///   (crash after `mark_follow_waiting`, before/into the spawn). `reconcile` proper
+///   deliberately skips such a row (it has no native_resume policy, so it would
+///   else be finalized failed) — relaunch it here via `launch_follow_child`. A
+///   launched-then-crashed child (native_resume set) is recovered by `reconcile`'s
+///   native resume instead, so it is left alone.
+/// - `reserved`: a pre-`waiting` partial-spawn window, left for a later sweep.
+pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> {
     use ryeos_app::runtime_db::follow_phase;
 
-    let mut intents: Vec<FollowResumeIntent> = Vec::new();
+    let mut actions: Vec<FollowReconcileAction> = Vec::new();
     for w in state.state_store.list_follow_waiters()? {
         match w.phase.as_str() {
             follow_phase::READY | follow_phase::RESUMING => {
                 tracing::info!(
                     follow_key = %w.follow_key,
                     phase = %w.phase,
-                    "follow waiter carries a stored child result — collecting parent-resume intent"
+                    "follow waiter carries a stored child result — collecting parent-resume"
                 );
-                intents.push(FollowResumeIntent {
+                actions.push(FollowReconcileAction::Resume {
                     follow_key: w.follow_key,
                 });
             }
-            follow_phase::WAITING => {
-                tracing::debug!(
+            follow_phase::WAITING => match w.child_thread_id.clone() {
+                Some(child_id) => match state.state_store.get_thread(&child_id) {
+                    // Pre-launch window: durable `waiting`, but the child provably
+                    // never launched (created, no pgid, no native_resume). Relaunch
+                    // it fresh. Same predicate `reconcile` uses to skip it.
+                    Ok(Some(child)) if is_pending_follow_child(state, &child) => {
+                        tracing::info!(
+                            follow_key = %w.follow_key,
+                            child_thread_id = %child_id,
+                            "follow child stranded pre-launch — collecting relaunch"
+                        );
+                        actions.push(FollowReconcileAction::RelaunchChild {
+                            child_thread_id: child_id,
+                        });
+                    }
+                    // Launching (created + live pgid), running, or terminal: the
+                    // native-resume / finalize-kick / launch-in-flight paths own it.
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        follow_key = %w.follow_key,
+                        error = %e,
+                        "follow child lookup failed during reconcile"
+                    ),
+                },
+                None => tracing::warn!(
                     follow_key = %w.follow_key,
-                    "follow waiter still waiting — child recovery + finalize kick own it"
-                );
-            }
+                    "waiting follow waiter has no child thread recorded"
+                ),
+            },
             other => {
                 tracing::debug!(
                     follow_key = %w.follow_key,
@@ -557,10 +632,10 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowResumeIntent>> {
             }
         }
     }
-    if !intents.is_empty() {
-        tracing::info!(count = intents.len(), "collected follow parent-resume intents");
+    if !actions.is_empty() {
+        tracing::info!(count = actions.len(), "collected follow reconcile actions");
     }
-    Ok(intents)
+    Ok(actions)
 }
 
 #[cfg(test)]

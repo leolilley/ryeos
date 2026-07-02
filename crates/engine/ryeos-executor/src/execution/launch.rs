@@ -2298,6 +2298,7 @@ async fn launch_claimed_follow_child(
     state: &AppState,
     thread: ryeos_app::state_store::ThreadDetail,
     provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
+    parent_context: Option<crate::dispatch::ParentExecutionContext>,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let thread_id = thread.thread_id.clone();
     // A follow child is a FRESH ROOT: no upstream braid, its own chain root.
@@ -2382,6 +2383,10 @@ async fn launch_claimed_follow_child(
             },
             // Fresh launch, not a checkpoint resume.
             checkpoint_resume_mode: CheckpointResumeMode::None,
+            // Clamp the child to the parent's hard limits + launch at parent depth
+            // + 1 on the hot path; `None` on reconcile (root behavior), exactly like
+            // a normal callback-dispatched native-resume child.
+            parent_execution_context: parent_context.as_ref(),
         },
         thread,
     )
@@ -2398,6 +2403,13 @@ pub async fn launch_follow_child(
     state: AppState,
     child_id: &str,
     provenance_override: Option<ryeos_app::execution_provenance::ExecutionProvenance>,
+    // Parent execution ceiling, built from the parent's live callback cap on the
+    // hot launch so the child is clamped to the parent's hard limits and launched
+    // at parent depth + 1 — the same context a normal callback-dispatched child
+    // gets. `None` on a reconcile relaunch (like `provenance_override`): a crashed
+    // follow child recovers through the general native-resume sweep as a root, the
+    // documented reconcile limit shared with every native-resume child.
+    parent_context: Option<crate::dispatch::ParentExecutionContext>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
     let claimed_by = format!("daemon:{}", std::process::id());
@@ -2436,19 +2448,20 @@ pub async fn launch_follow_child(
         return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
     }
 
-    // A still-`running` row whose process group is ALIVE is not crashed — a
-    // duplicate trigger or a stale-lease reclaim of a live launch. Skip rather than
-    // spawn a duplicate runtime.
-    if thread.status == ryeos_state::objects::ThreadStatus::Running.as_str() {
-        if let Some(pgid) = thread.runtime.pgid {
-            if ryeos_app::process::pgid_alive(pgid) {
-                let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
-                return Ok(SuccessorLaunchOutcome::Skipped("live_process"));
-            }
+    // A live process group means a launch is in flight or running — REGARDLESS of
+    // row status. A pgid attaches before the row flips `created → running`, so a
+    // `created` row can already have a live child; skipping only on `running` would
+    // let a reconcile relaunch spawn a duplicate in that window. Skip on any live
+    // pgid; a dead pgid (crashed) falls through to relaunch.
+    if let Some(pgid) = thread.runtime.pgid {
+        if ryeos_app::process::pgid_alive(pgid) {
+            let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+            return Ok(SuccessorLaunchOutcome::Skipped("live_process"));
         }
     }
 
-    let result = launch_claimed_follow_child(&state, thread, provenance_override).await;
+    let result =
+        launch_claimed_follow_child(&state, thread, provenance_override, parent_context).await;
     let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
 
     match result {
