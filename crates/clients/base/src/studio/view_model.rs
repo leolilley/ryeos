@@ -257,6 +257,11 @@ pub struct StudioInputVm {
     /// Completion suggestions from the input's `completion` source.
     #[serde(default)]
     pub completion: Vec<String>,
+    /// This input is a live filter (feeds a source param, no submit): the
+    /// renderer composes it as a filter line above its widget rather than
+    /// replacing the widget, and Enter activates the focused row.
+    #[serde(default)]
+    pub live_filter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1281,10 +1286,14 @@ fn input_vm(
     // Completion suggestions: an inline @-mention hint when the cursor is in
     // one, else the input's `/` command grammar.
     let completion = input_completion(core, view_ref, input, &text, cursor);
-    let hint = completion
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "Shift+Enter submit · / for commands · @ for refs".to_string());
+    let live_filter = input.is_live_filter();
+    let hint = completion.first().cloned().unwrap_or_else(|| {
+        if live_filter {
+            "type to filter · ↑↓ select · Enter opens".to_string()
+        } else {
+            "Shift+Enter submit · / for commands · @ for refs".to_string()
+        }
+    });
 
     let has_route_target =
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
@@ -1299,6 +1308,7 @@ fn input_vm(
         hint,
         submit_enabled: !text.trim().is_empty() && (has_route_target || has_affordance_target),
         completion,
+        live_filter,
         text,
     }
 }

@@ -377,9 +377,10 @@ pub fn list_threads_filtered(
     list_threads_sorted(db, limit, filter_principal, ThreadSort::Default)
 }
 
-/// Optional exact-match filters for a thread listing. `principal` is the
-/// authorization scope (public listings restrict to the caller's own threads);
-/// `status`/`kind`/`requested_by` are the operator dashboard's optional facets.
+/// Optional filters for a thread listing. `principal` is the authorization
+/// scope (public listings restrict to the caller's own threads, matched
+/// EXACTLY); `status`/`kind`/`requested_by` are the operator dashboard's
+/// optional facets, matched by substring so a type-to-filter box narrows.
 /// Every `None` field is simply omitted from the `WHERE`, so an unset filter
 /// widens rather than empties the list. Set fields are ANDed.
 #[derive(Debug, Clone, Default)]
@@ -411,8 +412,9 @@ pub fn list_threads_sorted(
 /// The `Watch` order sorts active-before-terminal, then newest — for the
 /// operator dashboard — without changing the default order the public list /
 /// CLI use. Ordering is applied BEFORE `LIMIT`, so a limited watch list still
-/// shows the most relevant (active + recent) rows. Filters are exact-match and
-/// each present one is ANDed; absent ones are omitted so the list stays wide.
+/// shows the most relevant (active + recent) rows. Each present filter is ANDed
+/// (principal exact, dashboard facets substring); absent ones are omitted so
+/// the list stays wide.
 pub fn list_threads_query(
     db: &ProjectionDb,
     limit: usize,
@@ -436,6 +438,9 @@ pub fn list_threads_query(
     };
     // Build the WHERE from the present filters only; each contributes one bound
     // parameter, so there is no injection surface and an absent filter widens.
+    // The owner-scope `principal` is EXACT (an authorization boundary must not
+    // widen by substring); the dashboard facets are substring (contains) so a
+    // type-to-filter box narrows as the operator types.
     let mut conditions: Vec<&str> = Vec::new();
     let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
     if let Some(principal) = &filter.principal {
@@ -443,15 +448,15 @@ pub fn list_threads_query(
         params.push(principal);
     }
     if let Some(status) = &filter.status {
-        conditions.push("status = ?");
+        conditions.push("status LIKE '%' || ? || '%'");
         params.push(status);
     }
     if let Some(kind) = &filter.kind {
-        conditions.push("kind = ?");
+        conditions.push("kind LIKE '%' || ? || '%'");
         params.push(kind);
     }
     if let Some(requested_by) = &filter.requested_by {
-        conditions.push("requested_by = ?");
+        conditions.push("requested_by LIKE '%' || ? || '%'");
         params.push(requested_by);
     }
     let where_clause = if conditions.is_empty() {
@@ -1804,12 +1809,13 @@ mod tests {
             list_threads_query(&db, 10, &ThreadListFilter::default(), ThreadSort::Default).unwrap();
         assert_eq!(ids(all), ["T-1", "T-2", "T-3"]);
 
-        // Each present filter narrows by exact match.
+        // Each present dashboard filter narrows by substring, so a partial
+        // value (as a type-to-filter box produces) still matches.
         let running = list_threads_query(
             &db,
             10,
             &ThreadListFilter {
-                status: Some("running".into()),
+                status: Some("run".into()),
                 ..Default::default()
             },
             ThreadSort::Default,

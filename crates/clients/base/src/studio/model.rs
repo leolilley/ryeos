@@ -996,6 +996,7 @@ impl StudioCore {
             help_open: self.ui.help_open,
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
+            input_is_live_filter: input.is_some_and(|i| i.is_live_filter()),
             input_has_completion: input
                 .is_some_and(|i| i.completion.is_some() || i.mentions.is_some()),
             input_can_accept_completion,

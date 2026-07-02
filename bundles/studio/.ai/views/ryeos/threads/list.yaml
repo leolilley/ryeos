@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-02T01:29:21Z:9e0126f36d39c9460b72ccc0ba493d445c4fe834bde09243025f377bd1eda1dc:HHmGiOVJeriZKlr9eBpeR6wJ9RsWq+aVHNTnYTuS7TLkrxtD4JSC63jiAEhEbNBXqS/15qCn/g64DAqohYSTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-02T02:24:53Z:aa7db21c4e3c3b70d131f53b98cec6cc7bb0dd433ccfde66fb2b03f6306c16e8:NmSzMcIzUVzkhzbNvxuIGfngPRRlVAG6SeEjOkLzF2WImqe0xfUHETZeMVo9QUCX5BfA5CHcZC7zpJ+Qm2/8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
@@ -71,5 +71,16 @@ affordances:
       ref: service:ui/studio/thread/cancel
       args:
         thread_id: "{record.thread_id}"
+# Inline live filter: typing narrows the list by status (substring) as you type;
+# it feeds the `status` source param (empty buffer = unfiltered). No `submit:`, so
+# this is a live filter — Enter activates the focused row (watches it), it does
+# not submit. When the list lens is focused, printable keys edit this filter
+# rather than the foot route input — the watch dashboard filters, it doesn't compose.
+input:
+  id: filter
+  placeholder: "filter by status…"
+  feeds:
+    param: status
+    debounce_ms: 120
 refresh:
   on_hint: thread

@@ -272,6 +272,15 @@ impl InputBlock {
             Some(id) => Some(id),
         }
     }
+
+    /// A live-filter input: its buffer feeds one of its own source params and
+    /// it has no submit target. The filter applies live (via `feeds`), so it is
+    /// never "submitted" — Enter should activate the focused row, not submit,
+    /// and the renderer composes it as a filter line above its widget rather
+    /// than replacing the widget with a prompt.
+    pub fn is_live_filter(&self) -> bool {
+        self.feeds.is_some() && self.submit.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

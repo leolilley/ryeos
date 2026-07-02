@@ -251,8 +251,22 @@ pub fn draw_tile(
         rect.w.saturating_sub(2),
         rect.h.saturating_sub(2),
     );
-    // An instance that declares `input` renders as the prompt — buffer +
-    // cursor only; the tile already owns the border/chrome.
+    // A live-filter input composes ABOVE its widget: a one-row filter strip at
+    // the top, the widget (e.g. the thread table) filling the rest. Typing
+    // narrows; the table still shows and Enter opens the selected row.
+    if let Some(input) = input.filter(|i| i.live_filter) {
+        if inner.h >= 2 {
+            let filter_rect = Rect::new(inner.x, inner.y, inner.w, 1);
+            super::input::draw_filter_line(surface, filter_rect, input, focused);
+            let view_rect = Rect::new(inner.x, inner.y + 1, inner.w, inner.h - 1);
+            super::draw_view(surface, view_rect, view);
+        } else {
+            super::draw_view(surface, inner, view);
+        }
+        return;
+    }
+    // A prompt input (no widget of its own, e.g. the foot input) renders as
+    // the buffer + cursor only; the tile already owns the border/chrome.
     if let Some(input) = input {
         draw_input_tile(surface, inner, input, None, None);
         return;
@@ -340,6 +354,54 @@ mod tests {
         // Order is left then right.
         assert_eq!(rects[0].1.x, 0);
         assert!(rects[1].1.x > center.x);
+    }
+
+    #[test]
+    fn live_filter_tile_composes_filter_line_above_the_widget() {
+        use ryeos_client_base::studio::view_model::{StudioTableRowVm, StudioTone};
+        let view = StudioViewVm::Table {
+            title: "threads".into(),
+            columns: vec!["thread".into()],
+            provenance: None,
+            affordance_hints: vec![],
+            rows: vec![StudioTableRowVm {
+                id: "T-ab".into(),
+                cells: vec!["T-ab".into()],
+                tone: StudioTone::Neutral,
+                action: None,
+                selected: false,
+                raw: serde_json::Value::Null,
+            }],
+        };
+        let input = StudioInputVm {
+            cursor: 3,
+            route_label: String::new(),
+            placeholder: "filter…".into(),
+            hint: String::new(),
+            submit_enabled: false,
+            completion: vec![],
+            live_filter: true,
+            text: "run".into(),
+        };
+        let mut surface = TextSurface::new(40, 10);
+        draw_tile(
+            &mut surface,
+            Rect::new(0, 0, 40, 10),
+            "t",
+            true,
+            "threads",
+            0,
+            &view,
+            Some(&input),
+            Some(Border::Thin),
+        );
+        let row = |y: usize| (0..40).map(|x| surface.get(x, y).rune).collect::<String>();
+        // Filter strip on the first interior row (inside the top border).
+        assert!(row(1).contains("filter"), "filter sigil: {:?}", row(1));
+        assert!(row(1).contains("run"), "buffer text: {:?}", row(1));
+        // The table still renders below the filter line (not replaced by it).
+        let body = (2..9).map(row).collect::<Vec<_>>().join("\n");
+        assert!(body.contains("T-ab"), "table rows below filter: {body:?}");
     }
 
     #[test]

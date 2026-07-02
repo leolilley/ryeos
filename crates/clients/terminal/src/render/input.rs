@@ -111,6 +111,41 @@ pub fn draw_input_tile(
     }
 }
 
+/// A one-row live-filter strip: a `filter›` sigil, the buffer, and a block
+/// cursor when focused (or the placeholder when empty). Unlike `draw_input_tile`
+/// this draws no box — it composes ABOVE a widget inside the tile's own frame,
+/// so a table lens shows its rows with a filter line at the top.
+pub fn draw_filter_line(surface: &mut TextSurface, rect: Rect, input: &StudioInputVm, focused: bool) {
+    let w = rect.w as usize;
+    if w < 4 {
+        return;
+    }
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    let sigil = "filter\u{203a} ";
+    let sigil_w = display_width(sigil);
+    surface.draw_text(x, y, sigil, Style::new().fg(MUTED).bg(BG));
+    let field_x = x + sigil_w;
+    let avail = w.saturating_sub(sigil_w + 1);
+    if avail == 0 {
+        return;
+    }
+    if input.text.is_empty() {
+        let ph = truncate(&input.placeholder, avail);
+        surface.draw_text(field_x, y, &ph, Style::new().fg(MUTED).bg(BG));
+    } else {
+        let visible = truncate(&input.text, avail);
+        surface.draw_text(field_x, y, &visible, Style::new().fg(FG).bg(BG));
+    }
+    // The block cursor marks focus — only the focused tile owns keystrokes.
+    if focused {
+        let cursor_byte = input_cursor_byte(&input.text, input.cursor);
+        let cursor_col = display_width(&input.text[..cursor_byte]).min(avail.saturating_sub(1));
+        let cursor_char = input.text[cursor_byte..].chars().next().unwrap_or(' ');
+        surface.draw_char(field_x + cursor_col, y, cursor_char, Style::new().fg(BG).bg(FG));
+    }
+}
+
 /// Draw the completion hint muted, accenting any `[current-arg]` segments
 /// so the argument the operator is on stands out. Single line, width-bounded.
 fn draw_hint(surface: &mut TextSurface, x: usize, y: usize, hint: &str, max_w: usize) {
@@ -158,6 +193,7 @@ mod tests {
             hint: String::new(),
             submit_enabled: false,
             completion: Vec::new(),
+            live_filter: false,
             text: String::new(),
         }
     }

@@ -666,6 +666,18 @@ impl StudioCore {
         if !feeds {
             return Vec::new();
         }
+        // A live filter narrows the list, so a table cursor the operator moved
+        // down may now point past the shortened rows — which would make Enter
+        // (activate row) a no-op. Reset the owning tile's cursor to the top so
+        // the first narrowed row is selected and openable.
+        if let Some(tile_id) = self
+            .workspace
+            .tile_ids()
+            .into_iter()
+            .find(|id| id.0.to_string() == key.view_instance_id)
+        {
+            self.set_tile_cursor(tile_id, 0);
+        }
         self.emit_fetch_source_keyed(key.view_instance_id.clone(), &view_ref)
             .into_iter()
             .collect()
@@ -3118,6 +3130,73 @@ mod tests {
             action_for_focused_row(&core).is_none(),
             "a bundles row has no section activation"
         );
+    }
+
+    #[test]
+    fn editing_a_live_filter_resets_the_table_cursor_to_the_top() {
+        use crate::studio::view_model::action_for_focused_row;
+        use crate::workspace::ViewLocalState;
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "table",
+                        "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                        "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
+                        "selection": { "activate": "watch" },
+                        "affordances": [{
+                            "id": "watch",
+                            "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
+                        }],
+                        "input": { "id": "filter", "feeds": { "param": "status" } }
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let tile = core.workspace.focused_tile;
+        let key = tile.0.to_string();
+        // A long list the operator has scrolled down into.
+        core.data.sources.insert(
+            key.clone(),
+            serde_json::json!({
+                "threads": (0..60)
+                    .map(|i| serde_json::json!({ "thread_id": format!("T-{i}") }))
+                    .collect::<Vec<_>>()
+            }),
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 50 },
+        });
+        let cursor = |core: &StudioCore| match &core.workspace.tiles.get(&tile).unwrap().local {
+            ViewLocalState::GenericList { cursor, .. } => *cursor,
+            other => panic!("expected generic-list local, got {other:?}"),
+        };
+        assert_eq!(cursor(&core), 50);
+
+        // Typing into the live filter narrows the list; the cursor must reset to
+        // the top so Enter (activate) hits the first narrowed row, not a no-op
+        // pointing past the end.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InsertInputChar { ch: 'r' },
+        });
+        assert_eq!(cursor(&core), 0);
+
+        // With the narrowed result, the reset cursor resolves the first row.
+        core.data.sources.insert(
+            key.clone(),
+            serde_json::json!({ "threads": [ { "thread_id": "T-only" } ] }),
+        );
+        match action_for_focused_row(&core).expect("first narrowed row activates") {
+            StudioAction::InvokeAffordance { record, .. } => {
+                assert_eq!(record["thread_id"], "T-only")
+            }
+            other => panic!("expected affordance invoke, got {other:?}"),
+        }
     }
 
     #[test]
