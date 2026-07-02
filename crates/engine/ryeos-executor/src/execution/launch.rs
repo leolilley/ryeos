@@ -944,21 +944,10 @@ async fn run_claimed_thread_row(
     // Missing/empty/null parent limits means "no parent clamp" — never
     // deserialize `{}` into a zero-valued HardLimits, since 0 reads as "no
     // limit" and `min(x, 0)` would erase the child's limits.
-    let parent_limits_value = parent_execution_context.map(|ctx| &ctx.hard_limits);
-    let parent_limits: Option<HardLimits> = parent_limits_value
-        .filter(|v| match v {
-            Value::Null => false,
-            Value::Object(m) => !m.is_empty(),
-            _ => true,
-        })
-        .map(|v| serde_json::from_value(v.clone()))
-        .transpose()
-        .map_err(|e| anyhow::anyhow!("failed to parse parent_limits: {e}"))?;
+    let parent_limits = parent_limits_from_context(parent_execution_context)?;
     // Current launch depth (position in the spawn tree). Callback children use
     // trusted parent depth + 1; roots and same-braid continuations launch at 0.
-    let current_depth: u32 = parent_execution_context
-        .map(|ctx| ctx.depth.saturating_add(1))
-        .unwrap_or(0);
+    let current_depth = launch_depth_from_context(parent_execution_context);
     let hard_limits = compute_effective_limits(
         Some(&requested_limits),
         &limits_config.defaults,
@@ -1411,15 +1400,7 @@ async fn run_claimed_thread_row(
             // Strip runtime-control fields from prompt inputs. Parent
             // budget/depth now travels out-of-band, but rejecting prompt leaks
             // here keeps forged caller/action fields from becoming model input.
-            inputs: {
-                let mut inputs = parameters.clone();
-                if let Some(obj) = inputs.as_object_mut() {
-                    for k in ryeos_runtime::callback::RESERVED_CONTROL_KEYS {
-                        obj.remove(*k);
-                    }
-                }
-                inputs
-            },
+            inputs: prompt_inputs_from_parameters(parameters),
             previous_thread_id: previous_thread_id.map(str::to_string),
             parent_thread_id: parent_execution_context.map(|ctx| ctx.parent_thread_id.clone()),
             parent_capabilities: None,
@@ -2277,9 +2258,43 @@ fn normalize_runtime_terminal_status(status: &str) -> &'static str {
     }
 }
 
+fn parent_limits_from_context(
+    parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
+) -> anyhow::Result<Option<HardLimits>> {
+    let parent_limits_value = parent_execution_context.map(|ctx| &ctx.hard_limits);
+    parent_limits_value
+        .filter(|v| match v {
+            Value::Null => false,
+            Value::Object(m) => !m.is_empty(),
+            _ => true,
+        })
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("failed to parse parent_limits: {e}"))
+}
+
+fn launch_depth_from_context(
+    parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
+) -> u32 {
+    parent_execution_context
+        .map(|ctx| ctx.depth.saturating_add(1))
+        .unwrap_or(0)
+}
+
+fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
+    let mut inputs = parameters.clone();
+    if let Some(obj) = inputs.as_object_mut() {
+        for k in ryeos_runtime::callback::RESERVED_CONTROL_KEYS {
+            obj.remove(*k);
+        }
+    }
+    inputs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::limits::{LimitCaps, LimitValues};
 
     #[test]
     fn host_triple_matches_rustc_host() {
@@ -2472,5 +2487,103 @@ mod tests {
         assert!(is_runtime_terminal_status("timed_out"));
         assert!(!is_runtime_terminal_status("created"));
         assert!(!is_runtime_terminal_status("running"));
+    }
+
+    #[test]
+    fn parent_context_clamps_child_limits_and_increments_spawn_depth() {
+        let parent_hard_limits = HardLimits {
+            turns: 6,
+            tokens: 1_000,
+            spend_usd: 0.25,
+            spawns: 2,
+            depth: 3,
+            duration_seconds: 45,
+        };
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: serde_json::to_value(&parent_hard_limits).unwrap(),
+            depth: 4,
+        };
+
+        let parent_limits = parent_limits_from_context(Some(&ctx))
+            .expect("parent hard limits parse")
+            .expect("parent hard limits present");
+        let requested = LimitValues {
+            turns: 20,
+            tokens: 20_000,
+            spend_usd: 2.0,
+            spawns: 10,
+            depth: 8,
+            duration_seconds: 300,
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps::default(),
+            Some(&parent_limits),
+        );
+
+        assert_eq!(hard.turns, 6);
+        assert_eq!(hard.tokens, 1_000);
+        assert_eq!(hard.spend_usd, 0.25);
+        assert_eq!(hard.spawns, 2);
+        assert_eq!(hard.depth, 3);
+        assert_eq!(hard.duration_seconds, 45);
+        assert_eq!(launch_depth_from_context(Some(&ctx)), 5);
+    }
+
+    #[test]
+    fn absent_parent_context_is_root_or_same_braid_launch() {
+        assert!(parent_limits_from_context(None).unwrap().is_none());
+        assert_eq!(launch_depth_from_context(None), 0);
+    }
+
+    #[test]
+    fn empty_parent_limits_do_not_zero_erase_child_limits() {
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: json!({}),
+            depth: 2,
+        };
+
+        assert!(parent_limits_from_context(Some(&ctx)).unwrap().is_none());
+        assert_eq!(launch_depth_from_context(Some(&ctx)), 3);
+    }
+
+    #[test]
+    fn malformed_parent_limits_fail_loudly() {
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: json!({"turns": "not-a-number"}),
+            depth: 0,
+        };
+
+        let err = parent_limits_from_context(Some(&ctx)).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse parent_limits"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn forged_parent_control_params_are_not_launch_context_or_prompt_input() {
+        let params = json!({
+            "task": "keep this",
+            "parent_limits": {"turns": 1},
+            "parent_thread_id": "T-forged",
+            "depth": 99,
+            "continuation": {"seed": "forged"}
+        });
+
+        assert!(
+            parent_limits_from_context(None).unwrap().is_none(),
+            "parent clamp must come only from trusted ParentExecutionContext"
+        );
+        assert_eq!(
+            launch_depth_from_context(None),
+            0,
+            "forged params must not affect launch depth"
+        );
+        assert_eq!(prompt_inputs_from_parameters(&params), json!({"task": "keep this"}));
     }
 }

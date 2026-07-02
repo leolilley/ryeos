@@ -399,6 +399,39 @@ mod tests {
     }
 
     #[test]
+    fn generate_with_context_round_trips_parent_limits_and_depth() {
+        let store = CallbackCapabilityStore::new();
+        let hard_limits = serde_json::json!({
+            "turns": 6,
+            "tokens": 1000,
+            "spend_usd": 0.25,
+            "spawns": 2,
+            "depth": 3,
+            "duration_seconds": 45,
+        });
+        let cap = store.generate_with_context(
+            "T-parent",
+            PathBuf::from("/project"),
+            Duration::from_secs(300),
+            vec!["ryeos.*".to_string()],
+            provenance(PathBuf::from("/project")),
+            Some("bundle-123".to_string()),
+            Some("directive:team/parent".to_string()),
+            hard_limits.clone(),
+            4,
+        );
+
+        let validated = store
+            .validate(&cap.token, "T-parent", PathBuf::from("/project").as_path())
+            .unwrap();
+        assert_eq!(validated.thread_id, "T-parent");
+        assert_eq!(validated.hard_limits, hard_limits);
+        assert_eq!(validated.depth, 4);
+        assert_eq!(validated.effective_bundle_id.as_deref(), Some("bundle-123"));
+        assert_eq!(validated.item_ref.as_deref(), Some("directive:team/parent"));
+    }
+
+    #[test]
     fn validate_rejects_unknown_token() {
         let store = CallbackCapabilityStore::new();
         let err = store

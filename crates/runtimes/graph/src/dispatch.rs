@@ -714,6 +714,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn graph_dispatch_does_not_inject_parent_context_for_budgeted_children() {
+        let cases = ["directive:team/child", "graph:team/subgraph"];
+        for item_id in cases {
+            let last = Arc::new(Mutex::new(None));
+            let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+                Arc::new(CapturingClient { last: last.clone() });
+            let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
+
+            let action = json!({
+                "item_id": item_id,
+                "params": {"user_input": "kept"},
+            });
+            dispatch_action(&client, &action, "T-test", "/project", None)
+                .await
+                .expect("dispatch ok");
+
+            let forwarded = last.lock().unwrap().take().expect("action captured");
+            assert_eq!(forwarded.params, json!({"user_input": "kept"}));
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_call_block_fails_loudly() {
         let client = make_mock_client(vec![]);
         let action = json!({
