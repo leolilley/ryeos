@@ -1,0 +1,13 @@
+# ryeos:signed:2026-07-02T06:15:56Z:9566cc61b80fb88201712912760370d495d9f224091cd410e06092808f72155b:dBWePjHPjRR+gRKQBQ5tDnRxtQF2iFg82gFTih6h1amm3qZqs1EEZ0rVQ9sZvkTQWGCi+gziu12m+KpgEB9MAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "directive-runtime"
+defaults:
+  # 0 means unlimited. By default RyeOS applies no hard execution limits; runaways
+  # are an operator/project policy via this config, directive-authored `limits:`,
+  # execution policy, or caller overrides.
+  turns: 0
+  tokens: 0
+  spend_usd: 0.0
+  spawns: 0
+  depth: 0
+  duration_seconds: 0
+caps: {}

@@ -40,7 +40,12 @@ pub async fn run_hooks(
         }
 
         let interpolated = crate::interpolation::interpolate_action(&hook.action, context)
-            .unwrap_or(hook.action.clone());
+            .map_err(|e| {
+                format!(
+                    "hook[{idx}] (id={}): action interpolation failed: {e:#}",
+                    hook.id
+                )
+            })?;
 
         let result = match dispatcher(interpolated, project_path.to_string()).await {
             Ok(val) => val,
@@ -57,10 +62,7 @@ pub async fn run_hooks(
             continue;
         }
 
-        if control_result.is_none()
-            && !result.is_null()
-            && result != serde_json::json!({"success": true})
-        {
+        if control_result.is_none() && result.get("action").is_some() {
             control_result = Some(result);
         }
     }
@@ -150,7 +152,7 @@ mod tests {
         let result = run_hooks("error", &ctx, &hooks, "/tmp", &dispatcher)
             .await
             .unwrap();
-        assert!(result.is_some());
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -185,5 +187,110 @@ mod tests {
             "dispatch failure should propagate as Err: {result:?}"
         );
         assert!(result.unwrap_err().contains("dispatch failed"));
+    }
+
+    #[tokio::test]
+    async fn run_hooks_propagates_interpolation_error() {
+        let hooks = vec![HookDefinition {
+            id: "needs-missing".to_string(),
+            event: "continuation".to_string(),
+            layer: Some(1),
+            condition: None,
+            action: json!({
+                "primary": "execute",
+                "item_id": "directive:test/hook",
+                "params": {"reason": "${event.missing}"}
+            }),
+        }];
+        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
+            Box::pin(async { Ok(json!({"action": "continue"})) })
+        });
+
+        let result = run_hooks(
+            "continuation",
+            &json!({"event": {"reason": "context_window"}}),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(err.contains("needs-missing"));
+        assert!(err.contains("action interpolation failed"));
+    }
+
+    #[tokio::test]
+    async fn run_hooks_interpolates_event_payload_preserving_types() {
+        let hooks = vec![HookDefinition {
+            id: "typed-event".to_string(),
+            event: "continuation".to_string(),
+            layer: Some(1),
+            condition: None,
+            action: json!({
+                "primary": "execute",
+                "item_id": "directive:test/hook",
+                "params": {
+                    "messages": "${event.messages}",
+                    "usage": "${event.usage}"
+                }
+            }),
+        }];
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_for_dispatch = captured.clone();
+        let dispatcher: HookDispatcher = Box::new(move |action, _project| {
+            let captured = captured_for_dispatch.clone();
+            Box::pin(async move {
+                *captured.lock().unwrap() = Some(action);
+                Ok(json!({"action": "continue"}))
+            })
+        });
+
+        run_hooks(
+            "continuation",
+            &json!({
+                "event": {
+                    "messages": [{"role": "assistant", "content": "hi"}],
+                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_usd": 0.0}
+                }
+            }),
+            &hooks,
+            "/tmp",
+            &dispatcher,
+        )
+        .await
+        .unwrap();
+
+        let action = captured.lock().unwrap().clone().unwrap();
+        assert!(action["params"]["messages"].is_array());
+        assert!(action["params"]["usage"].is_object());
+    }
+
+    #[tokio::test]
+    async fn run_hooks_non_control_result_does_not_mask_later_control() {
+        let hooks = vec![
+            make_hook("summary", "continuation", 1),
+            make_hook("abort", "continuation", 1),
+        ];
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+        let calls_for_dispatch = calls.clone();
+        let dispatcher: HookDispatcher = Box::new(move |_action, _project| {
+            let calls = calls_for_dispatch.clone();
+            Box::pin(async move {
+                let mut count = calls.lock().unwrap();
+                *count += 1;
+                if *count == 1 {
+                    Ok(json!("CONTINUATION_HOOK_SUMMARY: ok"))
+                } else {
+                    Ok(json!({"action": "abort"}))
+                }
+            })
+        });
+
+        let result = run_hooks("continuation", &json!({}), &hooks, "/tmp", &dispatcher)
+            .await
+            .unwrap();
+
+        assert_eq!(result, Some(json!({"action": "abort"})));
     }
 }
