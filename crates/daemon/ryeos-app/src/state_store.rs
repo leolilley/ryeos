@@ -1489,6 +1489,17 @@ impl StateStore {
         Self::rows_to_list_items(&g, thread_rows)
     }
 
+    /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
+    /// for a `chain_root_id` — the deep-watch summary of an execution and its
+    /// continuations.
+    pub fn chain_usage_totals(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<queries::ThreadUsageTotals> {
+        let g = self.lock()?;
+        queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
+    }
+
     /// As [`Self::list_threads_sorted`] but with the full optional filter set
     /// (status / kind / requested_by) the operator dashboard narrows by.
     pub fn list_threads_query(

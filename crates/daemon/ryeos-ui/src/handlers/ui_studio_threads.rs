@@ -112,6 +112,21 @@ pub async fn handle_inspect(
         .state_store
         .latest_thread_events(&req.thread_id, req.event_limit.clamp(1, MAX_EVENT_LIMIT))?;
 
+    // Deep-watch execution summary: chain-wide usage totals (this thread plus
+    // its continuations) as a list of labeled metrics the detail lens projects
+    // one row each. Kept as a projectable array (not the flat `cost.*` facets,
+    // whose dotted keys a view projection can't navigate).
+    let totals = state
+        .state_store
+        .chain_usage_totals(&thread.thread.chain_root_id)?;
+    let usage = serde_json::json!([
+        { "label": "input tokens", "value": totals.input_tokens.to_string() },
+        { "label": "output tokens", "value": totals.output_tokens.to_string() },
+        { "label": "cost", "value": format!("${:.4}", totals.spend_usd) },
+        { "label": "turns", "value": totals.completed_turns.to_string() },
+        { "label": "threads in chain", "value": totals.thread_count.to_string() },
+    ]);
+
     Ok(serde_json::json!({
         "schema_version": "studio.thread.inspect.v1",
         "thread": thread,
@@ -120,6 +135,7 @@ pub async fn handle_inspect(
         "children": children,
         "facets": facets_map,
         "events": events,
+        "usage": usage,
     }))
 }
 

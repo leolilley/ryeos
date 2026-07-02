@@ -2366,7 +2366,11 @@ mod tests {
             "thread": { "thread_id": "T-ab", "item_ref": "directive:ops/base", "status": "running" },
             "result": { "outcome_code": "error", "error": "boom" },
             "artifacts": [ { "artifact_type": "file", "uri": "file://out.txt" } ],
-            "children": [ { "item_ref": "directive:ops/child", "status": "completed" } ]
+            "children": [ { "item_ref": "directive:ops/child", "status": "completed" } ],
+            "usage": [
+                { "label": "input tokens", "value": "1200" },
+                { "label": "cost", "value": "$0.0421" }
+            ]
         });
         let section = |title: &str| {
             binding
@@ -2398,6 +2402,13 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].primary, "directive:ops/child");
         assert_eq!(children[0].meta.as_deref(), Some("completed"));
+
+        // Usage: one row per labeled metric (value primary, label meta).
+        let usage = project_section(section("Usage"), &response);
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].primary, "1200");
+        assert_eq!(usage[0].meta.as_deref(), Some("input tokens"));
+        assert_eq!(usage[1].primary, "$0.0421");
 
         // Re-fetches on the selection facet; each section pulls the selected
         // thread via @facet, so an unset selection SUPPRESSES the fetch (D8)

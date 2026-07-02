@@ -1,11 +1,11 @@
-# ryeos:signed:2026-07-02T01:29:21Z:ff0d97a368d6a2deea5745bc66ec87a0ffbb03dcb1560842223932ca91d56fd5:dfjwKYzyLGNGKtDzBobNZPSQO6NfYn1tXeIGqtVnNGQWdnvQUD06jqvqjRRDfKaQPVsj+5f+kcalIrqKITB0Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-02T03:26:06Z:6066f4810fd0cc3f85508456ca3d058fd6d10d3126303e64944bb44ccedfa082:WrtypUJy+iptDhW/sRYeW4cea4LD7LBM7gQGwuSnmlHu/kJ40CzVkE3gxlTd814XgfNGXP/WQU6XVkaILkRICw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-detail
 version: "1.0.0"
 description: >-
   Thread detail lens: the triage read for one execution. Sections project the
-  inspect service (summary, outcome, artifacts, children) — each reads a sub-value
-  of the one inspect response, so the whole thing degrades to empty sections
-  rather than a raw-JSON dump when a thread has no result/artifacts/children yet.
+  inspect service (summary, usage, outcome, artifacts, children) — each reads a
+  sub-value of the one inspect response, so the whole thing degrades to empty
+  sections rather than a raw-JSON dump when a thread has no result/artifacts yet.
 
 widget: sections
 title: Thread
@@ -31,6 +31,18 @@ sections:
           cancelled: warn
           completed: good
         default: neutral
+
+  # Usage: chain-wide execution totals (tokens, cost, turns, thread count), one
+  # metric per row — the deep-watch summary of what this execution consumed.
+  - title: Usage
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: usage
+    projection:
+      primary: value
+      meta: label
 
   # Outcome: the `result` sub-object (outcome code + error). Null until the
   # thread finishes → this section is simply empty.
