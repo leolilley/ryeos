@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-02T02:43:19Z:a87b424b3c87887ed7b213c2761de6da81a9fb87c13880595328fdf88ba2b8c9:n/dn+Ik6xvJgGdviqkiwXQ+8LS+DEj/cC9C0FJ6fa4O9plRXAuTq9pqgZi7sn5ja6KMZHlKajdfAyUSZB+YnBg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+# ryeos:signed:2026-07-02T03:44:31Z:a87b424b3c87887ed7b213c2761de6da81a9fb87c13880595328fdf88ba2b8c9:NKIyfeN+tan16O9bKZb9esr7fpjjY7NsZ3PDfBFFhIILRt04YNTiAAizDjVblH60Mh6ZKM8ZuSPIprg/uIPRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - s
 description: Cryptographically sign one or more items or item globs by canonical ref or .ai path

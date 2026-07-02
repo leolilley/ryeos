@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-02T02:38:55Z:05994c198c37c4d4378aa223f3b3f6dac032fdb726f3aee6c7d6565000d93c76:wTdkVM0U5egWwNwAkwAuzBPvv0c9amisU/hRCUZYDYX6+h2znZi4V+1OgdkR7aF3E6nLBy5xGpnOBQCP96RNAA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-02T03:44:33Z:05994c198c37c4d4378aa223f3b3f6dac032fdb726f3aee6c7d6565000d93c76:Kd2W12LBNOLKm4gPMR21RLtywpNpqQUYKPtqrsRWUD7odm4RkpeqiO6uYbO0K2YTP+zCYn5gD/QvfTAE10vRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example long-running directive that self-continues at the context boundary and seeds the successor with a summary hook."
 version: "1.0.0"
