@@ -1631,6 +1631,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reconcile_follow_converges_reserved_with_child_and_successor() {
+        // Partial spawn: child + successor recorded (so the parent is continued), but
+        // crashed before mark_follow_waiting → stuck `reserved`. Converge to waiting;
+        // the still-created child then yields a relaunch.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cres", "Cres"))
+            .unwrap();
+        state
+            .state_store
+            .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
+                follow_key: "wk-res".to_string(),
+                parent_thread_id: "P".to_string(),
+                parent_chain_root_id: "P".to_string(),
+                follow_node: "n".to_string(),
+                graph_run_id: "g".to_string(),
+                step_count: 0,
+                frontier_id: None,
+            })
+            .unwrap();
+        state.state_store.set_follow_child("wk-res", "Cres", "Cres").unwrap();
+        state.state_store.set_follow_parent_successor("wk-res", "S").unwrap();
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-res")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::RESERVED,
+            "precondition: stuck reserved (mark_follow_waiting never ran)"
+        );
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } if child_thread_id == "Cres"
+            )),
+            "a reserved waiter with recorded child+successor + continued parent must converge and relaunch, got {actions:?}"
+        );
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-res")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::WAITING,
+            "convergence must mark the waiter waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_leaves_reserved_when_parent_not_continued() {
+        // Reserved, child recorded, but no successor and parent not continued → the
+        // parent's own native resume re-drives spawn_follow_child; leave it.
+        let (_tmp, state) = setup_app_state();
+        state
+            .state_store
+            .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
+                follow_key: "wk-res2".to_string(),
+                parent_thread_id: "Pnc".to_string(),
+                parent_chain_root_id: "Pnc".to_string(),
+                follow_node: "n".to_string(),
+                graph_run_id: "g".to_string(),
+                step_count: 0,
+                frontier_id: None,
+            })
+            .unwrap();
+        state.state_store.set_follow_child("wk-res2", "Cnc", "Cnc").unwrap();
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            actions.is_empty(),
+            "a reserved waiter whose parent has not continued must be left for the parent resume, got {actions:?}"
+        );
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-res2")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::RESERVED,
+            "the waiter must remain reserved"
+        );
+    }
+
+    #[tokio::test]
     async fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter() {
         // Blocker-1 recovery: a `resuming` waiter whose VALID follow-resume successor
         // was claimed + run by another launcher (e.g. a native-resume intent) must be
