@@ -1571,7 +1571,7 @@ fn run_sign(
     source: String,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_tools::actions::sign::{run_sign, SignSource};
+    use ryeos_tools::actions::sign::{run_sign, BatchReport, ItemOutcome, SignSource};
 
     let (item_refs, project_arg, source_str) = if stdin_json {
         if !item_refs.is_empty() {
@@ -1586,12 +1586,26 @@ fn run_sign(
         (item_refs, project, source)
     };
 
+    if item_refs.is_empty() {
+        anyhow::bail!("ITEM_REF required (or pass item_ref/item_refs in stdin JSON)");
+    }
+
     let source = SignSource::parse(&source_str)?;
     let project = project_arg.or_else(|| std::env::current_dir().ok());
 
-    let mut batch = ryeos_tools::actions::sign::BatchReport::default();
+    let mut batch = BatchReport::default();
+    let batch_mode = item_refs.len() > 1;
     for item_ref in item_refs {
-        batch.extend(run_sign(&item_ref, project.as_deref(), source)?);
+        match run_sign(&item_ref, project.as_deref(), source) {
+            Ok(report) => batch.extend(report),
+            Err(e) if batch_mode => batch.failed.push(ItemOutcome {
+                item_ref,
+                signature: None,
+                error: Some(format!("{e:#}")),
+                warnings: Vec::new(),
+            }),
+            Err(e) => return Err(e),
+        }
     }
     println!("{}", serde_json::to_string_pretty(&batch)?);
     if !batch.is_total_success() {
