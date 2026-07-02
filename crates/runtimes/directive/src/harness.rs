@@ -236,18 +236,21 @@ pub enum HookAction {
 }
 
 impl HookAction {
-    pub fn from_value(action: &Value) -> Self {
-        if let Some(action_type) = action.get("action").and_then(|v| v.as_str()) {
-            match action_type {
-                "retry" => HookAction::Retry,
-                "fail" => HookAction::Fail,
-                "abort" => HookAction::Abort,
-                "suspend" => HookAction::Suspend,
-                "escalate" => HookAction::Escalate,
-                _ => HookAction::Continue,
-            }
-        } else {
-            HookAction::Continue
+    pub fn from_value(action: &Value) -> Result<Self, String> {
+        let Some(action_value) = action.get("action") else {
+            return Ok(HookAction::Continue);
+        };
+        let Some(action_type) = action_value.as_str() else {
+            return Err("hook control action must be a string".to_string());
+        };
+        match action_type {
+            "retry" => Ok(HookAction::Retry),
+            "fail" => Ok(HookAction::Fail),
+            "abort" => Ok(HookAction::Abort),
+            "suspend" => Ok(HookAction::Suspend),
+            "escalate" => Ok(HookAction::Escalate),
+            "continue" => Ok(HookAction::Continue),
+            other => Err(format!("unknown hook control action `{other}`")),
         }
     }
 }
@@ -446,21 +449,27 @@ mod tests {
     #[test]
     fn hook_action_from_value() {
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"action": "retry"})),
+            HookAction::from_value(&serde_json::json!({"action": "retry"})).unwrap(),
             HookAction::Retry
         );
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"action": "fail"})),
+            HookAction::from_value(&serde_json::json!({"action": "fail"})).unwrap(),
             HookAction::Fail
         );
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"action": "abort"})),
+            HookAction::from_value(&serde_json::json!({"action": "abort"})).unwrap(),
             HookAction::Abort
         );
         assert_eq!(
-            HookAction::from_value(&serde_json::json!({"action": "unknown"})),
+            HookAction::from_value(&serde_json::json!("summary text")).unwrap(),
             HookAction::Continue
         );
+        assert_eq!(
+            HookAction::from_value(&serde_json::json!({"result": "summary text"})).unwrap(),
+            HookAction::Continue
+        );
+        assert!(HookAction::from_value(&serde_json::json!({"action": "unknown"})).is_err());
+        assert!(HookAction::from_value(&serde_json::json!({"action": 123})).is_err());
     }
 
     #[test]

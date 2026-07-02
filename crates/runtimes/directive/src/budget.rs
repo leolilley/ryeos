@@ -33,6 +33,14 @@ impl BudgetTracker {
         self.max_usd > 0.0 && self.total_usd >= self.max_usd
     }
 
+    pub fn remaining_spend_usd(&self) -> Option<f64> {
+        if self.max_usd <= 0.0 {
+            None
+        } else {
+            Some((self.max_usd - self.total_usd).max(0.0))
+        }
+    }
+
     pub fn cost(&self) -> RuntimeCost {
         RuntimeCost {
             input_tokens: self.total_input,
