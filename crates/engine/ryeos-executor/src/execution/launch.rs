@@ -709,6 +709,10 @@ pub struct BuildAndLaunchParams<'a> {
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
+    /// Trusted parent execution context carried out-of-band from schema-driven
+    /// dispatch. Present for callback-dispatched child launches; absent for
+    /// roots and same-braid continuations.
+    pub parent_execution_context: Option<&'a crate::dispatch::ParentExecutionContext>,
     /// Machine continuation: fold the chain and resume with NO new stimulus.
     /// `false` for fresh launches and operator follow-ups (which inject their
     /// `parameters` as the opening stimulus); `true` only for an autonomous
@@ -813,6 +817,7 @@ async fn run_claimed_thread_row(
         required_envelope_fields,
         pre_minted_thread_id: _,
         previous_thread_id,
+        parent_execution_context,
         suppress_stimulus,
         captured_effective_caps,
         checkpoint_resume_mode,
@@ -933,12 +938,14 @@ async fn run_claimed_thread_row(
     };
     let requested_limits = apply_execution_policy_overrides(&base_limits, &execution_policy);
     let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
-    // Parent budget clamp: a child can never exceed the limits of the parent
-    // that spawned it. Missing/empty/null `parent_limits` means "no parent
-    // clamp" — never deserialize `{}` into a zero-valued HardLimits, since 0
-    // reads as "no limit" and `min(x, 0)` would erase the child's limits.
-    let parent_limits: Option<HardLimits> = parameters
-        .get(ryeos_runtime::callback::PARAM_PARENT_LIMITS)
+    // Parent budget/depth inheritance is trusted control-plane data carried
+    // out-of-band (callback token → DispatchRequest). It is never read from
+    // action parameters, so runtimes and graph authors cannot spoof it.
+    // Missing/empty/null parent limits means "no parent clamp" — never
+    // deserialize `{}` into a zero-valued HardLimits, since 0 reads as "no
+    // limit" and `min(x, 0)` would erase the child's limits.
+    let parent_limits_value = parent_execution_context.map(|ctx| &ctx.hard_limits);
+    let parent_limits: Option<HardLimits> = parent_limits_value
         .filter(|v| match v {
             Value::Null => false,
             Value::Object(m) => !m.is_empty(),
@@ -947,19 +954,11 @@ async fn run_claimed_thread_row(
         .map(|v| serde_json::from_value(v.clone()))
         .transpose()
         .map_err(|e| anyhow::anyhow!("failed to parse parent_limits: {e}"))?;
-    // Current launch depth (position in the spawn tree). Threaded into
-    // EnvelopeRequest.depth so the harness enforces depth against the real
-    // position; the depth *limit* is separate (HardLimits.depth, from
-    // requested.depth). Fail loud rather than truncating an out-of-range value.
-    let current_depth: u32 = match parameters.get(ryeos_runtime::callback::PARAM_DEPTH) {
-        None | Some(Value::Null) => 0,
-        Some(v) => {
-            let n = v.as_u64().ok_or_else(|| {
-                anyhow::anyhow!("params.depth must be an unsigned integer, got {v}")
-            })?;
-            u32::try_from(n).map_err(|_| anyhow::anyhow!("params.depth {n} exceeds u32"))?
-        }
-    };
+    // Current launch depth (position in the spawn tree). Callback children use
+    // trusted parent depth + 1; roots and same-braid continuations launch at 0.
+    let current_depth: u32 = parent_execution_context
+        .map(|ctx| ctx.depth.saturating_add(1))
+        .unwrap_or(0);
     let hard_limits = compute_effective_limits(
         Some(&requested_limits),
         &limits_config.defaults,
@@ -1325,6 +1324,8 @@ async fn run_claimed_thread_row(
         // ref), so token-claimed caps and minted caps cannot diverge.
         effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
+        serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
+        current_depth,
     );
 
     // 6b. Build inventory the launching kind asked for. The engine
@@ -1407,9 +1408,9 @@ async fn run_claimed_thread_row(
             operator_trusted_keys_dir,
         },
         EnvelopeRequest {
-            // Strip runtime-control fields the graph dispatcher injects into
-            // child params so they never leak into the directive's prompt
-            // inputs (unreferenced inputs get appended to the prompt).
+            // Strip runtime-control fields from prompt inputs. Parent
+            // budget/depth now travels out-of-band, but rejecting prompt leaks
+            // here keeps forged caller/action fields from becoming model input.
             inputs: {
                 let mut inputs = parameters.clone();
                 if let Some(obj) = inputs.as_object_mut() {
@@ -1420,7 +1421,7 @@ async fn run_claimed_thread_row(
                 inputs
             },
             previous_thread_id: previous_thread_id.map(str::to_string),
-            parent_thread_id: None,
+            parent_thread_id: parent_execution_context.map(|ctx| ctx.parent_thread_id.clone()),
             parent_capabilities: None,
             depth: current_depth,
             suppress_stimulus,
@@ -1918,6 +1919,7 @@ async fn launch_claimed_successor(
             required_envelope_fields: &required_envelope_fields,
             pre_minted_thread_id: None,
             previous_thread_id: Some(&previous_thread_id),
+            parent_execution_context: None,
             suppress_stimulus,
             captured_effective_caps,
             checkpoint_resume_mode: match mode {
@@ -1989,6 +1991,7 @@ async fn launch_claimed_native_resume(
             pre_minted_thread_id: None,
             // SAME thread, not a successor — no chain braid.
             previous_thread_id: None,
+            parent_execution_context: None,
             // Crash resume folds no new stimulus; it reloads its own checkpoint.
             suppress_stimulus: true,
             // Pin the captured authority verbatim (same as a machine relaunch).

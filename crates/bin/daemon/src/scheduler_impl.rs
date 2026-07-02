@@ -110,6 +110,7 @@ impl SchedulerContext for AppSchedulerContext {
             usage_subject: None,
             usage_subject_asserted_by: None,
             previous_thread_id: None,
+            parent_execution_context: None,
         };
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {

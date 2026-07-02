@@ -63,7 +63,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
-    handle_execute(params, state, &thread_auth, child_provenance).await
+    handle_execute(params, state, &thread_auth, &cap, child_provenance).await
 }
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
@@ -112,6 +112,7 @@ async fn handle_execute(
     params: DispatchActionParams,
     state: &AppState,
     thread_auth: &ThreadAuthState,
+    cap: &ryeos_app::callback_token::CallbackCapability,
     child_provenance: ryeos_app::execution_provenance::ExecutionProvenance,
 ) -> Result<Value> {
     // V5.4 P2 — strict typed callback contract requires every leaf
@@ -179,6 +180,11 @@ async fn handle_execute(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        parent_execution_context: Some(crate::dispatch::ParentExecutionContext {
+            parent_thread_id: cap.thread_id.clone(),
+            hard_limits: cap.hard_limits.clone(),
+            depth: cap.depth,
+        }),
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is

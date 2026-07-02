@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
 
@@ -35,6 +36,12 @@ pub struct CallbackCapability {
     pub effective_bundle_id: Option<String>,
     /// Root item ref that minted this callback token, used for attribution.
     pub item_ref: Option<String>,
+    /// Parent thread's resolved hard limits, serialized by the launcher. The
+    /// daemon passes this through out-of-band on callback-dispatched child
+    /// launches so runtimes cannot spoof parent budget inheritance.
+    pub hard_limits: Value,
+    /// Parent thread's current spawn-tree depth. Children launch at `depth + 1`.
+    pub depth: u32,
 }
 
 pub struct CallbackCapabilityStore {
@@ -70,6 +77,8 @@ impl CallbackCapabilityStore {
             provenance,
             None,
             None,
+            Value::Null,
+            0,
         )
     }
 
@@ -82,6 +91,8 @@ impl CallbackCapabilityStore {
         provenance: ExecutionProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
+        hard_limits: Value,
+        depth: u32,
     ) -> CallbackCapability {
         let random_bytes: [u8; 32] = rand::random();
         let hex = lillux::cas::sha256_hex(&random_bytes);
@@ -101,6 +112,8 @@ impl CallbackCapabilityStore {
             provenance,
             effective_bundle_id,
             item_ref,
+            hard_limits,
+            depth,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
@@ -564,6 +577,8 @@ mod tests {
             ),
             effective_bundle_id: None,
             item_ref: None,
+            hard_limits: serde_json::Value::Null,
+            depth: 0,
         };
 
         let cloned = cap.clone();
