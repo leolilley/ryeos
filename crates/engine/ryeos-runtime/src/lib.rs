@@ -43,7 +43,7 @@ pub use command::{
     CommandProjectResolution, CommandProvenance, CommandRegistrationClaim,
     CommandRegistrationClaimPattern, CommandRegistrationPolicy, CommandRegistrationRule,
     CommandRegistry, CommandRegistryError, ControlFlagBinding, FlagKeyNormalization,
-    MatchedCommand,
+    InvocationInputContract, InvocationInputField, InvocationInputType, MatchedCommand,
 };
 pub use condition::{apply_operator, matches, resolve_path};
 pub use daemon_rpc::{
