@@ -359,33 +359,70 @@ pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<Threa
 ///
 /// When `filter_principal` is `Some(fp)`, only threads with
 /// `requested_by = fp` are returned. `None` returns all threads.
+/// Row ordering for a thread listing. `Default` is the historical
+/// oldest-first order (public `threads.list`, CLI); `Watch` is the operator
+/// watch-console order: active threads (non-terminal status) first, then newest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadSort {
+    #[default]
+    Default,
+    Watch,
+}
+
 pub fn list_threads_filtered(
     db: &ProjectionDb,
     limit: usize,
     filter_principal: Option<&str>,
 ) -> anyhow::Result<Vec<ThreadRow>> {
+    list_threads_sorted(db, limit, filter_principal, ThreadSort::Default)
+}
+
+/// As [`list_threads_filtered`] but with an explicit [`ThreadSort`]. The
+/// `Watch` order sorts active-before-terminal, then newest — for the operator
+/// dashboard — without changing the default order the public list / CLI use.
+/// Ordering is applied BEFORE `LIMIT`, so a limited watch list still shows the
+/// most relevant (active + recent) rows.
+pub fn list_threads_sorted(
+    db: &ProjectionDb,
+    limit: usize,
+    filter_principal: Option<&str>,
+    sort: ThreadSort,
+) -> anyhow::Result<Vec<ThreadRow>> {
+    // Terminal statuses inlined from the shared constant (stable substrate
+    // vocabulary, not user input), so `active` = status NOT terminal.
+    let order = match sort {
+        ThreadSort::Default => "ORDER BY created_at".to_string(),
+        ThreadSort::Watch => {
+            let terminal_in = TERMINAL_STATUSES
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "ORDER BY CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END, created_at DESC"
+            )
+        }
+    };
     let sql = match filter_principal {
-        Some(_) => format!(
-            "SELECT {THREAD_COLUMNS} FROM threads WHERE requested_by = ? ORDER BY created_at LIMIT ?"
-        ),
-        None => format!(
-            "SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?"
-        ),
+        Some(_) => {
+            format!("SELECT {THREAD_COLUMNS} FROM threads WHERE requested_by = ? {order} LIMIT ?")
+        }
+        None => format!("SELECT {THREAD_COLUMNS} FROM threads {order} LIMIT ?"),
     };
     let mut stmt = db
         .connection()
         .prepare(&sql)
-        .context("prepare list_threads_filtered")?;
+        .context("prepare list_threads_sorted")?;
     let rows = match filter_principal {
         Some(fp) => {
             let params: [&dyn rusqlite::types::ToSql; 2] = [&fp, &limit];
             stmt.query_map(params, ThreadRow::from_row)
-                .context("query list_threads_filtered")?
+                .context("query list_threads_sorted")?
         }
         None => {
             let params: [&dyn rusqlite::types::ToSql; 1] = [&limit];
             stmt.query_map(params, ThreadRow::from_row)
-                .context("query list_threads_filtered")?
+                .context("query list_threads_sorted")?
         }
     };
     Ok(rows.filter_map(|r| r.ok()).collect())
@@ -1643,5 +1680,51 @@ mod tests {
         assert_eq!(rows[0].thread_count, 1);
         assert_eq!(rows[0].input_tokens, 150);
         assert_eq!(rows[0].output_tokens, 15);
+    }
+
+    /// Raw insert with a controlled `created_at`, so watch ordering (which lives
+    /// in SQL) can be asserted deterministically across timestamps.
+    fn insert_thread_at(db: &ProjectionDb, id: &str, status: &str, created_at: &str) {
+        db.connection()
+            .execute(
+                "INSERT INTO threads \
+                 (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
+                  launch_mode, current_site_id, origin_site_id, created_at, updated_at) \
+                 VALUES (?1, ?1, 'directive', ?2, 'directive:test', 'test/exec', \
+                  'inline', 'site:test', 'site:test', ?3, ?3)",
+                rusqlite::params![id, status, created_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn watch_sort_orders_active_first_then_newest_limit_after() {
+        let db = test_db();
+        insert_thread_at(&db, "T-old-run", "running", "2026-01-01T00:00:00Z");
+        insert_thread_at(&db, "T-old-done", "completed", "2026-02-01T00:00:00Z");
+        insert_thread_at(&db, "T-new-run", "running", "2026-03-01T00:00:00Z");
+        insert_thread_at(&db, "T-new-done", "completed", "2026-04-01T00:00:00Z");
+
+        // Watch: active (non-terminal) before terminal, newest-first per bucket.
+        let watch = list_threads_sorted(&db, 10, None, ThreadSort::Watch).unwrap();
+        assert_eq!(
+            watch.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            ["T-new-run", "T-old-run", "T-new-done", "T-old-done"]
+        );
+
+        // Default order is unchanged: oldest-first by created_at.
+        let default = list_threads_filtered(&db, 10, None).unwrap();
+        assert_eq!(
+            default.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            ["T-old-run", "T-old-done", "T-new-run", "T-new-done"]
+        );
+
+        // LIMIT applies AFTER watch ordering — the single row is the top active,
+        // not an arbitrary oldest row.
+        let top = list_threads_sorted(&db, 1, None, ThreadSort::Watch).unwrap();
+        assert_eq!(
+            top.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            ["T-new-run"]
+        );
     }
 }

@@ -26,6 +26,10 @@ use ryeos_engine::contracts::{
 use ryeos_engine::engine::Engine;
 use ryeos_state::UsageSubject;
 
+/// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
+/// can name the watch sort without a direct `ryeos-state` dependency.
+pub use ryeos_state::queries::ThreadSort;
+
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
     kind_profiles: Arc<KindProfileRegistry>,
@@ -1100,6 +1104,23 @@ impl ThreadLifecycleService {
         Ok(self
             .state_store
             .list_threads_filtered(limit, filter_principal)?
+            .into_iter()
+            .map(|item| self.decorate_list_item(item))
+            .collect())
+    }
+
+    /// As [`Self::list_thread_views_filtered`] but with an explicit sort — the
+    /// watch console requests [`ryeos_state::queries::ThreadSort::Watch`]
+    /// (active-first, newest) while the default list/CLI order is unchanged.
+    pub fn list_thread_views_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Vec<ThreadListView>> {
+        Ok(self
+            .state_store
+            .list_threads_sorted(limit, filter_principal, sort)?
             .into_iter()
             .map(|item| self.decorate_list_item(item))
             .collect())

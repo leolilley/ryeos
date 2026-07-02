@@ -1474,6 +1474,21 @@ impl StateStore {
         Self::rows_to_list_items(&g, thread_rows)
     }
 
+    /// As [`Self::list_threads_filtered`] but with an explicit
+    /// [`queries::ThreadSort`] — `Watch` orders active-before-terminal then
+    /// newest for the operator dashboard, without changing the default order.
+    pub fn list_threads_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: queries::ThreadSort,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows =
+            queries::list_threads_sorted(g.state_db.projection(), limit, filter_principal, sort)?;
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
     /// Project thread rows into `ThreadListItem`s, resolving each terminal
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list
