@@ -219,6 +219,97 @@ fn resolve_executor_chain(
     })
 }
 
+// ── Terminal executor descriptor ─────────────────────────────────────────
+
+/// Execution routine a terminal executor tool selects, declared in DATA via a
+/// top-level `terminal_executor:` block on the terminal (`executor_id: null`)
+/// tool. The dispatcher branches on this — never on the alias name or the
+/// terminal's canonical ref.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalExecutorKind {
+    /// Spawn the compiled subprocess.
+    Subprocess,
+    /// Re-dispatch a param-named ref as a runtime method call. The wrapper's
+    /// `method_dispatch:` block supplies the method + optional ref kind.
+    MethodDispatch,
+}
+
+/// Typed `terminal_executor:` block on a terminal executor tool.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminalExecutorDecl {
+    pub kind: TerminalExecutorKind,
+}
+
+/// The resolved chain terminal: which real tool it landed on, and the typed
+/// execution routine that terminal selects.
+#[derive(Debug, Clone)]
+pub struct ResolvedTerminalExecutor {
+    pub terminal_ref: String,
+    pub kind: TerminalExecutorKind,
+}
+
+/// Walk the executor chain from `starting_executor_id` to its terminal and
+/// return the terminal's declared execution routine.
+///
+/// Reuses the same chain walker as `build_plan` (alias/cycle/depth/trust
+/// behavior identical), but stops at the terminal and reads its typed
+/// `terminal_executor:` descriptor. It deliberately does NOT compile a
+/// subprocess spec — a `method_dispatch` terminal has no `config:`, so
+/// `compile_with_handlers` would fail with `NoRuntimeConfig`.
+///
+/// Every resolved terminal MUST declare a `terminal_executor:` block — a
+/// missing or invalid descriptor is a hard error (no silent fallback), so a
+/// mistyped or absent descriptor can never be silently treated as a subprocess.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_terminal_executor(
+    starting_executor_id: &str,
+    root_source_path: &Path,
+    root_kind: &str,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+) -> Result<ResolvedTerminalExecutor, EngineError> {
+    let terminal = resolve_executor_chain(
+        starting_executor_id,
+        root_source_path,
+        root_kind,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+    )?;
+    let last = terminal.intermediates.last().ok_or_else(|| {
+        EngineError::Internal("executor chain resolved to an empty intermediate list".to_string())
+    })?;
+    let decl: TerminalExecutorDecl = match last.parsed.get("terminal_executor") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            EngineError::SchemaLoaderError {
+                reason: format!(
+                    "terminal executor `{}` has an invalid `terminal_executor:` block: {e}",
+                    last.resolved_ref
+                ),
+            }
+        })?,
+        None => {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "terminal executor `{}` declares no `terminal_executor:` block; every \
+                     executor-chain terminal must declare its execution routine \
+                     (`terminal_executor: {{ kind: subprocess | method_dispatch }}`)",
+                    last.resolved_ref
+                ),
+            });
+        }
+    };
+    Ok(ResolvedTerminalExecutor {
+        terminal_ref: last.resolved_ref.clone(),
+        kind: decl.kind,
+    })
+}
+
 // ── Runtime registry construction ───────────────────────────────────────
 
 /// Build the per-request `RuntimeHandlerRegistry` from the kind

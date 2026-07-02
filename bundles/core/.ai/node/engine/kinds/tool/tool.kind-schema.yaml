@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-22T02:50:06Z:0a9f8c306b4eb6c616c305ce7cad997d6400b23ecccc1a1710b3184243b03566:X51NZ2WmnfGY+uL0hsjn52/UYEq/pArKjMqX9qmmD4HQQRrmlwE9u10qbvWPTw0EcoS2+eFCSL4syiK2aGcuAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-02T02:39:08Z:a7ef0bab0337886f8787b0557241fae54b7013ea2768cd097d40be9e3718af7d:2ztijFtD8Y8U97PA2eDehlPUle0qkkmJRoYSaJkc20lwRY+tNkXI5KJx7jvrClAEM6E7JWUKPm/Qk2gh3gOMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -17,6 +17,7 @@ execution:
     supports_continuation: false
   aliases:
     "@subprocess": "tool:ryeos/core/subprocess/execute"
+    "@method_dispatch": "tool:ryeos/core/method-dispatch/execute"
 formats:
   - extensions: [".py"]
     parser: parser:ryeos/core/python/tool-header
@@ -94,6 +95,17 @@ runtime:
     # TODO: handlers for these blocks land in subsequent phases.
     - execution_owner
     - native_resume
+    # `method_dispatch` configures a method-dispatch wrapper tool's target
+    # method/ref. Extracted into metadata.extra by the rule below and read by
+    # the method-dispatch terminal executor; ignored here (runtime block parser)
+    # so wrappers may declare it without triggering UnknownRuntimeBlock.
+    - method_dispatch
+    # `terminal_executor` is the typed descriptor a terminal executor tool
+    # (`executor_id: null`) declares to select its execution routine
+    # (subprocess vs method_dispatch). Read by the dispatcher's chain-terminal
+    # resolver, not by a runtime handler; ignored here so terminal tools carrying
+    # it don't trip UnknownRuntimeBlock during plan compilation.
+    - terminal_executor
 metadata:
   # Tool YAML files use plain keys (`category`, `version`, etc.). Tool
   # Python files use a comment-YAML `# ryeos-tool:` header that parses
@@ -129,3 +141,8 @@ metadata:
     requires:
       from: path_value
       key: requires
+    # Carry the `method_dispatch:` block verbatim into metadata.extra so the
+    # method-dispatch terminal executor can read the target method/ref_kind.
+    method_dispatch:
+      from: path_value
+      key: method_dispatch

@@ -1,0 +1,8 @@
+# ryeos:signed:2026-07-02T02:39:08Z:35c651a2248878bd5b03d060fe39faad6c90c7a050f870630b9258a7d7d25b3c:SjpHpOBvETwSSo788i+u7XJfnich4sETiKytm15vsNBt7CWl7rU/IL+E+sX3J4AatRlsAtzKBG5la05HLAiNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "ryeos/core/method-dispatch"
+version: "1.0.0"
+executor_id: null
+description: "Internal terminal executor for @method_dispatch. Not directly executable; wrap it with a tool that declares executor_id: \"@method_dispatch\" and a top-level method_dispatch: block. Selecting this terminal routes the wrapper's execution to a checked recursive runtime method dispatch (target <ref_kind>:<ref> with the wrapper's fixed method), instead of a subprocess."
+
+terminal_executor:
+  kind: method_dispatch
