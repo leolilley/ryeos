@@ -1673,7 +1673,18 @@ impl StudioCore {
             }
             StudioEffectResultKind::SourceData => {
                 if let StudioEffectKind::FetchSource { tile_id, .. } = &expected {
-                    self.data.sources.insert(tile_id.clone(), data);
+                    // Freshness guard: only the newest request for this key may
+                    // land. An older fetch (e.g. the previously selected thread's
+                    // section) resolving late is dropped, so a reused single-lens
+                    // tile never shows mixed data from two selections.
+                    let is_latest = self
+                        .data
+                        .source_epoch
+                        .get(tile_id)
+                        .map_or(true, |&latest| result.id >= latest);
+                    if is_latest {
+                        self.data.sources.insert(tile_id.clone(), data);
+                    }
                     self.bump_generation();
                 }
             }
@@ -2890,6 +2901,82 @@ mod tests {
             }
             other => panic!("expected bound rows dock view, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn stale_source_response_is_dropped_by_the_freshness_guard() {
+        use crate::studio::effect::{StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // Two fetches issued for the SAME key — a single-lens tile reused for a
+        // new selection keeps its key. The second is the newest request.
+        let older = core.emit(StudioEffectKind::FetchSource {
+            tile_id: "K".to_string(),
+            source_ref: "service:x".to_string(),
+            params: serde_json::json!({}),
+        });
+        let newer = core.emit(StudioEffectKind::FetchSource {
+            tile_id: "K".to_string(),
+            source_ref: "service:x".to_string(),
+            params: serde_json::json!({}),
+        });
+        assert!(newer.id > older.id);
+        // build_fetch_source would record the newest request; simulate that.
+        core.data.source_epoch.insert("K".to_string(), newer.id);
+
+        let deliver = |core: &mut StudioCore, id: u64, tag: &str| {
+            core.dispatch(StudioEvent::EffectResult {
+                result: StudioEffectResult {
+                    id,
+                    ok: true,
+                    kind: StudioEffectResultKind::SourceData,
+                    data: Some(serde_json::json!({ "tag": tag })),
+                    error: None,
+                },
+            });
+        };
+
+        // Newest resolves first and lands.
+        deliver(&mut core, newer.id, "new");
+        assert_eq!(core.data.sources["K"]["tag"], "new");
+        // An older straggler resolving afterwards is DROPPED — a slow fetch for
+        // the previous selection must not overwrite the current one.
+        deliver(&mut core, older.id, "old");
+        assert_eq!(
+            core.data.sources["K"]["tag"], "new",
+            "stale straggler must not overwrite the newest response"
+        );
+    }
+
+    #[test]
+    fn refetching_a_sections_view_clears_prior_section_data() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "sections",
+                "sections": [
+                    { "title": "A", "source": { "ref": "service:a" }, "projection": {} },
+                    { "title": "B", "source": { "ref": "service:b" }, "projection": {} }
+                ]
+            }),
+        );
+        let k0 = crate::studio::content::section_source_key("K", 0);
+        let k1 = crate::studio::content::section_source_key("K", 1);
+        core.data
+            .sources
+            .insert(k0.clone(), serde_json::json!({ "stale": "A" }));
+        core.data
+            .sources
+            .insert(k1.clone(), serde_json::json!({ "stale": "B" }));
+
+        // Refetching (the lens reused for a new selection) drops each section's
+        // prior response so the previous selection can't render underneath, and
+        // emits a fresh fetch per section.
+        let effects = core.emit_fetch_source_keyed("K".to_string(), "view:test/detail");
+        assert!(core.data.sources.get(&k0).is_none());
+        assert!(core.data.sources.get(&k1).is_none());
+        assert_eq!(effects.len(), 2);
     }
 
     #[test]
