@@ -230,7 +230,15 @@ pub async fn dispatch_runtime_method(
         "runtime.vault_list" => {
             handle_runtime_vault_list(&clean_params, state, callback_cap.as_ref())
         }
-        "runtime.finalize_thread" => handle_finalize(&clean_params, state),
+        "runtime.finalize_thread" => {
+            let result = handle_finalize(&clean_params, state)?;
+            // A self-finalizing follow child (the normal path) flips its waiter to
+            // `ready` here — kick the parent resume live, keyed on the child's chain.
+            if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
+                ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, chain_root_id);
+            }
+            Ok(result)
+        }
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => {
             let result = handle_request_continuation(&clean_params, state)?;
@@ -1207,6 +1215,81 @@ mod tests {
             .is_none()
     }
 
+    fn no_waiter_key(state: &AppState, key: &str) -> bool {
+        state
+            .state_store
+            .get_follow_waiter_by_key(key)
+            .unwrap()
+            .is_none()
+    }
+
+    fn new_successor_record(
+        thread_id: &str,
+        chain_root_id: &str,
+        upstream: Option<&str>,
+    ) -> ryeos_app::state_store::NewThreadRecord {
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: chain_root_id.to_string(),
+            kind: "graph".to_string(),
+            item_ref: "test/graph".to_string(),
+            executor_ref: "test/executor".to_string(),
+            launch_mode: "detached".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: upstream.map(Into::into),
+            requested_by: Some("user:test".to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+        }
+    }
+
+    /// Build a running parent "P" with a captured ResumeContext, then its REAL
+    /// graph-follow-resume successor "S" (marked + upstream-linked), advanced to
+    /// `running` — the shape the `AlreadyClaimed` cleanup must accept.
+    fn seed_marked_follow_successor(state: &AppState) {
+        use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+        use ryeos_engine::contracts::{
+            EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+        };
+        state
+            .threads
+            .create_thread(&make_create_params("P", "P"))
+            .unwrap();
+        state.threads.mark_running("P").unwrap();
+        state
+            .state_store
+            .seed_launch_metadata(
+                "P",
+                &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
+                    kind: "graph".into(),
+                    item_ref: "test/graph".into(),
+                    launch_mode: "detached".into(),
+                    parameters: json!({}),
+                    project_context: ProjectContext::LocalPath {
+                        path: std::path::PathBuf::from("/tmp/p"),
+                    },
+                    original_snapshot_hash: None,
+                    current_site_id: "site:test".into(),
+                    origin_site_id: "site:test".into(),
+                    requested_by: EffectivePrincipal::Local(Principal {
+                        fingerprint: "fp".into(),
+                        scopes: vec![],
+                    }),
+                    execution_hints: ExecutionHints::default(),
+                    effective_caps: vec![],
+                    executor_ref: None,
+                    runtime_ref: None,
+                }),
+            )
+            .unwrap();
+        state
+            .state_store
+            .create_follow_resume_successor(&new_successor_record("S", "P", Some("P")), "P", "P")
+            .unwrap();
+        state.threads.mark_running("S").unwrap();
+    }
+
     /// Arm a `waiting` follow waiter (key `wk`) whose child chain is `child`.
     fn arm_waiting_follow(state: &AppState, wk: &str, child: &str) {
         state
@@ -1241,6 +1324,170 @@ mod tests {
                 summary_json: None,
             })
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
+        let (_tmp, state) = setup_app_state();
+        // A still-waiting waiter: its child chain has not been recorded terminal, so
+        // the parent resume is not yet drivable — no intent.
+        arm_waiting_follow(&state, "wk-waiting", "CW");
+        // A waiter whose child chain reached terminal (flipped `waiting → ready`):
+        // the parent resume IS drivable — one intent.
+        arm_waiting_follow(&state, "wk-ready", "CR");
+        state
+            .state_store
+            .mark_follow_child_terminal("CR", "CR", "completed", &json!({"success": true}))
+            .unwrap();
+        // A waiter whose resume was interrupted mid-flight (`resuming`) — re-driven,
+        // so it too must be collected.
+        arm_waiting_follow(&state, "wk-resuming", "CX");
+        state
+            .state_store
+            .mark_follow_child_terminal("CX", "CX", "completed", &json!({"success": true}))
+            .unwrap();
+        state.state_store.mark_follow_resuming("wk-resuming").unwrap();
+
+        let intents = crate::reconcile::reconcile_follow(&state).unwrap();
+        let keys: Vec<&str> = intents.iter().map(|i| i.follow_key.as_str()).collect();
+        assert!(
+            keys.contains(&"wk-ready"),
+            "a ready waiter must yield a parent-resume intent, got {keys:?}"
+        );
+        assert!(
+            keys.contains(&"wk-resuming"),
+            "a resuming waiter must yield a parent-resume intent, got {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"wk-waiting"),
+            "a still-waiting waiter must NOT yield an intent, got {keys:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter() {
+        // Blocker-1 recovery: a `resuming` waiter whose VALID follow-resume successor
+        // was claimed + run by another launcher (e.g. a native-resume intent) must be
+        // retired, not left `resuming` until a future restart.
+        let (_tmp, state) = setup_app_state();
+        // "S" is a real marked follow-resume successor of "P", advanced to running.
+        seed_marked_follow_successor(&state);
+        arm_waiting_follow(&state, "wk-held", "C");
+        state
+            .state_store
+            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .unwrap();
+        state.state_store.mark_follow_resuming("wk-held").unwrap();
+        // Someone else holds the launch claim on "S".
+        assert!(matches!(
+            state
+                .state_store
+                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .unwrap(),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        ));
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_follow_resume_successor(
+            state.clone(),
+            "wk-held",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => panic!("claim is held → must not launch"),
+        };
+        assert_eq!(reason, "already_claimed");
+        assert!(
+            no_waiter_key(&state, "wk-held"),
+            "a VALID advanced follow successor means the resume is done — waiter cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_resume_claim_held_by_unmarked_successor_keeps_waiter() {
+        // Blocker-1 fail-closed: a `resuming` waiter pointing at a claimed row that is
+        // NOT this parent's graph-follow-resume successor must NOT be cleared — the
+        // AlreadyClaimed cleanup validates upstream + marker before retiring.
+        let (_tmp, state) = setup_app_state();
+        // A raw running "S" with no follow-resume marker (upstream None ≠ parent "P").
+        state
+            .threads
+            .create_thread(&make_create_params("S", "S"))
+            .unwrap();
+        state.threads.mark_running("S").unwrap();
+        arm_waiting_follow(&state, "wk-unmarked", "C");
+        state
+            .state_store
+            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .unwrap();
+        state.state_store.mark_follow_resuming("wk-unmarked").unwrap();
+        assert!(matches!(
+            state
+                .state_store
+                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .unwrap(),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        ));
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_follow_resume_successor(
+            state.clone(),
+            "wk-unmarked",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => panic!("claim is held → must not launch"),
+        };
+        assert_eq!(reason, "already_claimed");
+        assert!(
+            !no_waiter_key(&state, "wk-unmarked"),
+            "claim held by an UNMARKED row must NOT clear the waiter (fail closed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_resume_refuses_successor_without_marker() {
+        // Blocker-2 guard: a waiter pointing at a row that is NOT the parent's
+        // graph-follow-resume successor must not be spliced or launched, and the
+        // waiter must be left intact (suspected corruption is for inspection).
+        let (_tmp, state) = setup_app_state();
+        // "S" links upstream to the parent "P" but carries NO follow-resume edge.
+        let mut params = make_create_params("S", "S");
+        params.upstream_thread_id = Some("P".to_string());
+        state.threads.create_thread(&params).unwrap();
+        arm_waiting_follow(&state, "wk-nomarker", "C");
+        state
+            .state_store
+            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .unwrap();
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_follow_resume_successor(
+            state.clone(),
+            "wk-nomarker",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => {
+                panic!("a successor without the follow-resume marker must not launch")
+            }
+        };
+        assert_eq!(reason, "not_follow_successor");
+        assert!(
+            !no_waiter_key(&state, "wk-nomarker"),
+            "refusal on a suspected-bad successor must NOT clear the waiter"
+        );
+        // "S" was never launched — still `created`.
+        assert_eq!(
+            state.threads.get_thread("S").unwrap().unwrap().status,
+            ryeos_state::objects::ThreadStatus::Created.as_str()
+        );
     }
 
     #[tokio::test]

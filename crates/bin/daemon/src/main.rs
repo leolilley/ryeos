@@ -484,6 +484,9 @@ async fn main() -> Result<()> {
     // bound would fail. We collect intents here and dispatch them
     // below, after the listeners are accepting connections.
     let resume_intents = reconcile::reconcile(&app_state).await?;
+    // Follow parent-resume recovery collected here, dispatched post-listener too: a
+    // resumed parent's first callback must not precede a bound listener.
+    let follow_resume_intents = reconcile::reconcile_follow(&app_state)?;
 
     // Scheduler reload channel — must be created BEFORE the router is built
     // so that HTTP handler clones of AppState carry the sender.
@@ -685,6 +688,39 @@ async fn main() -> Result<()> {
                     error = %err,
                     "resume: dispatch failed"
                 );
+            }
+        });
+    }
+
+    // Drive the follow parent-resume intents collected above. Each
+    // `launch_follow_resume_successor` claims the successor launch, copies the
+    // parent's checkpoint + splices the child's result, and folds the chain — a
+    // duplicate with a live finalize kick is a benign claim-guarded `Skipped`.
+    for intent in follow_resume_intents {
+        let st = app_state.clone();
+        tokio::spawn(async move {
+            use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+            match ryeos_executor::execution::launch::launch_follow_resume_successor(
+                st,
+                &intent.follow_key,
+            )
+            .await
+            {
+                Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+                Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                    tracing::debug!(
+                        follow_key = %intent.follow_key,
+                        reason,
+                        "reconcile: follow parent-resume skipped"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        follow_key = %intent.follow_key,
+                        error = %err,
+                        "reconcile: follow parent-resume failed"
+                    );
+                }
             }
         });
     }

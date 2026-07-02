@@ -1772,6 +1772,10 @@ async fn run_claimed_thread_row(
             },
             managed_envelope,
         )?;
+        // Live parent-resume kick: a followed child finalized on this fallback
+        // (abnormal exit, no self-finalize over the callback) still flips its waiter
+        // to `ready`, so wake the parent now instead of waiting for a restart.
+        kick_follow_resume_if_ready(state, &finalized.chain_root_id);
         thread_detail = finalized;
     }
 
@@ -1824,6 +1828,12 @@ enum SuccessorMode {
     /// stimulus, re-derive caps fresh (no pin), and skip the auto-launch budget
     /// (an operator action is not an autonomous relaunch).
     Operator,
+    /// Follow-resume: fold the chain with NO new stimulus and pin authority like
+    /// Machine, but resume from the successor's OWN checkpoint dir — the follow-
+    /// resume launcher has already copied the predecessor's checkpoint in and
+    /// spliced the child's result — so no predecessor re-copy, and skip the
+    /// autonomous auto-launch budget (this relaunch is child-terminal-driven).
+    Follow,
 }
 
 /// Launch a continuation successor: an existing `created` thread row carrying a
@@ -1908,6 +1918,37 @@ async fn launch_successor_inner(
             .state_store
             .release_thread_launch_claim(successor_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
+    }
+
+    // Refusal guard (defense-in-depth): a follow-resume successor is driven ONLY by
+    // the follow-resume path, which first copies the parent's checkpoint in and
+    // splices the child's result. A machine/operator relaunch of it here would run
+    // it WITHOUT that result — corrupting the resume. Refuse. Fail closed if the
+    // marker read errors: never machine-launch a possibly-follow successor.
+    if let Some(source) = successor.upstream_thread_id.as_deref() {
+        match state
+            .state_store
+            .is_follow_resume_successor(source, successor_id)
+        {
+            Ok(true) => {
+                let _ = state
+                    .state_store
+                    .release_thread_launch_claim(successor_id, &claim_id);
+                return Ok(SuccessorLaunchOutcome::Skipped("follow_resume_successor"));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                let _ = state
+                    .state_store
+                    .release_thread_launch_claim(successor_id, &claim_id);
+                tracing::warn!(
+                    successor_id,
+                    error = %e,
+                    "follow-resume marker read failed; refusing successor launch"
+                );
+                return Ok(SuccessorLaunchOutcome::Skipped("follow_marker_error"));
+            }
+        }
     }
 
     // Attempt budget — MACHINE path only. Enforced HERE, after a successful claim
@@ -2040,7 +2081,10 @@ async fn launch_claimed_successor(
     // opening stimulus, and re-derive caps fresh (an explicit launch, not a
     // relaunch of the same authority).
     let (suppress_stimulus, capability_policy) = match mode {
-        SuccessorMode::Machine => (
+        // Machine and Follow both fold the chain (no stimulus) and pin authority to
+        // the predecessor's captured caps; they differ only in checkpoint sourcing
+        // (below). Operator injects the seeded input + re-derives caps fresh.
+        SuccessorMode::Machine | SuccessorMode::Follow => (
             true,
             CapabilityPolicy::ExactPinned(resume.effective_caps.as_slice()),
         ),
@@ -2069,6 +2113,10 @@ async fn launch_claimed_successor(
             checkpoint_resume_mode: match mode {
                 SuccessorMode::Machine => CheckpointResumeMode::MachineContinuation,
                 SuccessorMode::Operator => CheckpointResumeMode::None,
+                // The follow-resume launcher already copied the predecessor's
+                // checkpoint into this successor's dir and spliced the child
+                // result, so resume from its OWN dir — do NOT re-copy.
+                SuccessorMode::Follow => CheckpointResumeMode::SameThread,
             },
         },
         successor,
@@ -2415,6 +2463,281 @@ pub async fn launch_follow_child(
             Err(e)
         }
     }
+}
+
+/// If `child_chain_root_id`'s just-recorded terminal flipped a follow waiter to
+/// `ready`, fire the parent-resume launch NOW (claim-guarded; a no-op otherwise).
+/// Called from the finalize paths that carry a runtime terminal — the self-finalize
+/// UDS handler and the executor-supervised fallback — so a followed parent wakes
+/// live, not only at the next startup reconcile. Spawns the launch detached so the
+/// finalize path (and its held locks) is never blocked on the parent's whole resume.
+///
+/// GAP (must not survive past the sync-poll retirement): the GENERIC finalize path
+/// (operator cancel, pre-run failure) flips the waiter but does NOT kick here, so a
+/// follow child killed that way leaves the parent suspended until the next daemon
+/// restart drives `reconcile_follow`. Closing it means kicking from every finalize
+/// site (or signalling up from `record_follow_child_terminal`).
+pub fn kick_follow_resume_if_ready(state: &AppState, child_chain_root_id: &str) {
+    let waiter = match state
+        .state_store
+        .get_follow_waiter_by_child_chain(child_chain_root_id)
+    {
+        Ok(Some(w)) => w,
+        // The common case: no parent awaits this chain.
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                child_chain_root_id,
+                error = %e,
+                "follow-resume kick: waiter lookup failed"
+            );
+            return;
+        }
+    };
+    // Only a `ready` waiter has a stored result to resume with. `waiting` (an
+    // intermediate `continued` link) or `resuming`/cleared → no kick here.
+    if waiter.phase != ryeos_app::runtime_db::follow_phase::READY {
+        return;
+    }
+    let st = state.clone();
+    let follow_key = waiter.follow_key;
+    tokio::spawn(async move {
+        match launch_follow_resume_successor(st, &follow_key).await {
+            Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+            Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                tracing::debug!(follow_key = %follow_key, reason, "follow-resume kick skipped");
+            }
+            Err(err) => {
+                tracing::error!(follow_key = %follow_key, error = %err, "follow-resume kick failed");
+            }
+        }
+    });
+}
+
+/// Validate that `successor` really is the graph-follow-resume successor of
+/// `parent_thread_id`: it must link upstream to the parent AND carry the
+/// graph-follow-resume continuation marker. Returns `None` when valid, or the
+/// fail-closed skip reason otherwise. Shared by the claimed launch path AND the
+/// `AlreadyClaimed` waiter cleanup, so neither ever splices/launches — nor clears a
+/// waiter — for a stale/corrupt row that is not this parent's follow successor.
+fn follow_resume_successor_refusal(
+    state: &AppState,
+    parent_thread_id: &str,
+    successor: &ryeos_app::state_store::ThreadDetail,
+) -> Option<&'static str> {
+    if successor.upstream_thread_id.as_deref() != Some(parent_thread_id) {
+        tracing::warn!(
+            parent = %parent_thread_id,
+            successor_id = %successor.thread_id,
+            upstream = ?successor.upstream_thread_id,
+            "follow-resume: successor does not link back to the waiter's parent — refusing"
+        );
+        return Some("successor_mismatch");
+    }
+    match state
+        .state_store
+        .is_follow_resume_successor(parent_thread_id, &successor.thread_id)
+    {
+        Ok(true) => None,
+        Ok(false) => {
+            tracing::warn!(
+                parent = %parent_thread_id,
+                successor_id = %successor.thread_id,
+                "follow-resume: successor lacks the graph-follow-resume marker — refusing"
+            );
+            Some("not_follow_successor")
+        }
+        Err(e) => {
+            tracing::warn!(
+                parent = %parent_thread_id,
+                successor_id = %successor.thread_id,
+                error = %e,
+                "follow-resume: marker read failed — refusing"
+            );
+            Some("follow_marker_error")
+        }
+    }
+}
+
+/// Launch a suspended parent's follow-resume successor once the followed child's
+/// terminal envelope is stored on the waiter (`ready`, or `resuming` when re-driven
+/// after a crash). Claim-guarded and crash-safe: copies the parent's checkpoint
+/// into the successor's dir and splices the child's canonical envelope as
+/// `follow_result`, then runs the successor folding the chain (Follow mode). Clears
+/// the waiter once the successor is durably launched — its own checkpoint now
+/// carries the result, so reconcile can native-resume it independently. Idempotent
+/// by `follow_key`: a re-drive of an already-launched successor skips.
+pub async fn launch_follow_resume_successor(
+    state: AppState,
+    follow_key: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    use ryeos_app::runtime_db::follow_phase;
+
+    let waiter = state
+        .state_store
+        .get_follow_waiter_by_key(follow_key)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "follow-resume: waiter not found: {follow_key}"
+            ))
+        })?;
+
+    // Only a waiter whose child has reached terminal (`ready`) — or one already
+    // mid-resume (`resuming`, re-driven after a crash) — has a result to resume.
+    if waiter.phase != follow_phase::READY && waiter.phase != follow_phase::RESUMING {
+        return Ok(SuccessorLaunchOutcome::Skipped("not_ready"));
+    }
+    let successor_id = waiter.parent_successor_thread_id.clone().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: waiter {follow_key} has no parent successor"
+        ))
+    })?;
+
+    // Claim the successor launch — the serialization point (concurrent reconcile +
+    // live drives) and the sole authorization to run it.
+    let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let claimed_by = format!("daemon:{}", std::process::id());
+    match state.state_store.claim_thread_launch(
+        &successor_id,
+        &claim_id,
+        &claimed_by,
+        SUCCESSOR_LAUNCH_LEASE_MS,
+    )? {
+        ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {}
+        ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
+            // Another launcher holds the claim. Retire the waiter ONLY if the
+            // successor is a VALID follow-resume successor of THIS parent (upstream +
+            // marker) that has already advanced past `created` (the resume ran) — so
+            // it does not sit `resuming` until a future restart. Fail closed: a
+            // stale/corrupt waiter pointing at an unrelated claimed row is never
+            // cleared blindly. Still `created` → a concurrent follow launcher is
+            // mid-splice/launch and owns the clear.
+            match state.threads.get_thread(&successor_id) {
+                Ok(Some(s)) => {
+                    if follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &s)
+                        .is_none()
+                        && s.status != ryeos_state::objects::ThreadStatus::Created.as_str()
+                    {
+                        let _ = state.state_store.clear_follow_waiter(follow_key);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    follow_key,
+                    successor_id,
+                    error = %e,
+                    "follow-resume: claim held; failed to inspect successor for waiter cleanup"
+                ),
+            }
+            return Ok(SuccessorLaunchOutcome::Skipped("already_claimed"));
+        }
+    }
+
+    let result = launch_follow_resume_claimed(&state, &waiter, &successor_id).await;
+    let _ = state
+        .state_store
+        .release_thread_launch_claim(&successor_id, &claim_id);
+
+    match result {
+        Ok(SuccessorLaunchOutcome::Launched(native)) => {
+            // Durably launched: the successor's own checkpoint now carries the
+            // spliced result, so it is independently reconcile-recoverable. Retire
+            // the waiter.
+            let _ = state.state_store.clear_follow_waiter(follow_key);
+            Ok(SuccessorLaunchOutcome::Launched(native))
+        }
+        // Skips leave the waiter for a later drive (or it was already cleared by the
+        // not-created branch below).
+        Ok(skipped) => Ok(skipped),
+        Err(e) => {
+            crate::dispatch::finalize_method_thread_if_needed(
+                &state,
+                &successor_id,
+                "failed",
+                Some(json!({ "error": e.to_string() })),
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn launch_follow_resume_claimed(
+    state: &AppState,
+    waiter: &ryeos_app::runtime_db::FollowWaiter,
+    successor_id: &str,
+) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
+    let successor = state.threads.get_thread(successor_id)?.ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: successor not found: {successor_id}"
+        ))
+    })?;
+
+    // Marker validation BEFORE mutating anything: prove this successor really is the
+    // graph-follow-resume successor of the waiter's parent. A splice + fold-the-
+    // chain launch of the wrong row would run someone else's thread with the child's
+    // result. Fail closed — a mismatch or marker-read error skips WITHOUT launching
+    // (and without clearing the waiter: suspected corruption is left for inspection).
+    if let Some(reason) =
+        follow_resume_successor_refusal(state, &waiter.parent_thread_id, &successor)
+    {
+        return Ok(SuccessorLaunchOutcome::Skipped(reason));
+    }
+
+    // Only a `created` successor is launchable. A running/terminal row means the
+    // resume already fired (or is live) — the waiter's job is done, so retire it and
+    // skip WITHOUT re-splicing a live successor's checkpoint (which could corrupt an
+    // in-flight resume).
+    if successor.status != ryeos_state::objects::ThreadStatus::Created.as_str() {
+        let _ = state.state_store.clear_follow_waiter(&waiter.follow_key);
+        return Ok(SuccessorLaunchOutcome::Skipped("not_created"));
+    }
+
+    let terminal_envelope = waiter.terminal_envelope.clone().ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: waiter {} has no terminal envelope",
+            waiter.follow_key
+        ))
+    })?;
+
+    // Mark resuming (ready→resuming; idempotent on resuming) BEFORE mutating the
+    // successor's checkpoint, so a crash mid-resume is re-driven by reconcile.
+    state
+        .state_store
+        .mark_follow_resuming(&waiter.follow_key)
+        .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?;
+
+    // Seed the successor's checkpoint = parent's checkpoint + the child's canonical
+    // envelope spliced under `follow_result`. The successor is `created` (not yet
+    // running), so writing its checkpoint here races nothing.
+    let prev_dir = state
+        .config
+        .app_root
+        .join("threads")
+        .join(&waiter.parent_thread_id)
+        .join("checkpoints");
+    let succ_dir = state
+        .config
+        .app_root
+        .join("threads")
+        .join(successor_id)
+        .join("checkpoints");
+    let spliced = ryeos_runtime::checkpoint::CheckpointWriter::copy_latest_with_splice(
+        &prev_dir,
+        &succ_dir,
+        ryeos_runtime::checkpoint::FOLLOW_RESULT_KEY,
+        &terminal_envelope,
+    )
+    .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!("follow-resume splice: {e}")))?;
+    if !spliced {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-resume: predecessor {} has no checkpoint to resume from",
+            waiter.parent_thread_id
+        )));
+    }
+
+    launch_claimed_successor(state, successor, SuccessorMode::Follow)
+        .await
+        .map(SuccessorLaunchOutcome::Launched)
 }
 
 struct SpawnRuntimeParams<'a> {

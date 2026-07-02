@@ -32,8 +32,9 @@ pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 pub(crate) mod follow_keys {
     /// Marker object recorded at a follow suspend (local facts, no child IDs).
     pub const PENDING_FOLLOW: &str = "pending_follow";
-    /// The child's canonical terminal envelope, spliced in for resume.
-    pub const FOLLOW_RESULT: &str = "follow_result";
+    /// The child's canonical terminal envelope, spliced in for resume. Shared with
+    /// the daemon splicer — one definition, in the checkpoint crate both depend on.
+    pub const FOLLOW_RESULT: &str = ryeos_runtime::checkpoint::FOLLOW_RESULT_KEY;
     /// Nested inside `PENDING_FOLLOW`: the follow node to resume into.
     pub const FOLLOW_NODE: &str = "follow_node";
 }

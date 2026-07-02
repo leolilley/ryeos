@@ -506,6 +506,63 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     Ok(intents)
 }
 
+/// One follow waiter whose parent-resume successor is ready to launch (the followed
+/// child's terminal envelope is stored). Collected at startup and driven
+/// post-listener, mirroring [`ResumeIntent`] — the launch itself owns the claim.
+#[derive(Debug, Clone)]
+pub struct FollowResumeIntent {
+    pub follow_key: String,
+}
+
+/// Startup crash-recovery for daemon-managed follow: drive the PARENT-resume half.
+///
+/// The child chain itself is recovered by [`reconcile`] proper (a follow child is a
+/// normal thread — native-resume kinds resume, others finalize failed), and its
+/// terminal flips the awaiting waiter to `ready` through the finalize path. What a
+/// crash strands is the parent resume: a waiter left `ready` (child result stored,
+/// successor never launched) or `resuming` (launch interrupted mid-flight). Both
+/// are re-driven by `launch_follow_resume_successor`, idempotent by `follow_key`.
+///
+/// `waiting` waiters need nothing here — the live finalize kick, or a child
+/// recovered by `reconcile`, drives them once the child reaches terminal.
+/// `reserved` is a pre-`waiting` partial-spawn window, left for a later sweep.
+pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowResumeIntent>> {
+    use ryeos_app::runtime_db::follow_phase;
+
+    let mut intents: Vec<FollowResumeIntent> = Vec::new();
+    for w in state.state_store.list_follow_waiters()? {
+        match w.phase.as_str() {
+            follow_phase::READY | follow_phase::RESUMING => {
+                tracing::info!(
+                    follow_key = %w.follow_key,
+                    phase = %w.phase,
+                    "follow waiter carries a stored child result — collecting parent-resume intent"
+                );
+                intents.push(FollowResumeIntent {
+                    follow_key: w.follow_key,
+                });
+            }
+            follow_phase::WAITING => {
+                tracing::debug!(
+                    follow_key = %w.follow_key,
+                    "follow waiter still waiting — child recovery + finalize kick own it"
+                );
+            }
+            other => {
+                tracing::debug!(
+                    follow_key = %w.follow_key,
+                    phase = %other,
+                    "follow waiter in a pre-waiting phase — left for a later sweep"
+                );
+            }
+        }
+    }
+    if !intents.is_empty() {
+        tracing::info!(count = intents.len(), "collected follow parent-resume intents");
+    }
+    Ok(intents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,6 +25,14 @@ use serde_json::Value;
 
 const LATEST_FILE: &str = "latest.json";
 
+/// The top-level checkpoint field the follow machinery splices a followed child's
+/// terminal envelope into, and that a resuming graph walker reads to consume it.
+/// It lives here — the shared checkpoint crate both the daemon (which splices, via
+/// [`CheckpointWriter::copy_latest_with_splice`]) and the graph runtime (which
+/// reads) depend on — so the wire key has ONE definition, not a literal duplicated
+/// across crates that cannot see each other.
+pub const FOLLOW_RESULT_KEY: &str = "follow_result";
+
 #[derive(Debug, Clone)]
 pub struct CheckpointWriter {
     dir: PathBuf,
@@ -66,6 +74,37 @@ impl CheckpointWriter {
         std::fs::create_dir_all(to_dir).with_context(|| format!("create {}", to_dir.display()))?;
         std::fs::copy(&src, to_dir.join(LATEST_FILE))
             .with_context(|| format!("copy {} -> {}", src.display(), to_dir.display()))?;
+        Ok(true)
+    }
+
+    /// Copy the latest checkpoint from `from_dir` into `to_dir`, splicing an extra
+    /// top-level `key: value` into the copied payload (atomically). The follow-
+    /// resume launcher uses this to seed a suspended parent's successor with the
+    /// parent's checkpoint PLUS the followed child's terminal envelope, so the
+    /// resumed walker consumes the result at the follow node instead of
+    /// re-suspending. Returns `Ok(false)` if `from_dir` has no checkpoint.
+    ///
+    /// This is the ONE place the daemon reads a checkpoint payload; it stays a
+    /// shallow top-level object merge, never a schema-aware transform.
+    pub fn copy_latest_with_splice(
+        from_dir: &Path,
+        to_dir: &Path,
+        key: &str,
+        value: &Value,
+    ) -> Result<bool> {
+        let src = from_dir.join(LATEST_FILE);
+        if !src.exists() {
+            return Ok(false);
+        }
+        let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
+        let mut payload: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parse checkpoint {}", src.display()))?;
+        let obj = payload
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("checkpoint {} is not a JSON object", src.display()))?;
+        obj.insert(key.to_string(), value.clone());
+        // Atomic write into the successor's dir via the same tmp+rename path.
+        Self::new(to_dir.to_path_buf()).write(&payload)?;
         Ok(true)
     }
 
@@ -149,6 +188,67 @@ mod tests {
             .unwrap();
         assert_eq!(loaded["node"], "b");
         assert_eq!(loaded["step"], 2);
+    }
+
+    #[test]
+    fn copy_latest_with_splice_merges_follow_result_into_copy() {
+        let from = TempDir::new().unwrap();
+        let to = TempDir::new().unwrap();
+        // No source checkpoint → nothing spliced.
+        assert!(!CheckpointWriter::copy_latest_with_splice(
+            from.path(),
+            to.path(),
+            FOLLOW_RESULT_KEY,
+            &json!({"ignored": true})
+        )
+        .unwrap());
+
+        // The parent's checkpoint carries its own cursor; the splice adds the child
+        // result under FOLLOW_RESULT_KEY without disturbing the rest.
+        CheckpointWriter::new(from.path())
+            .write(&json!({"node": "await", "step": 7}))
+            .unwrap();
+        let child_env = json!({"success": true, "outputs": {"answer": 42}});
+        assert!(CheckpointWriter::copy_latest_with_splice(
+            from.path(),
+            to.path(),
+            FOLLOW_RESULT_KEY,
+            &child_env
+        )
+        .unwrap());
+
+        let resumed = CheckpointWriter::new(to.path())
+            .load_latest()
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed["node"], "await");
+        assert_eq!(resumed["step"], 7);
+        assert_eq!(resumed[FOLLOW_RESULT_KEY], child_env);
+        // The source is untouched — the splice only writes the destination.
+        assert!(CheckpointWriter::new(from.path())
+            .load_latest()
+            .unwrap()
+            .unwrap()
+            .get(FOLLOW_RESULT_KEY)
+            .is_none());
+    }
+
+    #[test]
+    fn copy_latest_with_splice_rejects_non_object_checkpoint() {
+        let from = TempDir::new().unwrap();
+        let to = TempDir::new().unwrap();
+        CheckpointWriter::new(from.path())
+            .write(&json!([1, 2, 3]))
+            .unwrap();
+        // A non-object payload has no top level to splice into — an error, not a
+        // silent drop of the child result.
+        assert!(CheckpointWriter::copy_latest_with_splice(
+            from.path(),
+            to.path(),
+            FOLLOW_RESULT_KEY,
+            &json!({})
+        )
+        .is_err());
     }
 
     #[test]
