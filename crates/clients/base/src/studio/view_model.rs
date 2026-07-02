@@ -1118,6 +1118,12 @@ fn bound_view_vm_keyed(
         }
         ("timeline", Some(response)) => {
             let mut full = timeline_entries(super::content::project_records(binding, response));
+            // Deep-watch header: a chain execution summary line at the top of the
+            // braid, from the source's `summary` (chain_replay). Absent for any
+            // timeline whose source carries no `summary`, so it never intrudes.
+            if let Some(summary) = timeline_summary_entry(response) {
+                full.insert(0, summary);
+            }
             append_live_delta(core, &mut full);
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
@@ -1310,6 +1316,41 @@ fn input_vm(
         completion,
         live_filter,
         text,
+    }
+}
+
+/// The deep-watch header for a braid: one summary line built from the source's
+/// `summary` (chain status + chain-wide usage totals, from chain_replay).
+/// Returns `None` when the source carries no `summary` — any non-chain timeline —
+/// so the header only appears where it means something.
+fn timeline_summary_entry(response: &serde_json::Value) -> Option<StudioTimelineEntryVm> {
+    let summary = response.get("summary")?;
+    let status = summary.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let input = summary.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let output = summary.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cost = summary.get("spend_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let turns = summary.get("turns").and_then(|v| v.as_i64()).unwrap_or(0);
+    let primary = format!("{status} · ↑{input} ↓{output} · ${cost:.4} · {turns} turns");
+    Some(StudioTimelineEntryVm::Line {
+        primary,
+        meta: None,
+        tone: status_tone(status),
+        action: None,
+    })
+}
+
+/// Map a thread/chain status to a tone (the same status→tone vocabulary the
+/// list/detail tone blocks declare, in code here for the summary header). Matches
+/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
+/// not a silently-neutral string.
+fn status_tone(status: &str) -> StudioTone {
+    use super::dto::ThreadStatus;
+    match ThreadStatus::from_wire(status) {
+        ThreadStatus::Running | ThreadStatus::Created => StudioTone::Accent,
+        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => StudioTone::Danger,
+        ThreadStatus::Cancelled => StudioTone::Warn,
+        ThreadStatus::Completed | ThreadStatus::Continued => StudioTone::Good,
+        ThreadStatus::Unknown => StudioTone::Neutral,
     }
 }
 
@@ -2349,6 +2390,45 @@ mod tests {
         assert_eq!(rows[1].tone.as_deref(), Some("danger"));
         // The raw record is preserved for affordance interpolation.
         assert_eq!(rows[0].raw["thread_id"], "T-ab");
+    }
+
+    #[test]
+    fn timeline_summary_entry_builds_a_header_line_from_the_summary() {
+        let response = json!({
+            "events": [],
+            "summary": {
+                "status": "running",
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "spend_usd": 0.0421,
+                "turns": 3
+            }
+        });
+        match timeline_summary_entry(&response).expect("summary present") {
+            StudioTimelineEntryVm::Line { primary, tone, .. } => {
+                assert!(primary.contains("running"), "{primary}");
+                assert!(primary.contains("1200") && primary.contains("340"), "{primary}");
+                assert!(primary.contains("$0.0421"), "{primary}");
+                assert!(primary.contains("3 turns"), "{primary}");
+                assert_eq!(tone, StudioTone::Accent);
+            }
+            other => panic!("expected a header Line, got {other:?}"),
+        }
+        // A timeline whose source carries no `summary` gets no header.
+        assert!(timeline_summary_entry(&json!({ "events": [] })).is_none());
+    }
+
+    #[test]
+    fn status_tone_maps_by_typed_status_variant() {
+        assert_eq!(status_tone("running"), StudioTone::Accent);
+        assert_eq!(status_tone("created"), StudioTone::Accent);
+        assert_eq!(status_tone("completed"), StudioTone::Good);
+        assert_eq!(status_tone("continued"), StudioTone::Good);
+        assert_eq!(status_tone("failed"), StudioTone::Danger);
+        assert_eq!(status_tone("killed"), StudioTone::Danger);
+        assert_eq!(status_tone("cancelled"), StudioTone::Warn);
+        // An unrecognized status folds to Unknown → neutral, not a panic.
+        assert_eq!(status_tone("some_future_status"), StudioTone::Neutral);
     }
 
     #[test]
