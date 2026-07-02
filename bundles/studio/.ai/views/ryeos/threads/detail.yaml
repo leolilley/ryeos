@@ -1,0 +1,87 @@
+# ryeos:signed:2026-07-02T01:29:21Z:ff0d97a368d6a2deea5745bc66ec87a0ffbb03dcb1560842223932ca91d56fd5:dfjwKYzyLGNGKtDzBobNZPSQO6NfYn1tXeIGqtVnNGQWdnvQUD06jqvqjRRDfKaQPVsj+5f+kcalIrqKITB0Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: thread-detail
+version: "1.0.0"
+description: >-
+  Thread detail lens: the triage read for one execution. Sections project the
+  inspect service (summary, outcome, artifacts, children) — each reads a sub-value
+  of the one inspect response, so the whole thing degrades to empty sections
+  rather than a raw-JSON dump when a thread has no result/artifacts/children yet.
+
+widget: sections
+title: Thread
+
+sections:
+  # Summary: the whole `thread` sub-record projected to one row (item + status),
+  # toned by status so the header reads at a glance.
+  - title: Summary
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: thread
+    projection:
+      primary: item_ref
+      meta: status
+      tone:
+        field: status
+        map:
+          running: accent
+          created: accent
+          failed: danger
+          cancelled: warn
+          completed: good
+        default: neutral
+
+  # Outcome: the `result` sub-object (outcome code + error). Null until the
+  # thread finishes → this section is simply empty.
+  - title: Outcome
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: result
+    projection:
+      primary: outcome_code
+      meta: error
+      tone:
+        field: outcome_code
+        map:
+          ok: good
+          error: danger
+        default: neutral
+
+  # Artifacts the execution produced (one row each; empty when none).
+  - title: Artifacts
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: artifacts
+    projection:
+      primary: artifact_type
+      meta: uri
+
+  # Child threads spawned by this one (the chain fanning out).
+  - title: Children
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: children
+    projection:
+      primary: item_ref
+      meta: status
+      tone:
+        field: status
+        map:
+          running: accent
+          created: accent
+          failed: danger
+          cancelled: warn
+          completed: good
+        default: neutral
+
+# Re-fetch whenever the selected thread changes (the inspect affordance writes
+# selection.thread before opening this lens).
+refresh:
+  on_facet: selection
