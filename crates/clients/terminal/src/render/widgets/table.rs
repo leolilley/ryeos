@@ -46,12 +46,23 @@ pub fn draw_table(surface: &mut TextSurface, rect: Rect, columns: &[String], row
         y += 1;
     }
 
-    if rows.is_empty() && y < bottom {
+    let rows_area = bottom.saturating_sub(y);
+    if rows_area == 0 {
+        return;
+    }
+    if rows.is_empty() {
         surface.draw_text(left, y, "no rows loaded", style_muted());
         return;
     }
 
-    for row in rows.iter().take(bottom.saturating_sub(y)) {
+    // Scroll to keep the selected row on screen: no scroll while the cursor is
+    // in the top half, then scroll so the cursor holds the halfway line —
+    // clamped so the last page fills the view instead of trailing blank space.
+    let selected_idx = rows.iter().position(|row| row.selected).unwrap_or(0);
+    let max_offset = rows.len().saturating_sub(rows_area);
+    let offset = selected_idx.saturating_sub(rows_area / 2).min(max_offset);
+
+    for row in rows.iter().skip(offset).take(rows_area) {
         let style = if row.selected {
             style_selected()
         } else {
@@ -201,6 +212,34 @@ mod tests {
         assert!(from_col(&body, GUTTER).starts_with('a'));
         assert!(from_col(&body, GUTTER + col_w).starts_with('b'));
         assert!(from_col(&body, GUTTER + 2 * col_w).starts_with('c'));
+    }
+
+    #[test]
+    fn table_scrolls_to_keep_selected_visible_past_halfway() {
+        let cols = vec!["thread".to_string()];
+        let make = || {
+            (0..20)
+                .map(|i| trow(StudioTone::Neutral, &[format!("T-{i}").as_str()]))
+                .collect::<Vec<_>>()
+        };
+
+        // Cursor in the top half → no scroll (row 0 still shown). Height 5 =
+        // 1 header + 4 row lines, so the halfway line is 2 rows down.
+        let (mut s, rect) = surface(40, 5);
+        let mut rows = make();
+        rows[1].selected = true;
+        draw_table(&mut s, rect, &cols, &rows);
+        let top: String = (1..5).map(|y| row_text(&s, 40, y)).collect::<Vec<_>>().join("\n");
+        assert!(top.contains("T-0"), "top-half cursor doesn't scroll: {top:?}");
+
+        // Cursor past halfway → scrolls: early rows gone, selected on screen.
+        let (mut s, rect) = surface(40, 5);
+        let mut rows = make();
+        rows[10].selected = true;
+        draw_table(&mut s, rect, &cols, &rows);
+        let body: String = (1..5).map(|y| row_text(&s, 40, y)).collect::<Vec<_>>().join("\n");
+        assert!(body.contains("T-10"), "selected row visible after scroll: {body:?}");
+        assert!(!body.contains("T-0"), "early rows scrolled off: {body:?}");
     }
 
     #[test]
