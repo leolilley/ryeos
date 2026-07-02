@@ -578,15 +578,16 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
         Some("sign") => {
             writeln!(
                 out,
-                "ryeos sign — Sign RyeOS items by canonical ref or glob"
+                "ryeos sign — Sign RyeOS items by canonical ref, glob, or .ai path"
             )?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos sign <item_ref_or_glob> [OPTIONS]")?;
+            writeln!(out, "USAGE: ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]")?;
             writeln!(out)?;
             writeln!(out, "EXAMPLES:")?;
             writeln!(out, "  ryeos sign knowledge:my/entry")?;
             writeln!(out, "  ryeos sign 'tool:agent-kiwi/*'")?;
             writeln!(out, "  ryeos sign 'node:routes/*'")?;
+            writeln!(out, "  ryeos sign .ai/directives/foo.md .ai/tools/bar.yaml")?;
             writeln!(out)?;
             writeln!(out, "OPTIONS:")?;
             writeln!(
