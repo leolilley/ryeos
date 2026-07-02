@@ -123,6 +123,8 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
             result: result.output.clone(),
             error: None,
             cost: None,
+            outputs: serde_json::Value::Null,
+            warnings: Vec::new(),
         }
     } else {
         ryeos_runtime::TerminalCompletion {
@@ -134,6 +136,8 @@ async fn run_thread(envelope: &MethodCallEnvelope) -> MethodCallResult {
                 .as_ref()
                 .and_then(|e| serde_json::to_value(e).ok()),
             cost: None,
+            outputs: serde_json::Value::Null,
+            warnings: Vec::new(),
         }
     };
     if let Err(e) = client.finalize_thread(completion).await {

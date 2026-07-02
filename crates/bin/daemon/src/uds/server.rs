@@ -320,6 +320,13 @@ struct RuntimeFinalizeParams {
     error: Option<serde_json::Value>,
     #[serde(default)]
     cost: Option<serde_json::Value>,
+    /// The runtime's structured outputs + warnings. Preserved into the canonical
+    /// managed envelope so a detached follow child's return data survives to the
+    /// parent's resume. Absent from older runtimes → degraded (empty).
+    #[serde(default)]
+    outputs: serde_json::Value,
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 /// Map a runtime self-reported terminal status. Timeout is daemon-owned — the
@@ -361,6 +368,17 @@ fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contr
 fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
+    // Build the canonical managed envelope from the RAW runtime fields (raw cost,
+    // outputs, warnings) BEFORE `completion` moves result/error, so a followed
+    // child's structured return survives to the parent's resume.
+    let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+        &params.status,
+        params.result.as_ref(),
+        params.error.as_ref(),
+        params.cost.as_ref(),
+        &params.outputs,
+        &params.warnings,
+    );
     let completion = ryeos_engine::contracts::ExecutionCompletion {
         status: terminal_status_from_str(&params.status)?,
         outcome_code: params.outcome_code,
@@ -371,11 +389,11 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
         continuation_request: None,
         metadata: None,
     };
-    serde_json::to_value(
-        state
-            .threads
-            .finalize_from_completion(&params.thread_id, &completion)?,
-    )
+    serde_json::to_value(state.threads.finalize_from_completion(
+        &params.thread_id,
+        &completion,
+        Some(managed_envelope),
+    )?)
     .context("failed to encode runtime.finalize_thread result")
 }
 
@@ -1082,6 +1100,200 @@ mod tests {
             .get_follow_waiter_by_key(FOLLOW_KEY)
             .unwrap()
             .is_none()
+    }
+
+    /// Arm a `waiting` follow waiter (key `wk`) whose child chain is `child`.
+    fn arm_waiting_follow(state: &AppState, wk: &str, child: &str) {
+        state
+            .state_store
+            .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
+                follow_key: wk.to_string(),
+                parent_thread_id: "P".to_string(),
+                parent_chain_root_id: "P".to_string(),
+                follow_node: "n".to_string(),
+                graph_run_id: "g".to_string(),
+                step_count: 0,
+                frontier_id: None,
+            })
+            .unwrap();
+        state.state_store.set_follow_child(wk, child, child).unwrap();
+        state.state_store.set_follow_parent_successor(wk, "S").unwrap();
+        state.state_store.mark_follow_waiting(wk).unwrap();
+    }
+
+    fn finalize_child(state: &AppState, child: &str, status: &str, result: Option<serde_json::Value>) {
+        state
+            .threads
+            .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                thread_id: child.to_string(),
+                status: status.to_string(),
+                outcome_code: Some(status.to_string()),
+                result,
+                error: None,
+                metadata: None,
+                artifacts: vec![],
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn finalize_thread_without_envelope_degrades_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-degraded", "C");
+
+        // The generic finalize path carries NO canonical envelope. A follow waiter
+        // consuming it gets a visible in-band FAILURE, not a silent empty success —
+        // so the parent resumes into its on_error path.
+        finalize_child(&state, "C", "completed", Some(json!({ "answer": 42 })));
+
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-degraded")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
+        let env = w.terminal_envelope.expect("degraded envelope stored");
+        assert_eq!(env["success"], json!(false));
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(
+            env["result"]["code"],
+            json!("degraded_follow_child_terminal_envelope")
+        );
+        assert_eq!(env["result"]["child_status"], json!("completed"));
+    }
+
+    #[tokio::test]
+    async fn finalize_with_managed_envelope_preserves_outputs_on_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-mgd", "C");
+
+        // The executor-fallback path carries the canonical envelope: outputs +
+        // warnings survive to the follow waiter as a success.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": "directive_return",
+            "outputs": { "recommendations": ["x"] },
+            "warnings": ["w1"],
+            "cost": { "input_tokens": 5, "output_tokens": 1, "total_usd": 0.001 },
+        });
+        state
+            .threads
+            .finalize_thread_with_managed_envelope(
+                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                    thread_id: "C".to_string(),
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result: Some(json!("directive_return")),
+                    error: None,
+                    metadata: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                    summary_json: None,
+                },
+                envelope,
+            )
+            .unwrap();
+
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-mgd")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
+        let env = w.terminal_envelope.expect("canonical envelope stored");
+        assert_eq!(env["success"], json!(true));
+        assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
+        assert_eq!(env["warnings"], json!(["w1"]));
+    }
+
+    #[tokio::test]
+    async fn finalize_continued_does_not_flip_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-cont", "C");
+
+        // A `continued` finalize is an intermediate link in the child's own chain,
+        // not the terminal tail — the waiter stays `waiting`.
+        finalize_child(&state, "C", "continued", None);
+
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-cont")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::WAITING);
+        assert!(w.terminal_envelope.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_finalize_carries_outputs_and_warnings_to_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-out", "C");
+
+        // The child SELF-finalizes via the runtime callback wire (not the executor
+        // fallback), carrying a `directive_return`-style result plus its structured
+        // outputs + warnings.
+        let cbt = state.callback_tokens.generate(
+            "C",
+            std::path::PathBuf::from("/proj"),
+            std::time::Duration::from_secs(300),
+            vec![],
+            test_provenance(&state, "/proj"),
+        );
+        let resp = dispatch(
+            rpc(
+                "runtime.finalize_thread",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "C",
+                    "status": "completed",
+                    "result": "directive_return",
+                    "outputs": { "recommendations": ["a", "b"] },
+                    "warnings": ["w1"],
+                    "cost": { "input_tokens": 10, "output_tokens": 2, "total_usd": 0.01 },
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
+
+        // The stored follow envelope preserves outputs + warnings + raw cost — not
+        // the fabricated empty forms.
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-out")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
+        let env = w.terminal_envelope.expect("canonical envelope stored");
+        assert_eq!(env["success"], json!(true));
+        assert_eq!(env["result"], json!("directive_return"));
+        assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));
+        assert_eq!(env["warnings"], json!(["w1"]));
+        assert_eq!(env["cost"]["input_tokens"], json!(10));
     }
 
     #[tokio::test]

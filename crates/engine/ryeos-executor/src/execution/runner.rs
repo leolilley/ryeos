@@ -533,7 +533,7 @@ fn finalize_completion(
 ) -> Result<ThreadDetail> {
     match state
         .threads
-        .finalize_from_completion(thread_id, &completion)
+        .finalize_from_completion(thread_id, &completion, None)
     {
         Ok(thread) => Ok(thread),
         Err(err) => {

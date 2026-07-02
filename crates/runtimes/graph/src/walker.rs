@@ -427,6 +427,8 @@ impl Walker {
                 result: None,
                 error: Some(json!(validation.errors.join("; "))),
                 cost: None,
+                outputs: Value::Null,
+                warnings: Vec::new(),
             };
             let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -1948,6 +1950,12 @@ impl Walker {
                 .cost
                 .as_ref()
                 .and_then(|c| serde_json::to_value(c).ok()),
+            // A graph's return value is its `result`; it has no separate structured
+            // outputs. Send a snapshot of accumulated callback-drift warnings so a
+            // follow parent (which consumes THIS envelope, not the later stdout
+            // RuntimeResult) sees the same warnings a live dispatch would.
+            outputs: Value::Null,
+            warnings: self.warnings.lock().unwrap().clone(),
         };
         let r = self.client.finalize_thread(completion).await;
         self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -2021,6 +2029,8 @@ impl Walker {
                     .cost
                     .as_ref()
                     .and_then(|c| serde_json::to_value(c).ok()),
+                outputs: Value::Null,
+                warnings: self.warnings.lock().unwrap().clone(),
             };
             let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));

@@ -114,14 +114,13 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         completion: TerminalCompletion,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({
-            "thread_id": thread_id,
-            "status": completion.status,
-            "outcome_code": completion.outcome_code,
-            "result": completion.result,
-            "error": completion.error,
-            "cost": completion.cost,
-        });
+        // Serialize the whole typed completion so wire and struct can't drift — a
+        // hand-listed set previously dropped `outputs`/`warnings`, losing a follow
+        // child's structured return. The daemon deserializes this back into
+        // RuntimeFinalizeParams.
+        let mut params = serde_json::to_value(&completion)
+            .map_err(|e| CallbackError::Transport(anyhow::anyhow!("serialize completion: {e}")))?;
+        params["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.finalize_thread", params)

@@ -936,6 +936,11 @@ impl Runner {
                                     result: Some(json!("directive_return")),
                                     error: None,
                                     cost: serde_json::to_value(self.budget.cost()).ok(),
+                                    // The structured return lives in `outputs`, not
+                                    // `result` — carry it so a follow parent can
+                                    // consume `${result.outputs.*}` on resume.
+                                    outputs: args.clone(),
+                                    warnings: warnings.clone(),
                                 };
                                 if let Err(e) = self.callback.finalize_thread(completion).await {
                                     guard.finalized = true;
@@ -1132,6 +1137,8 @@ impl Runner {
                         result: Some(result.clone()),
                         error: None,
                         cost: serde_json::to_value(self.budget.cost()).ok(),
+                        outputs: json!({}),
+                        warnings: warnings.clone(),
                     };
                     if let Err(e) = self.callback.finalize_thread(completion).await {
                         let runtime_result = RuntimeResult {
@@ -1204,6 +1211,8 @@ impl Runner {
                         result: None,
                         error: Some(json!(error)),
                         cost: serde_json::to_value(self.budget.cost()).ok(),
+                        outputs: json!({}),
+                        warnings: warnings.clone(),
                     };
                     if let Err(e) = self.callback.finalize_thread(completion).await {
                         // Finalize failed — surface in the error result

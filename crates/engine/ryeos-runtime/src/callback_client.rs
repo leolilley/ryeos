@@ -1049,6 +1049,8 @@ mod tests {
                 result: None,
                 error: None,
                 cost: None,
+                outputs: serde_json::Value::Null,
+                warnings: Vec::new(),
             })
             .await
             .unwrap_err();

@@ -1703,21 +1703,41 @@ async fn run_claimed_thread_row(
                     provider: None,
                     metadata: None,
                 });
-        let finalized = state.threads.finalize_thread(&ThreadFinalizeParams {
-            thread_id: thread_id.clone(),
-            status: terminal_status.to_string(),
-            outcome_code: if terminal_status == "completed" {
-                Some("success".to_string())
-            } else {
-                Some(terminal_status.to_string())
+        // Build the canonical managed envelope from the parsed RuntimeResult
+        // (outputs/warnings/raw cost) BEFORE the params move `terminal_error`, so
+        // a followed child finalized on this executor-supervised fallback preserves
+        // its structured return to the parent's resume — same shape live dispatch
+        // returns.
+        let raw_cost = runtime_result
+            .cost
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok());
+        let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+            terminal_status,
+            runtime_result.result.as_ref(),
+            terminal_error.as_ref(),
+            raw_cost.as_ref(),
+            &runtime_result.outputs,
+            &runtime_result.warnings,
+        );
+        let finalized = state.threads.finalize_thread_with_managed_envelope(
+            &ThreadFinalizeParams {
+                thread_id: thread_id.clone(),
+                status: terminal_status.to_string(),
+                outcome_code: if terminal_status == "completed" {
+                    Some("success".to_string())
+                } else {
+                    Some(terminal_status.to_string())
+                },
+                result: runtime_result.result.clone(),
+                error: terminal_error,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost,
+                summary_json: None,
             },
-            result: runtime_result.result.clone(),
-            error: terminal_error,
-            metadata: None,
-            artifacts: Vec::new(),
-            final_cost,
-            summary_json: None,
-        })?;
+            managed_envelope,
+        )?;
         thread_detail = finalized;
     }
 

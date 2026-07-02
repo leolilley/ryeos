@@ -91,6 +91,16 @@ pub struct TerminalCompletion {
     pub error: Option<Value>,
     #[serde(default)]
     pub cost: Option<Value>,
+    /// The runtime's `RuntimeResult.outputs` — its structured return value,
+    /// distinct from the terminal `result` (which some runtimes set to a sentinel
+    /// while the real values ride here). Carried so a detached child's outputs are
+    /// persisted for a follow parent to consume; defaults to null when unsent
+    /// (degraded).
+    #[serde(default)]
+    pub outputs: Value,
+    /// The runtime's `RuntimeResult.warnings` accumulated before finalize.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,5 +290,33 @@ mod tests {
         let wire = json!({ "item_id": "tool:t/echo", "thread": "inline" });
         let payload: ActionPayload = serde_json::from_value(wire).unwrap();
         assert!(payload.call.is_none());
+    }
+
+    #[test]
+    fn terminal_completion_serializes_outputs_and_warnings() {
+        // The UDS client serializes the WHOLE completion (anti-drift), so the wire
+        // must carry outputs + warnings — a hand-listed param set previously
+        // dropped them, losing a follow child's structured return.
+        let completion = TerminalCompletion {
+            status: "completed".to_string(),
+            outcome_code: Some("success".to_string()),
+            result: Some(json!("directive_return")),
+            error: None,
+            cost: None,
+            outputs: json!({ "recommendations": ["a"] }),
+            warnings: vec!["w1".to_string()],
+        };
+        let v = serde_json::to_value(&completion).unwrap();
+        assert_eq!(v["outputs"]["recommendations"], json!(["a"]));
+        assert_eq!(v["warnings"], json!(["w1"]));
+    }
+
+    #[test]
+    fn terminal_completion_defaults_outputs_and_warnings() {
+        // An old runtime sending no outputs/warnings still deserializes (degraded).
+        let wire = json!({ "status": "completed" });
+        let completion: TerminalCompletion = serde_json::from_value(wire).unwrap();
+        assert!(completion.outputs.is_null());
+        assert!(completion.warnings.is_empty());
     }
 }
