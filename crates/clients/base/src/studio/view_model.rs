@@ -1293,13 +1293,26 @@ fn input_vm(
     // one, else the input's `/` command grammar.
     let completion = input_completion(core, view_ref, input, &text, cursor);
     let live_filter = input.is_live_filter();
+    // Cyclable live filters name their active field in the prompt and hint.
+    let feeds = input.feeds.as_ref();
+    let filter_field = buffer.map(|b| b.filter_field).unwrap_or(0);
+    let cyclable = feeds.is_some_and(|f| f.field_count() > 1);
     let hint = completion.first().cloned().unwrap_or_else(|| {
-        if live_filter {
+        if live_filter && cyclable {
+            "Tab: field · type to filter · Enter opens".to_string()
+        } else if live_filter {
             "type to filter · ↑↓ select · Enter opens".to_string()
         } else {
             "Shift+Enter submit · / for commands · @ for refs".to_string()
         }
     });
+    // A cyclable filter's prompt names the active field ("filter by source…");
+    // otherwise the authored placeholder, else a generic prompt.
+    let placeholder = feeds
+        .and_then(|f| f.active_label(filter_field))
+        .map(|label| format!("filter by {label}…"))
+        .or_else(|| input.placeholder.clone())
+        .unwrap_or_else(|| "type RyeOS input…".to_string());
 
     let has_route_target =
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
@@ -1307,10 +1320,7 @@ fn input_vm(
     StudioInputVm {
         cursor,
         route_label,
-        placeholder: input
-            .placeholder
-            .clone()
-            .unwrap_or_else(|| "type RyeOS input…".to_string()),
+        placeholder,
         hint,
         submit_enabled: !text.trim().is_empty() && (has_route_target || has_affordance_target),
         completion,
@@ -2861,6 +2871,7 @@ mod tests {
             crate::studio::model::StudioInputState {
                 text: "/thread ".to_string(),
                 cursor: "/thread ".len(),
+                ..Default::default()
             },
         );
         let vm = build_view_model(&core);
@@ -2890,6 +2901,7 @@ mod tests {
             crate::studio::model::StudioInputState {
                 text: "/thr".to_string(),
                 cursor: 4,
+                ..Default::default()
             },
         );
         let vm = build_view_model(&core);
@@ -2928,6 +2940,7 @@ mod tests {
             crate::studio::model::StudioInputState {
                 text: "ping @directive".to_string(),
                 cursor: "ping @directive".len(),
+                ..Default::default()
             },
         );
         let vm = build_view_model(&core);

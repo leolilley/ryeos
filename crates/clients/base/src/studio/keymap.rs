@@ -52,6 +52,9 @@ pub struct StudioKeyContext {
     /// target). Its buffer applies live, so Enter must still activate the
     /// focused row rather than submit — typing narrows, Enter opens.
     pub input_is_live_filter: bool,
+    /// The focused live filter declares more than one target field, so Tab
+    /// cycles which field it filters (status → kind → source).
+    pub input_filter_fields: bool,
     /// The focused input declares a completion source.
     pub input_has_completion: bool,
     /// Completion would actually accept something right now for the focused
@@ -180,6 +183,14 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
         StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
             ui(StudioUiEvent::DeleteInputChar)
+        }
+        // A live filter with multiple target fields owns Tab to cycle the field
+        // (it has no completion or route-target, so Tab is otherwise free here).
+        StudioKey::Tab if context.input_filter_fields && event.modifiers.none() => {
+            ui(StudioUiEvent::CycleFilterField { forward: true })
+        }
+        StudioKey::Tab if context.input_filter_fields && event.modifiers.shift_only() => {
+            ui(StudioUiEvent::CycleFilterField { forward: false })
         }
         // Tab precedence (central interaction policy, capability + buffer
         // state — never a per-view keybinding):
@@ -370,6 +381,7 @@ mod tests {
             input_visible,
             input_has_text: false,
             input_is_live_filter: false,
+            input_filter_fields: false,
             input_has_completion: false,
             input_can_accept_completion: false,
             input_target_cycle: None,
@@ -384,6 +396,7 @@ mod tests {
             input_visible: true,
             input_has_text: true,
             input_is_live_filter: false,
+            input_filter_fields: false,
             input_has_completion: false,
             input_can_accept_completion: false,
             input_target_cycle: None,
@@ -681,6 +694,34 @@ mod tests {
             ),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::InsertInputChar { ch: 'r' }
+            }
+        ));
+    }
+
+    #[test]
+    fn tab_cycles_a_multi_field_live_filter() {
+        let ctx = StudioKeyContext {
+            input_is_live_filter: true,
+            input_filter_fields: true,
+            ..context_typing()
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), ctx),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleFilterField { forward: true }
+            }
+        ));
+        assert!(matches!(
+            studio_key_command(
+                shift_tab(),
+                StudioKeyContext {
+                    input_is_live_filter: true,
+                    input_filter_fields: true,
+                    ..context_typing()
+                }
+            ),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleFilterField { forward: false }
             }
         ));
     }
