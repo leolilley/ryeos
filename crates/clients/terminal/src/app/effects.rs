@@ -104,11 +104,22 @@ async fn effect_data(
         StudioEffectKind::Invoke { target, params, .. } => match target {
             ryeos_client_base::studio::effect::InvokeRef::Ref { item_ref } => {
                 let mut params = params.clone();
-                if let (Some(project), Some(map)) = (project_path, params.as_object_mut()) {
-                    // Services receive only their own parameters; project
-                    // context rides inside them as declared by the schema.
-                    map.entry("project_path".to_string())
-                        .or_insert_with(|| serde_json::Value::String(project.to_string()));
+                // Opt-in project scoping (mirrors FetchSource): fill param-level
+                // project_path ONLY when the params object explicitly declares an
+                // empty/null one. Services that don't declare it (e.g.
+                // threads.cancel / commands.submit, both deny_unknown_fields with
+                // no project_path field) must not receive it, or the request is
+                // rejected. Top-level /execute project_path still rides as
+                // transport context below.
+                if let (Some(project), Some(slot)) = (
+                    project_path,
+                    params
+                        .as_object_mut()
+                        .and_then(|map| map.get_mut("project_path")),
+                ) {
+                    if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
+                        *slot = serde_json::Value::String(project.to_string());
+                    }
                 }
                 let mut body = serde_json::json!({
                     "item_ref": item_ref,

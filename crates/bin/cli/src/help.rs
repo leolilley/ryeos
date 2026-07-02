@@ -10,10 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::error::CliError;
-use anyhow::Context;
 use ryeos_app::node_config::NodeConfigSnapshot;
-use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::engine::{EffectiveItemRequest, Engine};
+use ryeos_engine::engine::Engine;
 use serde_json::Value;
 
 use crate::node_descriptors::LoadedCommandDescriptor;
@@ -77,9 +75,14 @@ pub fn print_help(
             None
         }
     };
-    let bundle_roots = snapshot.map(snapshot_bundle_roots).unwrap_or_default();
+    let bundle_roots = snapshot
+        .map(crate::effective_metadata::snapshot_bundle_roots)
+        .unwrap_or_default();
     let engine = (!bundle_roots.is_empty())
-        .then(|| build_help_engine(app_root, ".", &bundle_roots).ok())
+        .then(|| {
+            crate::effective_metadata::build_effective_item_engine(app_root, None, &bundle_roots)
+                .ok()
+        })
         .flatten();
     let discovered = snapshot
         .map(|snapshot| discover_commands_from_snapshot(snapshot, engine.as_ref(), "."))
@@ -261,13 +264,19 @@ fn print_installed_command_help(
             "installed node config failed verification: {err:#}"
         ))
     })?;
-    let bundle_roots = snapshot_bundle_roots(&snapshot);
+    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
     let Some(command_descriptor) = crate::node_descriptors::find_command(&snapshot, command_tokens)
     else {
         return Ok(false);
     };
     let execute_ref = command_descriptor.execute_ref();
-    let engine = build_help_engine(app_root, project_path, &bundle_roots).ok();
+    let project_root = (project_path != ".").then(|| Path::new(project_path));
+    let engine = crate::effective_metadata::build_effective_item_engine(
+        app_root,
+        project_root,
+        &bundle_roots,
+    )
+    .ok();
     let item = execute_ref.and_then(|execute| {
         engine
             .as_ref()
@@ -461,49 +470,16 @@ fn installed_usage_line(
     )
 }
 
-fn snapshot_bundle_roots(snapshot: &NodeConfigSnapshot) -> Vec<PathBuf> {
-    snapshot
-        .bundles
-        .iter()
-        .map(|record| record.path.clone())
-        .collect()
-}
-
-fn build_help_engine(
-    app_root: &Path,
-    project_path: &str,
-    bundle_roots: &[PathBuf],
-) -> anyhow::Result<Engine> {
-    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })?;
-    let project_root = (project_path != ".").then(|| PathBuf::from(project_path));
-
-    ryeos_app::engine_init::build_engine_for_roots(
-        &config,
-        bundle_roots,
-        project_root.as_deref(),
-        None,
-    )
-    .context("build help effective-item engine")
-}
-
 fn resolve_effective_help(
     engine: &Engine,
     execute_ref: &str,
     project_path: &str,
 ) -> Option<ItemHelpMetadata> {
-    let item_ref = CanonicalRef::parse(execute_ref).ok()?;
-    let project_root = (project_path != ".").then(|| PathBuf::from(project_path));
-    let item = engine
-        .effective_item(EffectiveItemRequest {
-            item_ref,
-            expected_kind: None,
-            project_root,
-        })
-        .ok()?;
-    Some(ItemHelpMetadata::from_composed(&item.composed_value))
+    let project_root = (project_path != ".").then(|| Path::new(project_path));
+    crate::effective_metadata::resolve_effective_composed_value(engine, execute_ref, project_root)
+        .ok()
+        .flatten()
+        .map(|value| ItemHelpMetadata::from_composed(&value))
 }
 
 /// Print help for lifecycle commands when installed descriptors are unavailable.

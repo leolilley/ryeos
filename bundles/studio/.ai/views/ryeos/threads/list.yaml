@@ -1,21 +1,30 @@
-# ryeos:signed:2026-06-29T23:43:32Z:40892707cedf8fd8964f8beacf443e0075f8ce5d02b279daa56d416c0dbaaa76:fB2de6S09QoSS5tjfU/B4TfN36LaDQ4IoJdnp+PzULopW/bjwuY7VkYi+fAxGeH4b9WMO+d41EJ/orjnXAKGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-02T02:24:53Z:aa7db21c4e3c3b70d131f53b98cec6cc7bb0dd433ccfde66fb2b03f6306c16e8:NmSzMcIzUVzkhzbNvxuIGfngPRRlVAG6SeEjOkLzF2WImqe0xfUHETZeMVo9QUCX5BfA5CHcZC7zpJ+Qm2/8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
 
 widget: table
+# Operator watch dashboard: the UI-studio (operator-scoped) thread list, ordered
+# active-first then newest (sort: watch), applied before the limit so the most
+# relevant rows always show.
 source:
-  ref: service:threads/list
-  params: {}
+  ref: service:ui/studio/threads/list
+  params:
+    limit: 200
+    sort: watch
   collection: threads
 projections:
   columns:
     - label: thread
       field: thread_id
+    - label: kind
+      field: kind
     - label: item
       field: item_ref
     - label: status
       field: status
+    - label: source
+      field: requested_by
     - label: created
       field: created_at
   tone:
@@ -27,9 +36,24 @@ projections:
       cancelled: warn
       completed: good
     default: neutral
+# Enter watches the row: aim the route at the thread (both thread + chain_root so
+# the braid resolves) and swap the single center lens to its braid.
 selection:
-  activate: inspect
+  activate: watch
 affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/chain/timeline
+  # Inspect swaps the center lens to the thread's detail sections. Write the
+  # selected thread FIRST (the detail sources read @facet:selection.thread),
+  # then open the lens — the P1 open_view ordering guarantees the facet is set
+  # before the new lens fetches.
   - id: inspect
     label: Inspect
     invoke:
@@ -37,19 +61,26 @@ affordances:
       facet: selection
       value:
         thread: "{record.thread_id}"
-  - id: aim-input
-    label: Aim input here
-    invoke:
-      plane: ui
-      facet: input.route
-      merge:
-        thread: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
+  # Row-specific cancel through the operator-scoped studio service (args reach
+  # the daemon as parameters via /execute — the token path would drop them).
   - id: cancel
     label: Cancel
     invoke:
       plane: rye
-      tokens: [thread, cancel]
+      ref: service:ui/studio/thread/cancel
       args:
         thread_id: "{record.thread_id}"
+# Inline live filter: typing narrows the list by status (substring) as you type;
+# it feeds the `status` source param (empty buffer = unfiltered). No `submit:`, so
+# this is a live filter — Enter activates the focused row (watches it), it does
+# not submit. When the list lens is focused, printable keys edit this filter
+# rather than the foot route input — the watch dashboard filters, it doesn't compose.
+input:
+  id: filter
+  placeholder: "filter by status…"
+  feeds:
+    param: status
+    debounce_ms: 120
 refresh:
   on_hint: thread

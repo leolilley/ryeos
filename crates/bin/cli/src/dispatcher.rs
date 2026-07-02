@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use ryeos_runtime::{
     CommandDef, CommandDispatch, CommandParameterBindingMode, CommandProjectDefault,
-    CommandProjectResolution, CommandRegistry,
+    CommandProjectResolution, CommandRegistry, InvocationInputContract,
 };
 use serde_json::Value;
 
@@ -138,7 +138,15 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     //    service-schema `project` field, while global `-p/--project` before
     //    the command remains supported by clap above.
 
-    let resolved = resolve_command_for_daemon(&cli.rest, snapshot, cli.project.as_deref())?;
+    let mut resolved = resolve_command_for_daemon(&cli.rest, snapshot, cli.project.as_deref())?;
+    let item_ref_for_contract = resolved.item_ref.clone();
+    normalize_resolved_parameters(
+        &app_root,
+        snapshot,
+        &item_ref_for_contract,
+        resolved.project_path.as_deref(),
+        &mut resolved.parameters,
+    )?;
 
     let mut body = serde_json::json!({
         "item_ref": resolved.item_ref,
@@ -589,6 +597,60 @@ fn bind_command_parameters_for_daemon(
                 .map_err(CliError::ProjectResolution)
         }
     }
+}
+
+fn normalize_resolved_parameters(
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    item_ref: &str,
+    project_path: Option<&Path>,
+    parameters: &mut Value,
+) -> Result<(), CliError> {
+    let Some(contract) = resolve_invocation_contract(app_root, snapshot, item_ref, project_path)?
+    else {
+        return Ok(());
+    };
+    let normalized = ryeos_runtime::arg_binder::normalize_params_with_contract(
+        std::mem::take(parameters),
+        Some(&contract),
+    )
+    .map_err(CliError::ProjectResolution)?;
+    *parameters = normalized;
+    Ok(())
+}
+
+fn resolve_invocation_contract(
+    app_root: &Path,
+    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    item_ref: &str,
+    project_path: Option<&Path>,
+) -> Result<Option<InvocationInputContract>, CliError> {
+    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
+    if bundle_roots.is_empty() {
+        return Err(CliError::ProjectResolution(
+            "resolve invocation schema: installed node config has no bundle roots".into(),
+        ));
+    }
+    let engine = crate::effective_metadata::build_effective_item_engine(
+        app_root,
+        project_path,
+        &bundle_roots,
+    )
+    .map_err(|err| CliError::ProjectResolution(format!("resolve invocation schema: {err:#}")))?;
+    let Some(composed) = crate::effective_metadata::resolve_effective_composed_value(
+        &engine,
+        item_ref,
+        project_path,
+    )
+    .map_err(|err| CliError::ProjectResolution(format!("resolve invocation schema: {err:#}")))?
+    else {
+        return Ok(None);
+    };
+    let Some(schema) = composed.get("schema") else {
+        return Ok(None);
+    };
+    InvocationInputContract::from_lightweight_schema_value(schema)
+        .map_err(CliError::ProjectResolution)
 }
 
 fn apply_project_policy(

@@ -1572,6 +1572,46 @@ impl StateStore {
         Self::rows_to_list_items(&g, thread_rows)
     }
 
+    /// As [`Self::list_threads_filtered`] but with an explicit
+    /// [`queries::ThreadSort`] — `Watch` orders active-before-terminal then
+    /// newest for the operator dashboard, without changing the default order.
+    pub fn list_threads_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: queries::ThreadSort,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows =
+            queries::list_threads_sorted(g.state_db.projection(), limit, filter_principal, sort)?;
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
+    /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
+    /// for a `chain_root_id` — the deep-watch summary of an execution and its
+    /// continuations.
+    pub fn chain_usage_totals(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<queries::ThreadUsageTotals> {
+        let g = self.lock()?;
+        queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
+    }
+
+    /// As [`Self::list_threads_sorted`] but with the full optional filter set
+    /// (status / kind / requested_by) the operator dashboard narrows by.
+    pub fn list_threads_query(
+        &self,
+        limit: usize,
+        filter: &queries::ThreadListFilter,
+        sort: queries::ThreadSort,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows =
+            queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
     /// Project thread rows into `ThreadListItem`s, resolving each terminal
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list

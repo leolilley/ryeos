@@ -513,6 +513,7 @@ impl StudioCore {
                 super::seat::KEY_INPUT_ROUTE.to_string(),
                 None,
                 Some(serde_json::json!({ "thread": thread_id })),
+                None,
             ),
             StudioAction::InspectSummary { title, detail } => {
                 self.seat.append_facet(
@@ -664,6 +665,18 @@ impl StudioCore {
             .is_some();
         if !feeds {
             return Vec::new();
+        }
+        // A live filter narrows the list, so a table cursor the operator moved
+        // down may now point past the shortened rows — which would make Enter
+        // (activate row) a no-op. Reset the owning tile's cursor to the top so
+        // the first narrowed row is selected and openable.
+        if let Some(tile_id) = self
+            .workspace
+            .tile_ids()
+            .into_iter()
+            .find(|id| id.0.to_string() == key.view_instance_id)
+        {
+            self.set_tile_cursor(tile_id, 0);
         }
         self.emit_fetch_source_keyed(key.view_instance_id.clone(), &view_ref)
             .into_iter()
@@ -1043,14 +1056,23 @@ impl StudioCore {
                 facet,
                 value,
                 merge,
+                open_view,
             }) => {
-                let effects = self.apply_ui_affordance(facet, value, merge);
+                let effects = self.apply_ui_affordance(facet, value, merge, open_view);
                 self.clear_focused_input();
                 effects
             }
             Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
+                    params: args,
+                    route_seq: None,
+                    ratchet_on_thread_id: false,
+                })]
+            }
+            Some(super::content::AffordanceInvoke::Service { item_ref, args }) => {
+                vec![self.emit(StudioEffectKind::Invoke {
+                    target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -1347,10 +1369,19 @@ impl StudioCore {
                 facet,
                 value,
                 merge,
-            }) => self.apply_ui_affordance(facet, value, merge),
+                open_view,
+            }) => self.apply_ui_affordance(facet, value, merge, open_view),
             Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
+                    params: args,
+                    route_seq: None,
+                    ratchet_on_thread_id: false,
+                })]
+            }
+            Some(super::content::AffordanceInvoke::Service { item_ref, args }) => {
+                vec![self.emit(StudioEffectKind::Invoke {
+                    target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -1368,6 +1399,7 @@ impl StudioCore {
         facet: String,
         value: Option<serde_json::Value>,
         merge: Option<serde_json::Value>,
+        open_view: Option<String>,
     ) -> Vec<StudioEffect> {
         let next = if let Some(merge) = merge {
             let mut current = self
@@ -1387,7 +1419,15 @@ impl StudioCore {
         };
         self.seat.append_facet(facet.clone(), next);
         self.bump_generation();
-        self.effects_for_facet(&facet)
+        let mut effects = self.effects_for_facet(&facet);
+        // Open the view AFTER the facet write, so the opened view's fetch
+        // resolves its `@facet:` params against the value just written (e.g. a
+        // row drill-in sets input.route.chain_root, then the braid lens fetches
+        // that chain). Single-lens surfaces replace the center in place.
+        if let Some(view_ref) = open_view {
+            effects.extend(self.open_view(ViewSpec::bound(view_ref)));
+        }
+        effects
     }
 
     /// Facet write arrived: refetch every bound tile whose binding
@@ -1524,6 +1564,37 @@ impl StudioCore {
                     // Typed submit result: { thread_id?, delivery, notice?, execution? }.
                     let outcome: super::dto::LaunchOutcome =
                         serde_json::from_value(data.clone()).unwrap_or_default();
+                    // A plain service-ref invoke (row management like cancel) is
+                    // NOT a launch: it targets a service other than threads/input,
+                    // carries no `delivery`, no route_seq, and never ratchets.
+                    // Reading its result as a launch outcome would clear the
+                    // focused filter and falsely claim "Thread launched" — so
+                    // handle it as a plain service success: refresh the list/braid
+                    // and preserve the focused input.
+                    let service_ref = match &expected {
+                        StudioEffectKind::Invoke {
+                            target: super::effect::InvokeRef::Ref { item_ref },
+                            route_seq: None,
+                            ratchet_on_thread_id: false,
+                            ..
+                        } if item_ref.as_str() != "service:threads/input" => Some(item_ref.clone()),
+                        _ => None,
+                    };
+                    if let Some(item_ref) = service_ref.filter(|_| outcome.delivery.is_none()) {
+                        let notice = match item_ref.as_str() {
+                            "service:ui/studio/thread/cancel" | "service:threads/cancel" => outcome
+                                .thread_id
+                                .as_deref()
+                                .map(|id| format!("Cancelled {id}."))
+                                .unwrap_or_else(|| "Cancelled.".to_string()),
+                            _ => effect_success_notice(&expected, &data),
+                        };
+                        self.notice(notice, StudioTone::Good);
+                        let mut effects =
+                            vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+                        effects.extend(self.effects_for_hint("thread"));
+                        return effects;
+                    }
                     if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
                         // A refused delivery (non-continuation target, settled
                         // status, or duplicate-submit conflict) delivered
@@ -1645,7 +1716,18 @@ impl StudioCore {
             }
             StudioEffectResultKind::SourceData => {
                 if let StudioEffectKind::FetchSource { tile_id, .. } = &expected {
-                    self.data.sources.insert(tile_id.clone(), data);
+                    // Freshness guard: only the newest request for this key may
+                    // land. An older fetch (e.g. the previously selected thread's
+                    // section) resolving late is dropped, so a reused single-lens
+                    // tile never shows mixed data from two selections.
+                    let is_latest = self
+                        .data
+                        .source_epoch
+                        .get(tile_id)
+                        .map_or(true, |&latest| result.id >= latest);
+                    if is_latest {
+                        self.data.sources.insert(tile_id.clone(), data);
+                    }
                     self.bump_generation();
                 }
             }
@@ -2295,6 +2377,251 @@ mod tests {
     }
 
     #[test]
+    fn ui_affordance_open_view_writes_route_then_opens_view_with_new_facet() {
+        // The watch drill-in (P1): a row activation merges route {thread, chain_root}
+        // AND opens the braid lens, whose fetch must resolve the just-written chain_root.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "table",
+                "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                "affordances": [{
+                    "id": "watch",
+                    "invoke": {
+                        "plane": "ui",
+                        "facet": "input.route",
+                        "merge": { "thread": "{record.thread_id}", "chain_root": "{record.chain_root_id}" },
+                        "open_view": "view:ryeos/chain/timeline"
+                    }
+                }]
+            }),
+        );
+        seed_view_value(
+            &mut core,
+            "view:ryeos/chain/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "source": {
+                    "ref": "service:events/chain_replay",
+                    "params": { "chain_root_id": "@facet:input.route.chain_root" },
+                    "collection": "events"
+                }
+            }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                    affordance_id: "watch".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
+                },
+            },
+        });
+
+        // 1. Route facet carries BOTH thread and chain_root.
+        let fold = core.seat.fold();
+        let route = fold.get("input.route").expect("route facet written");
+        assert_eq!(route["thread"], "T-9");
+        assert_eq!(route["chain_root"], "T-root");
+
+        // 2. The braid lens was opened as a tile.
+        assert!(
+            core.workspace
+                .tiles
+                .values()
+                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+            "drill-in opens the braid lens"
+        );
+
+        // 3. Its fetch resolved the just-written chain_root (write-then-open order).
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { source_ref, params, .. }
+                    if source_ref == "service:events/chain_replay"
+                        && params["chain_root_id"] == "T-root")),
+            "timeline fetch must use the selected chain_root; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn service_ref_affordance_emits_execute_invoke_with_row_args() {
+        // Row management (P2): a service-ref affordance emits an /execute Invoke
+        // carrying the row's args — so cancel/kill/continue target that row, not
+        // the route head (the token path would drop the args).
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "table",
+                "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                "affordances": [{
+                    "id": "cancel",
+                    "invoke": {
+                        "plane": "rye",
+                        "ref": "service:commands/submit",
+                        "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" }
+                    }
+                }]
+            }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                    affordance_id: "cancel".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-7" }),
+                },
+            },
+        });
+
+        assert!(
+            matches!(effects.first().map(|e| &e.kind),
+                Some(StudioEffectKind::Invoke {
+                    target: crate::studio::effect::InvokeRef::Ref { item_ref },
+                    params,
+                    ..
+                }) if item_ref == "service:commands/submit"
+                    && params["thread_id"] == "T-7"
+                    && params["command_type"] == "cancel"),
+            "service-ref affordance must /execute with the row's args; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn service_ref_cancel_result_refreshes_without_launch_semantics() {
+        use crate::studio::effect::{InvokeRef, StudioEffectResult, StudioEffectResultKind};
+        // A focused list lens with a live filter and typed text.
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": { "view:ryeos/threads/list": {
+                    "widget": "table",
+                    "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                    "input": { "id": "filter", "feeds": { "param": "status" } }
+                }}
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'r' } });
+        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'u' } });
+        assert_eq!(
+            core.focused_input_buffer().map(|b| b.text.clone()),
+            Some("ru".to_string())
+        );
+
+        // A service-ref cancel invoke (as the row Cancel affordance emits) whose
+        // result looks superficially like a launch outcome ({thread_id, status}).
+        let effect = core.emit(StudioEffectKind::Invoke {
+            target: InvokeRef::Ref {
+                item_ref: "service:ui/studio/thread/cancel".to_string(),
+            },
+            params: serde_json::json!({ "thread_id": "T-7" }),
+            route_seq: None,
+            ratchet_on_thread_id: false,
+        });
+        let effects = core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-7", "status": "cancelled" })),
+                error: None,
+            },
+        });
+
+        // The focused filter buffer is PRESERVED (a launch would have cleared it).
+        assert_eq!(
+            core.focused_input_buffer().map(|b| b.text.clone()),
+            Some("ru".to_string()),
+            "cancel must not clear the focused filter"
+        );
+        // The route is NOT ratcheted onto the cancelled thread.
+        assert!(core.seat.fold().input_route().thread.is_none());
+        // A thread-list refresh is emitted.
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(&e.kind, StudioEffectKind::FetchThreads { .. })),
+            "cancel refreshes the thread list; got {effects:?}"
+        );
+        // The notice reads as a cancel, not a false launch.
+        let notice = core.ui.notices.last().expect("a notice");
+        assert!(notice.message.contains("Cancelled"), "got {:?}", notice.message);
+        assert!(!notice.message.contains("launched"), "got {:?}", notice.message);
+    }
+
+    #[test]
+    fn actual_threads_list_watch_affordance_drills_into_braid() {
+        // The shipped product contract: the real threads/list.yaml `watch`
+        // affordance drills a row into its braid.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let binding: crate::studio::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
+        ))
+        .unwrap();
+        core.views
+            .insert("view:ryeos/threads/list".to_string(), binding);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/chain/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "source": {
+                    "ref": "service:events/chain_replay",
+                    "params": { "chain_root_id": "@facet:input.route.chain_root" },
+                    "collection": "events"
+                }
+            }),
+        );
+        // A pre-existing route field must survive the merge.
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "directive": "directive:ryeos/ops/base" }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                    affordance_id: "watch".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
+                },
+            },
+        });
+
+        let fold = core.seat.fold();
+        let route = fold.get("input.route").expect("route facet");
+        assert_eq!(route["thread"], "T-9");
+        assert_eq!(route["chain_root"], "T-root");
+        assert_eq!(
+            route["directive"], "directive:ryeos/ops/base",
+            "merge preserves existing route fields"
+        );
+        assert!(
+            core.workspace
+                .tiles
+                .values()
+                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+            "watch opens the braid lens"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { source_ref, params, .. }
+                    if source_ref == "service:events/chain_replay"
+                        && params["chain_root_id"] == "T-root")),
+            "timeline fetch uses the row's chain_root; got {effects:?}"
+        );
+    }
+
+    #[test]
     fn invoke_affordance_rye_plane_emits_token_invoke_with_args() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(
@@ -2686,6 +3013,82 @@ mod tests {
     }
 
     #[test]
+    fn stale_source_response_is_dropped_by_the_freshness_guard() {
+        use crate::studio::effect::{StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        // Two fetches issued for the SAME key — a single-lens tile reused for a
+        // new selection keeps its key. The second is the newest request.
+        let older = core.emit(StudioEffectKind::FetchSource {
+            tile_id: "K".to_string(),
+            source_ref: "service:x".to_string(),
+            params: serde_json::json!({}),
+        });
+        let newer = core.emit(StudioEffectKind::FetchSource {
+            tile_id: "K".to_string(),
+            source_ref: "service:x".to_string(),
+            params: serde_json::json!({}),
+        });
+        assert!(newer.id > older.id);
+        // build_fetch_source would record the newest request; simulate that.
+        core.data.source_epoch.insert("K".to_string(), newer.id);
+
+        let deliver = |core: &mut StudioCore, id: u64, tag: &str| {
+            core.dispatch(StudioEvent::EffectResult {
+                result: StudioEffectResult {
+                    id,
+                    ok: true,
+                    kind: StudioEffectResultKind::SourceData,
+                    data: Some(serde_json::json!({ "tag": tag })),
+                    error: None,
+                },
+            });
+        };
+
+        // Newest resolves first and lands.
+        deliver(&mut core, newer.id, "new");
+        assert_eq!(core.data.sources["K"]["tag"], "new");
+        // An older straggler resolving afterwards is DROPPED — a slow fetch for
+        // the previous selection must not overwrite the current one.
+        deliver(&mut core, older.id, "old");
+        assert_eq!(
+            core.data.sources["K"]["tag"], "new",
+            "stale straggler must not overwrite the newest response"
+        );
+    }
+
+    #[test]
+    fn refetching_a_sections_view_clears_prior_section_data() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:test/detail",
+            serde_json::json!({
+                "widget": "sections",
+                "sections": [
+                    { "title": "A", "source": { "ref": "service:a" }, "projection": {} },
+                    { "title": "B", "source": { "ref": "service:b" }, "projection": {} }
+                ]
+            }),
+        );
+        let k0 = crate::studio::content::section_source_key("K", 0);
+        let k1 = crate::studio::content::section_source_key("K", 1);
+        core.data
+            .sources
+            .insert(k0.clone(), serde_json::json!({ "stale": "A" }));
+        core.data
+            .sources
+            .insert(k1.clone(), serde_json::json!({ "stale": "B" }));
+
+        // Refetching (the lens reused for a new selection) drops each section's
+        // prior response so the previous selection can't render underneath, and
+        // emits a fresh fetch per section.
+        let effects = core.emit_fetch_source_keyed("K".to_string(), "view:test/detail");
+        assert!(core.data.sources.get(&k0).is_none());
+        assert!(core.data.sources.get(&k1).is_none());
+        assert_eq!(effects.len(), 2);
+    }
+
+    #[test]
     fn sections_view_assembles_one_group_per_section_from_its_own_source() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.ui.docks.left.as_mut().unwrap().visible = true;
@@ -2824,6 +3227,73 @@ mod tests {
             action_for_focused_row(&core).is_none(),
             "a bundles row has no section activation"
         );
+    }
+
+    #[test]
+    fn editing_a_live_filter_resets_the_table_cursor_to_the_top() {
+        use crate::studio::view_model::action_for_focused_row;
+        use crate::workspace::ViewLocalState;
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "table",
+                        "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                        "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
+                        "selection": { "activate": "watch" },
+                        "affordances": [{
+                            "id": "watch",
+                            "invoke": { "plane": "ui", "facet": "selection", "value": { "thread": "{record.thread_id}" } }
+                        }],
+                        "input": { "id": "filter", "feeds": { "param": "status" } }
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let tile = core.workspace.focused_tile;
+        let key = tile.0.to_string();
+        // A long list the operator has scrolled down into.
+        core.data.sources.insert(
+            key.clone(),
+            serde_json::json!({
+                "threads": (0..60)
+                    .map(|i| serde_json::json!({ "thread_id": format!("T-{i}") }))
+                    .collect::<Vec<_>>()
+            }),
+        );
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 50 },
+        });
+        let cursor = |core: &StudioCore| match &core.workspace.tiles.get(&tile).unwrap().local {
+            ViewLocalState::GenericList { cursor, .. } => *cursor,
+            other => panic!("expected generic-list local, got {other:?}"),
+        };
+        assert_eq!(cursor(&core), 50);
+
+        // Typing into the live filter narrows the list; the cursor must reset to
+        // the top so Enter (activate) hits the first narrowed row, not a no-op
+        // pointing past the end.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InsertInputChar { ch: 'r' },
+        });
+        assert_eq!(cursor(&core), 0);
+
+        // With the narrowed result, the reset cursor resolves the first row.
+        core.data.sources.insert(
+            key.clone(),
+            serde_json::json!({ "threads": [ { "thread_id": "T-only" } ] }),
+        );
+        match action_for_focused_row(&core).expect("first narrowed row activates") {
+            StudioAction::InvokeAffordance { record, .. } => {
+                assert_eq!(record["thread_id"], "T-only")
+            }
+            other => panic!("expected affordance invoke, got {other:?}"),
+        }
     }
 
     #[test]

@@ -16,7 +16,6 @@ use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
-use crate::state::get_ui_state;
 
 fn default_limit() -> usize {
     100
@@ -24,22 +23,16 @@ fn default_limit() -> usize {
 
 const MAX_THREAD_LIST_LIMIT: usize = 2_000;
 
-fn session_id_from_context(ctx: &HandlerContext) -> Option<String> {
-    ctx.fingerprint.strip_prefix("session:").map(String::from)
-}
-
-fn require_browser_session(
-    ctx: &HandlerContext,
-    state: &AppState,
-) -> Result<crate::browser_session::BrowserSession, HandlerError> {
-    let session_id = session_id_from_context(ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-
-    get_ui_state(state)
-        .expect("UiState not set")
-        .browser_sessions
-        .get_session(&session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))
+/// Read an optional string filter param: absent, non-string, or empty/blank all
+/// mean "unfiltered" (`None`). The client sends `""` for an unset filter facet,
+/// so this is where that collapses to no filter.
+fn string_filter(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -52,10 +45,30 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .unwrap_or_else(default_limit)
         .clamp(1, MAX_THREAD_LIST_LIMIT);
 
-    // Browser session = admin context: no owner filtering. Route through the
-    // lifecycle layer so each row carries daemon-authored execution facts
-    // (`execution.supports_continuation`) the studio gates continuation on.
-    let threads = state.threads.list_thread_views_filtered(limit, None)?;
+    // Optional ordering: the watch dashboard requests `sort: watch`
+    // (active-first, then newest); anything else keeps the default order.
+    let sort = match params.get("sort").and_then(|v| v.as_str()) {
+        Some("watch") => ryeos_app::thread_lifecycle::ThreadSort::Watch,
+        _ => ryeos_app::thread_lifecycle::ThreadSort::Default,
+    };
+
+    // Optional dashboard filters. An empty or absent value means "unfiltered"
+    // (the client sends "" for an unset filter facet), so an unset filter
+    // widens the list rather than emptying it. Seat auth is unchanged: a
+    // browser session is admin context, so there is no owner (`principal`)
+    // scope — these are operator-chosen facets, not an authorization boundary.
+    let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
+        principal: None,
+        status: string_filter(&params, "status"),
+        kind: string_filter(&params, "kind"),
+        requested_by: string_filter(&params, "requested_by"),
+    };
+
+    // Route through the lifecycle layer so each row carries daemon-authored
+    // execution facts (`execution.supports_continuation`) the studio gates on.
+    let threads = state
+        .threads
+        .list_thread_views_query(limit, &filter, sort)?;
 
     Ok(serde_json::json!({
         "threads": threads,
@@ -99,6 +112,21 @@ pub async fn handle_inspect(
         .state_store
         .latest_thread_events(&req.thread_id, req.event_limit.clamp(1, MAX_EVENT_LIMIT))?;
 
+    // Deep-watch execution summary: chain-wide usage totals (this thread plus
+    // its continuations) as a list of labeled metrics the detail lens projects
+    // one row each. Kept as a projectable array (not the flat `cost.*` facets,
+    // whose dotted keys a view projection can't navigate).
+    let totals = state
+        .state_store
+        .chain_usage_totals(&thread.thread.chain_root_id)?;
+    let usage = serde_json::json!([
+        { "label": "input tokens", "value": totals.input_tokens.to_string() },
+        { "label": "output tokens", "value": totals.output_tokens.to_string() },
+        { "label": "cost", "value": format!("${:.4}", totals.spend_usd) },
+        { "label": "turns", "value": totals.completed_turns.to_string() },
+        { "label": "threads in chain", "value": totals.thread_count.to_string() },
+    ]);
+
     Ok(serde_json::json!({
         "schema_version": "studio.thread.inspect.v1",
         "thread": thread,
@@ -107,6 +135,7 @@ pub async fn handle_inspect(
         "children": children,
         "facets": facets_map,
         "events": events,
+        "usage": usage,
     }))
 }
 
@@ -115,26 +144,35 @@ pub async fn handle_cancel(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    let session = require_browser_session(&ctx, &state)?;
-    if session.read_only {
-        return Err(
-            HandlerError::Forbidden("read-only session cannot cancel threads".into()).into(),
-        );
-    }
-    let Some(user_principal_id) = session.user_principal_id else {
-        return Err(HandlerError::Forbidden(
-            "verified user principal required to cancel threads".into(),
-        )
-        .into());
-    };
+    use crate::seat_auth::SeatCaller;
 
     let req: ryeos_api::handlers::threads_cancel::Request = serde_json::from_value(params)
         .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-    // Studio cancellation is authorized by the browser session boundary:
-    // writable session + server-stored launch principal.  The underlying
-    // `threads.cancel` handler still performs the critical owner check
-    // against `thread.requested_by` and executes the real cancellation path.
-    let owner_ctx = HandlerContext::new(user_principal_id, session.granted_caps, true);
+
+    // Accept both seat lanes, like the list/inspect studio services: a browser
+    // session (writable + server-stored launch principal) OR a verified operator
+    // (e.g. the terminal watch dashboard). Either way the underlying
+    // `threads.cancel` still owner-checks `thread.requested_by` and runs the real
+    // cancellation.
+    let owner_ctx = match crate::seat_auth::require_seat_caller(&ctx, &state)? {
+        SeatCaller::Session(session) => {
+            if session.read_only {
+                return Err(HandlerError::Forbidden(
+                    "read-only session cannot cancel threads".into(),
+                )
+                .into());
+            }
+            let user_principal_id = session.user_principal_id.ok_or_else(|| {
+                HandlerError::Forbidden(
+                    "verified user principal required to cancel threads".into(),
+                )
+            })?;
+            HandlerContext::new(user_principal_id, session.granted_caps, true)
+        }
+        // Verified operator: pass the caller context straight through — the
+        // owner check happens in threads.cancel.
+        SeatCaller::Operator { .. } => ctx,
+    };
     ryeos_api::handlers::threads_cancel::handle(req, owner_ctx, state)
         .await
         .map_err(Into::into)

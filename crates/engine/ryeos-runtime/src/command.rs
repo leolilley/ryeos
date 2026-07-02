@@ -190,6 +190,86 @@ pub enum FlagKeyNormalization {
     Preserve,
 }
 
+/// Kind-agnostic input contract for command/invocation parameter binding.
+///
+/// This is intentionally not tied to any executable kind. Kind-specific item
+/// metadata may be normalized into this small vocabulary before command argv is
+/// converted into JSON parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InvocationInputContract {
+    pub fields: BTreeMap<String, InvocationInputField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvocationInputField {
+    pub ty: InvocationInputType,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvocationInputType {
+    String,
+    Integer,
+    Number,
+    Boolean,
+    Json,
+    Object,
+    Array,
+}
+
+impl InvocationInputContract {
+    /// Parse the lightweight effective-item schema used by command help, e.g.
+    /// `{ "limit": "integer?" }`. The trailing `?` marks optionality.
+    pub fn from_lightweight_schema_value(value: &Value) -> Result<Option<Self>, String> {
+        let Some(schema) = value.as_object() else {
+            if value.is_null() {
+                return Ok(None);
+            }
+            return Err("invocation schema must be an object".into());
+        };
+        if schema.is_empty() {
+            return Ok(None);
+        }
+
+        let mut fields = BTreeMap::new();
+        for (name, spec) in schema {
+            let raw = spec
+                .as_str()
+                .ok_or_else(|| format!("schema field '{name}' must be a type string"))?
+                .trim();
+            if raw.is_empty() {
+                return Err(format!("schema field '{name}' has an empty type"));
+            }
+            let required = !raw.ends_with('?');
+            let ty = raw.strip_suffix('?').unwrap_or(raw).trim();
+            let array_element = ty.strip_suffix("[]").map(str::trim);
+            let scalar_ty = array_element.unwrap_or(ty);
+            let ty = match scalar_ty {
+                "string" => InvocationInputType::String,
+                "integer" => InvocationInputType::Integer,
+                "number" => InvocationInputType::Number,
+                "boolean" => InvocationInputType::Boolean,
+                "json" => InvocationInputType::Json,
+                "object" | "mapping" => InvocationInputType::Object,
+                "array" | "sequence" => InvocationInputType::Array,
+                other => {
+                    return Err(format!(
+                        "schema field '{name}' has unsupported type '{other}'"
+                    ))
+                }
+            };
+            let ty = if array_element.is_some() {
+                InvocationInputType::Array
+            } else {
+                ty
+            };
+            fields.insert(name.clone(), InvocationInputField { ty, required });
+        }
+
+        Ok(Some(Self { fields }))
+    }
+}
+
 /// A control flag on a command: stripped from the CLI tail before parameter
 /// binding and routed into the outgoing request (or CLI display state) per its
 /// `binding`. Declared in command data so the dispatcher and help never
@@ -697,5 +777,47 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn invocation_contract_parses_lightweight_optional_integer() {
+        let schema = serde_json::json!({
+            "limit": "integer?",
+            "enabled": "boolean",
+        });
+
+        let contract = InvocationInputContract::from_lightweight_schema_value(&schema)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(contract.fields["limit"].ty, InvocationInputType::Integer);
+        assert!(!contract.fields["limit"].required);
+        assert_eq!(contract.fields["enabled"].ty, InvocationInputType::Boolean);
+        assert!(contract.fields["enabled"].required);
+    }
+
+    #[test]
+    fn invocation_contract_rejects_unknown_lightweight_type() {
+        let schema = serde_json::json!({
+            "limit": "usize?",
+        });
+
+        let err = InvocationInputContract::from_lightweight_schema_value(&schema).unwrap_err();
+
+        assert!(err.contains("unsupported type 'usize'"));
+    }
+
+    #[test]
+    fn invocation_contract_parses_lightweight_array_type() {
+        let schema = serde_json::json!({
+            "scopes": "string[]?",
+        });
+
+        let contract = InvocationInputContract::from_lightweight_schema_value(&schema)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(contract.fields["scopes"].ty, InvocationInputType::Array);
+        assert!(!contract.fields["scopes"].required);
     }
 }
