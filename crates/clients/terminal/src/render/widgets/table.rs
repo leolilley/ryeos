@@ -88,6 +88,7 @@ mod tests {
             tone,
             action: None,
             selected: false,
+            raw: serde_json::Value::Null,
         }
     }
 

@@ -371,6 +371,12 @@ pub struct StudioTableRowVm {
     pub action: Option<StudioAction>,
     #[serde(default)]
     pub selected: bool,
+    /// The row's raw record — base-only (not serialized to clients). The launcher
+    /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
+    /// management is reachable. Skipped to avoid duplicating every record into
+    /// the per-row wire payload.
+    #[serde(skip)]
+    pub raw: serde_json::Value,
 }
 
 /// One titled, collapsible group within a `Sections` view. `count` is the
@@ -1156,6 +1162,7 @@ fn bound_view_vm_keyed(
                         }
                     }),
                     selected: cursor == Some(index),
+                    raw: record.raw,
                 })
                 .collect();
             StudioViewVm::Table {
@@ -1612,6 +1619,54 @@ fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     .collect()
 }
 
+/// Launcher items for the focused table row's affordances OTHER than its
+/// activate (Enter) action — so row management (Cancel, …) is reachable. Each is
+/// rebuilt as an `InvokeAffordance` from the row's raw record and the view's
+/// declared affordances. Table lenses only (the list surfaces are all tables);
+/// rows-widget affordances are out of scope here.
+fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let Some(view) = core.workspace.focused_view() else {
+        return Vec::new();
+    };
+    let view_ref = view.view_ref.clone();
+    let Some(binding) = core.views.get(&view_ref) else {
+        return Vec::new();
+    };
+    let Some(row) = focused_selected_table_row(core) else {
+        return Vec::new();
+    };
+    if row.raw.is_null() {
+        return Vec::new();
+    }
+    let activate = binding.selection.as_ref().map(|s| s.activate.as_str());
+    binding
+        .affordances
+        .iter()
+        .filter_map(|aff| {
+            let id = aff.get("id").and_then(|v| v.as_str())?;
+            if Some(id) == activate {
+                return None; // already the row's Enter action
+            }
+            let label = aff
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id)
+                .to_string();
+            Some(StudioLauncherItemVm {
+                label,
+                hint: "focused row".to_string(),
+                action: StudioAction::InvokeAffordance {
+                    view_ref: view_ref.clone(),
+                    affordance_id: id.to_string(),
+                    record: row.raw.clone(),
+                },
+                secondary_action: None,
+                enabled: true,
+            })
+        })
+        .collect()
+}
+
 fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = Vec::new();
 
@@ -1624,6 +1679,11 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
             enabled: true,
         });
     }
+
+    // The focused row's non-activate affordances (e.g. Cancel on a thread row),
+    // so row management is reachable — the row's Enter action is only the
+    // activate affordance.
+    items.extend(focused_row_affordance_items(core));
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
@@ -2249,29 +2309,97 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(binding.widget, "table");
+        // The watch dashboard sources the operator-scoped UI-studio list,
+        // active-first (sort: watch), before the limit.
+        let source = binding.source.as_ref().expect("threads list has a source");
+        assert_eq!(source.item_ref, "service:ui/studio/threads/list");
+        assert_eq!(source.params["limit"], 200);
+        assert_eq!(source.params["sort"], "watch");
+        assert_eq!(source.collection.as_deref(), Some("threads"));
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "item", "status", "created"]
+            ["thread", "kind", "item", "status", "source", "created"]
         );
         let rows = project_table(
             &binding,
             &json!({ "threads": [
-                { "thread_id": "T-ab", "item_ref": "directive:ops/base", "status": "running", "created_at": "2026-06-29T00:00:00Z" },
-                { "thread_id": "T-cd", "item_ref": "directive:ops/scan", "status": "failed",  "created_at": "2026-06-28T00:00:00Z" }
+                { "thread_id": "T-ab", "kind": "directive", "item_ref": "directive:ops/base", "status": "running", "requested_by": "fp:claude", "created_at": "2026-06-29T00:00:00Z" },
+                { "thread_id": "T-cd", "kind": "graph", "item_ref": "directive:ops/scan", "status": "failed",  "requested_by": "fp:amp", "created_at": "2026-06-28T00:00:00Z" }
             ]}),
             &columns,
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].cells,
-            ["T-ab", "directive:ops/base", "running", "2026-06-29T00:00:00Z"]
+            ["T-ab", "directive", "directive:ops/base", "running", "fp:claude", "2026-06-29T00:00:00Z"]
         );
         // Tone reuses the shared status→tone block the rows widget would.
         assert_eq!(rows[0].tone.as_deref(), Some("accent"));
         assert_eq!(rows[1].tone.as_deref(), Some("danger"));
         // The raw record is preserved for affordance interpolation.
         assert_eq!(rows[0].raw["thread_id"], "T-ab");
+    }
+
+    #[test]
+    fn actual_thread_detail_binding_projects_inspect_sections() {
+        use crate::studio::content::{project_section, ViewBinding};
+        let binding: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/threads/detail.yaml"
+        ))
+        .unwrap();
+        assert_eq!(binding.widget, "sections");
+        // One inspect response feeds every section; each reads a different
+        // sub-value of it (thread / result / artifacts / children).
+        let response = json!({
+            "schema_version": "studio.thread.inspect.v1",
+            "thread": { "thread_id": "T-ab", "item_ref": "directive:ops/base", "status": "running" },
+            "result": { "outcome_code": "error", "error": "boom" },
+            "artifacts": [ { "artifact_type": "file", "uri": "file://out.txt" } ],
+            "children": [ { "item_ref": "directive:ops/child", "status": "completed" } ]
+        });
+        let section = |title: &str| {
+            binding
+                .sections
+                .iter()
+                .find(|s| s.title == title)
+                .unwrap_or_else(|| panic!("section {title}"))
+        };
+
+        // Summary: the whole `thread` sub-object → one row (item • status), toned.
+        let summary = project_section(section("Summary"), &response);
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].primary, "directive:ops/base");
+        assert_eq!(summary[0].meta.as_deref(), Some("running"));
+        assert_eq!(summary[0].tone.as_deref(), Some("accent"));
+
+        // Outcome: the `result` sub-object (outcome code + error), toned danger.
+        let outcome = project_section(section("Outcome"), &response);
+        assert_eq!(outcome.len(), 1);
+        assert_eq!(outcome[0].primary, "error");
+        assert_eq!(outcome[0].meta.as_deref(), Some("boom"));
+        assert_eq!(outcome[0].tone.as_deref(), Some("danger"));
+
+        // Artifacts + children are list sub-arrays: one row each.
+        let artifacts = project_section(section("Artifacts"), &response);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].primary, "file");
+        let children = project_section(section("Children"), &response);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].primary, "directive:ops/child");
+        assert_eq!(children[0].meta.as_deref(), Some("completed"));
+
+        // Re-fetches on the selection facet; each section pulls the selected
+        // thread via @facet, so an unset selection SUPPRESSES the fetch (D8)
+        // rather than sending a null thread_id to the deny_unknown inspect svc.
+        assert_eq!(
+            binding.refresh.get("on_facet").and_then(|v| v.as_str()),
+            Some("selection")
+        );
+        assert_eq!(
+            section("Summary").source.params["thread_id"],
+            "@facet:selection.thread"
+        );
     }
 
     #[test]
@@ -2387,6 +2515,65 @@ mod tests {
             }
             other => panic!("expected inspect invoke, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn launcher_surfaces_focused_row_cancel_but_not_the_activate() {
+        use crate::studio::model::{BrowserSession, BrowserViewport};
+        let session = BrowserSession {
+            effective_surface: Some(json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "table",
+                        "source": { "ref": "service:ui/studio/threads/list", "collection": "threads" },
+                        "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
+                        "selection": { "activate": "watch" },
+                        "affordances": [
+                            { "id": "watch", "label": "Watch",
+                              "invoke": { "plane": "ui", "facet": "input.route",
+                                          "merge": { "thread": "{record.thread_id}" },
+                                          "open_view": "view:ryeos/chain/timeline" } },
+                            { "id": "cancel", "label": "Cancel",
+                              "invoke": { "plane": "rye", "ref": "service:ui/studio/thread/cancel",
+                                          "args": { "thread_id": "{record.thread_id}" } } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let key = core.workspace.focused_tile.0.to_string();
+        core.data.sources.insert(
+            key,
+            json!({ "threads": [ { "thread_id": "T-ab", "chain_root_id": "T-ab" } ] }),
+        );
+
+        let items = launcher_items_for(&core);
+        // The focused row (default cursor 0 = T-ab) exposes a reachable Cancel
+        // targeting that specific row.
+        let cancel = items
+            .iter()
+            .find(|i| i.label == "Cancel")
+            .expect("cancel launcher item");
+        assert!(
+            matches!(&cancel.action,
+                StudioAction::InvokeAffordance { view_ref, affordance_id, record }
+                    if view_ref == "view:ryeos/threads/list"
+                        && affordance_id == "cancel"
+                        && record["thread_id"] == "T-ab"),
+            "cancel item must invoke the row's cancel affordance; got {:?}",
+            cancel.action
+        );
+        // The activate (watch) affordance is NOT duplicated as a context item —
+        // it's already the row's Enter action.
+        assert!(
+            !items.iter().any(|i| i.label == "Watch"),
+            "activate affordance should not be surfaced as a context item"
+        );
     }
 
     #[test]

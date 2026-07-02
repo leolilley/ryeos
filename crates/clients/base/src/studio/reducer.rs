@@ -513,6 +513,7 @@ impl StudioCore {
                 super::seat::KEY_INPUT_ROUTE.to_string(),
                 None,
                 Some(serde_json::json!({ "thread": thread_id })),
+                None,
             ),
             StudioAction::InspectSummary { title, detail } => {
                 self.seat.append_facet(
@@ -1043,14 +1044,23 @@ impl StudioCore {
                 facet,
                 value,
                 merge,
+                open_view,
             }) => {
-                let effects = self.apply_ui_affordance(facet, value, merge);
+                let effects = self.apply_ui_affordance(facet, value, merge, open_view);
                 self.clear_focused_input();
                 effects
             }
             Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
+                    params: args,
+                    route_seq: None,
+                    ratchet_on_thread_id: false,
+                })]
+            }
+            Some(super::content::AffordanceInvoke::Service { item_ref, args }) => {
+                vec![self.emit(StudioEffectKind::Invoke {
+                    target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -1347,10 +1357,19 @@ impl StudioCore {
                 facet,
                 value,
                 merge,
-            }) => self.apply_ui_affordance(facet, value, merge),
+                open_view,
+            }) => self.apply_ui_affordance(facet, value, merge, open_view),
             Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
+                    params: args,
+                    route_seq: None,
+                    ratchet_on_thread_id: false,
+                })]
+            }
+            Some(super::content::AffordanceInvoke::Service { item_ref, args }) => {
+                vec![self.emit(StudioEffectKind::Invoke {
+                    target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
                     route_seq: None,
                     ratchet_on_thread_id: false,
@@ -1368,6 +1387,7 @@ impl StudioCore {
         facet: String,
         value: Option<serde_json::Value>,
         merge: Option<serde_json::Value>,
+        open_view: Option<String>,
     ) -> Vec<StudioEffect> {
         let next = if let Some(merge) = merge {
             let mut current = self
@@ -1387,7 +1407,15 @@ impl StudioCore {
         };
         self.seat.append_facet(facet.clone(), next);
         self.bump_generation();
-        self.effects_for_facet(&facet)
+        let mut effects = self.effects_for_facet(&facet);
+        // Open the view AFTER the facet write, so the opened view's fetch
+        // resolves its `@facet:` params against the value just written (e.g. a
+        // row drill-in sets input.route.chain_root, then the braid lens fetches
+        // that chain). Single-lens surfaces replace the center in place.
+        if let Some(view_ref) = open_view {
+            effects.extend(self.open_view(ViewSpec::bound(view_ref)));
+        }
+        effects
     }
 
     /// Facet write arrived: refetch every bound tile whose binding
@@ -2292,6 +2320,185 @@ mod tests {
                     && source_ref == "service:test/inspect"
                     && params["canonical_ref"] == "tool:demo/run"
         ));
+    }
+
+    #[test]
+    fn ui_affordance_open_view_writes_route_then_opens_view_with_new_facet() {
+        // The watch drill-in (P1): a row activation merges route {thread, chain_root}
+        // AND opens the braid lens, whose fetch must resolve the just-written chain_root.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "table",
+                "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                "affordances": [{
+                    "id": "watch",
+                    "invoke": {
+                        "plane": "ui",
+                        "facet": "input.route",
+                        "merge": { "thread": "{record.thread_id}", "chain_root": "{record.chain_root_id}" },
+                        "open_view": "view:ryeos/chain/timeline"
+                    }
+                }]
+            }),
+        );
+        seed_view_value(
+            &mut core,
+            "view:ryeos/chain/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "source": {
+                    "ref": "service:events/chain_replay",
+                    "params": { "chain_root_id": "@facet:input.route.chain_root" },
+                    "collection": "events"
+                }
+            }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                    affordance_id: "watch".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
+                },
+            },
+        });
+
+        // 1. Route facet carries BOTH thread and chain_root.
+        let fold = core.seat.fold();
+        let route = fold.get("input.route").expect("route facet written");
+        assert_eq!(route["thread"], "T-9");
+        assert_eq!(route["chain_root"], "T-root");
+
+        // 2. The braid lens was opened as a tile.
+        assert!(
+            core.workspace
+                .tiles
+                .values()
+                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+            "drill-in opens the braid lens"
+        );
+
+        // 3. Its fetch resolved the just-written chain_root (write-then-open order).
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { source_ref, params, .. }
+                    if source_ref == "service:events/chain_replay"
+                        && params["chain_root_id"] == "T-root")),
+            "timeline fetch must use the selected chain_root; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn service_ref_affordance_emits_execute_invoke_with_row_args() {
+        // Row management (P2): a service-ref affordance emits an /execute Invoke
+        // carrying the row's args — so cancel/kill/continue target that row, not
+        // the route head (the token path would drop the args).
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/threads/list",
+            serde_json::json!({
+                "widget": "table",
+                "source": { "ref": "service:ui/studio/threads/list", "params": {}, "collection": "threads" },
+                "affordances": [{
+                    "id": "cancel",
+                    "invoke": {
+                        "plane": "rye",
+                        "ref": "service:commands/submit",
+                        "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" }
+                    }
+                }]
+            }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                    affordance_id: "cancel".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-7" }),
+                },
+            },
+        });
+
+        assert!(
+            matches!(effects.first().map(|e| &e.kind),
+                Some(StudioEffectKind::Invoke {
+                    target: crate::studio::effect::InvokeRef::Ref { item_ref },
+                    params,
+                    ..
+                }) if item_ref == "service:commands/submit"
+                    && params["thread_id"] == "T-7"
+                    && params["command_type"] == "cancel"),
+            "service-ref affordance must /execute with the row's args; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn actual_threads_list_watch_affordance_drills_into_braid() {
+        // The shipped product contract: the real threads/list.yaml `watch`
+        // affordance drills a row into its braid.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let binding: crate::studio::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
+        ))
+        .unwrap();
+        core.views
+            .insert("view:ryeos/threads/list".to_string(), binding);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/chain/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "source": {
+                    "ref": "service:events/chain_replay",
+                    "params": { "chain_root_id": "@facet:input.route.chain_root" },
+                    "collection": "events"
+                }
+            }),
+        );
+        // A pre-existing route field must survive the merge.
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "directive": "directive:ryeos/ops/base" }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InvokeAffordance {
+                    view_ref: "view:ryeos/threads/list".to_string(),
+                    affordance_id: "watch".to_string(),
+                    record: serde_json::json!({ "thread_id": "T-9", "chain_root_id": "T-root" }),
+                },
+            },
+        });
+
+        let fold = core.seat.fold();
+        let route = fold.get("input.route").expect("route facet");
+        assert_eq!(route["thread"], "T-9");
+        assert_eq!(route["chain_root"], "T-root");
+        assert_eq!(
+            route["directive"], "directive:ryeos/ops/base",
+            "merge preserves existing route fields"
+        );
+        assert!(
+            core.workspace
+                .tiles
+                .values()
+                .any(|t| t.view.view_ref == "view:ryeos/chain/timeline"),
+            "watch opens the braid lens"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { source_ref, params, .. }
+                    if source_ref == "service:events/chain_replay"
+                        && params["chain_root_id"] == "T-root")),
+            "timeline fetch uses the row's chain_root; got {effects:?}"
+        );
     }
 
     #[test]

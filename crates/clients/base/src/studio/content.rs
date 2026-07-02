@@ -530,15 +530,21 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
     match section.source.collection.as_deref() {
-        Some(path) => field_path(response, path)
-            .and_then(Value::as_array)
-            .map(|records| {
-                records
-                    .iter()
-                    .map(|record| project_record(record, &section.projection))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        // A `collection` path selects a sub-value of the response. An array is a
+        // list source (one row per element); a single object is a detail source
+        // (one row) — so a section can read a nested record (e.g. a thread's
+        // `result`) out of a larger inspect response. A null/scalar (e.g.
+        // `result` before the thread finishes) degrades to no rows, never a
+        // raw-JSON dump — which is what projecting the whole response through a
+        // missing path would otherwise produce.
+        Some(path) => match field_path(response, path) {
+            Some(Value::Array(records)) => records
+                .iter()
+                .map(|record| project_record(record, &section.projection))
+                .collect(),
+            Some(value @ Value::Object(_)) => vec![project_record(value, &section.projection)],
+            _ => Vec::new(),
+        },
         None => vec![project_record(response, &section.projection)],
     }
 }
@@ -807,9 +813,24 @@ pub enum AffordanceInvoke {
         facet: String,
         value: Option<Value>,
         merge: Option<Value>,
+        /// Optional view ref to open AFTER the facet write, in one activation.
+        /// Lets a row drill in — e.g. write `input.route.{thread,chain_root}`
+        /// then open the braid lens — which the facet/rye grammar alone can't
+        /// compose. Applied post-write so the opened view's fetch resolves
+        /// against the just-written facet. Single-lens: replaces the center.
+        open_view: Option<String>,
     },
     Rye {
         tokens: Vec<String>,
+        args: Value,
+    },
+    /// Invoke a service by ref with args through the daemon `/execute` path (as
+    /// the foot input does). Args reach the daemon as `parameters` — unlike the
+    /// token dispatch path. Row management (cancel / kill / continue on a
+    /// specific row) uses this so `{record.thread_id}` actually reaches the
+    /// service, targeting that row rather than the route head.
+    Service {
+        item_ref: String,
         args: Value,
     },
 }
@@ -836,20 +857,38 @@ pub fn resolve_affordance_invoke(
             merge: invoke
                 .get("merge")
                 .map(|merge| substitute_payload(merge, payload)),
+            open_view: invoke
+                .get("open_view")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }),
-        "rye" => Some(AffordanceInvoke::Rye {
-            tokens: invoke
-                .get("tokens")?
-                .as_array()?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-            args: invoke
-                .get("args")
-                .map(|args| substitute_payload(args, payload))
-                .unwrap_or(Value::Null),
-        }),
+        "rye" => {
+            // A `ref:` selects the service-invocation form (args → `/execute`
+            // parameters); otherwise it's grammar-token dispatch.
+            if let Some(item_ref) = invoke.get("ref").and_then(Value::as_str) {
+                Some(AffordanceInvoke::Service {
+                    item_ref: item_ref.to_string(),
+                    args: invoke
+                        .get("args")
+                        .map(|args| substitute_payload(args, payload))
+                        .unwrap_or(Value::Null),
+                })
+            } else {
+                Some(AffordanceInvoke::Rye {
+                    tokens: invoke
+                        .get("tokens")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                    args: invoke
+                        .get("args")
+                        .map(|args| substitute_payload(args, payload))
+                        .unwrap_or(Value::Null),
+                })
+            }
+        }
         _ => None,
     }
 }
@@ -974,6 +1013,44 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].primary, "1.0.0");
         assert_eq!(rows[0].meta.as_deref(), Some("node-xyz"));
+    }
+
+    #[test]
+    fn project_section_object_collection_is_a_single_detail_row() {
+        // A `collection` that resolves to an OBJECT (not an array) is a detail
+        // sub-record: the thread-detail lens reads `result` out of the inspect
+        // response this way, without dumping the whole payload.
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Outcome",
+            "source": { "ref": "service:ui/studio/thread/inspect", "collection": "result" },
+            "projection": { "primary": "outcome_code", "meta": "error" }
+        }))
+        .unwrap();
+        let response = json!({
+            "thread": { "thread_id": "T-ab" },
+            "result": { "outcome_code": "ok", "error": null }
+        });
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "ok");
+    }
+
+    #[test]
+    fn project_section_null_collection_yields_no_rows_not_a_dump() {
+        // `result` is null until a thread finishes. A missing/null collection
+        // must degrade to zero rows — NOT to a single row whose primary is the
+        // whole compacted response.
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Outcome",
+            "source": { "ref": "service:ui/studio/thread/inspect", "collection": "result" },
+            "projection": { "primary": "outcome_code", "meta": "error" }
+        }))
+        .unwrap();
+        let response = json!({ "thread": { "thread_id": "T-ab" }, "result": null });
+        assert!(project_section(&section, &response).is_empty());
+        // Absent entirely, too.
+        let bare = json!({ "thread": { "thread_id": "T-ab" } });
+        assert!(project_section(&section, &bare).is_empty());
     }
 
     #[test]
@@ -1339,6 +1416,63 @@ mod tests {
                 facet: "selection".into(),
                 value: Some(json!({ "thread": "T-1" })),
                 merge: None,
+                open_view: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ui_affordance_parses_merge_and_open_view() {
+        // The drill-in shape: merge route facets from the row, then open a view.
+        let affordance = json!({
+            "invoke": {
+                "plane": "ui",
+                "facet": "input.route",
+                "merge": { "thread": "{record.thread_id}", "chain_root": "{record.chain_root_id}" },
+                "open_view": "view:ryeos/chain/timeline"
+            }
+        });
+        let record = json!({ "thread_id": "T-9", "chain_root_id": "T-root" });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&record),
+        )
+        .expect("selection supplies record");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Ui {
+                facet: "input.route".into(),
+                value: None,
+                merge: Some(json!({ "thread": "T-9", "chain_root": "T-root" })),
+                open_view: Some("view:ryeos/chain/timeline".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn rye_affordance_with_ref_parses_as_service_invoke() {
+        // Row management: a `ref:` under the rye plane invokes a service with
+        // args (reaching the daemon as parameters), not token dispatch.
+        let affordance = json!({
+            "invoke": {
+                "plane": "rye",
+                "ref": "service:commands/submit",
+                "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" }
+            }
+        });
+        let record = json!({ "thread_id": "T-7" });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&record),
+        )
+        .expect("selection supplies record");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Service {
+                item_ref: "service:commands/submit".into(),
+                args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
             }
         );
     }
