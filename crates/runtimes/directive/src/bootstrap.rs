@@ -66,6 +66,16 @@ pub fn bootstrap(
         .map_err(|e| anyhow!("loading config `ryeos-runtime/execution`: {e}"))?
         .unwrap_or_default();
 
+    // Continuation behavior config (context-threshold ratio, carry bounds) —
+    // loaded the same way as execution config, defaults if absent. Directive-
+    // runtime config, not executor limit resolution: no envelope threading.
+    let continuation_runtime = loader
+        .load_config_strict::<crate::directive::ContinuationRuntimeConfig>(
+            "ryeos-runtime/continuation",
+        )
+        .map_err(|e| anyhow!("loading config `ryeos-runtime/continuation`: {e}"))?
+        .unwrap_or_default();
+
     // Consumer for the `category` round-trip fields on each typed
     // config — keeps `pub category: Option<String>` from being dead
     // code while making operators see a parity signal between bundle
@@ -115,6 +125,17 @@ pub fn bootstrap(
                         "directive header hooks[{idx}]: malformed hook definition: {e:#}"
                     )
                 })?;
+                // Dead-config: a directive-authored `continuation` hook can only
+                // fire when continuation is enabled. Validate here, before the
+                // merge loses header provenance, and fail loud rather than ship a
+                // hook that silently never runs.
+                if def.event == "continuation" && !header.continuation.enabled() {
+                    return Err(anyhow::anyhow!(
+                        "directive header hooks[{idx}]: a `continuation` event hook is \
+                         declared but `continuation` is disabled — it can never fire. \
+                         Enable `continuation` or remove the hook."
+                    ));
+                }
                 // Directive hooks default to layer 1 (before builtin layer 2)
                 if def.layer.is_none() {
                     def.layer = Some(1);
@@ -229,6 +250,8 @@ pub fn bootstrap(
             context_positions,
             hooks,
             outputs: header.outputs,
+            continuation: header.continuation,
+            continuation_runtime,
             risk_policy,
         },
         provider: resolved.provider.clone(),

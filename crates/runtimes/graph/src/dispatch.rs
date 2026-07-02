@@ -405,13 +405,27 @@ fn inject_parent_context(action: &mut Value, ctx: &ExecutionContext) {
         .and_then(Value::as_object_mut)
         .unwrap();
 
+    use ryeos_runtime::callback::{PARAM_DEPTH, PARAM_PARENT_LIMITS, PARAM_PARENT_THREAD_ID};
+    // These are trusted runtime-control fields: OVERWRITE any graph-authored
+    // values so an action cannot pre-seed params to dodge the parent clamp. Key
+    // names come from the shared runtime-control-key contract, not literals.
     if let Some(ref parent_id) = ctx.parent_thread_id {
-        params.entry("parent_thread_id").or_insert(json!(parent_id));
+        params.insert(PARAM_PARENT_THREAD_ID.into(), json!(parent_id));
     }
-    if !ctx.limits.is_null() {
-        params.entry("parent_limits").or_insert(ctx.limits.clone());
+    // Only forward real limits: an empty object would deserialize into a
+    // zero-valued HardLimits downstream, and `min(x, 0)` reads as "no limit",
+    // silently erasing the child's budget. Absent => no parent clamp.
+    let limits_present = match &ctx.limits {
+        Value::Null => false,
+        Value::Object(m) => !m.is_empty(),
+        _ => true,
+    };
+    if limits_present {
+        params.insert(PARAM_PARENT_LIMITS.into(), ctx.limits.clone());
+    } else {
+        params.remove(PARAM_PARENT_LIMITS);
     }
-    params.entry("depth").or_insert(json!(ctx.depth + 1));
+    params.insert(PARAM_DEPTH.into(), json!(ctx.depth.saturating_add(1)));
 }
 
 #[allow(clippy::only_used_in_recursion)]
@@ -778,6 +792,44 @@ mod tests {
         assert_eq!(action["params"]["parent_thread_id"], "T-parent");
         assert_eq!(action["params"]["depth"], 3);
         assert_eq!(action["params"]["parent_limits"]["turns"], 10);
+    }
+
+    #[test]
+    fn inject_parent_context_overwrites_preauthored_control_fields() {
+        // A graph action must not pre-seed params to dodge the trusted clamp.
+        let mut action = json!({
+            "item_id": "directive:test",
+            "params": {
+                "parent_limits": {"turns": 9999},
+                "depth": 0,
+                "parent_thread_id": "forged"
+            }
+        });
+        let ctx = ExecutionContext {
+            parent_thread_id: Some("T-real".to_string()),
+            limits: json!({"turns": 10}),
+            depth: 2,
+        };
+        inject_parent_context(&mut action, &ctx);
+        assert_eq!(action["params"]["parent_limits"]["turns"], 10); // trusted wins
+        assert_eq!(action["params"]["depth"], 3);
+        assert_eq!(action["params"]["parent_thread_id"], "T-real");
+    }
+
+    #[test]
+    fn inject_parent_context_skips_empty_limits() {
+        // An empty limits object must NOT be forwarded: downstream it would
+        // deserialize into a zero-valued HardLimits and `min(x, 0)` erases the
+        // child's budget. Missing parent_limits => no parent clamp.
+        let mut action = json!({"item_id": "directive:test", "params": {}});
+        let ctx = ExecutionContext {
+            parent_thread_id: None,
+            limits: json!({}),
+            depth: 0,
+        };
+        inject_parent_context(&mut action, &ctx);
+        assert!(action["params"].get("parent_limits").is_none());
+        assert_eq!(action["params"]["depth"], 1);
     }
 
     #[tokio::test]

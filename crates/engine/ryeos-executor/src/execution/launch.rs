@@ -7,12 +7,12 @@ use serde_json::{json, Value};
 
 use super::arch_check;
 use super::launch_envelope::{
-    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
+    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{
     apply_caller_limit_overrides, apply_execution_policy_overrides, compute_effective_limits,
-    load_limits_config,
+    load_limits_config, merge_header_limits,
 };
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
@@ -867,46 +867,11 @@ async fn run_claimed_thread_row(
         )
     })?;
     let limits_config = limits_config.unwrap_or_default();
-    let requested_limits =
-        apply_execution_policy_overrides(&limits_config.defaults, &execution_policy);
-    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
-    let hard_limits = compute_effective_limits(
-        Some(&requested_limits),
-        &limits_config.defaults,
-        &limits_config.caps,
-        None,
-        0,
-    );
-    let duration_source = if parameters.get("timeout").is_some() {
-        "caller param `timeout`".to_string()
-    } else {
-        execution_policy
-            .timeout
-            .as_ref()
-            .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
-    };
-    let turns_source = if parameters.get("max_steps").is_some() {
-        "caller param `max_steps`".to_string()
-    } else {
-        execution_policy
-            .max_steps
-            .as_ref()
-            .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
-    };
-    tracing::info!(
-        item_ref = %resolved.item_ref,
-        duration_seconds = hard_limits.duration_seconds,
-        duration_source,
-        duration_cap = ?limits_config.caps.duration_seconds,
-        turns = hard_limits.turns,
-        turns_source = %turns_source,
-        turns_cap = ?limits_config.caps.turns,
-        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
-        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
-        "native launch execution policy resolved"
-    );
+    // Hard limits are computed AFTER the resolution pipeline below (see
+    // "compute effective limits"), so the directive-authored header `limits:`
+    // can be overlaid onto defaults BELOW execution-policy/caller overrides.
+    // The composed header is not available until resolution runs; `hard_limits`
+    // is still produced before the TTL / envelope consumers further down.
 
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback
@@ -955,6 +920,82 @@ async fn run_claimed_thread_row(
         references_edges = resolution.references_edges.len(),
         effective_trust_class = ?resolution.effective_trust_class,
         "resolution pipeline complete"
+    );
+
+    // Compute effective limits now that the composed header is resolved.
+    // The item's authored `limits:` (from the composed view, any kind) overlays
+    // its named fields onto the project defaults; omitted fields inherit. The
+    // merge is at the JSON level, so the executor names no limit field here.
+    // Precedence: defaults → header → execution policy → caller → caps → parent.
+    let base_limits = match resolution.composed.composed.get("limits") {
+        Some(v) if !v.is_null() => merge_header_limits(&limits_config.defaults, v)?,
+        _ => limits_config.defaults.clone(),
+    };
+    let requested_limits = apply_execution_policy_overrides(&base_limits, &execution_policy);
+    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
+    // Parent budget clamp: a child can never exceed the limits of the parent
+    // that spawned it. Missing/empty/null `parent_limits` means "no parent
+    // clamp" — never deserialize `{}` into a zero-valued HardLimits, since 0
+    // reads as "no limit" and `min(x, 0)` would erase the child's limits.
+    let parent_limits: Option<HardLimits> = parameters
+        .get(ryeos_runtime::callback::PARAM_PARENT_LIMITS)
+        .filter(|v| match v {
+            Value::Null => false,
+            Value::Object(m) => !m.is_empty(),
+            _ => true,
+        })
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("failed to parse parent_limits: {e}"))?;
+    // Current launch depth (position in the spawn tree). Threaded into
+    // EnvelopeRequest.depth so the harness enforces depth against the real
+    // position; the depth *limit* is separate (HardLimits.depth, from
+    // requested.depth). Fail loud rather than truncating an out-of-range value.
+    let current_depth: u32 = match parameters.get(ryeos_runtime::callback::PARAM_DEPTH) {
+        None | Some(Value::Null) => 0,
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                anyhow::anyhow!("params.depth must be an unsigned integer, got {v}")
+            })?;
+            u32::try_from(n).map_err(|_| anyhow::anyhow!("params.depth {n} exceeds u32"))?
+        }
+    };
+    let hard_limits = compute_effective_limits(
+        Some(&requested_limits),
+        &limits_config.defaults,
+        &limits_config.caps,
+        parent_limits.as_ref(),
+    );
+    let duration_source = if parameters.get("timeout").is_some() {
+        "caller param `timeout`".to_string()
+    } else {
+        execution_policy
+            .timeout
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    let turns_source = if parameters.get("max_steps").is_some() {
+        "caller param `max_steps`".to_string()
+    } else {
+        execution_policy
+            .max_steps
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    tracing::info!(
+        item_ref = %resolved.item_ref,
+        duration_seconds = hard_limits.duration_seconds,
+        duration_source,
+        duration_cap = ?limits_config.caps.duration_seconds,
+        turns = hard_limits.turns,
+        turns_source = %turns_source,
+        turns_cap = ?limits_config.caps.turns,
+        header_limits_present = resolution.composed.composed.get("limits").is_some_and(|v| !v.is_null()),
+        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
+        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
+        "native launch execution policy resolved"
     );
 
     // ── Launch augmentations ──────────────────────────────────────
@@ -1366,11 +1407,22 @@ async fn run_claimed_thread_row(
             operator_trusted_keys_dir,
         },
         EnvelopeRequest {
-            inputs: parameters.clone(),
+            // Strip runtime-control fields the graph dispatcher injects into
+            // child params so they never leak into the directive's prompt
+            // inputs (unreferenced inputs get appended to the prompt).
+            inputs: {
+                let mut inputs = parameters.clone();
+                if let Some(obj) = inputs.as_object_mut() {
+                    for k in ryeos_runtime::callback::RESERVED_CONTROL_KEYS {
+                        obj.remove(*k);
+                    }
+                }
+                inputs
+            },
             previous_thread_id: previous_thread_id.map(str::to_string),
             parent_thread_id: None,
             parent_capabilities: None,
-            depth: 0,
+            depth: current_depth,
             suppress_stimulus,
         },
         EnvelopePolicy {

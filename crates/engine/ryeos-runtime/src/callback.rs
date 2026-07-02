@@ -79,6 +79,24 @@ pub struct ActionPayload {
     pub call: Option<MethodCall>,
 }
 
+/// Runtime-owned control keys carried in dispatch/launch params — parent budget,
+/// parent thread, tree depth, and the continuation seed. Defined ONCE here (the
+/// crate both the graph dispatcher and the executor launch depend on) so the
+/// injector, the input-stripper, and the daemon seed path reference the same
+/// names rather than duplicating string literals that can silently drift.
+pub const PARAM_PARENT_LIMITS: &str = "parent_limits";
+pub const PARAM_PARENT_THREAD_ID: &str = "parent_thread_id";
+pub const PARAM_DEPTH: &str = "depth";
+pub const PARAM_CONTINUATION: &str = "continuation";
+
+/// Control keys stripped from directive prompt inputs (all runtime-owned).
+pub const RESERVED_CONTROL_KEYS: &[&str] = &[
+    PARAM_PARENT_LIMITS,
+    PARAM_PARENT_THREAD_ID,
+    PARAM_DEPTH,
+    PARAM_CONTINUATION,
+];
+
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)

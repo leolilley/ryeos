@@ -404,7 +404,10 @@ impl Walker {
                 .and_then(|v| v.as_str())
                 .map(String::from),
             params.get("depth").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            json!({}),
+            // Forward the graph's own resolved hard limits so dispatched child
+            // items are clamped to the graph's budget (parent → child). Absent
+            // means "no clamp"; dispatch skips injecting an empty object.
+            params.get("hard_limits").cloned().unwrap_or_else(|| json!({})),
         );
 
         // pid/pgid is registered earlier, in `main.rs` right after the callback
