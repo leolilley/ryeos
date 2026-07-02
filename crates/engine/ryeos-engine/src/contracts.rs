@@ -2956,6 +2956,28 @@ pub enum LaunchMode {
     Detached,
 }
 
+impl LaunchMode {
+    /// Wire form (matches the serde `snake_case` mapping). Kept in lockstep
+    /// with [`LaunchMode::from_wire`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LaunchMode::Inline => "inline",
+            LaunchMode::Detached => "detached",
+        }
+    }
+
+    /// Parse the stringly-typed launch mode carried on the dispatch request.
+    /// Returns `None` for anything outside the accepted set — callers treat
+    /// that as "not this mode" (fail closed) rather than assuming a default.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "inline" => Some(LaunchMode::Inline),
+            "detached" => Some(LaunchMode::Detached),
+            _ => None,
+        }
+    }
+}
+
 // ── Execution hints ──────────────────────────────────────────────────
 
 /// Executor-specific hints forwarded verbatim through the pipeline.

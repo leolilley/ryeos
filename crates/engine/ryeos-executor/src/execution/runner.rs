@@ -605,6 +605,8 @@ fn mint_callback_env(
         provenance,
         effective_bundle_id,
         Some(item_ref.to_string()),
+        serde_json::Value::Null,
+        0,
     );
 
     let thread_auth =

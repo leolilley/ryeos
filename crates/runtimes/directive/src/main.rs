@@ -199,6 +199,21 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             tracing::info!("received SIGTERM, cancellation requested");
         });
     }
+
+    // Wire SIGUSR1 → harness interrupt flag (live intervention). This MUST set
+    // the flag at signal-DELIVERY time, not at async-task-poll time: the runner
+    // clears any stale interrupt at the turn boundary before streaming, so a
+    // signal delivered between turns has to be visible to that boundary clear.
+    // A tokio::signal task sets the flag only when the task is next polled, which
+    // can land AFTER the boundary clear — the flag would then cut the fresh
+    // cognition (stale-interrupt race). `signal_hook::flag::register` installs a
+    // synchronous handler that stores `true` into the shared atomic the instant
+    // the signal arrives (an atomic store is async-signal-safe), closing that
+    // race. It coexists with tokio's SIGTERM handler via signal-hook-registry and
+    // stays armed for the process lifetime (repeatable). SIGTERM keeps its async
+    // task: a late cancel only finalizes later, it never cuts-then-continues.
+    signal_hook::flag::register(signal_hook::consts::SIGUSR1, harness.interrupted_flag())
+        .context("failed to register SIGUSR1 live-interrupt flag")?;
     let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     let hooks = bootstrap_output.config.hooks.clone();
@@ -208,7 +223,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
     let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
-        let mut resume_state = resume::load_resume_state(&callback, resume_id).await?;
+        let carry_turns = bootstrap_output
+            .config
+            .continuation_runtime
+            .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
+        let mut resume_state = resume::load_resume_state(&callback, resume_id, carry_turns).await?;
 
         // R5: Resume gate — refuse resume if the prior thread has no
         // settled `thread_usage` event in the replay stream. Without
@@ -282,6 +301,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
                 thread_id: envelope.thread_id.clone(),
                 hooks,
                 outputs: bootstrap_output.config.outputs,
+                continuation: bootstrap_output.config.continuation,
+                context_threshold_ratio: bootstrap_output
+                    .config
+                    .continuation_runtime
+                    .context_threshold_ratio,
                 sampling,
             },
         )
@@ -357,6 +381,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
             thread_id: envelope.thread_id.clone(),
             hooks,
             outputs: bootstrap_output.config.outputs,
+            continuation: bootstrap_output.config.continuation,
+            context_threshold_ratio: bootstrap_output
+                .config
+                .continuation_runtime
+                .context_threshold_ratio,
             sampling,
         })
     };

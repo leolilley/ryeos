@@ -38,16 +38,42 @@ fn safe_error_body(body: &str) -> String {
     }
 }
 
-/// Check if the cancellation flag is set.
-fn cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> bool {
+/// How the stream loop terminated. Replaces overloading `Ok(AdapterResponse)`
+/// for partial termination: a cancelled or interrupted stream did NOT complete a
+/// cognition, and the runner must treat each distinctly (finalize cancelled /
+/// seal+redirect on interrupt / proceed on complete).
+pub enum StreamOutcome {
+    /// The provider finished the response normally.
+    Completed {
+        response: AdapterResponse,
+        events: Vec<StreamEvent>,
+    },
+    /// A live interrupt (SIGUSR1) cut the in-flight cognition. The partial
+    /// assistant message carries accumulated content/reasoning but NO tool_calls
+    /// — an interrupted cognition didn't complete its tool call, so the folded
+    /// wire history stays well-formed. The runner seals this as
+    /// `cognition_out{interrupted:true}` then folds the queued input. `events`
+    /// is the partial stream (already persisted live during streaming) — carried
+    /// so the runner can still surface any provider `Warning`s from the cut turn.
+    Interrupted {
+        partial_message: ProviderMessage,
+        events: Vec<StreamEvent>,
+    },
+    /// Cancellation (SIGTERM) cut the stream. The runner finalizes the thread as
+    /// cancelled — there is no consequence to record.
+    Cancelled,
+}
+
+/// Check if a flag (cancel or interrupt) is set.
+fn flag_set(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) -> bool {
     flag.as_ref()
         .map(|f| f.load(std::sync::atomic::Ordering::Relaxed))
         .unwrap_or(false)
 }
 
-/// Async future that resolves when the cancellation flag is set.
-/// Polls with a 50ms backoff — bounded cancellation latency.
-async fn cancel_signal(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+/// Async future that resolves when the given flag is set. Polls with a 50ms
+/// backoff — bounded reaction latency. Pending forever when the flag is `None`.
+async fn flag_signal(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
     if let Some(f) = flag {
         loop {
             if f.load(std::sync::atomic::Ordering::Relaxed) {
@@ -674,10 +700,13 @@ pub struct StreamingCallInput<'a> {
     pub callback: &'a CallbackClient,
     pub turn: u32,
     pub sampling: Option<&'a SamplingConfig>,
-    /// Optional cancellation flag. When `Some(atomic_bool)` and the
-    /// bool becomes `true`, the stream loop breaks mid-flight and
-    /// returns what it has accumulated so far.
+    /// Optional cancellation flag (SIGTERM). When set mid-stream, the loop
+    /// breaks and the call returns [`StreamOutcome::Cancelled`].
     pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Optional live-interrupt flag (SIGUSR1). When set mid-stream, the loop
+    /// breaks and the call returns [`StreamOutcome::Interrupted`] with the
+    /// partial assistant message accumulated so far.
+    pub interrupt_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[tracing::instrument(
@@ -685,9 +714,7 @@ pub struct StreamingCallInput<'a> {
     skip(input),
     fields(adapter_type = "stream", model = %input.model, turn = input.turn)
 )]
-pub async fn call_provider_streaming(
-    input: StreamingCallInput<'_>,
-) -> Result<(AdapterResponse, Vec<StreamEvent>)> {
+pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
     let StreamingCallInput {
         client,
         provider,
@@ -701,7 +728,8 @@ pub async fn call_provider_streaming(
         callback,
         turn,
         sampling,
-        cancel_flag: _, // checked inside the stream loop
+        cancel_flag: _,    // checked inside the stream loop
+        interrupt_flag: _, // checked inside the stream loop
     } = input;
     let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
 
@@ -836,24 +864,50 @@ pub async fn call_provider_streaming(
     // (`tool_calls[].function.arguments`) wire shapes.
     let mut tool_state: HashMap<String, String> = HashMap::new();
 
+    // How the loop terminated. `Closed` = upstream finished normally; the others
+    // are out-of-band cuts. Cancel takes priority over interrupt (SIGTERM ends
+    // the run; SIGUSR1 only redirects it).
+    #[derive(PartialEq)]
+    enum LoopExit {
+        Closed,
+        Cancelled,
+        Interrupted,
+    }
+    let mut exit = LoopExit::Closed;
+
     loop {
-        // Preemptive cancellation: check BEFORE waiting for the next
-        // chunk. Combined with the post-await check below, this
-        // guarantees cancellation latency is bounded by the polling
+        // Preemptive checks BEFORE waiting for the next chunk. Combined with the
+        // post-await select below, reaction latency is bounded by the polling
         // interval (~50ms), not the next chunk arrival.
-        if cancelled(&input.cancel_flag) {
+        if flag_set(&input.cancel_flag) {
             tracing::info!(
                 turn = input.turn,
                 "provider stream cancelled mid-flight (preemptive)"
             );
+            exit = LoopExit::Cancelled;
+            break;
+        }
+        if flag_set(&input.interrupt_flag) {
+            tracing::info!(
+                turn = input.turn,
+                "provider stream interrupted mid-flight (preemptive)"
+            );
+            exit = LoopExit::Interrupted;
             break;
         }
 
         let chunk_res = tokio::select! {
             biased;
 
-            _ = cancel_signal(&input.cancel_flag) => {
+            _ = flag_signal(&input.cancel_flag) => {
                 tracing::info!(turn = input.turn, "provider stream cancelled mid-flight (select)");
+                exit = LoopExit::Cancelled;
+                break;
+            }
+
+            _ = flag_signal(&input.interrupt_flag) => {
+                tracing::info!(turn = input.turn, "provider stream interrupted mid-flight (select)");
+                exit = LoopExit::Interrupted;
                 break;
             }
 
@@ -1013,8 +1067,16 @@ pub async fn call_provider_streaming(
         }
     }
 
-    // Final flush: any trailing block without terminal blank line.
-    if !buffer.trim().is_empty() {
+    // Cancellation (SIGTERM) ends the run — no consequence to record. Bail out
+    // before building any partial response.
+    if exit == LoopExit::Cancelled {
+        return Ok(StreamOutcome::Cancelled);
+    }
+
+    // Final flush: any trailing block without terminal blank line. Only on a
+    // normal close — an interrupt cut leaves an incomplete trailing SSE block we
+    // intentionally drop (the partial is whatever fully-parsed blocks produced).
+    if exit == LoopExit::Closed && !buffer.trim().is_empty() {
         let framed = format!("{}\n\n", buffer);
         harvest_chunk_meta(&buffer, &mut last_usage, &mut last_finish, stream_paths);
         let final_events =
@@ -1101,34 +1163,54 @@ pub async fn call_provider_streaming(
         }
     }
 
+    let content = if accumulated_text.is_empty() {
+        None
+    } else {
+        Some(json!(accumulated_text))
+    };
+    let reasoning_content = if accumulated_reasoning.is_empty() {
+        None
+    } else {
+        Some(accumulated_reasoning)
+    };
+
+    // Interrupt cut: seal the partial as an assistant message with content +
+    // reasoning only. NO tool_calls — an interrupted cognition didn't complete
+    // its tool call, so the folded wire history has no unpaired tool_call → the
+    // runner records `cognition_out{interrupted:true}` from this.
+    if exit == LoopExit::Interrupted {
+        return Ok(StreamOutcome::Interrupted {
+            partial_message: ProviderMessage {
+                role: "assistant".to_string(),
+                content,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content,
+            },
+            events: all_events,
+        });
+    }
+
     let message = ProviderMessage {
         role: "assistant".to_string(),
-        content: if accumulated_text.is_empty() {
-            None
-        } else {
-            Some(json!(accumulated_text))
-        },
+        content,
         tool_calls: if accumulated_tools.is_empty() {
             None
         } else {
             Some(accumulated_tools)
         },
         tool_call_id: None,
-        reasoning_content: if accumulated_reasoning.is_empty() {
-            None
-        } else {
-            Some(accumulated_reasoning)
-        },
+        reasoning_content,
     };
 
-    Ok((
-        AdapterResponse {
+    Ok(StreamOutcome::Completed {
+        response: AdapterResponse {
             message,
             usage: last_usage,
             finish_reason: last_finish,
         },
-        all_events,
-    ))
+        events: all_events,
+    })
 }
 
 /// Pull provider-side metadata (usage totals, finish_reason) out of a
@@ -2551,7 +2633,7 @@ owner = "ryeos-dev"
     }
 
     #[tokio::test]
-    async fn cancel_signal_resolves_within_250ms_of_flag_set() {
+    async fn flag_signal_resolves_within_250ms_of_flag_set() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
         use std::time::Duration;
@@ -2561,36 +2643,36 @@ owner = "ryeos-dev"
 
         let start = tokio::time::Instant::now();
 
-        // Spawn the cancel_signal future and set the flag after 10ms
+        // Spawn the flag_signal future and set the flag after 10ms
         let handle = tokio::spawn(async move {
             let opt_flag: Option<Arc<AtomicBool>> = Some(flag_clone);
-            cancel_signal(&opt_flag).await;
+            flag_signal(&opt_flag).await;
         });
 
         // Simulate external trigger after a short delay
         tokio::time::sleep(Duration::from_millis(10)).await;
         flag.store(true, Ordering::Relaxed);
 
-        // cancel_signal must resolve within 250ms of the flag being set
+        // flag_signal must resolve within 250ms of the flag being set
         let result = tokio::time::timeout(Duration::from_millis(250), handle).await;
         assert!(
             result.is_ok(),
-            "cancel_signal did not resolve within 250ms; elapsed: {}ms",
+            "flag_signal did not resolve within 250ms; elapsed: {}ms",
             start.elapsed().as_millis()
         );
     }
 
     #[test]
-    fn cancelled_returns_false_when_no_flag() {
-        assert!(!cancelled(&None));
+    fn flag_set_returns_false_when_no_flag() {
+        assert!(!flag_set(&None));
     }
 
     #[test]
-    fn cancelled_returns_true_when_flag_set() {
+    fn flag_set_returns_true_when_flag_set() {
         use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
         let flag = Arc::new(AtomicBool::new(true));
-        assert!(cancelled(&Some(flag)));
+        assert!(flag_set(&Some(flag)));
     }
 
     // ── Phase 5: Stream event emission tests ──────────────────────────

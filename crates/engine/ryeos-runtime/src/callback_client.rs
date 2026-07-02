@@ -24,8 +24,19 @@ pub fn storage_class_for(event_type: &str) -> &'static str {
 }
 
 fn storage_class_for_payload(event_type: &str, payload: &Value) -> &'static str {
-    if event_type == "cognition_out"
-        && (payload.get("delta").is_some() || payload.get("tool_use_partial").is_some())
+    // Progressive streamed cognition_out is live-only (ephemeral): deltas, partial
+    // tool args, AND complete `tool_use` blocks. The DURABLE record of a turn's
+    // tool calls is `emit_turn_complete`'s `cognition_out{tool_calls}` — persisting
+    // the mid-stream `tool_use` too would fold a spurious extra assistant turn on
+    // resume (reconstruct_messages reads `tool_calls`, not `tool_use`). Must stay
+    // in lock-step with the daemon's `is_ephemeral_allowed`. (The payload keys are
+    // JSON field names, not event types, so they stay string-keyed.)
+    if matches!(
+        RuntimeEventType::parse(event_type),
+        Ok(RuntimeEventType::CognitionOut)
+    ) && (payload.get("delta").is_some()
+        || payload.get("tool_use_partial").is_some()
+        || payload.get("tool_use").is_some())
     {
         return StorageClass::Ephemeral.as_str();
     }
@@ -507,6 +518,27 @@ impl CallbackClient {
         }
     }
 
+    /// Drain operator inputs staged for this running thread, in FIFO order.
+    /// The daemon has ALREADY persisted any returned inputs as durable
+    /// `cognition_in` (through the running-guarded path) before returning, so a
+    /// non-empty result is in the braid — the runner only needs to fold them
+    /// into its in-flight `messages`. Empty when disconnected (best-effort; the
+    /// loop simply continues without new input).
+    pub async fn poll_input(&self) -> Result<Vec<ryeos_state::objects::LiveInput>> {
+        let Some(client) = &self.inner else {
+            return Ok(Vec::new());
+        };
+        let raw = client
+            .poll_input(&self.thread_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        match raw.get("inputs").cloned() {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(inputs) => serde_json::from_value(inputs)
+                .map_err(|e| anyhow::anyhow!("invalid poll_input inputs from daemon: {e}")),
+        }
+    }
+
     // Typed event emission methods (merged from EventEmitter)
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -525,6 +557,28 @@ impl CallbackClient {
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
         self.append_event("cognition_in", serde_json::json!({"turn": turn}))
             .await
+    }
+
+    /// Resume-critical: seal a cognition cut short by a live interrupt. Emits a
+    /// transcript-bearing `cognition_out` with the partial `content`/
+    /// `reasoning_content` and `interrupted: true`, and deliberately NO
+    /// `tool_calls` — an interrupted cognition didn't complete its tool call, so
+    /// the folded wire history carries no unpaired tool call. Durable (indexed):
+    /// resume folds it as an assistant message so the redirect has honest context.
+    pub async fn emit_turn_interrupted(
+        &self,
+        turn: u32,
+        partial_message: Option<Value>,
+    ) -> Result<()> {
+        let mut data = serde_json::json!({ "turn": turn, "interrupted": true });
+        if let Some(Value::Object(message)) = partial_message {
+            for key in ["content", "reasoning_content"] {
+                if let Some(value) = message.get(key) {
+                    data[key] = value.clone();
+                }
+            }
+        }
+        self.append_event("cognition_out", data).await
     }
 
     /// Resume-critical: transcript-bearing event; hard-fails on disconnect.
@@ -715,6 +769,39 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    #[test]
+    fn progressive_cognition_out_is_ephemeral() {
+        // delta / tool_use_partial / complete tool_use are all live-only so they
+        // don't fold a spurious extra assistant turn on resume.
+        for payload in [
+            json!({"turn": 1, "delta": "hi"}),
+            json!({"turn": 1, "tool_use_partial": {"id": "x"}}),
+            json!({"turn": 1, "tool_use": {"id": "x", "name": "f", "arguments": {}}}),
+        ] {
+            assert_eq!(
+                storage_class_for_payload("cognition_out", &payload),
+                StorageClass::Ephemeral.as_str(),
+                "payload {payload} should be ephemeral"
+            );
+        }
+    }
+
+    #[test]
+    fn turn_complete_cognition_out_is_indexed() {
+        // The durable record of a turn (with tool_calls array) is indexed.
+        let payload = json!({"turn": 1, "content": "done", "tool_calls": []});
+        assert_eq!(
+            storage_class_for_payload("cognition_out", &payload),
+            StorageClass::Indexed.as_str()
+        );
+        // An interrupted seal (no progressive keys) is also durable.
+        let interrupted = json!({"turn": 1, "content": "par", "interrupted": true});
+        assert_eq!(
+            storage_class_for_payload("cognition_out", &interrupted),
+            StorageClass::Indexed.as_str()
+        );
+    }
 
     // ── Mock callback that records events in memory ──────────────────
 

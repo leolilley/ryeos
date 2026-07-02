@@ -566,6 +566,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             match ryeos_executor::dispatch::preflight_root_dispatch(
                 item_ref,
                 root_canonical.kind.as_str(),
+                &request.parameters,
                 &exec_ctx,
                 &state,
             ) {
@@ -775,6 +776,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id: None,
+            parent_execution_context: None,
         };
 
         match ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await {

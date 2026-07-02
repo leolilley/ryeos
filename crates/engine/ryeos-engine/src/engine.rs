@@ -506,6 +506,34 @@ impl Engine {
         })
     }
 
+    /// Resolve which execution routine a root item's executor chain terminal
+    /// selects, without building a subprocess plan.
+    ///
+    /// The dispatcher uses this to branch subprocess vs method-dispatch on the
+    /// terminal's typed `terminal_executor:` descriptor (never on the alias
+    /// name or terminal ref). Acquires the same per-request roots / effective
+    /// parsers / trust store as `build_plan`.
+    pub fn resolve_terminal_executor(
+        &self,
+        root_source_path: &std::path::Path,
+        root_executor_id: &str,
+        root_kind: &str,
+        project_root: Option<PathBuf>,
+    ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
+        let roots = self.resolution_roots(project_root.clone());
+        let trust_store = self.effective_trust_store(project_root.as_deref())?;
+        let effective_parsers = self.effective_parser_dispatcher(project_root.as_deref())?;
+        crate::plan_builder::resolve_terminal_executor(
+            root_executor_id,
+            root_source_path,
+            root_kind,
+            &self.kinds,
+            &effective_parsers,
+            &roots,
+            &trust_store,
+        )
+    }
+
     /// Execute a plan via Lillux subprocess dispatch.
     pub fn execute_plan(
         &self,

@@ -340,6 +340,10 @@ async fn main() -> Result<()> {
         event_streams.clone(),
     )?);
     threads.set_scheduler_db(scheduler_db.clone(), config.app_root.clone());
+    // Operator live-input queue, shared between the `threads.input` enqueue
+    // path (via AppState) and lifecycle finalization (closes a thread's entry).
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(CommandService::new(
         state_store.clone(),
         kind_profiles.clone(),
@@ -393,6 +397,7 @@ async fn main() -> Result<()> {
         ),
         identity: Arc::new(identity),
         threads,
+        live_input,
         events,
         event_streams,
         commands,
@@ -507,12 +512,15 @@ async fn main() -> Result<()> {
 
     // Write daemon.json so tools can discover the daemon.
     // This is the discovery contract — fail if we can't write it.
+    let build = ryeos_app::build_info::get();
     let daemon_info = ryeos_node::DaemonMetadata {
         pid: Some(std::process::id()),
         uds_path: Some(config.uds_path.clone()),
         bind: Some(actual_bind.to_string()),
         started_at: Some(lillux::time::iso8601_now()),
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        version: Some(build.version.to_string()),
+        revision: Some(build.revision.to_string()),
+        build_date: Some(build.build_date.to_string()),
         app_root: config.app_root.clone(),
     };
     let daemon_json_path = config.app_root.join("daemon.json");
@@ -885,6 +893,8 @@ async fn run_service_standalone(
         events.clone(),
         event_streams.clone(),
     )?);
+    let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+    threads.set_live_input_queue(live_input.clone());
     let commands = Arc::new(command_service::CommandService::new(
         state_store.clone(),
         kind_profiles,
@@ -910,6 +920,7 @@ async fn run_service_standalone(
         ),
         identity: Arc::new(identity),
         threads,
+        live_input,
         events,
         event_streams,
         commands,

@@ -40,6 +40,14 @@ pub struct ThreadLifecycleService {
     current_site_id: String,
     scheduler_db: std::sync::RwLock<Option<Arc<ryeos_scheduler::db::SchedulerDb>>>,
     app_root: std::sync::RwLock<Option<std::path::PathBuf>>,
+    /// Operator live-input staging, shared with `AppState`. Wired once after
+    /// construction (`set_live_input_queue`) so the existing constructor call
+    /// sites stay unchanged. Finalization closes the per-thread entry after the
+    /// terminal state write so no queued input survives a terminal status and
+    /// late enqueues are refused (see `live_input_queue`). Absent in tests
+    /// that don't wire it — the persist-path running-guard still prevents any
+    /// `cognition_in` append after terminal regardless.
+    live_input: std::sync::RwLock<Option<Arc<crate::live_input_queue::LiveInputQueue>>>,
 }
 
 impl std::fmt::Debug for ThreadLifecycleService {
@@ -331,7 +339,26 @@ impl ThreadLifecycleService {
             current_site_id: format!("site:{hostname}"),
             scheduler_db: std::sync::RwLock::new(None),
             app_root: std::sync::RwLock::new(None),
+            live_input: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Wire the shared operator live-input queue. Called once after
+    /// construction with the same `Arc` held by `AppState`, so finalization can
+    /// close a thread's entry. Mirrors `set_scheduler_db`.
+    pub fn set_live_input_queue(
+        &self,
+        queue: Arc<crate::live_input_queue::LiveInputQueue>,
+    ) {
+        *self.live_input.write().unwrap() = Some(queue);
+    }
+
+    /// Close a thread's live-input entry at terminal, if a queue is wired.
+    /// Clears any queued inputs and rejects future enqueues. No-op when unset.
+    fn close_live_input(&self, thread_id: &str) {
+        if let Some(queue) = self.live_input.read().unwrap().as_ref() {
+            queue.close(thread_id);
+        }
     }
 
     /// Publish persisted lifecycle records to live subscribers after the
@@ -684,6 +711,11 @@ impl ThreadLifecycleService {
             },
         )?;
         self.publish_records(&persisted);
+        // Terminal: no queued operator input may survive, and a late enqueue
+        // racing this finalize must be refused. Close after the terminal state
+        // write (above), so the queue `closed` tombstone and the persist-path
+        // running-guard together bound the race from either ordering.
+        self.close_live_input(thread_id);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
@@ -796,6 +828,9 @@ impl ThreadLifecycleService {
             },
         )?;
         self.publish_records(&persisted);
+        // Terminal: close the live-input entry after the terminal state write
+        // (see `finalize_from_completion` for the race rationale).
+        self.close_live_input(&params.thread_id);
 
         let terminal_status = normalize_terminal_status(&params.status)?;
         self.update_scheduler_fire_on_thread_terminal(

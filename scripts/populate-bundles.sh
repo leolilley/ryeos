@@ -104,6 +104,17 @@ sign_seed_yaml() {
   printf '%s' "$hash" > "$hash_tmp"
   openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$hash_tmp" -out "$sig_tmp" 2>/dev/null
   sig="$(base64_one_line < "$sig_tmp")"
+
+  # Idempotent: the signature covers the body hash only (the timestamp is
+  # envelope metadata), and ed25519 is deterministic, so an unchanged body
+  # yields the same hash:sig:fp tail. If the existing signature already matches,
+  # leave the file untouched — re-stamping a fresh timestamp would churn the
+  # committed seed files on every populate run for no content change.
+  if head -1 "$file" | grep -qF ":${hash}:${sig}:${PUBLISHER_FP}"; then
+    rm -f "$body_tmp" "$hash_tmp" "$sig_tmp"
+    return 0
+  fi
+
   timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   {

@@ -348,6 +348,17 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .await
             .map_err(Self::map_rpc_error)
     }
+
+    async fn poll_input(&self, thread_id: &str) -> Result<Value, CallbackError> {
+        // `inject_callback_token` adds BOTH the callback token and the
+        // thread_auth_token — the daemon's poll_input branch requires both.
+        let mut params = json!({"thread_id": thread_id});
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.poll_input", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
 }
 
 #[cfg(test)]

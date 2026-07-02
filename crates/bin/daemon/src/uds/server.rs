@@ -146,6 +146,30 @@ pub async fn dispatch_runtime_method(
             .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
+    } else if method == "runtime.poll_input" {
+        // runtime.poll_input drains staged operator inputs and persists them as
+        // durable `cognition_in` for the running thread. Require BOTH proofs the
+        // runtime holds: the per-request thread_auth_token (like dispatch_action)
+        // AND the exact-thread callback token (write tier — it appends durable
+        // events). Either alone is insufficient.
+        let tat = params
+            .get("thread_auth_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.poll_input"))?;
+        let thread_id = params
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing thread_id"))?;
+        state.thread_auth.validate(tat, thread_id)?;
+        let token = params
+            .get("callback_token")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing callback_token"))?;
+        Some(
+            state
+                .callback_tokens
+                .validate_token_and_thread(token, thread_id)?,
+        )
     } else if is_chain_read_method(method) {
         let token = params
             .get("callback_token")
@@ -221,6 +245,7 @@ pub async fn dispatch_runtime_method(
         "runtime.complete_command" => handle_complete_command(&clean_params, state),
         "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
         "runtime.attach_process" => handle_attach_process(&clean_params, state),
+        "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -284,9 +309,9 @@ fn authorize_chain_read(
 
 fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadMarkRunningParams =
-        serde_json::from_value(params.clone()).context("invalid threads.mark_running params")?;
+        serde_json::from_value(params.clone()).context("invalid runtime.mark_running params")?;
     serde_json::to_value(state.threads.mark_running(&params.thread_id)?)
-        .context("failed to encode threads.mark_running result")
+        .context("failed to encode runtime.mark_running result")
 }
 
 fn handle_attach_process(
@@ -294,14 +319,14 @@ fn handle_attach_process(
     state: &AppState,
 ) -> Result<serde_json::Value> {
     let mut params: ThreadAttachProcessParams =
-        serde_json::from_value(params.clone()).context("invalid threads.attach_process params")?;
+        serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
     // The runtime self-reports its pid only; ALWAYS derive the process group
     // daemon-side — never trust a runtime-supplied pgid. This gives reconcile's
     // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
     // probe instead of treating the thread as dead.
     params.pgid = ryeos_app::process::pgid_of(params.pid);
     serde_json::to_value(state.threads.attach_process(&params)?)
-        .context("failed to encode threads.attach_process result")
+        .context("failed to encode runtime.attach_process result")
 }
 
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
@@ -399,7 +424,7 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
 
 fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadGetParams =
-        serde_json::from_value(params.clone()).context("invalid threads.get params")?;
+        serde_json::from_value(params.clone()).context("invalid runtime.get_thread params")?;
     match state.threads.get_thread(&params.thread_id)? {
         Some(thread) => {
             let facets = state.state_store.get_facets(&params.thread_id)?;
@@ -413,7 +438,7 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
                 "artifacts": state.threads.list_thread_artifacts(&params.thread_id)?,
                 "facets": facets_map,
             }))
-            .context("failed to encode threads.get result")
+            .context("failed to encode runtime.get_thread result")
         }
         None => Ok(serde_json::Value::Null),
     }
@@ -504,6 +529,82 @@ fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<
         serde_json::from_value(params.clone()).context("invalid events.replay params")?;
     serde_json::to_value(state.events.replay(&params)?)
         .context("failed to encode events.replay result")
+}
+
+/// `runtime.poll_input` — poll-and-persist staged operator inputs for a running
+/// thread. The queue is daemon-side scratch; this is the ONLY place a queued
+/// input becomes a durable braid event.
+///
+/// Contract: drain FIFO → append indexed `cognition_in` (content only) through
+/// the running-guarded path → return the persisted inputs for the runtime to
+/// fold. The guard is the terminal-safety anchor: if the thread is no longer
+/// running, the append is a no-op and the drained items are discarded (never a
+/// `cognition_in` after terminal). A transient append error restores the items
+/// to the front so a later poll retries.
+fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+    let thread_id = params
+        .get("thread_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing thread_id on runtime.poll_input"))?;
+
+    // Resolve the chain root BEFORE draining so a lookup failure can't strand
+    // drained input — nothing has been drained yet. If the thread vanished there
+    // is nowhere to persist.
+    let Some(detail) = state.state_store.get_thread(thread_id)? else {
+        return Ok(json!({ "inputs": [] }));
+    };
+
+    let pending = state.live_input.drain(thread_id);
+    if pending.is_empty() {
+        return Ok(json!({ "inputs": [] }));
+    }
+    let n = pending.len();
+
+    // Encode the response BEFORE persisting: a serialize failure must restore the
+    // drained items (releasing the in-flight reservation), never leave durable
+    // `cognition_in` the runtime never receives.
+    let inputs_value = match serde_json::to_value(&pending) {
+        Ok(v) => v,
+        Err(e) => {
+            state.live_input.restore_front(thread_id, pending);
+            return Err(anyhow::Error::new(e).context("failed to encode poll_input inputs"));
+        }
+    };
+
+    // A `cognition_in` carries only `content` — the intent is a delivery concern,
+    // not part of the braid. Indexed (durable) so resume folds it in order.
+    let events: Vec<ryeos_app::state_store::NewEventRecord> = pending
+        .iter()
+        .map(|s| ryeos_app::state_store::NewEventRecord {
+            event_type: "cognition_in".to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({ "content": s.content }),
+        })
+        .collect();
+
+    match state
+        .threads
+        .append_thread_events(&detail.chain_root_id, thread_id, &events)
+    {
+        // Persisted while running — release the reservation and hand the inputs
+        // back for the loop to fold.
+        Ok(Some(_persisted)) => {
+            state.live_input.ack_drained(thread_id, n);
+            Ok(json!({ "inputs": inputs_value }))
+        }
+        // Not running (terminal) — discard and release the reservation. The
+        // queue close at finalize already cleared queued items; this drops
+        // anything that raced in.
+        Ok(None) => {
+            state.live_input.ack_drained(thread_id, n);
+            Ok(json!({ "inputs": [] }))
+        }
+        // Transient failure — restore for a later poll, then surface the error.
+        Err(e) => {
+            state.live_input.restore_front(thread_id, pending);
+            Err(e)
+        }
+    }
 }
 
 fn handle_bundle_events_append(
@@ -681,7 +782,10 @@ fn handle_get_facets(params: &serde_json::Value, state: &AppState) -> Result<ser
 fn rpc_result(request_id: u64, result: Result<serde_json::Value>) -> RpcResponse {
     match result {
         Ok(value) => RpcResponse::ok(request_id, value),
-        Err(err) => RpcResponse::err(request_id, "request_failed", err.to_string()),
+        // `{:#}` walks the anyhow cause chain, so a deep failure (e.g. a serde
+        // decode error under "invalid <method> params") surfaces its root cause
+        // to the caller instead of only the top-level context line.
+        Err(err) => RpcResponse::err(request_id, "request_failed", format!("{err:#}")),
     }
 }
 
@@ -825,6 +929,7 @@ mod tests {
             ),
             identity: Arc::new(identity),
             threads,
+            live_input: Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new()),
             events,
             event_streams,
             commands,
@@ -1843,6 +1948,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let append = dispatch(
@@ -1898,6 +2005,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let caller_bundle_id = dispatch(
@@ -1932,6 +2041,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            serde_json::Value::Null,
+            0,
         );
         let missing_cap = dispatch(
             rpc(
@@ -1973,6 +2084,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let put = dispatch(
@@ -2057,6 +2170,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
 
         let caller_bundle_id = dispatch(
@@ -2090,6 +2205,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
         let missing_cap = dispatch(
             rpc(
@@ -2121,6 +2238,8 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            serde_json::Value::Null,
+            0,
         );
         let other_bundle = dispatch(
             rpc(

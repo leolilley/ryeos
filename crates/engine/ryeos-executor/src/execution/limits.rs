@@ -66,32 +66,6 @@ pub struct LimitCaps {
     pub duration_seconds: Option<u64>,
 }
 
-impl LimitCaps {
-    fn turns(&self) -> u32 {
-        self.turns.unwrap_or(u32::MAX)
-    }
-
-    fn tokens(&self) -> u64 {
-        self.tokens.unwrap_or(u64::MAX)
-    }
-
-    fn spend_usd(&self) -> f64 {
-        self.spend_usd.unwrap_or(f64::MAX)
-    }
-
-    fn spawns(&self) -> u32 {
-        self.spawns.unwrap_or(u32::MAX)
-    }
-
-    fn depth(&self) -> u32 {
-        self.depth.unwrap_or(u32::MAX)
-    }
-
-    fn duration_seconds(&self) -> u64 {
-        self.duration_seconds.unwrap_or(u64::MAX)
-    }
-}
-
 fn default_turns() -> u32 {
     25
 }
@@ -116,48 +90,84 @@ pub fn compute_effective_limits(
     defaults: &LimitValues,
     caps: &LimitCaps,
     parent_limits: Option<&HardLimits>,
-    depth: u32,
 ) -> HardLimits {
     let requested = item_requested.unwrap_or(defaults);
 
-    let turns = clamp(requested.turns, caps.turns());
-    let tokens = clamp(requested.tokens, caps.tokens());
-    let spend_usd = clamp_f64(requested.spend_usd, caps.spend_usd());
-    let spawns = clamp(requested.spawns, caps.spawns());
-    let effective_depth = clamp(depth.max(1), caps.depth());
-    let duration_seconds = clamp(requested.duration_seconds, caps.duration_seconds());
-
+    // Ops caps clamp. A cap is an upper bound; "no cap" (`None`) is the 0
+    // sentinel = unbounded. `sentinel_clamp` also makes a present cap win over a
+    // 0 (= unlimited) request, so a request can never bypass a configured cap.
+    // `depth` here is the depth LIMIT (from requested.depth), NOT the current
+    // launch depth — current depth travels separately in EnvelopeRequest.depth.
     let mut hard = HardLimits {
-        turns,
-        tokens,
-        spend_usd,
-        spawns,
-        depth: effective_depth,
-        duration_seconds,
+        turns: sentinel_clamp(requested.turns, caps.turns.unwrap_or(0)),
+        tokens: sentinel_clamp(requested.tokens, caps.tokens.unwrap_or(0)),
+        spend_usd: sentinel_clamp(requested.spend_usd, caps.spend_usd.unwrap_or(0.0)),
+        spawns: sentinel_clamp(requested.spawns, caps.spawns.unwrap_or(0)),
+        depth: sentinel_clamp(requested.depth, caps.depth.unwrap_or(0)),
+        duration_seconds: sentinel_clamp(
+            requested.duration_seconds,
+            caps.duration_seconds.unwrap_or(0),
+        ),
     };
 
     if let Some(parent) = parent_limits {
-        hard.turns = hard.turns.min(parent.turns);
-        hard.tokens = hard.tokens.min(parent.tokens);
-        hard.spend_usd = hard.spend_usd.min(parent.spend_usd);
-        hard.spawns = hard.spawns.min(parent.spawns);
-        hard.depth = hard.depth.min(parent.depth);
-        hard.duration_seconds = hard.duration_seconds.min(parent.duration_seconds);
+        // A child can never exceed the parent that spawned it.
+        hard.turns = sentinel_clamp(hard.turns, parent.turns);
+        hard.tokens = sentinel_clamp(hard.tokens, parent.tokens);
+        hard.spend_usd = sentinel_clamp(hard.spend_usd, parent.spend_usd);
+        hard.spawns = sentinel_clamp(hard.spawns, parent.spawns);
+        hard.depth = sentinel_clamp(hard.depth, parent.depth);
+        hard.duration_seconds = sentinel_clamp(hard.duration_seconds, parent.duration_seconds);
     }
 
     hard
 }
 
-fn clamp<T: Ord>(value: T, cap: T) -> T {
-    value.min(cap)
+/// Clamp a `value` to an upper `bound`, honouring the "0 means unlimited"
+/// sentinel used at enforcement time — on BOTH sides. Used for ops caps (no cap
+/// => bound 0) and parent clamps alike. A plain `min` would let a zero bound
+/// erase a bounded value into unlimited, or let a zero (unlimited) value ignore
+/// a real bound.
+#[allow(clippy::float_cmp)] // 0.0 is an exact sentinel here, not an approximation
+fn sentinel_clamp<T: Copy + PartialOrd + Default>(value: T, bound: T) -> T {
+    let unlimited = T::default();
+    if bound == unlimited {
+        value // no bound
+    } else if value == unlimited {
+        bound // value unbounded → take the bound
+    } else if value < bound {
+        value
+    } else {
+        bound
+    }
 }
 
-fn clamp_f64(value: f64, cap: f64) -> f64 {
-    if value > cap {
-        cap
-    } else {
-        value
+/// Overlay a partial header `limits:` JSON object onto base defaults, returning
+/// the merged [`LimitValues`]. Present header keys win; omitted keys inherit
+/// `base` (the project's `limits.yaml` defaults, not built-in constants).
+/// Merges at the JSON level so no limit field is named here — the field set
+/// lives only in `LimitValues`.
+pub fn merge_header_limits(base: &LimitValues, header: &Value) -> anyhow::Result<LimitValues> {
+    let overlay = header
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("`limits` must be an object, got {header}"))?;
+    let mut merged = serde_json::to_value(base)?;
+    let m = merged
+        .as_object_mut()
+        .expect("LimitValues always serializes to a JSON object");
+    for (k, v) in overlay {
+        m.insert(k.clone(), v.clone());
     }
+    let result: LimitValues = serde_json::from_value(merged)?;
+    // A non-finite or negative spend cap silently disables enforcement (the
+    // harness only acts when `spend_usd > 0.0`), so reject it at the source.
+    if !result.spend_usd.is_finite() || result.spend_usd < 0.0 {
+        return Err(anyhow::anyhow!(
+            "limits.spend_usd must be finite and non-negative, got {}",
+            result.spend_usd
+        ));
+    }
+    Ok(result)
 }
 
 /// Load limits config from the project's `.ai/config/ryeos-runtime/limits.yaml`.
@@ -227,23 +237,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clamp_value_within_cap() {
-        assert_eq!(clamp(10u32, 25), 10);
+    fn header_overlay_preserves_project_defaults_for_omitted() {
+        // A partial header overrides only the fields it names; omitted fields
+        // inherit the PROJECT defaults (limits.yaml), not built-in constants.
+        let base = LimitValues {
+            turns: 40,
+            tokens: 111_111,
+            ..LimitValues::default()
+        };
+        let header = serde_json::json!({ "tokens": 250_000 });
+        let merged = merge_header_limits(&base, &header).unwrap();
+        assert_eq!(merged.tokens, 250_000); // present header field wins
+        assert_eq!(merged.turns, 40); // omitted inherits project default
     }
 
     #[test]
-    fn clamp_value_exceeds_cap() {
-        assert_eq!(clamp(50u32, 25), 25);
+    fn header_overlay_empty_is_identity() {
+        let base = LimitValues::default();
+        let merged = merge_header_limits(&base, &serde_json::json!({})).unwrap();
+        assert_eq!(merged.turns, base.turns);
+        assert_eq!(merged.tokens, base.tokens);
     }
 
     #[test]
-    fn clamp_f64_within_cap() {
-        assert!((clamp_f64(1.0, 2.0) - 1.0).abs() < f64::EPSILON);
+    fn merge_header_limits_rejects_non_object() {
+        let base = LimitValues::default();
+        let err = merge_header_limits(&base, &serde_json::json!("nope")).unwrap_err();
+        assert!(err.to_string().contains("must be an object"), "got {err}");
     }
 
     #[test]
-    fn clamp_f64_exceeds_cap() {
-        assert!((clamp_f64(5.0, 2.0) - 2.0).abs() < f64::EPSILON);
+    fn caps_apply_across_all_dimensions() {
+        // Zero (= unlimited) requests on every dimension must all be bounded by
+        // their caps, not just turns/duration.
+        let requested = LimitValues {
+            tokens: 0,
+            spend_usd: 0.0,
+            spawns: 0,
+            ..Default::default()
+        };
+        let caps = LimitCaps {
+            tokens: Some(1000),
+            spend_usd: Some(1.5),
+            spawns: Some(3),
+            ..Default::default()
+        };
+        let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
+        assert_eq!(hard.tokens, 1000);
+        assert_eq!(hard.spend_usd, 1.5);
+        assert_eq!(hard.spawns, 3);
+    }
+
+    #[test]
+    fn sentinel_clamp_zero_is_unlimited_on_both_sides() {
+        // Bound 0 (= no limit) must NOT erase a bounded value to 0.
+        assert_eq!(sentinel_clamp(100u32, 0u32), 100);
+        // Value 0 (= unlimited) takes a bounded cap/parent.
+        assert_eq!(sentinel_clamp(0u32, 50u32), 50);
+        // Both bounded → the smaller wins.
+        assert_eq!(sentinel_clamp(100u32, 50u32), 50);
+        assert_eq!(sentinel_clamp(30u32, 50u32), 30);
+        // Both unlimited → unlimited.
+        assert_eq!(sentinel_clamp(0u64, 0u64), 0);
+    }
+
+    #[test]
+    fn zero_request_cannot_bypass_a_configured_cap() {
+        // A "0 means unlimited" request must not slip past an explicit cap.
+        let requested = LimitValues {
+            turns: 0,
+            ..Default::default()
+        };
+        let caps = LimitCaps {
+            turns: Some(30),
+            ..Default::default()
+        };
+        let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
+        assert_eq!(hard.turns, 30, "cap must win over an unlimited request");
     }
 
     #[test]
@@ -256,7 +326,7 @@ mod tests {
             turns: Some(50),
             ..Default::default()
         };
-        let hard = compute_effective_limits(None, &defaults, &caps, None, 0);
+        let hard = compute_effective_limits(None, &defaults, &caps, None);
         assert_eq!(hard.turns, 20);
     }
 
@@ -270,8 +340,7 @@ mod tests {
             turns: Some(30),
             ..Default::default()
         };
-        let hard =
-            compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None, 0);
+        let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
         assert_eq!(hard.turns, 30);
     }
 
@@ -286,7 +355,6 @@ mod tests {
             &LimitValues::default(),
             &LimitCaps::default(),
             None,
-            0,
         );
         assert_eq!(hard.duration_seconds, 7200);
     }
@@ -301,8 +369,7 @@ mod tests {
             duration_seconds: Some(600),
             ..Default::default()
         };
-        let hard =
-            compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None, 0);
+        let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
         assert_eq!(hard.duration_seconds, 600);
     }
 
@@ -317,21 +384,43 @@ mod tests {
             &LimitValues::default(),
             &LimitCaps::default(),
             Some(&parent),
-            0,
         );
         assert_eq!(hard.turns, 10);
     }
 
     #[test]
-    fn compute_effective_depth_minimum_one() {
+    fn parent_zero_field_does_not_unlimit_child() {
+        // A parent with a zero (unlimited) field must not erase the child's
+        // bounded limit — regression for the zero-erase hazard.
+        let parent = HardLimits {
+            turns: 0,
+            ..HardLimits::default()
+        };
+        let requested = LimitValues {
+            turns: 15,
+            ..Default::default()
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps::default(),
+            Some(&parent),
+        );
+        assert_eq!(hard.turns, 15, "zero parent field must not unlimit child");
+    }
+
+    #[test]
+    fn depth_limit_comes_from_requested_not_current_depth() {
+        // HardLimits.depth is the depth LIMIT (from requested.depth, default 5),
+        // NOT the current launch depth — current depth now travels separately in
+        // EnvelopeRequest.depth.
         let hard = compute_effective_limits(
             None,
             &LimitValues::default(),
             &LimitCaps::default(),
             None,
-            0,
         );
-        assert_eq!(hard.depth, 1);
+        assert_eq!(hard.depth, default_depth());
     }
 
     #[test]
@@ -410,7 +499,6 @@ mod tests {
                 ..Default::default()
             },
             None,
-            0,
         );
 
         assert_eq!(requested.duration_seconds, 7200);

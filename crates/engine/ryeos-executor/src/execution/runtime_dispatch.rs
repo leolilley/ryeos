@@ -63,7 +63,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
-    handle_execute(params, state, &thread_auth, child_provenance).await
+    handle_execute(params, state, &thread_auth, &cap, child_provenance).await
 }
 
 /// V5.5 P2: enforce the callback's composed `effective_caps` against
@@ -112,6 +112,7 @@ async fn handle_execute(
     params: DispatchActionParams,
     state: &AppState,
     thread_auth: &ThreadAuthState,
+    cap: &ryeos_app::callback_token::CallbackCapability,
     child_provenance: ryeos_app::execution_provenance::ExecutionProvenance,
 ) -> Result<Value> {
     // V5.4 P2 — strict typed callback contract requires every leaf
@@ -179,6 +180,7 @@ async fn handle_execute(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        parent_execution_context: Some(parent_execution_context_from_capability(cap)),
     };
 
     // V5.4 P2.3 cleanup — async end-to-end: the UDS dispatcher is
@@ -191,14 +193,63 @@ async fn handle_execute(
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+fn parent_execution_context_from_capability(
+    cap: &ryeos_app::callback_token::CallbackCapability,
+) -> crate::dispatch::ParentExecutionContext {
+    crate::dispatch::ParentExecutionContext {
+        parent_thread_id: cap.thread_id.clone(),
+        hard_limits: cap.hard_limits.clone(),
+        depth: cap.depth,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     // ── V5.5 P2: enforce_callback_caps ──────────────────────────────
 
     fn test_auth() -> ryeos_runtime::authorizer::Authorizer {
         ryeos_runtime::authorizer::Authorizer::new()
+    }
+
+    fn minimal_engine() -> Arc<ryeos_engine::engine::Engine> {
+        Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::dispatcher::ParserDispatcher::new(
+                ryeos_engine::parsers::registry::ParserRegistry::empty(),
+                Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
+            ),
+            vec![],
+        ))
+    }
+
+    #[test]
+    fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
+        let cap = ryeos_app::callback_token::CallbackCapability {
+            token: "cbt-test".to_string(),
+            invocation_id: "inv-test".to_string(),
+            thread_id: "T-parent".to_string(),
+            project_path: PathBuf::from("/project"),
+            expires_at: Instant::now() + Duration::from_secs(300),
+            effective_caps: vec!["ryeos.*".to_string()],
+            provenance: ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                PathBuf::from("/project"),
+                minimal_engine(),
+            ),
+            effective_bundle_id: None,
+            item_ref: Some("graph:team/parent".to_string()),
+            hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
+            depth: 4,
+        };
+
+        let ctx = parent_execution_context_from_capability(&cap);
+        assert_eq!(ctx.parent_thread_id, "T-parent");
+        assert_eq!(ctx.hard_limits, serde_json::json!({"turns": 6, "tokens": 1000}));
+        assert_eq!(ctx.depth, 4);
     }
 
     #[test]

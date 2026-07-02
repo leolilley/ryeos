@@ -1,16 +1,23 @@
-# ryeos:signed:2026-06-13T05:38:46Z:125ccded23ec57aa67d65892d173bdf8c91ceb0ebd046b2f14752ab9affce681:+3E39RgrGa2X9PO3SqWrD+QHmwpdB2ci7HQ9AvN2VnBYu4wQuoKIt9EJeqtQEZA4ZiWgkkoFnjBsA++sZUSvAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-29T23:43:32Z:40892707cedf8fd8964f8beacf443e0075f8ce5d02b279daa56d416c0dbaaa76:fB2de6S09QoSS5tjfU/B4TfN36LaDQ4IoJdnp+PzULopW/bjwuY7VkYi+fAxGeH4b9WMO+d41EJ/orjnXAKGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
 
-widget: rows
+widget: table
 source:
   ref: service:threads/list
   params: {}
   collection: threads
 projections:
-  primary: item_ref
-  meta: status
+  columns:
+    - label: thread
+      field: thread_id
+    - label: item
+      field: item_ref
+    - label: status
+      field: status
+    - label: created
+      field: created_at
   tone:
     field: status
     map:

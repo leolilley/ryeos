@@ -7,12 +7,12 @@ use serde_json::{json, Value};
 
 use super::arch_check;
 use super::launch_envelope::{
-    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, LaunchEnvelope,
+    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{
     apply_caller_limit_overrides, apply_execution_policy_overrides, compute_effective_limits,
-    load_limits_config,
+    load_limits_config, merge_header_limits,
 };
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
@@ -842,6 +842,10 @@ pub struct BuildAndLaunchParams<'a> {
     pub pre_minted_thread_id: Option<&'a str>,
     /// Chained-resume turn (see `DispatchRequest::previous_thread_id`).
     pub previous_thread_id: Option<&'a str>,
+    /// Trusted parent execution context carried out-of-band from schema-driven
+    /// dispatch. Present for callback-dispatched child launches; absent for
+    /// roots and same-braid continuations.
+    pub parent_execution_context: Option<&'a crate::dispatch::ParentExecutionContext>,
     /// Machine continuation: fold the chain and resume with NO new stimulus.
     /// `false` for fresh launches and operator follow-ups (which inject their
     /// `parameters` as the opening stimulus); `true` only for an autonomous
@@ -941,6 +945,7 @@ async fn run_claimed_thread_row(
         required_envelope_fields,
         pre_minted_thread_id: _,
         previous_thread_id,
+        parent_execution_context,
         suppress_stimulus,
         capability_policy,
         checkpoint_resume_mode,
@@ -999,46 +1004,11 @@ async fn run_claimed_thread_row(
         )
     })?;
     let limits_config = limits_config.unwrap_or_default();
-    let requested_limits =
-        apply_execution_policy_overrides(&limits_config.defaults, &execution_policy);
-    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
-    let hard_limits = compute_effective_limits(
-        Some(&requested_limits),
-        &limits_config.defaults,
-        &limits_config.caps,
-        None,
-        0,
-    );
-    let duration_source = if parameters.get("timeout").is_some() {
-        "caller param `timeout`".to_string()
-    } else {
-        execution_policy
-            .timeout
-            .as_ref()
-            .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
-    };
-    let turns_source = if parameters.get("max_steps").is_some() {
-        "caller param `max_steps`".to_string()
-    } else {
-        execution_policy
-            .max_steps
-            .as_ref()
-            .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
-    };
-    tracing::info!(
-        item_ref = %resolved.item_ref,
-        duration_seconds = hard_limits.duration_seconds,
-        duration_source,
-        duration_cap = ?limits_config.caps.duration_seconds,
-        turns = hard_limits.turns,
-        turns_source = %turns_source,
-        turns_cap = ?limits_config.caps.turns,
-        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
-        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
-        "native launch execution policy resolved"
-    );
+    // Hard limits are computed AFTER the resolution pipeline below (see
+    // "compute effective limits"), so the directive-authored header `limits:`
+    // can be overlaid onto defaults BELOW execution-policy/caller overrides.
+    // The composed header is not available until resolution runs; `hard_limits`
+    // is still produced before the TTL / envelope consumers further down.
 
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback
@@ -1087,6 +1057,65 @@ async fn run_claimed_thread_row(
         references_edges = resolution.references_edges.len(),
         effective_trust_class = ?resolution.effective_trust_class,
         "resolution pipeline complete"
+    );
+
+    // Compute effective limits now that the composed header is resolved.
+    // The item's authored `limits:` (from the composed view, any kind) overlays
+    // its named fields onto the project defaults; omitted fields inherit. The
+    // merge is at the JSON level, so the executor names no limit field here.
+    // Precedence: defaults → header → execution policy → caller → caps → parent.
+    let base_limits = match resolution.composed.composed.get("limits") {
+        Some(v) if !v.is_null() => merge_header_limits(&limits_config.defaults, v)?,
+        _ => limits_config.defaults.clone(),
+    };
+    let requested_limits = apply_execution_policy_overrides(&base_limits, &execution_policy);
+    let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
+    // Parent budget/depth inheritance is trusted control-plane data carried
+    // out-of-band (callback token → DispatchRequest). It is never read from
+    // action parameters, so runtimes and graph authors cannot spoof it.
+    // Missing/empty/null parent limits means "no parent clamp" — never
+    // deserialize `{}` into a zero-valued HardLimits, since 0 reads as "no
+    // limit" and `min(x, 0)` would erase the child's limits.
+    let parent_limits = parent_limits_from_context(parent_execution_context)?;
+    // Current launch depth (position in the spawn tree). Callback children use
+    // trusted parent depth + 1; roots and same-braid continuations launch at 0.
+    let current_depth = launch_depth_from_context(parent_execution_context);
+    let hard_limits = compute_effective_limits(
+        Some(&requested_limits),
+        &limits_config.defaults,
+        &limits_config.caps,
+        parent_limits.as_ref(),
+    );
+    let duration_source = if parameters.get("timeout").is_some() {
+        "caller param `timeout`".to_string()
+    } else {
+        execution_policy
+            .timeout
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    let turns_source = if parameters.get("max_steps").is_some() {
+        "caller param `max_steps`".to_string()
+    } else {
+        execution_policy
+            .max_steps
+            .as_ref()
+            .map(|policy| policy.source.describe())
+            .unwrap_or_else(|| "ryeos-runtime/limits.yaml defaults or built-in default".to_string())
+    };
+    tracing::info!(
+        item_ref = %resolved.item_ref,
+        duration_seconds = hard_limits.duration_seconds,
+        duration_source,
+        duration_cap = ?limits_config.caps.duration_seconds,
+        turns = hard_limits.turns,
+        turns_source = %turns_source,
+        turns_cap = ?limits_config.caps.turns,
+        header_limits_present = resolution.composed.composed.get("limits").is_some_and(|v| !v.is_null()),
+        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
+        caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
+        "native launch execution policy resolved"
     );
 
     // ── Launch augmentations ──────────────────────────────────────
@@ -1416,6 +1445,8 @@ async fn run_claimed_thread_row(
         // ref), so token-claimed caps and minted caps cannot diverge.
         effective_bundle_id_for_request(resolved),
         Some(resolved.item_ref.clone()),
+        serde_json::to_value(&hard_limits).unwrap_or(Value::Null),
+        current_depth,
     );
     // Carry the thread's authoritative chain root on the cap (it defaults to
     // thread_id / root until set here).
@@ -1506,11 +1537,14 @@ async fn run_claimed_thread_row(
             operator_trusted_keys_dir,
         },
         EnvelopeRequest {
-            inputs: parameters.clone(),
+            // Strip runtime-control fields from prompt inputs. Parent
+            // budget/depth now travels out-of-band, but rejecting prompt leaks
+            // here keeps forged caller/action fields from becoming model input.
+            inputs: prompt_inputs_from_parameters(parameters),
             previous_thread_id: previous_thread_id.map(str::to_string),
-            parent_thread_id: None,
+            parent_thread_id: parent_execution_context.map(|ctx| ctx.parent_thread_id.clone()),
             parent_capabilities: None,
-            depth: 0,
+            depth: current_depth,
             suppress_stimulus,
         },
         EnvelopePolicy {
@@ -2029,6 +2063,7 @@ async fn launch_claimed_successor(
             required_envelope_fields: &required_envelope_fields,
             pre_minted_thread_id: None,
             previous_thread_id: Some(&previous_thread_id),
+            parent_execution_context: None,
             suppress_stimulus,
             capability_policy,
             checkpoint_resume_mode: match mode {
@@ -2100,6 +2135,7 @@ async fn launch_claimed_native_resume(
             pre_minted_thread_id: None,
             // SAME thread, not a successor — no chain braid.
             previous_thread_id: None,
+            parent_execution_context: None,
             // Crash resume folds no new stimulus; it reloads its own checkpoint.
             suppress_stimulus: true,
             // Pin the captured authority verbatim (same as a machine relaunch).
@@ -2567,9 +2603,43 @@ fn normalize_runtime_terminal_status(status: &str) -> &'static str {
     }
 }
 
+fn parent_limits_from_context(
+    parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
+) -> anyhow::Result<Option<HardLimits>> {
+    let parent_limits_value = parent_execution_context.map(|ctx| &ctx.hard_limits);
+    parent_limits_value
+        .filter(|v| match v {
+            Value::Null => false,
+            Value::Object(m) => !m.is_empty(),
+            _ => true,
+        })
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("failed to parse parent_limits: {e}"))
+}
+
+fn launch_depth_from_context(
+    parent_execution_context: Option<&crate::dispatch::ParentExecutionContext>,
+) -> u32 {
+    parent_execution_context
+        .map(|ctx| ctx.depth.saturating_add(1))
+        .unwrap_or(0)
+}
+
+fn prompt_inputs_from_parameters(parameters: &Value) -> Value {
+    let mut inputs = parameters.clone();
+    if let Some(obj) = inputs.as_object_mut() {
+        for k in ryeos_runtime::callback::RESERVED_CONTROL_KEYS {
+            obj.remove(*k);
+        }
+    }
+    inputs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::limits::{LimitCaps, LimitValues};
 
     fn caps(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
@@ -2950,5 +3020,103 @@ mod tests {
         assert!(is_runtime_terminal_status("timed_out"));
         assert!(!is_runtime_terminal_status("created"));
         assert!(!is_runtime_terminal_status("running"));
+    }
+
+    #[test]
+    fn parent_context_clamps_child_limits_and_increments_spawn_depth() {
+        let parent_hard_limits = HardLimits {
+            turns: 6,
+            tokens: 1_000,
+            spend_usd: 0.25,
+            spawns: 2,
+            depth: 3,
+            duration_seconds: 45,
+        };
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: serde_json::to_value(&parent_hard_limits).unwrap(),
+            depth: 4,
+        };
+
+        let parent_limits = parent_limits_from_context(Some(&ctx))
+            .expect("parent hard limits parse")
+            .expect("parent hard limits present");
+        let requested = LimitValues {
+            turns: 20,
+            tokens: 20_000,
+            spend_usd: 2.0,
+            spawns: 10,
+            depth: 8,
+            duration_seconds: 300,
+        };
+        let hard = compute_effective_limits(
+            Some(&requested),
+            &LimitValues::default(),
+            &LimitCaps::default(),
+            Some(&parent_limits),
+        );
+
+        assert_eq!(hard.turns, 6);
+        assert_eq!(hard.tokens, 1_000);
+        assert_eq!(hard.spend_usd, 0.25);
+        assert_eq!(hard.spawns, 2);
+        assert_eq!(hard.depth, 3);
+        assert_eq!(hard.duration_seconds, 45);
+        assert_eq!(launch_depth_from_context(Some(&ctx)), 5);
+    }
+
+    #[test]
+    fn absent_parent_context_is_root_or_same_braid_launch() {
+        assert!(parent_limits_from_context(None).unwrap().is_none());
+        assert_eq!(launch_depth_from_context(None), 0);
+    }
+
+    #[test]
+    fn empty_parent_limits_do_not_zero_erase_child_limits() {
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: json!({}),
+            depth: 2,
+        };
+
+        assert!(parent_limits_from_context(Some(&ctx)).unwrap().is_none());
+        assert_eq!(launch_depth_from_context(Some(&ctx)), 3);
+    }
+
+    #[test]
+    fn malformed_parent_limits_fail_loudly() {
+        let ctx = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: "T-parent".to_string(),
+            hard_limits: json!({"turns": "not-a-number"}),
+            depth: 0,
+        };
+
+        let err = parent_limits_from_context(Some(&ctx)).unwrap_err();
+        assert!(
+            err.to_string().contains("failed to parse parent_limits"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn forged_parent_control_params_are_not_launch_context_or_prompt_input() {
+        let params = json!({
+            "task": "keep this",
+            "parent_limits": {"turns": 1},
+            "parent_thread_id": "T-forged",
+            "depth": 99,
+            "continuation": {"seed": "forged"}
+        });
+
+        assert!(
+            parent_limits_from_context(None).unwrap().is_none(),
+            "parent clamp must come only from trusted ParentExecutionContext"
+        );
+        assert_eq!(
+            launch_depth_from_context(None),
+            0,
+            "forged params must not affect launch depth"
+        );
+        assert_eq!(prompt_inputs_from_parameters(&params), json!({"task": "keep this"}));
     }
 }

@@ -71,8 +71,34 @@ run_timeout() {
     fi
 }
 
+# The user who invoked the installer. Under sudo, lifecycle commands (status/
+# stop/start) MUST run as this user, not root: the daemon and its state live
+# under the user's XDG data dir, so a root-context `ryeos` resolves root's
+# app-root instead — it sees no daemon, so it never stops the stale one and
+# never restarts, leaving the old binary running against the swapped-out files.
+# Same drop-to-user reasoning as the populate/init steps below.
+invoking_user="${SUDO_USER:-$(id -un)}"
+
+# Run `ryeos <args>` with a timeout, as the invoking user when under sudo so it
+# targets that user's app-root. `timeout` wraps the external command (sudo or
+# ryeos), never a shell function.
+ryeos_user() {
+    local secs="$1"
+    shift
+    if [[ "$invoking_user" != "$(id -un)" ]]; then
+        local user_shell cmd a
+        user_shell="$(getent passwd "$invoking_user" | cut -d: -f7)"
+        [[ -x "$user_shell" ]] || user_shell="/bin/sh"
+        printf -v cmd 'exec ryeos'
+        for a in "$@"; do printf -v cmd '%s %q' "$cmd" "$a"; done
+        run_timeout "$secs" sudo -H -u "$invoking_user" "$user_shell" -lc "$cmd"
+    else
+        run_timeout "$secs" ryeos "$@"
+    fi
+}
+
 ryeos_status_quick() {
-    run_timeout 10 ryeos node status 2>/dev/null || true
+    ryeos_user 10 node status 2>/dev/null || true
 }
 
 bundle_payload_bins() {
@@ -194,7 +220,7 @@ stop_daemon_for_install() {
     fi
 
     echo "[install-local-direct] stopping running daemon before replacing binaries"
-    if ! run_timeout 30 ryeos stop --force >/dev/null; then
+    if ! ryeos_user 30 stop --force >/dev/null; then
         echo "[install-local-direct] ryeos stop timed out or failed; falling back to direct process kill" >&2
         pid="$(pid_from_status <<<"$status_out")"
         if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
@@ -579,7 +605,7 @@ if [[ $daemon_was_running -eq 1 ]]; then
     # rebuild projection.sqlite3 from CAS/refs before readiness. Give that
     # healthy one-time rebuild enough time to finish. Keep this slightly above
     # ryeos start's internal wait so the CLI can print its own diagnostic.
-    run_timeout 930 ryeos start >/dev/null || die "daemon did not restart cleanly"
+    ryeos_user 930 start >/dev/null || die "daemon did not restart cleanly"
     ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 

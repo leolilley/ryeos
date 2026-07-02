@@ -21,10 +21,10 @@
 //!     keeps running after the HTTP response is closed.
 //!
 //! Both consumers share the same `dispatch::dispatch` call shape with
-//! `pre_minted_thread_id = Some(thread_id)`, so the persistence-first
-//! contract holds: lifecycle events for the thread are emitted by
-//! dispatch and durable in the event store before any subscriber sees
-//! them.
+//! `pre_minted_thread_id = Some(thread_id)`. Dispatch normally creates
+//! the pre-minted row itself; if dispatch fails before it reaches row
+//! creation, this helper creates and finalizes a failed placeholder row
+//! so the id already returned to a caller cannot remain phantom.
 
 use serde_json::Value;
 
@@ -139,6 +139,8 @@ pub(crate) fn spawn_dispatch_launch(
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 
         let site_id = current_site_id;
+        let current_site_id_for_failure_row = site_id.clone();
+        let origin_site_id_for_failure_row = site_id.clone();
 
         let plan_ctx = PlanContext {
             requested_by: EffectivePrincipal::Local(Principal {
@@ -167,6 +169,9 @@ pub(crate) fn spawn_dispatch_launch(
             state_clone.engine.clone(),
         );
 
+        let usage_subject_for_failure_row = usage_subject.clone();
+        let usage_subject_asserted_by_for_failure_row = usage_subject_asserted_by.clone();
+
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: &launch_mode,
             target_site_id: dispatch_target_site_id.as_deref(),
@@ -180,6 +185,7 @@ pub(crate) fn spawn_dispatch_launch(
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id,
+            parent_execution_context: None,
         };
 
         match ryeos_executor::dispatch::dispatch(
@@ -195,32 +201,73 @@ pub(crate) fn spawn_dispatch_launch(
                 // Persistence-first safety net: if dispatch created the
                 // pre-minted thread row but failed before finalizing it
                 // (e.g. a managed `build_and_launch` policy/trust/grant
-                // failure that returns before spawn), finalize it `failed`
-                // so the id returned by accepted launch reaches a terminal
-                // state instead of hanging at `created`. No-ops if the
-                // thread was never created or the runtime already drove it
-                // terminal.
-                if let Ok(Some(detail)) = state_clone.threads.get_thread(&pre_minted_thread_id) {
-                    if !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
-                        .is_some_and(|s| s.is_terminal())
-                    {
-                        let _ = state_clone.threads.finalize_thread(
-                            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                // failure that returns before spawn), finalize it `failed`.
+                // If dispatch failed before creating the row at all (TOCTOU
+                // after accepted preflight, invalidated bundle item, etc.),
+                // create a failed placeholder row first so the id returned by
+                // accepted launch never remains phantom. No-ops when the
+                // runtime already drove the row terminal.
+                let error_payload = serde_json::json!({
+                    "code": e.code(),
+                    "reason": e.to_string(),
+                });
+                let should_finalize = match state_clone.threads.get_thread(&pre_minted_thread_id) {
+                    Ok(Some(detail)) => !ryeos_state::objects::ThreadStatus::from_str_lossy(
+                        &detail.status,
+                    )
+                    .is_some_and(|s| s.is_terminal()),
+                    Ok(None) => {
+                        let failure_thread_kind = state_clone
+                            .engine
+                            .kinds
+                            .get(item_ref.kind())
+                            .and_then(|schema| schema.execution())
+                            .and_then(|exec| exec.thread_profile.as_ref())
+                            .map(|profile| profile.name.clone())
+                            .unwrap_or_else(|| "system_task".to_string());
+                        let _ = state_clone.threads.create_thread(
+                            &ryeos_app::thread_lifecycle::ThreadCreateParams {
                                 thread_id: pre_minted_thread_id.clone(),
-                                status: "failed".to_string(),
-                                outcome_code: Some("failed".to_string()),
-                                result: None,
-                                error: Some(serde_json::json!({
-                                    "code": e.code(),
-                                    "reason": e.to_string(),
-                                })),
-                                metadata: None,
-                                artifacts: Vec::new(),
-                                final_cost: None,
-                                summary_json: None,
+                                chain_root_id: pre_minted_thread_id.clone(),
+                                kind: failure_thread_kind,
+                                item_ref: item_ref.as_str().to_string(),
+                                executor_ref: item_ref.as_str().to_string(),
+                                launch_mode: launch_mode.clone(),
+                                current_site_id: current_site_id_for_failure_row.clone(),
+                                origin_site_id: origin_site_id_for_failure_row.clone(),
+                                upstream_thread_id: None,
+                                requested_by: Some(principal_id.clone()),
+                                usage_subject: usage_subject_for_failure_row.clone(),
+                                usage_subject_asserted_by: usage_subject_asserted_by_for_failure_row
+                                    .clone(),
                             },
                         );
+                        state_clone
+                            .threads
+                            .get_thread(&pre_minted_thread_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|detail| {
+                                !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+                                    .is_some_and(|s| s.is_terminal())
+                            })
                     }
+                    Err(_) => false,
+                };
+                if should_finalize {
+                    let _ = state_clone.threads.finalize_thread(
+                        &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                            thread_id: pre_minted_thread_id.clone(),
+                            status: "failed".to_string(),
+                            outcome_code: Some("failed".to_string()),
+                            result: None,
+                            error: Some(error_payload),
+                            metadata: None,
+                            artifacts: Vec::new(),
+                            final_cost: None,
+                            summary_json: None,
+                        },
+                    );
                 }
                 Err(LaunchSpawnError::Dispatch(e))
             }

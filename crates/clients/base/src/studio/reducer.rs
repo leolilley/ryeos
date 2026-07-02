@@ -308,7 +308,8 @@ impl StudioCore {
                 }
                 self.dispatch_action(StudioAction::CancelThread { thread_id: head })
             }
-            StudioUiEvent::SubmitInput => self.submit_focused_input(),
+            StudioUiEvent::SubmitInput => self.submit_focused_input(false),
+            StudioUiEvent::SubmitInputInterrupt => self.submit_focused_input(true),
             StudioUiEvent::MoveLauncherSelection { delta } => {
                 let len = filtered_launcher_items(self).len();
                 if len > 0 {
@@ -608,13 +609,16 @@ impl StudioCore {
                         },
                         params: serde_json::json!({
                             "thread_id": thread_id,
-                            "command_type": command,
+                            "command_type": command.as_str(),
                         }),
                         route_seq: None,
                         ratchet_on_thread_id: false,
                     })]
                 } else {
-                    self.notice(format!("No active thread to {command}."), StudioTone::Warn);
+                    self.notice(
+                        format!("No active thread to {}.", command.as_str()),
+                        StudioTone::Warn,
+                    );
                     Vec::new()
                 }
             }
@@ -670,7 +674,12 @@ impl StudioCore {
     /// (no submit — buffer is live), `submit: <affordance>` (fire it with
     /// `{value}`), `submit: route` (the engine route-fold: classification
     /// + route_seq + ratchet, unchanged).
-    fn submit_focused_input(&mut self) -> Vec<StudioEffect> {
+    /// `interrupt` selects the live-delivery intent for a submit that routes at a
+    /// RUNNING thread: `true` cuts the in-flight cognition (forceful redirect),
+    /// `false` steers (folds at the next turn boundary). It is carried as the
+    /// `intent` param and ignored by the daemon on non-running targets (fresh
+    /// launch / settled continuation land at boundaries by construction).
+    fn submit_focused_input(&mut self, interrupt: bool) -> Vec<StudioEffect> {
         let Some((key, view_ref)) = self.focused_input_instance() else {
             return Vec::new();
         };
@@ -707,7 +716,7 @@ impl StudioCore {
 
         // Mode 3: `submit: route` — the existing engine route-fold.
         debug_assert!(input.submits_to_route());
-        self.submit_route(&text)
+        self.submit_route(&text, interrupt)
     }
 
     /// The open conversation chains the input can target, as
@@ -908,7 +917,7 @@ impl StudioCore {
     /// route-fold. Behaviour (slash/plain, route_seq, read-only/empty) is
     /// unchanged; it is now reached through the `input` grammar instead of
     /// the deleted Input dock special-case.
-    fn submit_route(&mut self, text: &str) -> Vec<StudioEffect> {
+    fn submit_route(&mut self, text: &str, interrupt: bool) -> Vec<StudioEffect> {
         if self.is_read_only() {
             self.notice("This session is read-only.", StudioTone::Warn);
             return Vec::new();
@@ -969,6 +978,13 @@ impl StudioCore {
                         params["input"] = serde_json::Value::String(plain);
                         if let Some(thread) = &route.thread {
                             params["thread"] = serde_json::Value::String(thread.clone());
+                        }
+                        // Live-delivery intent for a running-thread target. Only
+                        // set for interrupt; steer is the daemon default (and the
+                        // wire-compatible value for older daemons). Ignored by the
+                        // daemon on non-running targets.
+                        if interrupt {
+                            params["intent"] = serde_json::Value::String("interrupt".to_string());
                         }
                         vec![self.emit(StudioEffectKind::Invoke {
                             target: super::effect::InvokeRef::Ref { item_ref },
@@ -1520,6 +1536,32 @@ impl StudioCore {
                             StudioTone::Warn,
                         );
                         return Vec::new();
+                    }
+                    if outcome.delivery == Some(super::dto::ThreadDelivery::Submitted) {
+                        // Live fold into a RUNNING thread: the stimulus was
+                        // delivered as a new cognition_in on the SAME thread — no
+                        // new thread, so no ratchet and no "launched" copy. Clear
+                        // the buffer and keep the route where it is; the live tail
+                        // shows the folded turn. A notice present here means a
+                        // degradation (interrupt → steer); surface it as a warning.
+                        self.clear_focused_input();
+                        let degraded = outcome.notice.is_some();
+                        self.notice(
+                            outcome.notice.unwrap_or_else(|| match outcome.thread_id.as_deref()
+                            {
+                                Some(id) => format!("Input delivered to {id}."),
+                                None => "Input delivered.".to_string(),
+                            }),
+                            if degraded {
+                                StudioTone::Warn
+                            } else {
+                                StudioTone::Good
+                            },
+                        );
+                        let mut effects =
+                            vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+                        effects.extend(self.effects_for_hint("thread"));
+                        return effects;
                     }
                     self.clear_focused_input();
                     let Some(thread_id) = outcome.thread_id.clone() else {
@@ -3434,6 +3476,46 @@ mod tests {
     }
 
     #[test]
+    fn plain_submit_carries_no_interrupt_intent() {
+        // Steer is the daemon default → the wire omits `intent` entirely
+        // (backward-compatible with older daemons).
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        set_focused_input(&mut core, "steer me");
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInput,
+        });
+        let Some(StudioEffectKind::Invoke { params, .. }) =
+            effects.first().map(|e| &e.kind)
+        else {
+            panic!("expected an Invoke effect");
+        };
+        assert_eq!(params["input"], "steer me");
+        assert!(params.get("intent").is_none(), "steer must not set intent");
+    }
+
+    #[test]
+    fn interrupt_submit_sets_interrupt_intent() {
+        // Alt+Enter → SubmitInputInterrupt injects intent=interrupt so a running
+        // thread cuts its current cognition.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        set_focused_input(&mut core, "stop, do X");
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SubmitInputInterrupt,
+        });
+        let Some(StudioEffectKind::Invoke { params, .. }) =
+            effects.first().map(|e| &e.kind)
+        else {
+            panic!("expected an Invoke effect");
+        };
+        assert_eq!(params["input"], "stop, do X");
+        assert_eq!(params["intent"], "interrupt");
+    }
+
+    #[test]
     fn complete_input_accepts_top_slash_candidate() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core);
@@ -5034,7 +5116,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
-                    command: "interrupt".to_string(),
+                    command: crate::studio::dto::ThreadControlCommand::Interrupt,
                 },
             },
         });
@@ -5057,7 +5139,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::Activate {
                 action: StudioAction::SubmitThreadCommand {
-                    command: "interrupt".to_string(),
+                    command: crate::studio::dto::ThreadControlCommand::Interrupt,
                 },
             },
         });

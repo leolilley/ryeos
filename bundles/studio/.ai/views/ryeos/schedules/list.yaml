@@ -1,16 +1,23 @@
-# ryeos:signed:2026-06-13T05:38:46Z:2088c148410c73e272df5b2884f20929f72174223da35514c7c0f3d3312d5757:9YYNKhR/FQQ+PQtpi1NV2fY0umgiksJDzzkmQb3W02izwxx4FF2488RoLoY3Pu5xkPhEF5fuq7O+bPyvMJggCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-06-30T00:10:25Z:780b0e7af259b0337dc3d5a8d81259ba5a655242a55a60aaf2cf68da1291b8d2:f8VOL4dYFWYMlDlY4yyV5SC5PEO9ubRkawy6G2Dcn9Al1qVFea7oW100N0PFHuM0Tcy8lYUTIY0AO8IK1I6VAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: schedules-list
 version: "1.0.0"
 description: Registered schedules and their state
 
-widget: rows
+widget: table
 source:
   ref: service:scheduler/list
   params: {}
   collection: schedules
 projections:
-  primary: schedule_id
-  meta: expression
+  columns:
+    - label: schedule
+      field: schedule_id
+    - label: item
+      field: item_ref
+    - label: expression
+      field: expression
+    - label: enabled
+      field: enabled
   tone:
     field: enabled
     map:

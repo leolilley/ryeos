@@ -222,14 +222,21 @@ fn standard_bundle_has_no_old_tool_descriptors() {
 
     let mut yaml_files = Vec::new();
     walk_yaml_files(&tools_dir, &mut yaml_files);
+    yaml_files.retain(|path| {
+        path.strip_prefix(&tools_dir)
+            .map(|rel| rel != Path::new("knowledge/compose.yaml"))
+            .unwrap_or(true)
+    });
 
-    // Standard bundle ships no Python/HTTP tool descriptors under
-    // tools/ryeos/. Runtime delegation is via runtimes/ pointing at
-    // native Rust binaries; model providers are config-driven.
+    // Standard bundle ships no legacy Python/HTTP provider or state-graph tool
+    // descriptors under tools/ryeos/. Runtime delegation is via runtimes/
+    // pointing at native Rust binaries; model providers are config-driven. The
+    // knowledge compose wrapper is intentionally a standard-bundle tool because
+    // it routes to the standard knowledge kind/runtime through method dispatch.
     assert!(
         yaml_files.is_empty(),
-        "standard bundle's tools/ryeos/ must be empty after the old \
-         state-graph + provider tool descriptors were removed; found {:?}",
+        "standard bundle's tools/ryeos/ contains old state-graph/provider \
+         tool descriptors; found {:?}",
         yaml_files
     );
 }

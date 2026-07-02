@@ -6,14 +6,23 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
 //! use ryeos_app::extension_state::ExtensionState;
 //! use std::sync::Arc;
+//!
+//! struct MyState;
+//!
+//! impl MyState {
+//!     fn new() -> Self {
+//!         Self
+//!     }
+//! }
 //!
 //! let mut ext = ExtensionState::new();
 //! ext.insert(Arc::new(MyState::new()));
 //!
 //! let retrieved: Option<Arc<MyState>> = ext.get();
+//! assert!(retrieved.is_some());
 //! ```
 
 use std::any::{Any, TypeId};

@@ -374,20 +374,7 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
         .get("meta")
         .and_then(Value::as_str)
         .and_then(|path| field_text(record, path));
-    let tone = projection.get("tone").and_then(|tone| {
-        let field = tone.get("field").and_then(Value::as_str)?;
-        let Some(value) = field_text(record, field) else {
-            return tone
-                .get("missing")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-        };
-        tone.get("map")
-            .and_then(|map| map.get(&value))
-            .and_then(Value::as_str)
-            .or_else(|| tone.get("default").and_then(Value::as_str))
-            .map(str::to_string)
-    });
+    let tone = project_tone(record, projection);
     let pair_key = match role {
         TimelineRole::PairOpen | TimelineRole::PairClose => projection
             .get("pair_key")
@@ -409,6 +396,95 @@ pub fn project_record(record: &Value, projection: &Value) -> ProjectedRecord {
         pair_key,
         raw: record.clone(),
     }
+}
+
+/// Map a record to a tone name via a `tone: {field, map, default, missing}`
+/// projection block. Shared by rows/timeline (`project_record`) and the table
+/// widget, so a table colours its rows by the same status→tone rule a rows view
+/// would. Absent block / unmapped value → `None` (renderer's neutral).
+pub fn project_tone(record: &Value, projection: &Value) -> Option<String> {
+    let tone = projection.get("tone")?;
+    let field = tone.get("field").and_then(Value::as_str)?;
+    let Some(value) = field_text(record, field) else {
+        return tone
+            .get("missing")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    };
+    tone.get("map")
+        .and_then(|map| map.get(&value))
+        .and_then(Value::as_str)
+        .or_else(|| tone.get("default").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// One declared column of a `table` view: a header label and the record field
+/// it projects. `projections.columns` is the ordered list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableColumn {
+    pub label: String,
+    pub field: String,
+}
+
+/// The columns a `table` view declares — `projections.columns`, each
+/// `{label, field}` (label defaults to the field path). A column missing a
+/// field is skipped; absent `columns` → empty (the table renders headerless).
+pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
+    binding
+        .projections
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|cols| {
+            cols.iter()
+                .filter_map(|col| {
+                    let field = col.get("field").and_then(Value::as_str)?;
+                    let label = col.get("label").and_then(Value::as_str).unwrap_or(field);
+                    Some(TableColumn {
+                        label: label.to_string(),
+                        field: field.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One projected table row: a cell per column (in column order), the row tone,
+/// and the raw record kept for affordance interpolation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectedTableRow {
+    pub cells: Vec<String>,
+    pub tone: Option<String>,
+    pub raw: Value,
+}
+
+/// Project a table source response: pull the collection (same shape as
+/// `project_records`), then one cell per declared column. Row tone reuses the
+/// shared `projections.tone` block. Missing cells degrade to empty strings.
+pub fn project_table(
+    binding: &ViewBinding,
+    response: &Value,
+    columns: &[TableColumn],
+) -> Vec<ProjectedTableRow> {
+    let records: &[Value] = binding
+        .source
+        .as_ref()
+        .and_then(|s| s.collection.as_deref())
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    records
+        .iter()
+        .map(|record| ProjectedTableRow {
+            cells: columns
+                .iter()
+                .map(|col| field_text(record, &col.field).unwrap_or_default())
+                .collect(),
+            tone: project_tone(record, &binding.projections),
+            raw: record.clone(),
+        })
+        .collect()
 }
 
 /// Project a rows/timeline source response: pull the collection, apply

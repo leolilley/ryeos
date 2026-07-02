@@ -17,6 +17,7 @@ pub mod attestation;
 pub mod bundle_event;
 pub mod chain_state;
 pub mod item_source;
+pub mod live_input;
 pub mod project_snapshot;
 pub mod source_manifest;
 pub mod thread_event;
@@ -29,6 +30,7 @@ pub use bundle_event::{
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use item_source::ItemSource;
+pub use live_input::{LiveInputIntent, LiveInput};
 pub use project_snapshot::ProjectSnapshot;
 pub use source_manifest::SourceManifest;
 pub use thread_event::{EventDurability, ThreadEvent};

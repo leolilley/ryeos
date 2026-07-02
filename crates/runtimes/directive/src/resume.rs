@@ -25,6 +25,7 @@ const MAX_CONTINUATION_PATH: usize = 10_000;
 pub async fn load_resume_state(
     callback: &CallbackClient,
     previous_thread_id: &str,
+    carry_turns: u32,
 ) -> Result<ResumeState> {
     // Fold the linear CONTINUATION PATH (turn 1 → … → predecessor), not the
     // whole chain namespace: a conversation is a chain of turns, so turn N must
@@ -44,6 +45,7 @@ pub async fn load_resume_state(
 
     let messages = reconstruct_messages(&events)?;
     let turns_completed = count_turns(&messages);
+    let messages = trim_to_recent_turns(messages, carry_turns);
 
     let trimmed = trim_to_token_budget(messages, 16_000);
 
@@ -64,10 +66,7 @@ pub async fn load_resume_state(
 /// Resolve the linear continuation path ending at `predecessor_id`, ordered
 /// root-first. Walks `upstream_thread_id` (the continuation predecessor link)
 /// until the root (no upstream), guarding against cycles.
-async fn continuation_path(
-    callback: &CallbackClient,
-    predecessor_id: &str,
-) -> Result<Vec<String>> {
+async fn continuation_path(callback: &CallbackClient, predecessor_id: &str) -> Result<Vec<String>> {
     let mut path = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut current = Some(predecessor_id.to_string());
@@ -146,6 +145,15 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
                     reasoning_content: None,
                 });
             }
+            "cognition_out"
+                if event.payload.get("delta").is_some()
+                    || event.payload.get("tool_use").is_some()
+                    || event.payload.get("tool_use_partial").is_some() =>
+            {
+                // Streaming fragments are UI/event-log data, not replayable
+                // provider history. The final transcript-bearing
+                // cognition_out emitted at turn completion is folded below.
+            }
             "cognition_out" => {
                 let tool_calls = match event.payload.get("tool_calls").and_then(|tc| tc.as_array())
                 {
@@ -218,6 +226,44 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
 
 fn count_turns(messages: &[ProviderMessage]) -> u32 {
     messages.iter().filter(|m| m.role == "assistant").count() as u32
+}
+
+/// Keep only the most recent `carry_turns` assistant turns plus the context
+/// after the preceding assistant. This is the directive-level continuation
+/// policy (`continuation.carry_turns`, resolved/clamped by runtime config),
+/// applied before the token-budget backstop. If the cut lands immediately before
+/// tool results, drop those leading tool messages rather than orphaning them
+/// without the assistant tool-call that owns them; provider APIs reject that
+/// shape.
+fn trim_to_recent_turns(
+    mut messages: Vec<ProviderMessage>,
+    carry_turns: u32,
+) -> Vec<ProviderMessage> {
+    if carry_turns == 0 || messages.is_empty() {
+        return Vec::new();
+    }
+    let total_turns = count_turns(&messages);
+    if total_turns <= carry_turns {
+        return messages;
+    }
+
+    let turns_to_drop = total_turns - carry_turns;
+    let mut seen = 0u32;
+    let mut cutoff = 0usize;
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == "assistant" {
+            seen += 1;
+            if seen == turns_to_drop {
+                cutoff = idx + 1;
+                break;
+            }
+        }
+    }
+    let mut trimmed = messages.split_off(cutoff);
+    while trimmed.first().is_some_and(|msg| msg.role == "tool") {
+        trimmed.remove(0);
+    }
+    trimmed
 }
 
 fn trim_to_token_budget(
@@ -301,7 +347,11 @@ mod tests {
             // thread detail before paging the chain.
             Ok(json!({"thread": {"chain_root_id": "C-test-chain"}}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
@@ -375,7 +425,9 @@ mod tests {
     #[tokio::test]
     async fn load_empty_replay_returns_empty() {
         let callback = make_callback(vec![]);
-        let state = load_resume_state(&callback, "nonexistent").await.unwrap();
+        let state = load_resume_state(&callback, "nonexistent", 8)
+            .await
+            .unwrap();
         assert!(state.messages.is_empty());
         assert_eq!(state.turns_completed, 0);
         assert!(state.thread_usage.is_none());
@@ -423,6 +475,94 @@ mod tests {
         assert!(messages[3].tool_calls.is_some());
         assert_eq!(messages[4].role, "tool");
         assert_eq!(messages[4].tool_call_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn reconstruct_messages_skips_streaming_cognition_out_fragments() {
+        let events = vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: json!({"content": "Hello"}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"delta": "H"}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"tool_use_partial": {"id": "partial"}}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"tool_use": {"id": "call-1", "name": "read_file"}}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"turn": 1, "content": "Hi there!"}),
+            },
+        ];
+
+        let messages = reconstruct_messages(&events).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(
+            messages[1].content.as_ref().and_then(|v| v.as_str()),
+            Some("Hi there!")
+        );
+
+        let trimmed = trim_to_recent_turns(messages, 1);
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].role, "user");
+        assert_eq!(trimmed[1].role, "assistant");
+    }
+
+    #[test]
+    fn interrupted_seal_folds_as_assistant_then_redirect() {
+        // A live-interrupt seal is a content-bearing cognition_out (with
+        // interrupted:true, no tool_calls). Resume must fold it as an assistant
+        // message in order — the redirect input follows as the next user turn,
+        // and the fresh cognition's output after that. The `interrupted` marker is
+        // ignored by the fold (only content/tool_calls/reasoning are read).
+        let events = vec![
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: json!({"content": "start the long task"}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"turn": 1, "content": "working on it, step on", "interrupted": true}),
+            },
+            // The operator's redirect, folded as a durable cognition_in by the
+            // daemon's poll-and-persist.
+            ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload: json!({"content": "stop — do X instead"}),
+            },
+            ReplayedEventRecord {
+                event_type: "cognition_out".to_string(),
+                payload: json!({"turn": 2, "content": "doing X"}),
+            },
+        ];
+        let messages = reconstruct_messages(&events).unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(
+            messages[1].content.as_ref().and_then(|c| c.as_str()),
+            Some("working on it, step on"),
+            "interrupted partial content is preserved"
+        );
+        assert!(
+            messages[1].tool_calls.is_none(),
+            "an interrupted seal carries no tool_calls — no unpaired tool call"
+        );
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(
+            messages[2].content.as_ref().and_then(|c| c.as_str()),
+            Some("stop — do X instead")
+        );
+        assert_eq!(messages[3].role, "assistant");
     }
 
     #[test]
@@ -521,7 +661,7 @@ mod tests {
             },
         ];
         let callback = make_callback(events);
-        let state = load_resume_state(&callback, "T-prev").await.unwrap();
+        let state = load_resume_state(&callback, "T-prev", 8).await.unwrap();
         assert_eq!(state.messages.len(), 2);
         assert_eq!(state.turns_completed, 1);
     }
@@ -534,21 +674,55 @@ mod tests {
 
     #[async_trait]
     impl RuntimeCallbackAPI for PathMock {
-        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: TerminalCompletion) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn get_thread(&self, thread_id: &str) -> Result<Value, CallbackError> {
             // T2's continuation predecessor is T1; T1 is the root (no upstream).
             let upstream = if thread_id == "T2" { Some("T1") } else { None };
             Ok(json!({"thread": {"chain_root_id": "T1", "upstream_thread_id": upstream}}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
-            let tid = params.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
-            let ev = |t: &str, p: Value| ReplayedEventRecord { event_type: t.to_string(), payload: p };
+            let tid = params
+                .get("thread_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ev = |t: &str, p: Value| ReplayedEventRecord {
+                event_type: t.to_string(),
+                payload: p,
+            };
             let events = match tid {
                 "T1" => vec![
                     ev("cognition_in", json!({"content": "turn1 in"})),
@@ -564,31 +738,71 @@ mod tests {
                 "T1-child" => vec![ev("cognition_out", json!({"content": "POLLUTION"}))],
                 _ => vec![],
             };
-            Ok(serde_json::to_value(ReplayResponse { events, next_cursor: None }).unwrap())
+            Ok(serde_json::to_value(ReplayResponse {
+                events,
+                next_cursor: None,
+            })
+            .unwrap())
         }
-        async fn bundle_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn bundle_events_read_chain(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn vault_put(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn vault_get(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn vault_delete(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn vault_list(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"keys": []})) }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn bundle_events_append(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_get(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_delete(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn vault_list(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"keys": []}))
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
     }
 
     #[tokio::test]
     async fn resume_folds_only_continuation_path_not_chain_children() {
         let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
         let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
-        let state = load_resume_state(&callback, "T2").await.unwrap();
+        let state = load_resume_state(&callback, "T2", 8).await.unwrap();
 
         let contents: Vec<String> = state
             .messages
             .iter()
-            .filter_map(|m| m.content.as_ref().and_then(|c| c.as_str()).map(String::from))
+            .filter_map(|m| {
+                m.content
+                    .as_ref()
+                    .and_then(|c| c.as_str())
+                    .map(String::from)
+            })
             .collect();
         // Both turns, root-first, in order; the chain-sharing child is excluded.
         assert_eq!(
@@ -601,5 +815,115 @@ mod tests {
         );
         assert_eq!(state.turns_completed, 2);
         assert!(state.has_thread_usage_event);
+    }
+
+    #[test]
+    fn trim_to_recent_turns_keeps_last_n_assistant_turns_with_context() {
+        let messages = vec![
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("u1")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("a1")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("u2")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("a2")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "tool".to_string(),
+                content: Some(json!("tool2")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("u3")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("a3")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+
+        let trimmed = trim_to_recent_turns(messages, 2);
+        let contents: Vec<_> = trimmed
+            .iter()
+            .filter_map(|m| m.content.as_ref().and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(contents, vec!["u2", "a2", "tool2", "u3", "a3"]);
+    }
+
+    #[test]
+    fn trim_to_recent_turns_drops_leading_orphan_tool_results() {
+        let messages = vec![
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("u1")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("a1 tool call")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "tool".to_string(),
+                content: Some(json!("orphan if kept")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "user".to_string(),
+                content: Some(json!("u2")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("a2")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+
+        let trimmed = trim_to_recent_turns(messages, 1);
+        let contents: Vec<_> = trimmed
+            .iter()
+            .filter_map(|m| m.content.as_ref().and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(contents, vec!["u2", "a2"]);
     }
 }

@@ -118,6 +118,24 @@ pub struct ActionPayload {
     pub call: Option<MethodCall>,
 }
 
+/// Runtime-owned control keys carried in dispatch/launch params — parent budget,
+/// parent thread, tree depth, and the continuation seed. Defined ONCE here (the
+/// crate both the graph dispatcher and the executor launch depend on) so the
+/// injector, the input-stripper, and the daemon seed path reference the same
+/// names rather than duplicating string literals that can silently drift.
+pub const PARAM_PARENT_LIMITS: &str = "parent_limits";
+pub const PARAM_PARENT_THREAD_ID: &str = "parent_thread_id";
+pub const PARAM_DEPTH: &str = "depth";
+pub const PARAM_CONTINUATION: &str = "continuation";
+
+/// Control keys stripped from directive prompt inputs (all runtime-owned).
+pub const RESERVED_CONTROL_KEYS: &[&str] = &[
+    PARAM_PARENT_LIMITS,
+    PARAM_PARENT_THREAD_ID,
+    PARAM_DEPTH,
+    PARAM_CONTINUATION,
+];
+
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
@@ -231,6 +249,17 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     ) -> Result<Value, CallbackError>;
 
     async fn get_facets(&self, thread_id: &str) -> Result<Value, CallbackError>;
+
+    /// Drain-and-persist operator inputs staged for this RUNNING thread,
+    /// returning `{ inputs: [LiveInput...] }` in FIFO order. The daemon
+    /// appends each as a durable `cognition_in` through the running-guarded path
+    /// before returning, so a non-empty result is already in the braid.
+    ///
+    /// Default: no live input (mocks and runtimes without a live data channel).
+    /// Only the real UDS client overrides this.
+    async fn poll_input(&self, _thread_id: &str) -> Result<Value, CallbackError> {
+        Ok(serde_json::json!({ "inputs": [] }))
+    }
 }
 
 pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {

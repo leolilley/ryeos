@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::content::{ProjectedRecord, TimelineRole};
+use super::dto::CognitionOutPayload;
 use super::effect::StudioEffect;
 use super::event::StudioAction;
 use super::model::StudioCore;
@@ -143,8 +144,8 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
 
     for record in records {
         // Plumbing/stream lifecycle events are the substrate's bookkeeping,
-        // not conversation — drop them so the feed reads as a chat. Outcomes
-        // (completed/failed/cancelled) and usage still render via
+        // not cognition — drop them so the feed reads as the cognition braid.
+        // Outcomes (completed/failed/cancelled) and usage still render via
         // execution_entry; cognition and tool calls still render via roles.
         if is_plumbing_event(&record) {
             continue;
@@ -180,6 +181,24 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
                 });
                 continue;
             }
+        }
+        // A `cognition_out` cut short by a live interrupt: render whatever partial
+        // content it produced (normal tone — it is real, if truncated, cognition),
+        // then a seam separator marking where the cognition was cut and the next
+        // `cognition_in` folds in. Read from the raw event because `cognition_out`
+        // is projected by role, not a FeedEventType.
+        if is_interrupted_cognition_out(&record) {
+            flush_flow(&mut pending_flow, &mut entries);
+            if !record.primary.trim().is_empty() {
+                entries.push(StudioTimelineEntryVm::Block {
+                    text: record.primary.clone(),
+                    tone: tone_from_name(record.tone.as_deref()),
+                });
+            }
+            entries.push(StudioTimelineEntryVm::Separator {
+                label: "interrupted".to_string(),
+            });
+            continue;
         }
         match record.role {
             TimelineRole::Flow => {
@@ -304,6 +323,7 @@ fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FeedEventType {
     CognitionIn,
+    CognitionOut,
     ThreadCompleted,
     ThreadFailed,
     ThreadCancelled,
@@ -325,6 +345,7 @@ impl FeedEventType {
     fn parse(event_type: &str) -> Option<Self> {
         Some(match event_type {
             "cognition_in" => Self::CognitionIn,
+            "cognition_out" => Self::CognitionOut,
             "thread_completed" => Self::ThreadCompleted,
             "thread_failed" => Self::ThreadFailed,
             "thread_cancelled" => Self::ThreadCancelled,
@@ -344,7 +365,7 @@ impl FeedEventType {
         })
     }
 
-    /// Substrate bookkeeping that is noise in a conversation view: thread/
+    /// Substrate bookkeeping that is noise in the braid view: thread/
     /// stream lifecycle and ephemeral progress. Dropped from the feed entirely
     /// — the outcome (completed/failed/cancelled), usage, cognition, and tool
     /// calls carry the meaning. Mirrors the live tail's ignored set in
@@ -375,6 +396,21 @@ fn feed_event_type(record: &ProjectedRecord) -> Option<FeedEventType> {
 
 fn is_plumbing_event(record: &ProjectedRecord) -> bool {
     feed_event_type(record).is_some_and(FeedEventType::is_plumbing)
+}
+
+/// Whether a record is a `cognition_out` sealed by a live interrupt — a
+/// cognition cut mid-flight. The event type is matched via the `FeedEventType`
+/// enum, and the payload is deserialized into the typed [`CognitionOutPayload`]
+/// rather than read by raw JSON key.
+fn is_interrupted_cognition_out(record: &ProjectedRecord) -> bool {
+    if feed_event_type(record) != Some(FeedEventType::CognitionOut) {
+        return false;
+    }
+    record
+        .raw
+        .get("payload")
+        .and_then(|payload| serde_json::from_value::<CognitionOutPayload>(payload.clone()).ok())
+        .is_some_and(|payload| payload.interrupted)
 }
 
 /// Build a legible entry for thread-execution milestone events (lifecycle,
@@ -573,6 +609,60 @@ mod tests {
         };
         assert_eq!(primary, "completed");
         assert!(matches!(tone, StudioTone::Good));
+    }
+
+    #[test]
+    fn interrupted_cognition_out_renders_partial_then_a_seam() {
+        // A cognition cut by a live interrupt: its partial content renders as a
+        // block, then an `interrupted` seam marks where it was cut.
+        let mut rec = raw_record(json!({
+            "event_type": "cognition_out",
+            "payload": { "content": "starting to read the", "interrupted": true }
+        }));
+        rec.primary = "starting to read the".to_string();
+        rec.role = TimelineRole::Flow;
+
+        let entries = timeline_entries(vec![rec]);
+        assert_eq!(entries.len(), 2, "partial block + seam");
+        assert!(
+            matches!(&entries[0], StudioTimelineEntryVm::Block { text, .. } if text == "starting to read the"),
+            "partial content renders as a block"
+        );
+        assert!(
+            matches!(&entries[1], StudioTimelineEntryVm::Separator { label } if label == "interrupted"),
+            "a seam separator marks the cut"
+        );
+    }
+
+    #[test]
+    fn interrupted_cognition_out_with_no_content_is_just_a_seam() {
+        // Cut before any text streamed → no block, just the seam.
+        let rec = raw_record(json!({
+            "event_type": "cognition_out",
+            "payload": { "interrupted": true }
+        }));
+        let entries = timeline_entries(vec![rec]);
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(&entries[0], StudioTimelineEntryVm::Separator { label } if label == "interrupted"));
+    }
+
+    #[test]
+    fn completed_cognition_out_has_no_seam() {
+        // A normal (uninterrupted) cognition_out folds to a flow block, never a seam.
+        let mut rec = raw_record(json!({
+            "event_type": "cognition_out",
+            "payload": { "content": "done" }
+        }));
+        rec.primary = "done".to_string();
+        rec.role = TimelineRole::Flow;
+
+        let entries = timeline_entries(vec![rec]);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| matches!(e, StudioTimelineEntryVm::Separator { label } if label == "interrupted")),
+            "no seam for a completed cognition"
+        );
     }
 
     #[test]
