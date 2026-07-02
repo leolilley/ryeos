@@ -543,7 +543,7 @@ mod tests {
 
         let runtime_config = runtime_config(serde_json::json!({
             "policy": {"provider": "heuristic", "chars_per_token": 2.0, "reserve_ratio": 0.0}
-        });
+        }));
         let result = compose(&payload, &runtime_config).unwrap();
         assert_eq!(result.composition.token_estimator.provider, "heuristic");
         assert_eq!(result.composition.token_estimator.chars_per_token, Some(2.0));
@@ -629,7 +629,7 @@ mod tests {
         };
         let runtime_config = runtime_config(serde_json::json!({
             "policy": {"provider": "heuristic", "chars_per_token": 2.0, "reserve_ratio": 0.0}
-        });
+        }));
 
         let result = compose_positions(&payload, &runtime_config).unwrap();
         let before = result.rendered.get("before").unwrap();
