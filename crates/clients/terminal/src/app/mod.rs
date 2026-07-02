@@ -27,6 +27,7 @@ pub async fn run(
     project_path: &str,
     read_only: bool,
     loaded_surface: LoadedSurface,
+    diagnostics: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = DaemonClient::try_connect().await?;
     let surface_ref = loaded_surface
@@ -57,6 +58,13 @@ pub async fn run(
         now_ms: now_ms(),
     });
     dispatch_effects(&mut core, &client, start_effects).await;
+
+    // Surface startup diagnostics (surface/view resolution warnings) as in-TUI
+    // notices. Otherwise they print to stderr BEFORE the alternate screen is
+    // entered, so they scroll off above the render where they can't be read.
+    for message in diagnostics {
+        core.notice(message, ryeos_client_base::studio::view_model::StudioTone::Warn);
+    }
 
     // The seat is itself a thread: braided, owned, replayable. Reattach
     // to the latest running owned seat for this surface when possible;
