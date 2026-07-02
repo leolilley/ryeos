@@ -46,6 +46,44 @@ impl ThreadControlCommand {
     }
 }
 
+/// A thread's lifecycle status as it arrives on the wire. Mirrors the substrate
+/// status vocabulary (the daemon is the source of truth); typed here so UI code
+/// classifies by variant rather than matching raw status strings scattered in
+/// logic. Unknown/future values fold to `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadStatus {
+    Created,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Killed,
+    TimedOut,
+    Continued,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ThreadStatus {
+    /// Parse the wire spelling; unrecognized → `Unknown`. The one boundary
+    /// where a status string becomes a variant (mirrors the substrate enum's
+    /// own `from_str_lossy`).
+    pub fn from_wire(status: &str) -> Self {
+        match status {
+            "created" => Self::Created,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "killed" => Self::Killed,
+            "timed_out" => Self::TimedOut,
+            "continued" => Self::Continued,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// The fields the braid lens reads from a `cognition_out` event payload. Typed
 /// so the projection branches on a field rather than a raw JSON key. Other
 /// payload fields (turn, tokens, content, tool_calls) reach the feed through the
@@ -497,4 +535,31 @@ pub struct StudioRawContentDto {
     pub bytes: usize,
     #[serde(default)]
     pub truncated: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_status_parses_serdes_and_folds_unknown() {
+        // from_wire: exact substrate spellings, and a multi-word one.
+        assert_eq!(ThreadStatus::from_wire("timed_out"), ThreadStatus::TimedOut);
+        assert_eq!(ThreadStatus::from_wire("running"), ThreadStatus::Running);
+        // Unrecognized folds to Unknown (both via from_wire and serde `other`).
+        assert_eq!(ThreadStatus::from_wire("nonsense"), ThreadStatus::Unknown);
+        assert_eq!(
+            serde_json::from_value::<ThreadStatus>(serde_json::json!("nonsense")).unwrap(),
+            ThreadStatus::Unknown
+        );
+        // snake_case round-trip on the wire spelling.
+        assert_eq!(
+            serde_json::to_value(ThreadStatus::TimedOut).unwrap(),
+            serde_json::json!("timed_out")
+        );
+        assert_eq!(
+            serde_json::from_value::<ThreadStatus>(serde_json::json!("timed_out")).unwrap(),
+            ThreadStatus::TimedOut
+        );
+    }
 }

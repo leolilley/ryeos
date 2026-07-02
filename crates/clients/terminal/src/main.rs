@@ -124,6 +124,11 @@ fn main() {
             surface_name: None,
         };
 
+        // Non-fatal resolution diagnostics (a view that failed to resolve, an
+        // unsupported field) are collected here and handed to the TUI, which
+        // shows them as notices — stderr scrolls off above the alternate screen.
+        let mut diagnostics: Vec<String> = Vec::new();
+
         // If --surface was given, resolve through daemon.
         // --surface always means daemon resolution, not local preview.
         let loaded: ryeos_client_base::surface::LoadedSurface = if surface_name.is_some() {
@@ -168,8 +173,10 @@ fn main() {
                                     }
                                     Err(e) => {
                                         // Degrade: the pane renders the
-                                        // missing-binding placeholder.
-                                        eprintln!("warn: failed to resolve {view_ref}: {e}");
+                                        // missing-binding placeholder, and the
+                                        // TUI shows why as a notice.
+                                        diagnostics
+                                            .push(format!("view {view_ref} unavailable: {e}"));
                                     }
                                 }
                             }
@@ -231,7 +238,9 @@ fn main() {
                                     binding.get("composed_value").cloned().unwrap_or(binding);
                                 views.insert(view_ref, composed);
                             }
-                            Err(e) => eprintln!("warn: failed to resolve {view_ref}: {e}"),
+                            Err(e) => {
+                                diagnostics.push(format!("view {view_ref} unavailable: {e}"))
+                            }
                         }
                     }
                     loaded.set_views(serde_json::Value::Object(views));
@@ -245,17 +254,18 @@ fn main() {
             loaded
         };
 
-        // Surface diagnostics
+        // Surface diagnostics → the same in-TUI notice channel (errors/warnings
+        // that don't abort the load; pure info stays on stderr as it's benign).
         for diag in loaded.all_diagnostics() {
             match diag {
                 ryeos_client_base::surface::SurfaceDiagnostic::ValidationError { message } => {
-                    eprintln!("error: {}", message);
+                    diagnostics.push(format!("surface: {message}"));
                 }
                 ryeos_client_base::surface::SurfaceDiagnostic::UnsupportedField {
                     field,
                     message,
                 } => {
-                    eprintln!("warn: unsupported field '{}': {}", field, message);
+                    diagnostics.push(format!("unsupported field '{field}': {message}"));
                 }
                 ryeos_client_base::surface::SurfaceDiagnostic::Info { message } => {
                     eprintln!("info: {}", message);
@@ -263,7 +273,7 @@ fn main() {
             }
         }
 
-        let result = app::run(&project_path, read_only, loaded).await;
+        let result = app::run(&project_path, read_only, loaded, diagnostics).await;
 
         if let Err(e) = result {
             eprintln!("ryeos-tui error: {}", e);

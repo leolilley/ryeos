@@ -189,9 +189,49 @@ pub enum InputTargetCycle {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputFeeds {
+    /// Single-field feed: the source param the buffer writes. Optional when
+    /// `fields` declares a cyclable set instead.
+    #[serde(default)]
     pub param: String,
+    /// A cyclable set of filter fields — the box feeds ONE at a time and a key
+    /// cycles which is active. Empty → single-field via `param`.
+    #[serde(default)]
+    pub fields: Vec<FilterField>,
     #[serde(default)]
     pub debounce_ms: Option<u64>,
+}
+
+/// One field a live-filter box can target: the source param it feeds and an
+/// optional label for the prompt strip ("filter by <label>…").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilterField {
+    pub param: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl InputFeeds {
+    /// Count of cyclable fields (0 when single-field via `param`).
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// The source param fed at `index`: the cyclable field when declared, else
+    /// the single `param`. `index` wraps, so callers needn't clamp.
+    pub fn active_param(&self, index: usize) -> &str {
+        if self.fields.is_empty() {
+            &self.param
+        } else {
+            &self.fields[index % self.fields.len()].param
+        }
+    }
+
+    /// The active field's prompt label, if any.
+    pub fn active_label(&self, index: usize) -> Option<&str> {
+        self.fields
+            .get(index % self.fields.len().max(1))
+            .and_then(|f| f.label.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1395,6 +1435,40 @@ mod tests {
         let rows = project_records(&binding, &response);
         assert!(rows[0].primary.contains("\"a\""));
         assert_eq!(rows[0].raw, json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn feeds_fields_declare_a_cyclable_live_filter() {
+        let b: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:x", "params": {}, "collection": "rows" },
+            "input": { "id": "filter", "feeds": { "fields": [
+                { "param": "status", "label": "status" },
+                { "param": "requested_by", "label": "source" }
+            ] } }
+        }))
+        .unwrap();
+        let input = b.input.as_ref().unwrap();
+        let feeds = input.feeds.as_ref().unwrap();
+        assert_eq!(feeds.field_count(), 2);
+        assert_eq!(feeds.active_param(0), "status");
+        assert_eq!(feeds.active_param(1), "requested_by");
+        // The index wraps, so a caller never has to clamp.
+        assert_eq!(feeds.active_param(2), "status");
+        assert_eq!(feeds.active_label(1), Some("source"));
+        // No submit → still a live filter, just multi-field.
+        assert!(input.is_live_filter());
+
+        // Single-field feeds keep working (param, no fields).
+        let single: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:x", "params": {}, "collection": "rows" },
+            "input": { "id": "filter", "feeds": { "param": "status" } }
+        }))
+        .unwrap();
+        let feeds = single.input.as_ref().unwrap().feeds.as_ref().unwrap();
+        assert_eq!(feeds.field_count(), 0);
+        assert_eq!(feeds.active_param(0), "status");
     }
 
     #[test]

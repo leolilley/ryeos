@@ -43,8 +43,8 @@
 //!   alternatives so an operator can fix the schema/cap/registry
 //!   without spelunking the source.
 
-use std::collections::{BTreeSet, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -52,7 +52,8 @@ use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{LaunchMode, ResolvedItem, VerifiedItem};
 use ryeos_engine::kind_registry::{
-    DelegationVia, ExecutionSchema, InProcessRegistryKind, MethodDecl, MethodScope, TerminatorDecl,
+    DelegationVia, ExecutionSchema, InProcessRegistryKind, MethodDecl,
+    MethodRuntimeConfigRequirement, MethodScope, TerminatorDecl,
 };
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
@@ -929,6 +930,81 @@ fn project_method_payload(
     Ok(payload)
 }
 
+pub(crate) fn method_runtime_config_snapshot(
+    kind: &str,
+    requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    state: &AppState,
+) -> Result<BTreeMap<String, Value>, DispatchError> {
+    if requirements.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let loader = verified_loader_for_method_runtime(
+        engine_roots,
+        &state.config.runtime_root().trusted_keys_dir(),
+    )
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("runtime config loader: {e}")))?;
+
+    let mut snapshots = BTreeMap::new();
+    for (name, requirement) in requirements {
+        let value = loader
+            .load_config_strict_signed::<Value>(&requirement.path)
+            .map_err(|e| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "loading method runtime config `{}` at `{}`: {e}",
+                    name,
+                    requirement.path
+                ))
+            })?
+            .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                kind: kind.to_string(),
+                detail: format!(
+                    "method requires runtime config `{}` at `{}`, but no config file was found",
+                    name, requirement.path
+                ),
+            })?;
+        snapshots.insert(name.clone(), value);
+    }
+
+    Ok(snapshots)
+}
+
+fn verified_loader_for_method_runtime(
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    operator_trusted_keys_dir: &Path,
+) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
+    let project_root = engine_roots
+        .ordered
+        .iter()
+        .find(|r| r.space == ryeos_engine::contracts::ItemSpace::Project)
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or_else(|| r.ai_root.clone())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no project root in engine resolution roots"))?;
+
+    let bundle_roots: Vec<PathBuf> = engine_roots
+        .ordered
+        .iter()
+        .filter(|r| r.space == ryeos_engine::contracts::ItemSpace::Bundle)
+        .map(|r| {
+            r.ai_root
+                .parent()
+                .map(|pp| pp.to_path_buf())
+                .unwrap_or_else(|| r.ai_root.clone())
+        })
+        .collect();
+
+    Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
+        project_root,
+        bundle_roots,
+        operator_trusted_keys_dir,
+    ))
+}
+
 pub(crate) async fn dispatch_method(
     kind: &str,
     method_name: &str,
@@ -1023,6 +1099,7 @@ pub(crate) async fn dispatch_method(
             ctx,
             request,
         )?;
+        method_runtime_config_snapshot(kind, &method_decl.runtime_config, &engine_roots, state)?;
         return Ok(json!({
             "validated": true,
             "item_ref": canonical_ref.to_string(),
@@ -1117,6 +1194,8 @@ pub(crate) async fn dispatch_method(
             socket_path: state.config.uds_path.clone(),
             token: cap.token.clone(),
         };
+        let runtime_config =
+            method_runtime_config_snapshot(kind, &method_decl.runtime_config, &engine_roots, state)?;
 
         let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
             schema_version: 1,
@@ -1125,6 +1204,7 @@ pub(crate) async fn dispatch_method(
             thread_id: thread_id.clone(),
             callback,
             project_root: request.project_path.to_path_buf(),
+            runtime_config,
             payload,
         };
 
@@ -4300,6 +4380,7 @@ requires:
         MethodDecl {
             scope: MethodScope::default(),
             args,
+            runtime_config: BTreeMap::new(),
         }
     }
 
