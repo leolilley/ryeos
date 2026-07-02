@@ -23,6 +23,18 @@ fn default_limit() -> usize {
 
 const MAX_THREAD_LIST_LIMIT: usize = 2_000;
 
+/// Read an optional string filter param: absent, non-string, or empty/blank all
+/// mean "unfiltered" (`None`). The client sends `""` for an unset filter facet,
+/// so this is where that collapses to no filter.
+fn string_filter(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
@@ -40,12 +52,23 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         _ => ryeos_app::thread_lifecycle::ThreadSort::Default,
     };
 
-    // Browser session = admin context: no owner filtering. Route through the
-    // lifecycle layer so each row carries daemon-authored execution facts
-    // (`execution.supports_continuation`) the studio gates continuation on.
+    // Optional dashboard filters. An empty or absent value means "unfiltered"
+    // (the client sends "" for an unset filter facet), so an unset filter
+    // widens the list rather than emptying it. Seat auth is unchanged: a
+    // browser session is admin context, so there is no owner (`principal`)
+    // scope — these are operator-chosen facets, not an authorization boundary.
+    let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
+        principal: None,
+        status: string_filter(&params, "status"),
+        kind: string_filter(&params, "kind"),
+        requested_by: string_filter(&params, "requested_by"),
+    };
+
+    // Route through the lifecycle layer so each row carries daemon-authored
+    // execution facts (`execution.supports_continuation`) the studio gates on.
     let threads = state
         .threads
-        .list_thread_views_sorted(limit, None, sort)?;
+        .list_thread_views_query(limit, &filter, sort)?;
 
     Ok(serde_json::json!({
         "threads": threads,

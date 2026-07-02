@@ -377,15 +377,46 @@ pub fn list_threads_filtered(
     list_threads_sorted(db, limit, filter_principal, ThreadSort::Default)
 }
 
-/// As [`list_threads_filtered`] but with an explicit [`ThreadSort`]. The
-/// `Watch` order sorts active-before-terminal, then newest — for the operator
-/// dashboard — without changing the default order the public list / CLI use.
-/// Ordering is applied BEFORE `LIMIT`, so a limited watch list still shows the
-/// most relevant (active + recent) rows.
+/// Optional exact-match filters for a thread listing. `principal` is the
+/// authorization scope (public listings restrict to the caller's own threads);
+/// `status`/`kind`/`requested_by` are the operator dashboard's optional facets.
+/// Every `None` field is simply omitted from the `WHERE`, so an unset filter
+/// widens rather than empties the list. Set fields are ANDed.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadListFilter {
+    pub principal: Option<String>,
+    pub status: Option<String>,
+    pub kind: Option<String>,
+    pub requested_by: Option<String>,
+}
+
 pub fn list_threads_sorted(
     db: &ProjectionDb,
     limit: usize,
     filter_principal: Option<&str>,
+    sort: ThreadSort,
+) -> anyhow::Result<Vec<ThreadRow>> {
+    list_threads_query(
+        db,
+        limit,
+        &ThreadListFilter {
+            principal: filter_principal.map(str::to_string),
+            ..Default::default()
+        },
+        sort,
+    )
+}
+
+/// The general thread listing: optional [`ThreadListFilter`] + [`ThreadSort`].
+/// The `Watch` order sorts active-before-terminal, then newest — for the
+/// operator dashboard — without changing the default order the public list /
+/// CLI use. Ordering is applied BEFORE `LIMIT`, so a limited watch list still
+/// shows the most relevant (active + recent) rows. Filters are exact-match and
+/// each present one is ANDed; absent ones are omitted so the list stays wide.
+pub fn list_threads_query(
+    db: &ProjectionDb,
+    limit: usize,
+    filter: &ThreadListFilter,
     sort: ThreadSort,
 ) -> anyhow::Result<Vec<ThreadRow>> {
     // Terminal statuses inlined from the shared constant (stable substrate
@@ -403,28 +434,41 @@ pub fn list_threads_sorted(
             )
         }
     };
-    let sql = match filter_principal {
-        Some(_) => {
-            format!("SELECT {THREAD_COLUMNS} FROM threads WHERE requested_by = ? {order} LIMIT ?")
-        }
-        None => format!("SELECT {THREAD_COLUMNS} FROM threads {order} LIMIT ?"),
+    // Build the WHERE from the present filters only; each contributes one bound
+    // parameter, so there is no injection surface and an absent filter widens.
+    let mut conditions: Vec<&str> = Vec::new();
+    let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+    if let Some(principal) = &filter.principal {
+        conditions.push("requested_by = ?");
+        params.push(principal);
+    }
+    if let Some(status) = &filter.status {
+        conditions.push("status = ?");
+        params.push(status);
+    }
+    if let Some(kind) = &filter.kind {
+        conditions.push("kind = ?");
+        params.push(kind);
+    }
+    if let Some(requested_by) = &filter.requested_by {
+        conditions.push("requested_by = ?");
+        params.push(requested_by);
+    }
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
     };
+    let sql =
+        format!("SELECT {THREAD_COLUMNS} FROM threads {where_clause} {order} LIMIT ?");
+    params.push(&limit);
     let mut stmt = db
         .connection()
         .prepare(&sql)
-        .context("prepare list_threads_sorted")?;
-    let rows = match filter_principal {
-        Some(fp) => {
-            let params: [&dyn rusqlite::types::ToSql; 2] = [&fp, &limit];
-            stmt.query_map(params, ThreadRow::from_row)
-                .context("query list_threads_sorted")?
-        }
-        None => {
-            let params: [&dyn rusqlite::types::ToSql; 1] = [&limit];
-            stmt.query_map(params, ThreadRow::from_row)
-                .context("query list_threads_sorted")?
-        }
-    };
+        .context("prepare list_threads_query")?;
+    let rows = stmt
+        .query_map(params.as_slice(), ThreadRow::from_row)
+        .context("query list_threads_query")?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
@@ -1726,5 +1770,89 @@ mod tests {
             top.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
             ["T-new-run"]
         );
+    }
+
+    /// Raw insert controlling kind and requested_by too, for filter assertions.
+    fn insert_thread_full(db: &ProjectionDb, id: &str, status: &str, kind: &str, requested_by: &str) {
+        db.connection()
+            .execute(
+                "INSERT INTO threads \
+                 (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
+                  launch_mode, current_site_id, origin_site_id, requested_by, created_at, updated_at) \
+                 VALUES (?1, ?1, ?2, ?3, 'directive:test', 'test/exec', \
+                  'inline', 'site:test', 'site:test', ?4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, kind, status, requested_by],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn thread_filters_narrow_by_status_kind_source_and_widen_when_unset() {
+        let db = test_db();
+        insert_thread_full(&db, "T-1", "running", "directive", "fp:claude");
+        insert_thread_full(&db, "T-2", "completed", "directive", "fp:amp");
+        insert_thread_full(&db, "T-3", "running", "graph", "fp:claude");
+
+        let ids = |rows: Vec<ThreadRow>| {
+            let mut v = rows.iter().map(|r| r.thread_id.clone()).collect::<Vec<_>>();
+            v.sort();
+            v
+        };
+
+        // No filter → all rows: an unset filter widens, never empties.
+        let all =
+            list_threads_query(&db, 10, &ThreadListFilter::default(), ThreadSort::Default).unwrap();
+        assert_eq!(ids(all), ["T-1", "T-2", "T-3"]);
+
+        // Each present filter narrows by exact match.
+        let running = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                status: Some("running".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(running), ["T-1", "T-3"]);
+
+        let graph = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                kind: Some("graph".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(graph), ["T-3"]);
+
+        let amp = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                requested_by: Some("fp:amp".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(amp), ["T-2"]);
+
+        // Present filters are ANDed.
+        let combined = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                status: Some("running".into()),
+                requested_by: Some("fp:claude".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(combined), ["T-1", "T-3"]);
     }
 }

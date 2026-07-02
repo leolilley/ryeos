@@ -1489,6 +1489,20 @@ impl StateStore {
         Self::rows_to_list_items(&g, thread_rows)
     }
 
+    /// As [`Self::list_threads_sorted`] but with the full optional filter set
+    /// (status / kind / requested_by) the operator dashboard narrows by.
+    pub fn list_threads_query(
+        &self,
+        limit: usize,
+        filter: &queries::ThreadListFilter,
+        sort: queries::ThreadSort,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows =
+            queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
     /// Project thread rows into `ThreadListItem`s, resolving each terminal
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list

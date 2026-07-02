@@ -580,21 +580,36 @@ fn resolve_params_dyn(params: &Value, facet_lookup: &dyn Fn(&str) -> Option<Valu
     match params {
         Value::String(s) => {
             if let Some(rest) = s.strip_prefix("@facet:") {
+                // An optional trailing `|<default>` makes the reference
+                // DEFAULTING: when the facet is absent, resolve to the literal
+                // default instead of null. A bare `@facet:x` stays REQUIRED —
+                // an unresolved one is null, which suppresses the fetch (right
+                // for `thread_id` on an inspect source). A defaulting one keeps
+                // an unset OPTIONAL param (e.g. a list filter) from suppressing
+                // the whole list; an empty default (`@facet:x|`) resolves to ""
+                // which a service reads as "no filter".
+                let (spec, default) = match rest.split_once('|') {
+                    Some((spec, default)) => (spec, Some(default)),
+                    None => (rest, None),
+                };
                 // Facet keys themselves contain dots (`input.route`), so
                 // try every dot-prefix as the key, longest first; the
                 // remainder is a field path into the facet value.
-                let dots: Vec<usize> = rest
+                let dots: Vec<usize> = spec
                     .char_indices()
                     .filter_map(|(i, c)| (c == '.').then_some(i))
                     .collect();
-                let mut candidates: Vec<&str> = vec![rest];
-                candidates.extend(dots.iter().rev().map(|&i| &rest[..i]));
+                let mut candidates: Vec<&str> = vec![spec];
+                candidates.extend(dots.iter().rev().map(|&i| &spec[..i]));
                 for candidate in candidates {
-                    if let Some(found) = try_facet(candidate, rest, facet_lookup) {
+                    if let Some(found) = try_facet(candidate, spec, facet_lookup) {
                         return found;
                     }
                 }
-                Value::Null
+                match default {
+                    Some(default) => Value::String(default.to_string()),
+                    None => Value::Null,
+                }
             } else {
                 params.clone()
             }
@@ -1332,6 +1347,31 @@ mod tests {
         });
         assert_eq!(resolved["chain_root_id"], "T-9");
         assert_eq!(resolved["limit"], 5);
+    }
+
+    #[test]
+    fn defaulting_facet_param_resolves_and_falls_back() {
+        // `@facet:x|default` resolves to the facet when present…
+        let present = resolve_params(
+            &json!({ "status": "@facet:threads.filter.status|" }),
+            |key| (key == "threads.filter").then(|| json!({ "status": "running" })),
+        );
+        assert_eq!(present["status"], "running");
+
+        // …and to the literal default when the facet is absent, so an unset
+        // optional filter never resolves to null (which would suppress the
+        // list fetch). Empty default → "" (a service reads it as "no filter").
+        let absent = resolve_params(
+            &json!({ "status": "@facet:threads.filter.status|", "kind": "@facet:threads.filter.kind|all" }),
+            |_| None,
+        );
+        assert_eq!(absent["status"], "");
+        assert_eq!(absent["kind"], "all");
+
+        // A bare (non-defaulting) reference still resolves to null when unset —
+        // required params (e.g. inspect thread_id) keep suppressing the fetch.
+        let required = resolve_params(&json!({ "thread_id": "@facet:selection.thread" }), |_| None);
+        assert!(required["thread_id"].is_null());
     }
 
     #[test]

@@ -28,7 +28,7 @@ use ryeos_state::UsageSubject;
 
 /// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
 /// can name the watch sort without a direct `ryeos-state` dependency.
-pub use ryeos_state::queries::ThreadSort;
+pub use ryeos_state::queries::{ThreadListFilter, ThreadSort};
 
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
@@ -1121,6 +1121,22 @@ impl ThreadLifecycleService {
         Ok(self
             .state_store
             .list_threads_sorted(limit, filter_principal, sort)?
+            .into_iter()
+            .map(|item| self.decorate_list_item(item))
+            .collect())
+    }
+
+    /// As [`Self::list_thread_views_sorted`] but with the full optional filter
+    /// set (status / kind / requested_by) the operator dashboard narrows by.
+    pub fn list_thread_views_query(
+        &self,
+        limit: usize,
+        filter: &ryeos_state::queries::ThreadListFilter,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Vec<ThreadListView>> {
+        Ok(self
+            .state_store
+            .list_threads_query(limit, filter, sort)?
             .into_iter()
             .map(|item| self.decorate_list_item(item))
             .collect())
