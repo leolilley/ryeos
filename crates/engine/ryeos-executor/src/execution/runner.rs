@@ -1492,9 +1492,37 @@ pub fn execution_params_from_resume_context(
         .requested_by_name()
         .unwrap_or_else(|| "fp:resume".to_string());
 
-    // TODO(resume-overlay): resume still uses the daemon startup
-    // engine and a LiveFs root provenance until the resume path can
-    // rebuild per-snapshot overlay engines and temp-dir lifelines.
+    // Resume runs against the live filesystem and the daemon's current
+    // engine. This is correct for LocalPath resumes by intent — the
+    // original spawn also resolved against the then-current live engine
+    // (the residual drift is an install-generation change between spawn
+    // and resume; accepted here, not pinned).
+    //
+    // TODO(resume-overlay): a genuinely snapshot-pinned (pushed-head)
+    // resume should instead rebuild the per-snapshot overlay engine +
+    // temp-dir lifeline that `execute_mode.rs` builds at spawn (via the
+    // engine cache keyed `(install_generation, snapshot_hash)`) and pass
+    // `root_pushed_head`. That is NOT wired here because the prerequisites
+    // live outside this crate and are not yet met:
+    //   1. `ResumeContext` (ryeos-app `launch_metadata.rs`) records
+    //      `project_context` as `LocalPath` for EVERY spawn — pushed-head
+    //      runs are rewritten to `LocalPath{checkout}` by `execute_mode`,
+    //      and the checkout dir is ephemeral. The pin identity lives
+    //      orthogonally in `original_snapshot_hash`; there is no carried
+    //      `original_project_path` (HEAD-ref key) that `root_pushed_head`
+    //      needs for foldback.
+    //   2. The managed resume launchers (`launch_claimed_successor`,
+    //      `launch_claimed_native_resume` in `execution/launch.rs`)
+    //      hard-reject a non-`LocalPath` `project_context`, and the
+    //      managed run path passes a `project_path` decoupled from the
+    //      provenance (so an overlay engine would not govern resolution).
+    //   3. Switching a LocalPath-origin resume to `root_pushed_head`
+    //      would turn on the snapshot pin + foldback + HEAD advance that
+    //      the original LiveFs spawn never performed — a HEAD-corruption
+    //      hazard. Pinning must therefore ride a spawn-side change that
+    //      records the pushed-head ref, not a resume-side reinterpretation.
+    // The fix spans launch.rs + launch_metadata.rs; see
+    // `docs/future/native-resume-snapshot-pinning.md`.
     let provenance = ExecutionProvenance::root_live_fs(
         project_path.clone().unwrap_or_else(|| PathBuf::from(".")),
         state.engine.clone(),
