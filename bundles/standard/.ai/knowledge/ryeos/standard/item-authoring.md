@@ -125,23 +125,33 @@ authority does not constrain the target: the wrapper tool's
 > narrowest `namespace` the wrapper is meant to expose, and prefer separate
 > wrapper tools for distinct scopes over one wide wrapper.
 
-### Where the wrapper lives — binary locality
+### Where the wrapper lives — qualified binary reuse
 
-`command: bin:ryeos-core-tools` resolves against the **wrapper tool's own
-bundle** (`<bundle-root>/.ai/bin/<host-triple>/ryeos-core-tools`), not a shared
-core binary. So the wrapper must reside in a bundle that actually ships and signs
-`ryeos-core-tools` in its own `.ai/bin/` — today, the `core` bundle. Reusing
-core's binary from a *separate* authoring bundle is not yet supported; it needs a
-qualified cross-bundle binary reference (a follow-up), or the bundle must vendor
-and sign its own copy.
+Use `command: bin:core/ryeos-core-tools` from an authoring bundle wrapper. The
+wrapper stays in the authoring bundle (so its own `requires` and signed manifest
+own the authoring authority), while the executable is resolved from the signed
+registered bundle whose manifest name is `core`.
+
+Qualified binary refs are deliberately narrow:
+
+- `bin:<name>` remains wrapper-bundle local.
+- `bin:<bundle>/<name>` resolves only from registered signed bundle roots, never
+  from project space or PATH.
+- The source wrapper bundle must have a signed dependency relationship on the
+  target bundle: one of its `requires_kinds` / `uses_kinds` must be provided by
+  the target bundle. For `core`, wrappers that use tool items naturally require
+  the `tool` kind.
+- The target binary is still verified through the target bundle's binary
+  manifest, CAS content hash, sidecar signature, trust store, and bundle
+  confinement checks before dispatch.
 
 ### Wrapper tool item
 
-Placed in a bundle that ships `ryeos-core-tools`; its manifest must declare the
-matching `runtime_authority.item_authoring`:
+Placed in the authoring bundle; its manifest must declare the matching
+`runtime_authority.item_authoring`:
 
 ```yaml
-# <bundle-that-ships-ryeos-core-tools>/.ai/tools/<ns>/author-item.yaml
+# <authoring-bundle>/.ai/tools/<ns>/author-item.yaml
 version: "0.1.0"
 category: "<ns>"
 name: "author-item"
@@ -149,7 +159,7 @@ executor_id: "@subprocess"
 required_caps: ["ryeos.execute.tool.<ns>/author-item"]
 description: "Author a signed project item via the daemon."
 config:
-  command: "bin:ryeos-core-tools"   # resolves within THIS bundle's .ai/bin
+  command: "bin:core/ryeos-core-tools"
   args: ["author-item", "--stdin-json"]
   input_data: "{params_json}"
   timeout_secs: 30
@@ -168,6 +178,23 @@ requires:
         item_authoring:
           - kind: knowledge
             namespace: runtime-authored/*   # narrow this to the exact subspace
+```
+
+The authoring bundle's `.ai/manifest.source.yaml` must both declare the matching
+authority and depend on the bundle that provides the binary's kind surface, for
+example (publish materializes `provides_kinds` into the generated
+`.ai/manifest.yaml` — don't hand-maintain it):
+
+```yaml
+# <authoring-bundle>/.ai/manifest.source.yaml
+name: <authoring-bundle>
+version: "0.1.0"
+requires_kinds:
+  - tool
+runtime_authority:
+  item_authoring:
+    - kind: knowledge
+      namespace: runtime-authored/*
 ```
 
 An executing directive or graph then calls the tool as an action with

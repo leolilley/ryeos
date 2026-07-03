@@ -29,10 +29,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lillux::crypto::VerifyingKey;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::contracts::{ItemSpace, SignatureEnvelope, TrustClass as ContractTrustClass};
 use crate::error::EngineError;
+use crate::item_resolution::ResolutionRoots;
 use crate::resolution::TrustClass;
+use crate::trust::TrustStore;
 
 /// Result of resolving a binary reference.
 #[derive(Debug)]
@@ -40,6 +44,82 @@ pub struct ResolvedBinary {
     pub absolute_path: PathBuf,
     pub manifest_hash: String,
     pub signer_fingerprint: String,
+}
+
+/// Resolve a runtime command binary ref for a concrete wrapper item.
+///
+/// Accepted shapes:
+///   - `bin:<name>` — existing behavior, resolved in the wrapper item's bundle.
+///   - `bin:<bundle>/<name>` — qualified behavior, resolved in the registered
+///     signed bundle whose manifest name is `<bundle>`.
+///
+/// Qualified refs intentionally change only executable materialization. Runtime
+/// callback authority remains attached to the wrapper item that requested the
+/// subprocess, not to the bundle that ships the binary.
+pub fn resolve_runtime_binary_command_ref(
+    binary_ref: &str,
+    wrapper_source_path: &Path,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    root_trust_class: TrustClass,
+) -> Result<ResolvedBinary, EngineError> {
+    let Some(rest) = binary_ref.strip_prefix("bin:") else {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: binary_ref.to_string(),
+            detail: "runtime command binary_ref must start with `bin:`".into(),
+        });
+    };
+
+    let slash_count = rest.matches('/').count();
+    match slash_count {
+        0 => {
+            let bundle_root = registered_bundle_root_for_source(wrapper_source_path, roots)
+                .or_else(|| find_bundle_root(wrapper_source_path))
+                .ok_or_else(|| EngineError::InvalidBinPrefix {
+                    raw: binary_ref.to_string(),
+                    detail: format!(
+                        "cannot find bundle root (no registered bundle or .ai/ ancestor of {})",
+                        wrapper_source_path.display()
+                    ),
+                })?;
+            resolve_bundle_binary_ref(
+                binary_ref,
+                &bundle_root,
+                |fp| trust_store.get(fp).map(|signer| signer.verifying_key),
+                root_trust_class,
+            )
+        }
+        1 => {
+            let (target_bundle, bin_name) = rest.split_once('/').expect("one slash checked above");
+            validate_bundle_name(target_bundle, binary_ref)?;
+            validate_bin_name(bin_name, binary_ref)?;
+
+            let source_root = registered_bundle_root_for_source(wrapper_source_path, roots)
+                .ok_or_else(|| EngineError::InvalidBinPrefix {
+                    raw: binary_ref.to_string(),
+                    detail: format!(
+                        "qualified `bin:<bundle>/<name>` refs are only allowed from registered bundle items; {} is not under a registered bundle root",
+                        wrapper_source_path.display()
+                    ),
+                })?;
+            let source_manifest = load_minimal_bundle_manifest(&source_root, trust_store)?;
+            let (target_root, target_manifest) =
+                find_qualified_target_bundle(target_bundle, roots, trust_store)?;
+
+            ensure_qualified_binary_dependency(&source_manifest, &target_manifest)?;
+
+            resolve_bundle_binary_ref(
+                &format!("bin:{bin_name}"),
+                &target_root,
+                |fp| trust_store.get(fp).map(|signer| signer.verifying_key),
+                root_trust_class,
+            )
+        }
+        _ => Err(EngineError::InvalidBinPrefix {
+            raw: binary_ref.to_string(),
+            detail: "qualified binary refs must be `bin:<bundle>/<binary>`; bundle and binary names cannot contain `/`".into(),
+        }),
+    }
 }
 
 /// Resolve a binary reference relative to a bundle root.
@@ -306,6 +386,196 @@ pub fn resolve_bundle_binary_ref(
     })
 }
 
+fn registered_bundle_root_for_source(
+    source_path: &Path,
+    roots: &ResolutionRoots,
+) -> Option<PathBuf> {
+    roots
+        .ordered
+        .iter()
+        .filter(|root| root.space == ItemSpace::Bundle)
+        .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
+        .find(|bundle_root| source_path.starts_with(bundle_root))
+}
+
+/// Walk up from `path` to find the first ancestor containing `.ai/`.
+fn find_bundle_root(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.join(crate::AI_DIR).is_dir() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+fn find_qualified_target_bundle(
+    target_name: &str,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+) -> Result<(PathBuf, MinimalBundleManifest), EngineError> {
+    let mut searched = Vec::new();
+    let mut skipped = Vec::new();
+    let mut matches = Vec::new();
+
+    for root in roots
+        .ordered
+        .iter()
+        .filter(|root| root.space == ItemSpace::Bundle)
+    {
+        let Some(bundle_root) = root.ai_root.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        searched.push(bundle_root.display().to_string());
+        // Skip bundles whose signed manifest doesn't verify: an unverifiable
+        // manifest can't be a trusted target, and one malformed/unsigned bundle
+        // in the registered set must not break qualified resolution of others.
+        // The reason is retained so a broken registration surfaces in the
+        // not-found diagnostic rather than looking like a genuine absence.
+        match load_minimal_bundle_manifest(&bundle_root, trust_store) {
+            Ok(manifest) if manifest.name == target_name => {
+                matches.push((bundle_root, manifest));
+            }
+            Ok(_) => {}
+            Err(reason) => skipped.push(reason.to_string()),
+        }
+    }
+
+    match matches.len() {
+        0 => Err(EngineError::QualifiedBinBundleNotFound {
+            bundle: target_name.to_string(),
+            searched,
+            skipped,
+        }),
+        1 => Ok(matches.pop().expect("len checked above")),
+        _ => Err(EngineError::QualifiedBinBundleAmbiguous {
+            bundle: target_name.to_string(),
+            roots: matches.into_iter().map(|(root, _)| root).collect(),
+        }),
+    }
+}
+
+/// The subset of a signed bundle manifest that qualified binary resolution
+/// needs: the bundle identity and its kind-dependency surface. Intentionally a
+/// lenient projection (no `deny_unknown_fields`) so it does not break when the
+/// full manifest schema gains fields — the manifest is already signature- and
+/// trust-verified before it is parsed here, so extra fields are not a hazard.
+#[derive(Debug, Deserialize)]
+struct MinimalBundleManifest {
+    name: String,
+    #[serde(default)]
+    provides_kinds: Vec<String>,
+    #[serde(default)]
+    requires_kinds: Vec<String>,
+    #[serde(default)]
+    uses_kinds: Vec<String>,
+}
+
+fn load_minimal_bundle_manifest(
+    bundle_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<MinimalBundleManifest, EngineError> {
+    let manifest_path = bundle_root.join(crate::AI_DIR).join("manifest.yaml");
+    let file_type = std::fs::symlink_metadata(&manifest_path)
+        .map_err(|e| EngineError::QualifiedBinManifestInvalid {
+            path: manifest_path.display().to_string(),
+            reason: format!("stat failed: {e}"),
+        })?
+        .file_type();
+    if file_type.is_symlink() || !file_type.is_file() {
+        return Err(EngineError::QualifiedBinManifestInvalid {
+            path: manifest_path.display().to_string(),
+            reason: "manifest is not a regular file".into(),
+        });
+    }
+
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        EngineError::QualifiedBinManifestInvalid {
+            path: manifest_path.display().to_string(),
+            reason: format!("read failed: {e}"),
+        }
+    })?;
+    let envelope = SignatureEnvelope {
+        prefix: "#".into(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let sig_header =
+        crate::item_resolution::parse_signature_header(&raw, &envelope).ok_or_else(|| {
+            EngineError::QualifiedBinManifestInvalid {
+                path: manifest_path.display().to_string(),
+                reason: "missing or malformed signature header".into(),
+            }
+        })?;
+    let (trust_class, _) =
+        crate::trust::verify_item_signature(&raw, &sig_header, &envelope, trust_store).map_err(
+            |e| EngineError::QualifiedBinManifestInvalid {
+                path: manifest_path.display().to_string(),
+                reason: format!("signature verification failed: {e}"),
+            },
+        )?;
+    if trust_class != ContractTrustClass::Trusted {
+        return Err(EngineError::QualifiedBinManifestInvalid {
+            path: manifest_path.display().to_string(),
+            reason: format!(
+                "manifest signer {} is not trusted (trust_class: {:?})",
+                sig_header.signer_fingerprint, trust_class
+            ),
+        });
+    }
+
+    let body = lillux::signature::strip_signature_lines(&raw);
+    serde_yaml::from_str(&body).map_err(|e| EngineError::QualifiedBinManifestInvalid {
+        path: manifest_path.display().to_string(),
+        reason: format!("parse failed: {e}"),
+    })
+}
+
+fn ensure_qualified_binary_dependency(
+    source: &MinimalBundleManifest,
+    target: &MinimalBundleManifest,
+) -> Result<(), EngineError> {
+    if source.name == target.name {
+        return Ok(());
+    }
+    let source_needs = source.requires_kinds.iter().chain(source.uses_kinds.iter());
+    if source_needs.clone().any(|kind| {
+        target
+            .provides_kinds
+            .iter()
+            .any(|provided| provided == kind)
+    }) {
+        return Ok(());
+    }
+
+    Err(EngineError::QualifiedBinDependencyMissing {
+        source_bundle: source.name.clone(),
+        target_bundle: target.name.clone(),
+    })
+}
+
+fn validate_bundle_name(name: &str, raw_ref: &str) -> Result<(), EngineError> {
+    if name.is_empty() {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "no bundle name in qualified binary ref".into(),
+        });
+    }
+    if name.contains('/') || name.contains("..") || name.starts_with('.') || name.contains(' ') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "bundle name must be a single non-hidden identifier without spaces, slashes, or `..`".into(),
+        });
+    }
+    if name.chars().any(|c| c.is_control() || c == '\0') {
+        return Err(EngineError::InvalidBinPrefix {
+            raw: raw_ref.to_string(),
+            detail: "bundle name must not contain control characters".into(),
+        });
+    }
+    Ok(())
+}
+
 fn verify_item_source_sidecar(
     bin_name: &str,
     bin_path: &Path,
@@ -447,6 +717,8 @@ fn is_dispatchable_trust_class(tc: TrustClass) -> bool {
 mod tests {
     use super::*;
     use crate::executor_resolution::verify_executor_trust;
+    use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
+    use crate::trust::{TrustStore, TrustedSigner};
     use lillux::crypto::SigningKey;
     use serde_json::json;
 
@@ -578,6 +850,59 @@ mod tests {
         move |fp| (fp == expected_fp).then(|| key.verifying_key())
     }
 
+    fn trust_store_for(fp: &str, key: &SigningKey) -> TrustStore {
+        TrustStore::from_signers(vec![TrustedSigner {
+            fingerprint: fp.to_string(),
+            verifying_key: key.verifying_key(),
+            label: None,
+        }])
+    }
+
+    fn write_signed_bundle_manifest(
+        bundle_root: &Path,
+        name: &str,
+        provides_kinds: &[&str],
+        requires_kinds: &[&str],
+        uses_kinds: &[&str],
+        key: &SigningKey,
+    ) {
+        let ai = bundle_root.join(crate::AI_DIR);
+        std::fs::create_dir_all(&ai).unwrap();
+        let yaml = format!(
+            "name: {name}\nversion: \"0.1.0\"\nprovides_kinds:\n{}requires_kinds:\n{}uses_kinds:\n{}\n",
+            yaml_list(provides_kinds),
+            yaml_list(requires_kinds),
+            yaml_list(uses_kinds),
+        );
+        let signed = lillux::signature::sign_content(&yaml, key, "#", None);
+        std::fs::write(ai.join("manifest.yaml"), signed).unwrap();
+    }
+
+    fn yaml_list(values: &[&str]) -> String {
+        if values.is_empty() {
+            "  []\n".to_string()
+        } else {
+            values
+                .iter()
+                .map(|value| format!("  - {value}\n"))
+                .collect()
+        }
+    }
+
+    fn roots_for(bundle_roots: &[&Path]) -> ResolutionRoots {
+        ResolutionRoots {
+            ordered: bundle_roots
+                .iter()
+                .enumerate()
+                .map(|(i, root)| ResolutionRoot {
+                    space: ItemSpace::Bundle,
+                    label: format!("bundle:{i}"),
+                    ai_root: root.join(crate::AI_DIR),
+                })
+                .collect(),
+        }
+    }
+
     /// `bin/{triple}/<name>` resolves identically to the canonical
     /// `bin/<host-triple>/<name>` shape, including manifest lookup.
     #[test]
@@ -627,6 +952,240 @@ mod tests {
 
         assert_eq!(short.absolute_path, placeholder.absolute_path);
         assert_eq!(short.manifest_hash, placeholder.manifest_hash);
+    }
+
+    #[test]
+    fn qualified_runtime_ref_resolves_target_bundle_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let target = tmp.path().join("core");
+        let (fp, key) = write_resolver_fixture(&target, "ryeos-core-tools");
+        write_signed_bundle_manifest(&source, "authoring", &[], &["tool"], &[], &key);
+        write_signed_bundle_manifest(&target, "core", &["tool"], &[], &[], &key);
+        let roots = roots_for(&[&source, &target]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, "version: 0.1.0\n").unwrap();
+
+        let resolved = resolve_runtime_binary_command_ref(
+            "bin:core/ryeos-core-tools",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .expect("qualified core binary ref should resolve");
+
+        assert!(resolved
+            .absolute_path
+            .starts_with(target.join(crate::AI_DIR).join("bin")));
+        assert_eq!(resolved.signer_fingerprint, fp);
+    }
+
+    #[test]
+    fn qualified_runtime_ref_requires_source_dependency_on_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let target = tmp.path().join("core");
+        let (fp, key) = write_resolver_fixture(&target, "ryeos-core-tools");
+        write_signed_bundle_manifest(&source, "authoring", &[], &["knowledge"], &[], &key);
+        write_signed_bundle_manifest(&target, "core", &["tool"], &[], &[], &key);
+        let roots = roots_for(&[&source, &target]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+
+        let err = resolve_runtime_binary_command_ref(
+            "bin:core/ryeos-core-tools",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EngineError::QualifiedBinDependencyMissing {
+                source_bundle,
+                target_bundle,
+            } if source_bundle == "authoring" && target_bundle == "core"
+        ));
+    }
+
+    #[test]
+    fn qualified_runtime_ref_rejects_slashy_bundle_or_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let (fp, key) = write_resolver_fixture(&source, "local");
+        write_signed_bundle_manifest(&source, "authoring", &["tool"], &[], &[], &key);
+        let roots = roots_for(&[&source]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+
+        let err = resolve_runtime_binary_command_ref(
+            "bin:ryeos/core/ryeos-core-tools",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EngineError::InvalidBinPrefix { ref detail, .. }
+                if detail.contains("bin:<bundle>/<binary>")),
+            "expected clear qualified ref parse error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn qualified_runtime_ref_rejects_duplicate_target_bundle_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let target_a = tmp.path().join("core-a");
+        let target_b = tmp.path().join("core-b");
+        let (fp, key) = write_resolver_fixture(&target_a, "ryeos-core-tools");
+        write_resolver_fixture(&target_b, "ryeos-core-tools");
+        write_signed_bundle_manifest(&source, "authoring", &[], &["tool"], &[], &key);
+        write_signed_bundle_manifest(&target_a, "core", &["tool"], &[], &[], &key);
+        write_signed_bundle_manifest(&target_b, "core", &["tool"], &[], &[], &key);
+        let roots = roots_for(&[&source, &target_a, &target_b]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+
+        let err = resolve_runtime_binary_command_ref(
+            "bin:core/ryeos-core-tools",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            EngineError::QualifiedBinBundleAmbiguous { bundle, roots }
+                if bundle == "core" && roots.len() == 2
+        ));
+    }
+
+    #[test]
+    fn unqualified_runtime_ref_resolves_wrapper_local() {
+        // Regression guard for the changed hot path: an unqualified `bin:<name>`
+        // still resolves in the wrapper item's own bundle.
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let (fp, key) = write_resolver_fixture(&source, "local-tool");
+        write_signed_bundle_manifest(&source, "authoring", &[], &[], &[], &key);
+        let roots = roots_for(&[&source]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/w.yaml");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::fs::write(&wrapper, "version: 0.1.0\n").unwrap();
+
+        let resolved = resolve_runtime_binary_command_ref(
+            "bin:local-tool",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .expect("unqualified ref resolves in the wrapper's own bundle");
+        assert!(resolved
+            .absolute_path
+            .starts_with(source.join(crate::AI_DIR).join("bin")));
+    }
+
+    #[test]
+    fn qualified_runtime_ref_rejects_untrusted_target_manifest() {
+        // The target bundle's manifest is signed by a key absent from the trust
+        // store, so it is not a trusted candidate — no trusted `core` is found.
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let target = tmp.path().join("core");
+        let (fp, key) = write_resolver_fixture(&target, "ryeos-core-tools");
+        write_signed_bundle_manifest(&source, "authoring", &[], &["tool"], &[], &key);
+        let rogue = SigningKey::from_bytes(&[7u8; 32]);
+        write_signed_bundle_manifest(&target, "core", &["tool"], &[], &[], &rogue);
+        let roots = roots_for(&[&source, &target]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+
+        let err = resolve_runtime_binary_command_ref(
+            "bin:core/ryeos-core-tools",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .unwrap_err();
+        // Not a trusted candidate → not found, and the broken registration is
+        // surfaced in the diagnostic rather than looking like a genuine absence.
+        match err {
+            EngineError::QualifiedBinBundleNotFound {
+                bundle, skipped, ..
+            } => {
+                assert_eq!(bundle, "core");
+                assert!(
+                    skipped.iter().any(|s| s.contains("invalid")),
+                    "expected the skipped invalid manifest to be reported, got: {skipped:?}"
+                );
+            }
+            other => panic!("expected QualifiedBinBundleNotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn qualified_ref_tolerates_full_signed_manifest_fields() {
+        // Guards the intentional lenient projection: a real generated manifest
+        // carries `description` and a `runtime_authority` block (and may gain
+        // more fields). The minimal projection must ignore them, not reject the
+        // manifest — so qualified resolution keeps working against real bundles.
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("authoring");
+        let target = tmp.path().join("core");
+        let (fp, key) = write_resolver_fixture(&target, "ryeos-core-tools");
+        write_full_signed_manifest(
+            &source,
+            "authoring",
+            &[],
+            &["tool"],
+            &key,
+            "runtime_authority:\n  item_authoring:\n    - kind: knowledge\n      namespace: runtime-authored/*\n",
+        );
+        write_full_signed_manifest(&target, "core", &["tool"], &[], &key, "runtime_authority: {}\n");
+        let roots = roots_for(&[&source, &target]);
+        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+
+        let resolved = resolve_runtime_binary_command_ref(
+            "bin:core/ryeos-core-tools",
+            &wrapper,
+            &roots,
+            &trust_store_for(&fp, &key),
+            TrustClass::TrustedBundle,
+        )
+        .expect("full-shape signed manifests must still resolve");
+        assert!(resolved
+            .absolute_path
+            .starts_with(target.join(crate::AI_DIR).join("bin")));
+    }
+
+    /// Like `write_signed_bundle_manifest` but includes `description` and a
+    /// caller-supplied trailing block (e.g. `runtime_authority`), mirroring a
+    /// generated `.ai/manifest.yaml`.
+    fn write_full_signed_manifest(
+        bundle_root: &Path,
+        name: &str,
+        provides_kinds: &[&str],
+        requires_kinds: &[&str],
+        key: &SigningKey,
+        extra_yaml: &str,
+    ) {
+        let ai = bundle_root.join(crate::AI_DIR);
+        std::fs::create_dir_all(&ai).unwrap();
+        let yaml = format!(
+            "name: {name}\nversion: \"0.1.0\"\ndescription: \"full manifest\"\nprovides_kinds:\n{}requires_kinds:\n{}uses_kinds:\n{}{extra_yaml}",
+            yaml_list(provides_kinds),
+            yaml_list(requires_kinds),
+            yaml_list(&[]),
+        );
+        let signed = lillux::signature::sign_content(&yaml, key, "#", None);
+        std::fs::write(ai.join("manifest.yaml"), signed).unwrap();
     }
 
     #[test]

@@ -291,7 +291,6 @@ enum Cmd {
         output: Option<PathBuf>,
     },
 
-    /// Manage sealed secrets in the daemon vault.
     /// Author (create or upsert) a signed project item through the daemon
     /// `runtime.author_item` callback.
     ///
@@ -322,6 +321,7 @@ enum Cmd {
         #[arg(long)]
         format_ext: Option<String>,
     },
+    /// Manage sealed secrets in the daemon vault.
     Vault {
         #[command(subcommand)]
         cmd: VaultCmd,
@@ -1747,7 +1747,10 @@ fn run_sign(
 
 #[derive(serde::Deserialize)]
 struct StdinSignParams {
-    #[serde(default, deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
+    )]
     item_refs: Vec<String>,
     #[serde(default)]
     item_ref: Option<String>,
