@@ -100,35 +100,29 @@ impl StudioCore {
         outcome: super::dto::LaunchOutcome,
         data: &serde_json::Value,
     ) -> Vec<StudioEffect> {
-        // A plain service-ref invoke (row management like cancel) is
-        // NOT a launch: it targets a service other than threads/input,
-        // carries no `delivery`, no route_seq, and never ratchets.
-        // Reading its result as a launch outcome would clear the
-        // focused filter and falsely claim "Thread launched" — so
-        // handle it as a plain service success: refresh the list/braid
-        // and preserve the focused input.
-        let service_ref = match expected {
-            StudioEffectKind::Invoke {
-                target: super::effect::InvokeRef::Ref { item_ref },
-                route_seq: None,
-                ratchet_on_thread_id: false,
-                ..
-            } if item_ref.as_str() != "service:threads/input" => Some(item_ref.clone()),
-            _ => None,
-        };
-        if let Some(item_ref) = service_ref.filter(|_| outcome.delivery.is_none()) {
-            let notice = match item_ref.as_str() {
-                "service:ui/studio/thread/cancel" | "service:threads/cancel" => outcome
-                    .thread_id
-                    .as_deref()
-                    .map(|id| format!("Cancelled {id}."))
-                    .unwrap_or_else(|| "Cancelled.".to_string()),
-                _ => effect_success_notice(expected, data),
-            };
-            self.notice(notice, StudioTone::Good);
-            let mut effects = vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
-            effects.extend(self.effects_for_hint("thread"));
-            return effects;
+        // A `Service`-intent invoke (row management like cancel) is NOT a launch:
+        // the emit site declared its intent, so the result never sniffs the ref.
+        // Reading its result as a launch outcome would clear the focused filter
+        // and falsely claim "Thread launched" — so handle it as a plain service
+        // success: refresh the list/braid and preserve the focused input. Copy
+        // comes from the affordance's `notice:` template (rendered against the
+        // outcome), falling back to the generic success notice.
+        if let StudioEffectKind::Invoke {
+            intent: super::effect::InvokeIntent::Service,
+            success_notice,
+            ..
+        } = expected
+        {
+            if outcome.delivery.is_none() {
+                let notice = match success_notice {
+                    Some(template) => render_result_notice(template, data),
+                    None => effect_success_notice(expected, data),
+                };
+                self.notice(notice, StudioTone::Good);
+                let mut effects = vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+                effects.extend(self.effects_for_hint("thread"));
+                return effects;
+            }
         }
         if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
             // A refused delivery (non-continuation target, settled
@@ -525,6 +519,31 @@ fn structured_error_message(raw: &str) -> Option<String> {
         })
 }
 
+/// Render an affordance success-notice template, substituting `{result.<field>}`
+/// tokens with the matching field of the invocation outcome (the result body).
+fn render_result_notice(template: &str, data: &serde_json::Value) -> String {
+    const OPEN: &str = "{result.";
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        match after.find('}') {
+            Some(end) => {
+                let field = &after[..end];
+                out.push_str(&json_field_text(data, &[field]).unwrap_or_default());
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn json_field_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| value.get(*key)).map(|v| {
         v.as_str()
@@ -758,6 +777,10 @@ mod tests {
                 item_ref: "service:ui/studio/thread/cancel".to_string(),
             },
             params: serde_json::json!({ "thread_id": "T-7" }),
+            // As the row Cancel affordance now emits: a Service intent carrying
+            // the authored success-notice template.
+            intent: crate::studio::effect::InvokeIntent::Service,
+            success_notice: Some("Cancelled {result.thread_id}.".to_string()),
             route_seq: None,
             ratchet_on_thread_id: false,
         });

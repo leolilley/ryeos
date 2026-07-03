@@ -887,6 +887,10 @@ pub enum AffordanceInvoke {
     Rye {
         tokens: Vec<String>,
         args: Value,
+        /// Optional success-notice template (`{result.<field>}` placeholders,
+        /// rendered against the invocation outcome), carried from the
+        /// affordance's `notice:` and surfaced when the invocation succeeds.
+        notice: Option<String>,
     },
     /// Invoke a service by ref with args through the daemon `/execute` path (as
     /// the foot input does). Args reach the daemon as `parameters` — unlike the
@@ -896,6 +900,10 @@ pub enum AffordanceInvoke {
     Service {
         item_ref: String,
         args: Value,
+        /// Optional success-notice template (`{result.<field>}` placeholders,
+        /// rendered against the invocation outcome), carried from the
+        /// affordance's `notice:` and surfaced when the invocation succeeds.
+        notice: Option<String>,
     },
 }
 
@@ -929,6 +937,13 @@ pub fn resolve_affordance_invoke(
         "rye" => {
             // A `ref:` selects the service-invocation form (args → `/execute`
             // parameters); otherwise it's grammar-token dispatch.
+            // The success-notice template is rendered later against the result
+            // outcome (`{result.<field>}`), so it is carried raw, not
+            // payload-substituted here.
+            let notice = invoke
+                .get("notice")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             if let Some(item_ref) = invoke.get("ref").and_then(Value::as_str) {
                 Some(AffordanceInvoke::Service {
                     item_ref: item_ref.to_string(),
@@ -936,6 +951,7 @@ pub fn resolve_affordance_invoke(
                         .get("args")
                         .map(|args| substitute_payload(args, payload))
                         .unwrap_or(Value::Null),
+                    notice,
                 })
             } else {
                 Some(AffordanceInvoke::Rye {
@@ -950,6 +966,7 @@ pub fn resolve_affordance_invoke(
                         .get("args")
                         .map(|args| substitute_payload(args, payload))
                         .unwrap_or(Value::Null),
+                    notice,
                 })
             }
         }
@@ -1596,6 +1613,7 @@ mod tests {
             AffordanceInvoke::Service {
                 item_ref: "service:commands/submit".into(),
                 args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
+                notice: None,
             }
         );
     }
@@ -1613,6 +1631,7 @@ mod tests {
             AffordanceInvoke::Rye {
                 tokens: vec!["thread".into(), "input".into()],
                 args: json!({ "line": "hello world" }),
+                notice: None,
             }
         );
     }

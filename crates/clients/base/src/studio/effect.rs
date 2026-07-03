@@ -82,6 +82,19 @@ pub enum StudioEffectKind {
     Invoke {
         target: InvokeRef,
         params: Value,
+        /// Whether this invocation launches/continues a conversation (`Launch`)
+        /// or is a discrete service/command action (`Service`). Recorded at
+        /// ISSUE time from the emit site — each site knows which it is — so the
+        /// result handler branches on intent, never on the target ref. A
+        /// `Service` result refreshes and preserves the input; a `Launch`
+        /// result runs the delivery/ratchet tower.
+        intent: InvokeIntent,
+        /// Optional success-notice template carried from the invoking affordance
+        /// (`notice:` in the affordance schema). Rendered against the result's
+        /// outcome fields (`{result.<field>}`) when the invocation succeeds;
+        /// falls back to the generic success notice when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        success_notice: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route_seq: Option<u64>,
         /// Whether a successful launch should ratchet the seat route onto the
@@ -135,6 +148,21 @@ pub enum StudioEffectResultKind {
     Commands,
     SourceData,
     BrowserOnly,
+}
+
+/// Whether a generic invocation launches/continues a conversation or is a
+/// discrete service/command action. Set at the emit site (each site knows its
+/// own intent); the result handler branches on this rather than sniffing the
+/// target ref — the structural facts (`route_seq`/`ratchet`) are ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvokeIntent {
+    /// Launches or continues a conversation (the routed foot input); the result
+    /// runs the delivery/ratchet tower.
+    Launch,
+    /// A discrete service or command action (row-management affordances); the
+    /// result refreshes the affected surface and preserves the input.
+    Service,
 }
 
 /// Target forms for the generic invocation: a canonical item ref, or

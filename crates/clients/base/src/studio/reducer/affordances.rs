@@ -70,18 +70,30 @@ impl StudioCore {
                 merge,
                 open_view,
             }) => self.apply_ui_affordance(facet, value, merge, open_view),
-            Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
+            Some(super::content::AffordanceInvoke::Rye {
+                tokens,
+                args,
+                notice,
+            }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: args,
+                    intent: super::effect::InvokeIntent::Service,
+                    success_notice: notice,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
             }
-            Some(super::content::AffordanceInvoke::Service { item_ref, args }) => {
+            Some(super::content::AffordanceInvoke::Service {
+                item_ref,
+                args,
+                notice,
+            }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
+                    intent: super::effect::InvokeIntent::Service,
+                    success_notice: notice,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]

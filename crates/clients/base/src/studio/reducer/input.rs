@@ -341,6 +341,8 @@ impl StudioCore {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: serde_json::json!({}),
+                    intent: super::effect::InvokeIntent::Launch,
+                    success_notice: None,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
@@ -385,6 +387,8 @@ impl StudioCore {
                         vec![self.emit(StudioEffectKind::Invoke {
                             target: super::effect::InvokeRef::Ref { item_ref },
                             params,
+                            intent: super::effect::InvokeIntent::Launch,
+                            success_notice: None,
                             route_seq,
                             ratchet_on_thread_id,
                         })]
@@ -394,6 +398,8 @@ impl StudioCore {
                         vec![self.emit(StudioEffectKind::Invoke {
                             target: super::effect::InvokeRef::Tokens { tokens },
                             params: serde_json::json!({}),
+                            intent: super::effect::InvokeIntent::Launch,
+                            success_notice: None,
                             route_seq,
                             ratchet_on_thread_id,
                         })]
@@ -445,18 +451,30 @@ impl StudioCore {
                 self.clear_focused_input();
                 effects
             }
-            Some(super::content::AffordanceInvoke::Rye { tokens, args }) => {
+            Some(super::content::AffordanceInvoke::Rye {
+                tokens,
+                args,
+                notice,
+            }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Tokens { tokens },
                     params: args,
+                    intent: super::effect::InvokeIntent::Service,
+                    success_notice: notice,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
             }
-            Some(super::content::AffordanceInvoke::Service { item_ref, args }) => {
+            Some(super::content::AffordanceInvoke::Service {
+                item_ref,
+                args,
+                notice,
+            }) => {
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
+                    intent: super::effect::InvokeIntent::Service,
+                    success_notice: notice,
                     route_seq: None,
                     ratchet_on_thread_id: false,
                 })]
