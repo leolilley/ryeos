@@ -540,6 +540,35 @@ impl StudioCore {
                 Some(serde_json::json!({ "thread": thread_id })),
                 None,
             ),
+            StudioAction::PrefillRetryTurn {
+                thread_id,
+                chain_root_id,
+                input,
+            } => {
+                if self.is_read_only() {
+                    self.notice("This session is read-only.", StudioTone::Warn);
+                    return Vec::new();
+                }
+                // Retarget the route at the SELECTED failed thread — not the
+                // current head, which the ratchet has advanced past — so the
+                // next submit continues THAT turn into a fresh successor. Merge
+                // so any other route fields (e.g. the directive) survive.
+                let effects = self.apply_ui_affordance(
+                    super::seat::KEY_INPUT_ROUTE.to_string(),
+                    None,
+                    Some(serde_json::json!({ "thread": thread_id, "chain_root": chain_root_id })),
+                    None,
+                );
+                // Stage the failed turn's stimulus for review; the operator
+                // presses Enter to resubmit through the normal submit path. No
+                // Invoke here — retry is pre-fill, not one-click.
+                if let Some(buffer) = self.focused_input_buffer_mut() {
+                    let cursor = input.len();
+                    buffer.set_text(input, cursor);
+                }
+                self.bump_generation();
+                effects
+            }
             StudioAction::InspectSummary { title, detail } => {
                 self.seat.append_facet(
                     super::seat::KEY_SELECTION,
@@ -1370,5 +1399,172 @@ mod tests {
         });
         assert!(effects.is_empty());
         assert!(!core.ui.notices.is_empty());
+    }
+
+    #[test]
+    fn inspect_summary_writes_the_facet_and_a_summary_inspector_renders_it() {
+        // The correction a prior prototype missed: writing `selection.summary`
+        // is not enough — a view must READ it. The summary-capable inspector is
+        // facet-backed (renders `selection.summary` directly, no service round
+        // trip) so an inspected error terminal is actually visible.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view_value(
+            &mut core,
+            "view:ryeos/item/inspector",
+            serde_json::json!({
+                "widget": "key_value",
+                "facet": "selection.summary",
+                "source": {
+                    "ref": "service:ui/studio/item/inspect",
+                    "params": { "canonical_ref": "@facet:selection.item" }
+                },
+                "projections": { "detail": ["canonical_ref", "title", "detail"] },
+                "refresh": { "on_facet": "selection" }
+            }),
+        );
+        // Open the right slot so the inspector renders in the dock plane.
+        core.ui.docks.right.as_mut().unwrap().visible = true;
+
+        // Enter on a failed feed line → InspectSummary (title = the visible line,
+        // detail = the full raw event).
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::InspectSummary {
+                    title: "failed — boom".to_string(),
+                    detail: serde_json::json!({
+                        "event_type": "thread_failed",
+                        "thread_id": "T-1",
+                        "payload": { "error": { "message": "boom" } }
+                    }),
+                },
+            },
+        });
+
+        // The facet carries the summary …
+        let fold = core.seat.fold();
+        assert_eq!(fold.get("selection").unwrap()["summary"]["title"], "failed — boom");
+
+        // … and the inspector actually RENDERS it.
+        let vm = build_view_model(&core);
+        let dock = vm.workspace.docks.right.expect("right dock open");
+        let rows = match dock.view {
+            crate::studio::view_model::StudioViewVm::Rows { rows, .. } => rows,
+            other => panic!("expected the key_value inspector to render rows, got {other:?}"),
+        };
+        assert!(
+            rows.iter()
+                .any(|row| row.primary.starts_with("title:") && row.primary.contains("failed — boom")),
+            "the inspector renders the summary title: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.primary.starts_with("detail:") && row.primary.contains("thread_failed")),
+            "the inspector renders the full-event detail: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn prefill_retry_turn_retargets_route_and_stages_input() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core);
+        // A later thread is the current head (the ratchet advanced past the
+        // failed turn); retry must retarget at the SELECTED failed thread.
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({
+                "invoke": { "type": "service", "ref": "service:threads/input" },
+                "thread": "T-head",
+                "chain_root": "R-head"
+            }),
+        );
+
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::PrefillRetryTurn {
+                    thread_id: "T-failed".to_string(),
+                    chain_root_id: "R-1".to_string(),
+                    input: "run the thing".to_string(),
+                },
+            },
+        });
+
+        let route = core.seat.fold().input_route();
+        assert_eq!(
+            route.thread.as_deref(),
+            Some("T-failed"),
+            "route retargets at the selected failed thread, not the ratcheted head"
+        );
+        assert_eq!(route.chain_root.as_deref(), Some("R-1"));
+        assert_eq!(focused_input_text(&core), "run the thing", "the failed turn's input is staged");
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e.kind, StudioEffectKind::Invoke { .. })),
+            "retry is pre-fill, not one-click — no submit is emitted"
+        );
+    }
+
+    #[test]
+    fn prefill_retry_turn_read_only_is_a_noop_with_notice() {
+        let mut core = StudioCore::new(session(), BrowserViewport::default(), 0); // read-only
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::PrefillRetryTurn {
+                    thread_id: "T-failed".to_string(),
+                    chain_root_id: "R-1".to_string(),
+                    input: "run".to_string(),
+                },
+            },
+        });
+        assert!(effects.is_empty());
+        assert_eq!(focused_input_text(&core), "", "read-only stages nothing");
+        assert!(
+            core.seat.fold().input_route().thread.is_none(),
+            "read-only does not retarget the route"
+        );
+        assert!(core.ui.notices.iter().any(|n| n.message.contains("read-only")));
+    }
+
+    #[test]
+    fn retry_prefill_then_submit_continues_the_selected_failed_thread() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_input_view(&mut core);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({
+                "invoke": { "type": "service", "ref": "service:threads/input" },
+                "params": { "directive": "directive:demo/base" },
+                "thread": "T-head",
+                "chain_root": "R-head"
+            }),
+        );
+
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::PrefillRetryTurn {
+                    thread_id: "T-failed".to_string(),
+                    chain_root_id: "R-1".to_string(),
+                    input: "retry me".to_string(),
+                },
+            },
+        });
+        assert_eq!(focused_input_text(&core), "retry me");
+
+        // The operator reviews, then Enter → the normal submit path, now aimed
+        // at the selected failed thread (a continuation), not the prior head.
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit emits an effect");
+        let StudioEffectKind::Invoke { params, .. } = &effect.kind else {
+            panic!("submit emits an Invoke, got {:?}", effect.kind);
+        };
+        assert_eq!(
+            params["thread"], "T-failed",
+            "the resubmit continues the selected failed thread"
+        );
+        assert_eq!(params["input"], "retry me");
     }
 }

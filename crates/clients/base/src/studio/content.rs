@@ -65,6 +65,15 @@ pub struct ViewBinding {
     /// Open JSON — projected by renderers, never typed per-view.
     #[serde(default)]
     pub body: Value,
+    /// A seat-fold facet path this view renders directly as its data, in
+    /// place of a service fetch — e.g. an inspector showing `selection.summary`
+    /// (an inline event detail written by an inspect action) without a round
+    /// trip. Reuses the `@facet:` grammar: when the facet resolves to a value
+    /// it becomes the view's response; when it is absent the view falls back
+    /// to its `source` fetch. Mechanism, not a view ref — the engine names no
+    /// view, only a fold path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
     /// Row-activation binding intrinsic to the `rows` widget:

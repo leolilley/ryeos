@@ -51,9 +51,16 @@ pub enum StudioTimelineEntryVm {
         tone: StudioTone,
         /// What activating this entry (Enter on the point) does — e.g. a
         /// forked-subthread line aims the route at that child thread so the
-        /// feed re-projects to its braid. Most lines carry no action.
+        /// feed re-projects to its braid; an error terminal inspects its full
+        /// structured error. Most lines carry no action.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<StudioAction>,
+        /// A second affordance for this entry, surfaced through the launcher
+        /// (its Shift+Enter secondary and a distinct context item) rather than
+        /// a direct key — e.g. "retry this failed turn" beside the entry's
+        /// Enter=inspect action. Most lines carry none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secondary_action: Option<StudioAction>,
     },
     Pair {
         summary: String,
@@ -141,6 +148,11 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
     let mut entries = Vec::new();
     let mut pending_flow: Option<(String, StudioTone)> = None;
     let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
+    // Turn-opening stimulus text per thread, so a failed terminal can recover
+    // its own input for retry without mis-attributing across interleaved
+    // chains. Prescanned before the render loop so a failed event finds its
+    // stimulus regardless of iteration order.
+    let stimulus = stimulus_by_thread(&records);
 
     for record in records {
         // Plumbing/stream lifecycle events are the substrate's bookkeeping,
@@ -152,7 +164,7 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
         }
         // Execution milestones (lifecycle, usage, forks) read as an
         // execution, not as bare default-projection lines.
-        if let Some(entry) = execution_entry(&record) {
+        if let Some(entry) = execution_entry(&record, &stimulus) {
             flush_flow(&mut pending_flow, &mut entries);
             entries.push(entry);
             continue;
@@ -178,6 +190,7 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
                     meta: None,
                     tone: StudioTone::Accent,
                     action: None,
+                    secondary_action: None,
                 });
                 continue;
             }
@@ -293,6 +306,7 @@ pub(crate) fn append_live_delta(core: &StudioCore, entries: &mut Vec<StudioTimel
             meta: None,
             tone: StudioTone::Accent,
             action: None,
+            secondary_action: None,
         });
     }
 }
@@ -312,6 +326,7 @@ fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
         meta: record.meta,
         tone: tone_from_name(record.tone.as_deref()),
         action: None,
+        secondary_action: None,
     }
 }
 
@@ -420,22 +435,20 @@ fn is_interrupted_cognition_out(record: &ProjectedRecord) -> bool {
 /// distinguishes them: ✓ done, ✗ failed, ! warned, › forked). Returns `None`
 /// for every other event so the role-based handling still applies. Best-effort
 /// on payload fields — never panics on a missing/odd shape.
-fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
+fn execution_entry(
+    record: &ProjectedRecord,
+    stimulus: &std::collections::BTreeMap<String, String>,
+) -> Option<StudioTimelineEntryVm> {
     let payload = record.raw.get("payload");
     let event = feed_event_type(record)?;
     let (primary, meta, tone) = match event {
         FeedEventType::ThreadCompleted => ("completed".to_string(), None, StudioTone::Good),
-        FeedEventType::ThreadFailed => (
-            match failure_reason(payload) {
-                Some(reason) => format!("failed — {reason}"),
-                None => "failed".to_string(),
-            },
-            None,
-            StudioTone::Danger,
-        ),
+        FeedEventType::ThreadFailed => (terminal_reason("failed", payload), None, StudioTone::Danger),
         FeedEventType::ThreadCancelled => ("cancelled".to_string(), None, StudioTone::Warn),
-        FeedEventType::ThreadKilled => ("killed".to_string(), None, StudioTone::Danger),
-        FeedEventType::ThreadTimedOut => ("timed out".to_string(), None, StudioTone::Warn),
+        FeedEventType::ThreadKilled => (terminal_reason("killed", payload), None, StudioTone::Danger),
+        FeedEventType::ThreadTimedOut => {
+            (terminal_reason("timed out", payload), None, StudioTone::Warn)
+        }
         FeedEventType::ChildThreadSpawned => (
             "forked subthread".to_string(),
             payload.and_then(child_thread_ref),
@@ -444,20 +457,107 @@ fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
         FeedEventType::ThreadUsage => (usage_summary(payload?)?, None, StudioTone::Neutral),
         _ => return None,
     };
-    // A forked subthread is navigable: activating it aims the route at the
-    // child so the feed re-projects to that subthread's braid.
-    let action = match event {
-        FeedEventType::ChildThreadSpawned => meta
-            .clone()
-            .map(|thread_id| StudioAction::AimThread { thread_id }),
-        _ => None,
+    // What activating this entry does, and its launcher-secondary affordance:
+    // - a forked subthread is navigable (Enter aims the route at the child);
+    // - an error-like terminal (failed / timed out / killed) is inspectable
+    //   (Enter opens its full structured error), and a *recoverable* failed
+    //   turn additionally offers retry — re-submitting its own stimulus as a
+    //   continuation. timed_out / killed are inspectable but NOT retryable:
+    //   the daemon refuses continuation for those settled statuses (v1).
+    let (action, secondary_action) = match event {
+        FeedEventType::ChildThreadSpawned => (
+            meta.clone().map(|thread_id| StudioAction::AimThread { thread_id }),
+            None,
+        ),
+        FeedEventType::ThreadFailed => (
+            Some(inspect_action(&primary, record)),
+            retry_action(record, stimulus),
+        ),
+        FeedEventType::ThreadKilled | FeedEventType::ThreadTimedOut => {
+            (Some(inspect_action(&primary, record)), None)
+        }
+        _ => (None, None),
     };
     Some(StudioTimelineEntryVm::Line {
         primary,
         meta,
         tone,
         action,
+        secondary_action,
     })
+}
+
+/// A terminal-status line label carrying the failure cause when the daemon
+/// attached one. The cause is surfaced for every error-like terminal (the
+/// daemon writes `error` onto failed / timed-out / killed payloads alike), not
+/// just `thread_failed`, so an interleaved chain reads *why* each turn settled.
+fn terminal_reason(status: &str, payload: Option<&Value>) -> String {
+    match failure_reason(payload) {
+        Some(reason) => format!("{status} — {reason}"),
+        None => status.to_string(),
+    }
+}
+
+/// The inspect action for an error terminal: the title is the visible line
+/// (carrying `failed — <reason>`), the detail is the FULL raw event —
+/// `{ event_type, thread_id, chain_root_id, chain_seq, payload, … }` — not
+/// just the payload, so inspecting a failure in an interleaved chain shows
+/// which turn (and sequence) it was.
+fn inspect_action(title: &str, record: &ProjectedRecord) -> StudioAction {
+    StudioAction::InspectSummary {
+        title: title.to_string(),
+        detail: record.raw.clone(),
+    }
+}
+
+/// The retry action for a recoverable failed turn: re-submit that thread's own
+/// stimulus as a continuation, retargeted at the selected failed thread.
+/// `None` unless BOTH the thread's chain coordinates and its stimulus text are
+/// known — a marker-only turn (`cognition_in` with no `content`) yields no
+/// retry input, and correlation is keyed by `thread_id` so interleaved chains
+/// never cross-attribute.
+fn retry_action(
+    record: &ProjectedRecord,
+    stimulus: &std::collections::BTreeMap<String, String>,
+) -> Option<StudioAction> {
+    let thread_id = record.raw.get("thread_id").and_then(Value::as_str)?;
+    let chain_root_id = record.raw.get("chain_root_id").and_then(Value::as_str)?;
+    let input = stimulus.get(thread_id)?.clone();
+    Some(StudioAction::PrefillRetryTurn {
+        thread_id: thread_id.to_string(),
+        chain_root_id: chain_root_id.to_string(),
+        input,
+    })
+}
+
+/// Map each thread's turn-opening stimulus text, keyed by `thread_id`. Only a
+/// `cognition_in` carrying `content` (the operator's stimulus, not a bare turn
+/// marker) contributes — the safe, correlated source for retry input (thread
+/// records / launch metadata are deliberately NOT used: they can hold
+/// arbitrary sensitive parameters).
+fn stimulus_by_thread(
+    records: &[ProjectedRecord],
+) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for record in records {
+        if feed_event_type(record) != Some(FeedEventType::CognitionIn) {
+            continue;
+        }
+        let Some(thread_id) = record.raw.get("thread_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(content) = record
+            .raw
+            .get("payload")
+            .and_then(|payload| payload.get("content"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|content| !content.is_empty())
+        {
+            map.insert(thread_id.to_string(), content.to_string());
+        }
+    }
+    map
 }
 
 /// A compact settlement summary from a `thread_usage` payload (the serialized
@@ -601,9 +701,16 @@ mod tests {
         }
     }
 
+    /// `execution_entry` with no correlated stimulus — the common case for the
+    /// per-event label/tone assertions (retry correlation is exercised
+    /// separately with a populated stimulus map).
+    fn exec(raw: serde_json::Value) -> Option<StudioTimelineEntryVm> {
+        execution_entry(&raw_record(raw), &std::collections::BTreeMap::new())
+    }
+
     #[test]
     fn execution_entry_labels_terminal_status() {
-        let entry = execution_entry(&raw_record(json!({ "event_type": "thread_completed" })));
+        let entry = exec(json!({ "event_type": "thread_completed" }));
         let Some(StudioTimelineEntryVm::Line { primary, tone, .. }) = entry else {
             panic!("expected a status line");
         };
@@ -669,10 +776,10 @@ mod tests {
     fn execution_entry_carries_failure_message() {
         // Real shape: state_store surfaces the reason under `error` in the
         // thread_failed event payload (+ a stable outcome_code).
-        let entry = execution_entry(&raw_record(json!({
+        let entry = exec(json!({
             "event_type": "thread_failed",
             "payload": { "error": { "message": "boom" }, "outcome_code": "launch_augmentation_failed" }
-        })));
+        }));
         let Some(StudioTimelineEntryVm::Line { primary, tone, .. }) = entry else {
             panic!("expected a failure line");
         };
@@ -685,7 +792,7 @@ mod tests {
         // The structured error envelope (StructuredErrorPayload) carries its
         // human message in `error.error`, not `error.message`. Surface that
         // (e.g. which secret is missing) instead of the terse outcome_code.
-        let entry = execution_entry(&raw_record(json!({
+        let entry = exec(json!({
             "event_type": "thread_failed",
             "payload": {
                 "outcome_code": "required_secret_missing",
@@ -695,7 +802,7 @@ mod tests {
                     "env_var": "ZEN_API_KEY"
                 }
             }
-        })));
+        }));
         assert!(matches!(
             entry,
             Some(StudioTimelineEntryVm::Line { primary, .. })
@@ -705,16 +812,16 @@ mod tests {
 
     #[test]
     fn execution_entry_failure_falls_back_to_outcome_code_then_plain() {
-        let coded = execution_entry(&raw_record(json!({
+        let coded = exec(json!({
             "event_type": "thread_failed",
             "payload": { "outcome_code": "timed_out" }
-        })));
+        }));
         assert!(matches!(
             coded,
             Some(StudioTimelineEntryVm::Line { primary, .. }) if primary == "failed — timed_out"
         ));
 
-        let bare = execution_entry(&raw_record(json!({ "event_type": "thread_failed" })));
+        let bare = exec(json!({ "event_type": "thread_failed" }));
         assert!(matches!(
             bare,
             Some(StudioTimelineEntryVm::Line { primary, .. }) if primary == "failed"
@@ -723,13 +830,13 @@ mod tests {
 
     #[test]
     fn execution_entry_composes_usage_summary() {
-        let entry = execution_entry(&raw_record(json!({
+        let entry = exec(json!({
             "event_type": "thread_usage",
             "payload": {
                 "input_tokens": 1200, "output_tokens": 3400,
                 "spend_usd": 0.0123, "completed_turns": 3
             }
-        })));
+        }));
         let Some(StudioTimelineEntryVm::Line { primary, tone, .. }) = entry else {
             panic!("expected a usage line");
         };
@@ -740,9 +847,9 @@ mod tests {
     #[test]
     fn execution_entry_ignores_non_milestone_and_untyped_records() {
         // A cognition event is handled by the role path, not here.
-        assert!(execution_entry(&raw_record(json!({ "event_type": "cognition_out" }))).is_none());
+        assert!(exec(json!({ "event_type": "cognition_out" })).is_none());
         // A record with no event_type (e.g. the test `record` helper shape).
-        assert!(execution_entry(&raw_record(json!({ "primary": "x" }))).is_none());
+        assert!(exec(json!({ "primary": "x" })).is_none());
     }
 
     #[test]
@@ -833,10 +940,10 @@ mod tests {
     fn child_thread_entry_is_actionable_aims_the_route() {
         // A forked subthread is a navigable feed entry: activating it aims
         // the route at the child so the feed re-projects to its braid.
-        let entry = execution_entry(&raw_record(json!({
+        let entry = exec(json!({
             "event_type": "child_thread_spawned",
             "payload": { "child_thread_id": "T-child" }
-        })));
+        }));
         let Some(StudioTimelineEntryVm::Line { meta, action, .. }) = entry else {
             panic!("expected a forked-subthread line");
         };
@@ -849,11 +956,182 @@ mod tests {
 
     #[test]
     fn ordinary_milestone_entries_carry_no_action() {
-        let entry = execution_entry(&raw_record(json!({ "event_type": "thread_completed" })));
+        let entry = exec(json!({ "event_type": "thread_completed" }));
         assert!(matches!(
             entry,
-            Some(StudioTimelineEntryVm::Line { action: None, .. })
+            Some(StudioTimelineEntryVm::Line {
+                action: None,
+                secondary_action: None,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn error_terminals_are_inspectable_but_completed_and_cancelled_are_not() {
+        // failed / timed_out / killed each carry an inspect (Enter) action whose
+        // title is the visible line and whose detail is the FULL raw event.
+        for event_type in ["thread_failed", "thread_timed_out", "thread_killed"] {
+            let raw = json!({
+                "event_type": event_type,
+                "thread_id": "T-1",
+                "chain_root_id": "R-1",
+                "chain_seq": 7,
+                "payload": { "error": { "message": "boom" } }
+            });
+            let entry = exec(raw.clone());
+            let Some(StudioTimelineEntryVm::Line { primary, action, .. }) = entry else {
+                panic!("expected a terminal line for {event_type}");
+            };
+            match action {
+                Some(StudioAction::InspectSummary { title, detail }) => {
+                    assert_eq!(title, primary, "inspect title is the visible line");
+                    assert_eq!(detail, raw, "inspect detail is the full raw event");
+                }
+                other => panic!("{event_type} should be inspectable, got {other:?}"),
+            }
+        }
+        // completed / cancelled are NOT errors — no inspect, no retry.
+        for event_type in ["thread_completed", "thread_cancelled"] {
+            let entry = exec(json!({ "event_type": event_type }));
+            assert!(
+                matches!(
+                    entry,
+                    Some(StudioTimelineEntryVm::Line {
+                        action: None,
+                        secondary_action: None,
+                        ..
+                    })
+                ),
+                "{event_type} carries neither inspect nor retry"
+            );
+        }
+    }
+
+    #[test]
+    fn only_failed_offers_retry_and_only_when_the_stimulus_is_known() {
+        let mut stimulus = std::collections::BTreeMap::new();
+        stimulus.insert("T-1".to_string(), "run the thing".to_string());
+
+        let failed = json!({
+            "event_type": "thread_failed",
+            "thread_id": "T-1",
+            "chain_root_id": "R-1",
+            "payload": { "error": { "message": "boom" } }
+        });
+        // failed + known stimulus → retry pre-fills that turn's own input,
+        // retargeted at the selected failed thread.
+        let Some(StudioTimelineEntryVm::Line { secondary_action, .. }) =
+            execution_entry(&raw_record(failed.clone()), &stimulus)
+        else {
+            panic!("expected a failed line");
+        };
+        assert!(
+            matches!(
+                secondary_action,
+                Some(StudioAction::PrefillRetryTurn { thread_id, chain_root_id, input })
+                    if thread_id == "T-1" && chain_root_id == "R-1" && input == "run the thing"
+            ),
+            "retry recovers the failed thread's own stimulus"
+        );
+
+        // failed but stimulus unknown (marker-only turn / missing) → inspect
+        // only, no retry input to offer.
+        let Some(StudioTimelineEntryVm::Line { action, secondary_action, .. }) =
+            execution_entry(&raw_record(failed), &std::collections::BTreeMap::new())
+        else {
+            panic!("expected a failed line");
+        };
+        assert!(matches!(action, Some(StudioAction::InspectSummary { .. })));
+        assert!(secondary_action.is_none(), "no stimulus → no retry");
+
+        // timed_out / killed are inspectable but NOT retryable even with a known
+        // stimulus — the daemon refuses continuation for those statuses (v1).
+        for event_type in ["thread_timed_out", "thread_killed"] {
+            let raw = json!({
+                "event_type": event_type,
+                "thread_id": "T-1",
+                "chain_root_id": "R-1",
+                "payload": {}
+            });
+            let Some(StudioTimelineEntryVm::Line { action, secondary_action, .. }) =
+                execution_entry(&raw_record(raw), &stimulus)
+            else {
+                panic!("expected a terminal line for {event_type}");
+            };
+            assert!(matches!(action, Some(StudioAction::InspectSummary { .. })));
+            assert!(
+                secondary_action.is_none(),
+                "{event_type} is inspectable but not retryable"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_stimulus_is_keyed_by_thread_so_interleaved_chains_dont_cross_attribute() {
+        // Two turns interleaved: T-1's stimulus and T-2's stimulus, then T-1
+        // fails. The retry input must be T-1's own stimulus, never T-2's.
+        let records = vec![
+            raw_record(json!({
+                "event_type": "cognition_in",
+                "thread_id": "T-1",
+                "payload": { "content": "first turn" }
+            })),
+            raw_record(json!({
+                "event_type": "cognition_in",
+                "thread_id": "T-2",
+                "payload": { "content": "second turn" }
+            })),
+            raw_record(json!({
+                "event_type": "thread_failed",
+                "thread_id": "T-1",
+                "chain_root_id": "R-1",
+                "payload": { "error": { "message": "boom" } }
+            })),
+        ];
+        let entries = timeline_entries(records);
+        let retry = entries.iter().find_map(|entry| match entry {
+            StudioTimelineEntryVm::Line {
+                secondary_action: Some(StudioAction::PrefillRetryTurn { input, thread_id, .. }),
+                ..
+            } => Some((thread_id.clone(), input.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            retry,
+            Some(("T-1".to_string(), "first turn".to_string())),
+            "retry recovers T-1's own stimulus, not the interleaved T-2's"
+        );
+    }
+
+    #[test]
+    fn marker_only_cognition_in_yields_no_retry_input() {
+        // A bare turn marker (no `content`) contributes no stimulus, so a
+        // failure on that thread is inspectable but not retryable.
+        let records = vec![
+            raw_record(json!({
+                "event_type": "cognition_in",
+                "thread_id": "T-1",
+                "payload": { "turn": 2 }
+            })),
+            raw_record(json!({
+                "event_type": "thread_failed",
+                "thread_id": "T-1",
+                "chain_root_id": "R-1",
+                "payload": {}
+            })),
+        ];
+        let entries = timeline_entries(records);
+        assert!(
+            entries.iter().all(|entry| !matches!(
+                entry,
+                StudioTimelineEntryVm::Line {
+                    secondary_action: Some(_),
+                    ..
+                }
+            )),
+            "a marker-only turn offers no retry"
+        );
     }
 
     #[test]

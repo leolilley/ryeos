@@ -1,9 +1,14 @@
 # ryeos:signed:2026-06-13T10:31:03Z:bf52ce54e879b0f8f64b7f3e878318f52cfa380f54c00b7ed707e87f814376f7:rJeMDNG13sPoBUpAo6bRT+XgGSnpR09ubXqYaPBXIh8R16rcxsjpdmRteIdZ+ywM86rLMOpCNcWP+mYB9/SnDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-inspector
 version: "1.0.0"
-description: Key-value inspection of the selected item, provenance first
+description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
 
 widget: key_value
+# An inspect action can write an inline `selection.summary` ({title, detail})
+# — e.g. Enter on a failed feed line stages the full structured error. When
+# present it renders directly (no round trip); otherwise the view falls back to
+# the item-inspect fetch below against `selection.item`.
+facet: selection.summary
 source:
   ref: service:ui/studio/item/inspect
   params:
@@ -18,5 +23,7 @@ projections:
     - signer
     - version
     - description
+    - title
+    - detail
 refresh:
   on_facet: selection
