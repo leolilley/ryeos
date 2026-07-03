@@ -745,7 +745,9 @@ mod tests {
             now_ms: 0,
         });
 
-        assert_eq!(effects.len(), 4);
+        // Dimension + Projects + Topology. Completion/commands is fetched only
+        // for inputs that declare it (this fixture's input does not).
+        assert_eq!(effects.len(), 3);
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
