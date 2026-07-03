@@ -158,6 +158,12 @@ impl StudioCore {
             .is_some_and(row_is_suspended_parent)
     }
 
+    /// Route-cycle candidate (not built): while a parent is suspended on a
+    /// follow, its CHILD chain (`follow.child_chain_root_id` on the parent
+    /// row) is the natural steering target — the child is what's running.
+    /// Today the suspended parent is only excluded; offering the child in the
+    /// cycle needs the child's row to be in the fetched page and a de-dup
+    /// against its own chain entry. Build when follow steering demands it.
     pub(crate) fn input_target_chains(&self) -> Vec<(String, String)> {
         let Some(threads) = self.data.threads.as_ref() else {
             return Vec::new();
