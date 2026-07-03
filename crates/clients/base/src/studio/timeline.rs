@@ -334,6 +334,7 @@ enum FeedEventType {
     ThreadCreated,
     ThreadStarted,
     ThreadContinued,
+    GraphFollowSuspended,
     StreamOpened,
     StreamClosed,
     StreamSnapshot,
@@ -356,6 +357,7 @@ impl FeedEventType {
             "thread_created" => Self::ThreadCreated,
             "thread_started" => Self::ThreadStarted,
             "thread_continued" => Self::ThreadContinued,
+            "graph_follow_suspended" => Self::GraphFollowSuspended,
             "stream_opened" => Self::StreamOpened,
             "stream_closed" => Self::StreamClosed,
             "stream_snapshot" => Self::StreamSnapshot,
@@ -441,6 +443,18 @@ fn execution_entry(record: &ProjectedRecord) -> Option<StudioTimelineEntryVm> {
             payload.and_then(child_thread_ref),
             StudioTone::Accent,
         ),
+        // A graph `follow:` node suspended the run (`continued`) to await its
+        // child chain. Renders as a boundary milestone — the follow node in the
+        // meta — but carries NO drill-in action: the suspend event names only
+        // the local follow node, never the child chain (it is dispatched after
+        // the checkpoint), so there is no child ref to aim at. The child braid is
+        // reached from the thread row's `watch child` affordance, which reads the
+        // waiter-sourced `follow.child_chain_root_id` off the projection.
+        FeedEventType::GraphFollowSuspended => (
+            "suspended · following child".to_string(),
+            payload.and_then(follow_suspend_node),
+            StudioTone::Accent,
+        ),
         FeedEventType::ThreadUsage => (usage_summary(payload?)?, None, StudioTone::Neutral),
         _ => return None,
     };
@@ -487,6 +501,15 @@ fn compact_count(n: u64) -> String {
     } else {
         format!("{:.1}k", n as f64 / 1000.0)
     }
+}
+
+/// The follow node id from a `graph_follow_suspended` payload (the graph node
+/// that issued the `follow:`); shown as the milestone meta.
+fn follow_suspend_node(payload: &Value) -> Option<String> {
+    payload
+        .get("node")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Best-effort child thread id from a `child_thread_spawned` payload, across
@@ -845,6 +868,25 @@ mod tests {
             matches!(action, Some(StudioAction::AimThread { thread_id }) if thread_id == "T-child"),
             "the entry aims the route at the child thread"
         );
+    }
+
+    #[test]
+    fn graph_follow_suspend_renders_a_boundary_milestone_without_a_drill_in() {
+        // The suspend event names only the local follow node (the child chain is
+        // dispatched after the checkpoint), so it renders as an accent milestone
+        // with the follow node in the meta and NO action — there is no child ref
+        // to aim at (drill-in to the child is the row's `watch child` affordance).
+        let entry = execution_entry(&raw_record(json!({
+            "event_type": "graph_follow_suspended",
+            "payload": { "node": "fetch", "item_id": "root", "step": 3 }
+        })));
+        let Some(StudioTimelineEntryVm::Line { primary, meta, tone, action }) = entry else {
+            panic!("expected a suspend milestone line");
+        };
+        assert_eq!(primary, "suspended · following child");
+        assert_eq!(meta.as_deref(), Some("fetch"));
+        assert!(matches!(tone, StudioTone::Accent));
+        assert!(action.is_none(), "the suspend event carries no child ref to drill into");
     }
 
     #[test]

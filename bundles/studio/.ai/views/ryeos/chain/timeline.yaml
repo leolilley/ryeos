@@ -60,6 +60,16 @@ projections:
         map:
           cost_untracked: warn
         default: warn
+    # A graph `follow:` node suspended the run (`continued`) to await its child
+    # chain. The event names only the local follow node — the child chain is
+    # dispatched after the checkpoint, so the payload carries no child ref. The
+    # timeline widget refines this into an accent milestone (see
+    # `execution_entry` in base `studio::timeline`); the boundary projection here
+    # is the declarative record for other consumers.
+    graph_follow_suspended:
+      primary: payload.node
+      meta: payload.item_id
+      role: boundary
   default:
     primary: event_type
     meta: ts

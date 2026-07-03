@@ -113,10 +113,12 @@ impl StudioCore {
             })?;
         // Typed execution facts (no `supports_continuation` string literal).
         // `None` = no execution object on the row (unknown), distinct from an
-        // explicit `Some(false)`.
+        // explicit `Some(false)`. A suspended follow-parent is never
+        // continuation-eligible while suspended: the daemon owns its resume via
+        // the followed child, so the instance follow fact vetoes the kind fact.
         let facts: super::dto::ExecutionFacts =
             serde_json::from_value(row.get("execution")?.clone()).ok()?;
-        Some(facts.supports_continuation)
+        Some(facts.supports_continuation && !row_is_suspended_parent(row))
     }
 
     /// The daemon-authored `execution.supports_operator_followup` for a thread.
@@ -130,7 +132,30 @@ impl StudioCore {
         })?;
         let facts: super::dto::ExecutionFacts =
             serde_json::from_value(row.get("execution")?.clone()).ok()?;
-        Some(facts.supports_operator_followup)
+        // A suspended follow-parent takes no operator input regardless of kind
+        // policy — its resume successor (not it) is the live target. Gating here
+        // means every consumer of this predicate (the input-target list, the
+        // foot-input "continuing" label, the Continue launcher item) excludes a
+        // suspended parent without each re-deriving the follow state.
+        Some(facts.supports_operator_followup && !row_is_suspended_parent(row))
+    }
+
+    /// Whether a thread row is a graph follow SUSPENDED PARENT — issued a
+    /// `follow:` and settled `continued`, awaiting its child chain. Read from the
+    /// typed daemon-authored [`FollowFact`](super::dto::FollowFact) on the row, not
+    /// raw JSON: this is a behavior gate (a suspended parent is never an
+    /// input/interrupt target), exactly the no-stringly rule. Absent `follow`
+    /// object → `false`.
+    pub(crate) fn thread_is_suspended_parent(&self, thread_id: &str) -> bool {
+        self.data
+            .threads
+            .as_ref()
+            .and_then(|threads| {
+                threads.threads.iter().find(|row| {
+                    row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+                })
+            })
+            .is_some_and(row_is_suspended_parent)
     }
 
     pub(crate) fn input_target_chains(&self) -> Vec<(String, String)> {
@@ -163,8 +188,12 @@ impl StudioCore {
             // `execution.supports_operator_followup`, not `supports_continuation`
             // (a graph continues by machine but takes no operator input).
             // Distrust only an explicit `false`; unknown stays offered (the
-            // daemon refuses a real non-followup submit anyway).
-            if self.thread_supports_operator_followup(head) == Some(false) {
+            // daemon refuses a real non-followup submit anyway). A suspended
+            // follow-parent is excluded outright (its successor, not it, is the
+            // live target): the follow fact vetoes even an unknown execution fact.
+            if self.thread_supports_operator_followup(head) == Some(false)
+                || self.thread_is_suspended_parent(head)
+            {
                 continue;
             }
             out.push((root.to_string(), head.to_string()));
@@ -518,6 +547,15 @@ impl StudioCore {
     }
 }
 
+/// Whether a thread projection row carries a follow fact marking it a suspended
+/// parent. Reads the typed [`FollowFact`](super::dto::FollowFact) off the row's
+/// `follow` object; a missing/odd `follow` is not a suspended parent.
+fn row_is_suspended_parent(row: &serde_json::Value) -> bool {
+    row.get("follow")
+        .and_then(|follow| serde_json::from_value::<super::dto::FollowFact>(follow.clone()).ok())
+        .is_some_and(|fact| fact.is_suspended_parent())
+}
+
 /// A route-chain target the input can cycle onto.
 #[derive(Debug, Clone, PartialEq)]
 enum TargetSlot {
@@ -728,6 +766,76 @@ mod tests {
         assert_eq!(core.thread_supports_continuation("T-c"), None, "missing facts → unknown");
         assert_eq!(core.thread_supports_operator_followup("T-c"), None);
         assert_eq!(core.thread_supports_continuation("T-missing"), None);
+    }
+
+    #[test]
+    fn suspended_follow_parent_gates_the_continuation_predicates() {
+        // A suspended parent carries `execution.supports_continuation: true` (a
+        // graph continues by machine) yet must report NOT continuation-eligible
+        // and NOT operator-followup-eligible while suspended — the instance
+        // follow fact vetoes the kind facts.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({
+                "thread_id": "T-parent",
+                "status": "continued",
+                "execution": { "supports_continuation": true, "supports_operator_followup": false },
+                "follow": { "role": "suspended_parent", "phase": "waiting",
+                            "child_chain_root_id": "T-child", "child_terminal_status": null }
+            })],
+        });
+        assert!(core.thread_is_suspended_parent("T-parent"));
+        assert_eq!(
+            core.thread_supports_continuation("T-parent"),
+            Some(false),
+            "a suspended parent is not continuation-eligible while suspended"
+        );
+        assert_eq!(
+            core.thread_supports_operator_followup("T-parent"),
+            Some(false),
+            "a suspended parent takes no operator input"
+        );
+    }
+
+    #[test]
+    fn suspended_follow_parent_is_never_an_input_target() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_service_route(&mut core);
+        // Two single-thread chains: one is a normal operator-followup directive,
+        // the other is a suspended follow-parent (its successor is not yet in the
+        // list, so the parent is the chain head).
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![
+                serde_json::json!({ "thread_id": "T-ok", "chain_root_id": "T-ok",
+                    "execution": { "supports_continuation": true, "supports_operator_followup": true } }),
+                serde_json::json!({ "thread_id": "T-parent", "chain_root_id": "T-parent",
+                    "status": "continued",
+                    "execution": { "supports_continuation": true, "supports_operator_followup": false },
+                    "follow": { "role": "suspended_parent", "child_chain_root_id": "T-child" } }),
+            ],
+        });
+        let targets = core.input_target_chains();
+        assert!(
+            targets.iter().any(|(root, _)| root == "T-ok"),
+            "the ordinary chain is offered: {targets:?}"
+        );
+        assert!(
+            !targets.iter().any(|(root, _)| root == "T-parent"),
+            "the suspended follow-parent is never offered as an input target: {targets:?}"
+        );
+        // Cycling the input target skips straight past the suspended parent.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(core.seat.fold().input_route().chain_root.as_deref(), Some("T-ok"));
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::CycleInputTarget { forward: true },
+        });
+        assert_eq!(
+            core.seat.fold().input_route().chain_root,
+            None,
+            "wraps back to new conversation — the suspended parent was never a slot"
+        );
     }
 
     #[test]
