@@ -20,6 +20,8 @@ use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
 use ryeosd::{bootstrap, lifecycle_marker, reconcile, scheduler, uds};
 
+mod maintenance_schedule;
+
 fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
     static DESCRIPTORS: once_cell::sync::Lazy<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
         once_cell::sync::Lazy::new(|| {
@@ -725,6 +727,13 @@ async fn main() -> Result<()> {
                 }
             }
         });
+    }
+
+    // ── Maintenance schedule: apply the bundle-authored GC schedule so the
+    // scheduler reconcile below projects it like any other node schedule. Runs
+    // before reconcile; never overwrites an operator-paused/edited spec. ──
+    if let Err(err) = maintenance_schedule::ensure_maintenance_schedule(&app_state) {
+        tracing::warn!(error = %err, "failed to apply maintenance schedule");
     }
 
     // ── Scheduler reconciliation + timer start ──
