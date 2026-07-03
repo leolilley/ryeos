@@ -89,14 +89,22 @@ pub struct LimitsSpec {
 
 /// What a directive does at the context-window continuation boundary.
 ///
-/// `false` or absent → **stop** (finalize): take one final turn to emit declared
-/// outputs, then finalize; never spawn a successor. This is the default — a
-/// directive that does not opt in stops at its budget.
+/// `false` or absent → **stop**: finalize immediately with the current state
+/// (the last assistant content). The runtime grants no extra turn and enforces
+/// no declared outputs at the boundary — emitting outputs before the wall (via
+/// `directive_return`) is the directive's own job. This is the default: a
+/// directive that does not opt in stops when its live context reaches the
+/// threshold. (This resolves the limits-design §9.2/§9.3 open questions in the
+/// landed shape: there is no auto-granted final turn, so neither "final-turn
+/// overrun reserve" nor "final turn without `directive_return`" can arise — the
+/// context-threshold ratio is itself the pre-wall reserve.)
 ///
 /// An object → **self-continue**: the same directive resumes across segments
 /// carrying `carry_turns` recent turns. Opt-in. (`true` = enabled with
-/// defaults.) Untagged so `continuation: false` and `continuation: {…}` both
-/// parse from the header.
+/// defaults.) The successor fork fires at the live-context threshold — a
+/// per-segment reserve below the hard context limit — never at the wall.
+/// Untagged so `continuation: false` and `continuation: {…}` both parse from
+/// the header.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum ContinuationConfig {
@@ -323,6 +331,12 @@ pub enum StreamEvent {
         id: Option<String>,
         name: String,
         arguments: Value,
+        /// Set when the streamed argument JSON failed to parse and was
+        /// recovered as `{}` (see [`MalformedArgs`]). `None` on a clean parse.
+        /// Carried so the runner can attach the corruption fact to the
+        /// `tool_use` braid event instead of surfacing a silent empty
+        /// invocation the operator cannot connect to the upstream fault.
+        malformed_args: Option<MalformedArgs>,
     },
     /// Partial tool call argument JSON streamed mid-flight.
     ///
@@ -359,6 +373,18 @@ pub enum StreamEvent {
         reason: FinishReason,
         raw: Option<String>,
     },
+}
+
+/// Diagnostic fact recorded when a streamed tool-call's argument JSON could
+/// not be parsed and was recovered as an empty object. Attached to the
+/// `tool_use` braid event so an operator sees "args corrupted upstream" and can
+/// correlate the empty invocation with the raw bytes by hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedArgs {
+    /// SHA-256 (hex) of the raw, unparseable argument bytes.
+    pub sha256: String,
+    /// Byte length of the raw arguments before recovery.
+    pub raw_len: usize,
 }
 
 /// Normalized finish reason across all provider families.
