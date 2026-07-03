@@ -37,3 +37,7 @@ Instructions for the runtime.
 - `actions`: tool or service actions the runtime may call through callbacks.
 
 Keep directives focused: one job, clear inputs, explicit declared capabilities, and no hidden reliance on project-root provider configs unless trust policy allows it.
+
+> Not to be confused with **runtime item authoring** — how an executing runtime
+> proposes a new signed project item through the daemon `runtime.author_item`
+> callback. That is a separate capability; see `ryeos/standard/item-authoring`.
