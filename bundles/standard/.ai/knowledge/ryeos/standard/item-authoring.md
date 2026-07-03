@@ -103,15 +103,72 @@ required_capability }`.
 
 v1 supports live-filesystem project provenance only.
 
-## Current invocation surface
+## Invoking it: the `author-item` tool
 
-The capability, the manifest declaration, the cap minting, and the daemon
-`runtime.author_item` service are wired end to end. There is **not yet an
-author-facing surface** that calls it: the callback client exposes
-`CallbackClient::author_item`, but nothing in the runtime action surface invokes
-it, and no tool, action verb, or language binding sends `runtime.author_item`.
+The callback is driven by the `ryeos-core-tools author-item` subcommand — a
+capability-bounded callback client. When the daemon dispatches it as a tool it
+reads the callback token, thread-auth token, and thread id from the env, sends
+`runtime.author_item` with `{item_ref, content, mode, format_ext}` on stdin, and
+prints the daemon's response. It never touches project state directly.
 
-To trigger authoring today a runtime must send the `runtime.author_item`
-callback directly over the callback protocol with both proofs. A runtime-facing
-surface (a tool or a graph/directive action verb that an item author can call) is
-still to be built.
+### Authority lives on the wrapper tool — scope it tightly
+
+A dispatched tool is minted its **own** callback token from its **own**
+`requires`, backed by its **own** bundle's signed manifest. The caller's
+authority does not constrain the target: the wrapper tool's
+`runtime_authority.item_authoring` **is** the authoring authority.
+
+> **Overgrant warning.** Any item that can `ryeos.execute.tool.<...>/author-item`
+> can author anywhere in that wrapper's declared namespace — its own narrower
+> `requires` will not limit `item_ref`. Granting execute on a broad authoring
+> wrapper is equivalent to granting its full authoring namespace. Declare the
+> narrowest `namespace` the wrapper is meant to expose, and prefer separate
+> wrapper tools for distinct scopes over one wide wrapper.
+
+### Where the wrapper lives — binary locality
+
+`command: bin:ryeos-core-tools` resolves against the **wrapper tool's own
+bundle** (`<bundle-root>/.ai/bin/<host-triple>/ryeos-core-tools`), not a shared
+core binary. So the wrapper must reside in a bundle that actually ships and signs
+`ryeos-core-tools` in its own `.ai/bin/` — today, the `core` bundle. Reusing
+core's binary from a *separate* authoring bundle is not yet supported; it needs a
+qualified cross-bundle binary reference (a follow-up), or the bundle must vendor
+and sign its own copy.
+
+### Wrapper tool item
+
+Placed in a bundle that ships `ryeos-core-tools`; its manifest must declare the
+matching `runtime_authority.item_authoring`:
+
+```yaml
+# <bundle-that-ships-ryeos-core-tools>/.ai/tools/<ns>/author-item.yaml
+version: "0.1.0"
+category: "<ns>"
+name: "author-item"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.<ns>/author-item"]
+description: "Author a signed project item via the daemon."
+config:
+  command: "bin:ryeos-core-tools"   # resolves within THIS bundle's .ai/bin
+  args: ["author-item", "--stdin-json"]
+  input_data: "{params_json}"
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties:
+    item_ref:   { type: string }
+    content:    { type: string }
+    mode:       { type: string, enum: [create, upsert], default: create }
+    format_ext: { type: string }
+  required: [item_ref, content]
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        item_authoring:
+          - kind: knowledge
+            namespace: runtime-authored/*   # narrow this to the exact subspace
+```
+
+An executing directive or graph then calls the tool as an action with
+`{item_ref, content, mode, format_ext}`, and the daemon writes the signed item.
