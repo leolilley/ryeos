@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-03T09:54:31Z:1bc3cb1387a5721f9f4fe97d1d57e906054c30826523869adc30af20ba1daa57:TxBSWHBvPTm1W/aGSqB5V/txoCTGnfseDyIaLfIiXtuaVddeppc7SHfL6zd5EoTYj56NDf17+ZfTwRphhpBYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime, operations, callbacks, identity]

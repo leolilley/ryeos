@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T10:31:03Z:bf52ce54e879b0f8f64b7f3e878318f52cfa380f54c00b7ed707e87f814376f7:rJeMDNG13sPoBUpAo6bRT+XgGSnpR09ubXqYaPBXIh8R16rcxsjpdmRteIdZ+ywM86rLMOpCNcWP+mYB9/SnDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T09:54:36Z:5fccc60f0bfe58351880afced65a27f4a5eb8f78471b548d70ae553752820297:Eh/4to257IlGKA1HDSLGY7WkBfYWKNeyqjR8mGdBkj/8me4JCMtf34MaUeh+VPv+zQ1BDMwubZynbxMa5e0xAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: item-inspector
 version: "1.0.0"
 description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
