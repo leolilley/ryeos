@@ -37,164 +37,7 @@ impl StudioCore {
                 .as_ref()
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            match result.kind {
-                StudioEffectResultKind::ActionInvocation => {
-                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
-                    return vec![
-                        self.emit(StudioEffectKind::FetchDimension),
-                        self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
-                    ];
-                }
-                StudioEffectResultKind::ThreadCancelled => {
-                    self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
-                    let mut effects = vec![
-                        self.emit(StudioEffectKind::FetchDimension),
-                        self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
-                    ];
-                    effects.extend(self.effects_for_hint("thread"));
-                    return effects;
-                }
-                StudioEffectResultKind::Invoked => {
-                    // Typed submit result: { thread_id?, delivery, notice?, execution? }.
-                    let outcome: super::dto::LaunchOutcome =
-                        serde_json::from_value(data.clone()).unwrap_or_default();
-                    // A plain service-ref invoke (row management like cancel) is
-                    // NOT a launch: it targets a service other than threads/input,
-                    // carries no `delivery`, no route_seq, and never ratchets.
-                    // Reading its result as a launch outcome would clear the
-                    // focused filter and falsely claim "Thread launched" — so
-                    // handle it as a plain service success: refresh the list/braid
-                    // and preserve the focused input.
-                    let service_ref = match &expected {
-                        StudioEffectKind::Invoke {
-                            target: super::effect::InvokeRef::Ref { item_ref },
-                            route_seq: None,
-                            ratchet_on_thread_id: false,
-                            ..
-                        } if item_ref.as_str() != "service:threads/input" => Some(item_ref.clone()),
-                        _ => None,
-                    };
-                    if let Some(item_ref) = service_ref.filter(|_| outcome.delivery.is_none()) {
-                        let notice = match item_ref.as_str() {
-                            "service:ui/studio/thread/cancel" | "service:threads/cancel" => outcome
-                                .thread_id
-                                .as_deref()
-                                .map(|id| format!("Cancelled {id}."))
-                                .unwrap_or_else(|| "Cancelled.".to_string()),
-                            _ => effect_success_notice(&expected, &data),
-                        };
-                        self.notice(notice, StudioTone::Good);
-                        let mut effects =
-                            vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
-                        effects.extend(self.effects_for_hint("thread"));
-                        return effects;
-                    }
-                    if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
-                        // A refused delivery (non-continuation target, settled
-                        // status, or duplicate-submit conflict) delivered
-                        // nothing: KEEP the buffer so the operator's text isn't
-                        // lost, surface the daemon's reason, and do NOT ratchet
-                        // or claim a launch. (`thread_id` may be null or an
-                        // existing id; either way nothing new was created.)
-                        self.notice(
-                            outcome.notice.unwrap_or_else(|| REFUSED_NOTICE.to_string()),
-                            StudioTone::Warn,
-                        );
-                        return Vec::new();
-                    }
-                    if outcome.delivery == Some(super::dto::ThreadDelivery::Submitted) {
-                        // Live fold into a RUNNING thread: the stimulus was
-                        // delivered as a new cognition_in on the SAME thread — no
-                        // new thread, so no ratchet and no "launched" copy. Clear
-                        // the buffer and keep the route where it is; the live tail
-                        // shows the folded turn. A notice present here means a
-                        // degradation (interrupt → steer); surface it as a warning.
-                        self.clear_focused_input();
-                        let degraded = outcome.notice.is_some();
-                        self.notice(
-                            outcome.notice.unwrap_or_else(|| match outcome.thread_id.as_deref()
-                            {
-                                Some(id) => format!("Input delivered to {id}."),
-                                None => "Input delivered.".to_string(),
-                            }),
-                            if degraded {
-                                StudioTone::Warn
-                            } else {
-                                StudioTone::Good
-                            },
-                        );
-                        let mut effects =
-                            vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
-                        effects.extend(self.effects_for_hint("thread"));
-                        return effects;
-                    }
-                    self.clear_focused_input();
-                    let Some(thread_id) = outcome.thread_id.clone() else {
-                        self.notice(effect_success_notice(&expected, &data), StudioTone::Good);
-                        self.bump_generation();
-                        return Vec::new();
-                    };
-                    // Ratchet: the route is live state — a launch retargets
-                    // the input at the produced thread so the next submit
-                    // continues the chain. A stale result (route changed
-                    // since issue) may notice but never retargets.
-                    if let StudioEffectKind::Invoke {
-                        route_seq,
-                        ratchet_on_thread_id,
-                        ..
-                    } = &expected
-                    {
-                        let fold = self.seat.fold();
-                        // Eligibility was decided at issue time (see submit_route)
-                        // — read it, don't recompute from current focus, which
-                        // may have moved while the launch was in flight. AND in
-                        // the produced thread's substrate facts when the result
-                        // carries them (an operator continuation does; a fresh
-                        // async launch doesn't — unknown stays eligible, and the
-                        // daemon refuses a real non-continuation continue).
-                        // Operator-input targeting: ratchet only onto a successor
-                        // that accepts OPERATOR follow-up (a graph continues by
-                        // machine but takes no operator input).
-                        let result_supports = outcome.execution.map(|e| e.supports_operator_followup);
-                        let targets = *ratchet_on_thread_id && result_supports != Some(false);
-                        if fold.seq_of(super::seat::KEY_INPUT_ROUTE) == *route_seq {
-                            let mut route = fold.input_route();
-                            // Only ratchet a continuation target onto routes
-                            // whose input declares conversation targeting. A
-                            // fire-and-forget route that happens to produce a
-                            // thread_id must NOT be retargeted as "continuing" —
-                            // same declaration the cycle and the label key off.
-                            if targets {
-                                // First turn of a conversation: the launched
-                                // thread IS the chain root (root == head).
-                                // Continuations (route already had a head) keep
-                                // the root and only advance the head — so the
-                                // feed keeps showing the whole braid while the
-                                // next submit braids onto the newest turn.
-                                if route.thread.is_none() {
-                                    route.chain_root = Some(thread_id.clone());
-                                }
-                                route.thread = Some(thread_id.clone());
-                                if let Ok(value) = serde_json::to_value(&route) {
-                                    self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
-                                }
-                            }
-                        } else {
-                            self.notice(
-                                "Route changed since submit; not retargeting.",
-                                StudioTone::Warn,
-                            );
-                        }
-                    }
-                    self.notice(format!("Thread {thread_id} launched."), StudioTone::Good);
-                    let mut effects =
-                        vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
-                    effects.extend(self.effects_for_facet(super::seat::KEY_INPUT_ROUTE));
-                    effects.extend(self.effects_for_hint("thread"));
-                    return effects;
-                }
-                _ => unreachable!(),
-            }
+            return self.apply_invocation_result(&expected, result.kind, data);
         }
 
         let Some(data) = result.data else {
@@ -202,14 +45,224 @@ impl StudioCore {
             return Vec::new();
         };
 
-        match result.kind {
+        self.apply_source_result(&expected, result.kind, result.id, data)
+    }
+
+    /// The command-result arms (`ActionInvocation` / `ThreadCancelled` /
+    /// `Invoked`) — a synthetic-`Null`-defaulted body that always resolves to a
+    /// notice plus a refresh, never to the parse-and-store path.
+    fn apply_invocation_result(
+        &mut self,
+        expected: &StudioEffectKind,
+        kind: StudioEffectResultKind,
+        data: serde_json::Value,
+    ) -> Vec<StudioEffect> {
+        match kind {
+            StudioEffectResultKind::ActionInvocation => {
+                self.notice(effect_success_notice(expected, &data), StudioTone::Good);
+                vec![
+                    self.emit(StudioEffectKind::FetchDimension),
+                    self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
+                ]
+            }
+            StudioEffectResultKind::ThreadCancelled => {
+                self.notice(effect_success_notice(expected, &data), StudioTone::Good);
+                let mut effects = vec![
+                    self.emit(StudioEffectKind::FetchDimension),
+                    self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
+                ];
+                effects.extend(self.effects_for_hint("thread"));
+                effects
+            }
+            StudioEffectResultKind::Invoked => {
+                // Typed submit result: { thread_id?, delivery, notice?, execution? }.
+                let outcome: super::dto::LaunchOutcome =
+                    serde_json::from_value(data.clone()).unwrap_or_default();
+                self.apply_launch_outcome(expected, outcome, &data)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// The `Invoked` tower: a plain service-ref success (row management), a
+    /// refused/submitted live delivery, or a fresh launch that ratchets the
+    /// seat route onto the produced thread.
+    fn apply_launch_outcome(
+        &mut self,
+        expected: &StudioEffectKind,
+        outcome: super::dto::LaunchOutcome,
+        data: &serde_json::Value,
+    ) -> Vec<StudioEffect> {
+        // A plain service-ref invoke (row management like cancel) is
+        // NOT a launch: it targets a service other than threads/input,
+        // carries no `delivery`, no route_seq, and never ratchets.
+        // Reading its result as a launch outcome would clear the
+        // focused filter and falsely claim "Thread launched" — so
+        // handle it as a plain service success: refresh the list/braid
+        // and preserve the focused input.
+        let service_ref = match expected {
+            StudioEffectKind::Invoke {
+                target: super::effect::InvokeRef::Ref { item_ref },
+                route_seq: None,
+                ratchet_on_thread_id: false,
+                ..
+            } if item_ref.as_str() != "service:threads/input" => Some(item_ref.clone()),
+            _ => None,
+        };
+        if let Some(item_ref) = service_ref.filter(|_| outcome.delivery.is_none()) {
+            let notice = match item_ref.as_str() {
+                "service:ui/studio/thread/cancel" | "service:threads/cancel" => outcome
+                    .thread_id
+                    .as_deref()
+                    .map(|id| format!("Cancelled {id}."))
+                    .unwrap_or_else(|| "Cancelled.".to_string()),
+                _ => effect_success_notice(expected, data),
+            };
+            self.notice(notice, StudioTone::Good);
+            let mut effects = vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+            effects.extend(self.effects_for_hint("thread"));
+            return effects;
+        }
+        if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
+            // A refused delivery (non-continuation target, settled
+            // status, or duplicate-submit conflict) delivered
+            // nothing: KEEP the buffer so the operator's text isn't
+            // lost, surface the daemon's reason, and do NOT ratchet
+            // or claim a launch. (`thread_id` may be null or an
+            // existing id; either way nothing new was created.)
+            self.notice(
+                outcome.notice.unwrap_or_else(|| REFUSED_NOTICE.to_string()),
+                StudioTone::Warn,
+            );
+            return Vec::new();
+        }
+        if outcome.delivery == Some(super::dto::ThreadDelivery::Submitted) {
+            // Live fold into a RUNNING thread: the stimulus was
+            // delivered as a new cognition_in on the SAME thread — no
+            // new thread, so no ratchet and no "launched" copy. Clear
+            // the buffer and keep the route where it is; the live tail
+            // shows the folded turn. A notice present here means a
+            // degradation (interrupt → steer); surface it as a warning.
+            self.clear_focused_input();
+            let degraded = outcome.notice.is_some();
+            self.notice(
+                outcome.notice.unwrap_or_else(|| match outcome.thread_id.as_deref() {
+                    Some(id) => format!("Input delivered to {id}."),
+                    None => "Input delivered.".to_string(),
+                }),
+                if degraded {
+                    StudioTone::Warn
+                } else {
+                    StudioTone::Good
+                },
+            );
+            let mut effects = vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+            effects.extend(self.effects_for_hint("thread"));
+            return effects;
+        }
+        self.clear_focused_input();
+        let Some(thread_id) = outcome.thread_id.clone() else {
+            self.notice(effect_success_notice(expected, data), StudioTone::Good);
+            self.bump_generation();
+            return Vec::new();
+        };
+        // Ratchet: the route is live state — a launch retargets
+        // the input at the produced thread so the next submit
+        // continues the chain. A stale result (route changed
+        // since issue) may notice but never retargets.
+        if let StudioEffectKind::Invoke {
+            route_seq,
+            ratchet_on_thread_id,
+            ..
+        } = expected
+        {
+            self.try_ratchet_route(
+                *route_seq,
+                *ratchet_on_thread_id,
+                &thread_id,
+                outcome.execution,
+            );
+        }
+        self.notice(format!("Thread {thread_id} launched."), StudioTone::Good);
+        let mut effects = vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
+        effects.extend(self.effects_for_facet(super::seat::KEY_INPUT_ROUTE));
+        effects.extend(self.effects_for_hint("thread"));
+        effects
+    }
+
+    /// Retarget the seat route onto a just-launched thread, honoring the
+    /// issue-time ratchet eligibility and the produced thread's substrate
+    /// facts. Returns whether the route was retargeted; a stale result (the
+    /// route moved since submit) notices and leaves the route untouched.
+    fn try_ratchet_route(
+        &mut self,
+        route_seq: Option<u64>,
+        ratchet_on_thread_id: bool,
+        thread_id: &str,
+        execution: Option<super::dto::ExecutionFacts>,
+    ) -> bool {
+        // Eligibility was decided at issue time (see submit_route)
+        // — read it, don't recompute from current focus, which
+        // may have moved while the launch was in flight. AND in
+        // the produced thread's substrate facts when the result
+        // carries them (an operator continuation does; a fresh
+        // async launch doesn't — unknown stays eligible, and the
+        // daemon refuses a real non-continuation continue).
+        // Operator-input targeting: ratchet only onto a successor
+        // that accepts OPERATOR follow-up (a graph continues by
+        // machine but takes no operator input).
+        let result_supports = execution.map(|e| e.supports_operator_followup);
+        let targets = ratchet_on_thread_id && result_supports != Some(false);
+        let fold = self.seat.fold();
+        if fold.seq_of(super::seat::KEY_INPUT_ROUTE) != route_seq {
+            self.notice(
+                "Route changed since submit; not retargeting.",
+                StudioTone::Warn,
+            );
+            return false;
+        }
+        // Only ratchet a continuation target onto routes
+        // whose input declares conversation targeting. A
+        // fire-and-forget route that happens to produce a
+        // thread_id must NOT be retargeted as "continuing" —
+        // same declaration the cycle and the label key off.
+        if !targets {
+            return false;
+        }
+        let mut route = fold.input_route();
+        // First turn of a conversation: the launched
+        // thread IS the chain root (root == head).
+        // Continuations (route already had a head) keep
+        // the root and only advance the head — so the
+        // feed keeps showing the whole braid while the
+        // next submit braids onto the newest turn.
+        if route.thread.is_none() {
+            route.chain_root = Some(thread_id.to_string());
+        }
+        route.thread = Some(thread_id.to_string());
+        if let Ok(value) = serde_json::to_value(&route) {
+            self.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
+        }
+        true
+    }
+
+    /// The parse-and-store arms: deserialize the optional body into its DTO
+    /// and fold it into `data`, honoring per-tile freshness/scope guards.
+    fn apply_source_result(
+        &mut self,
+        expected: &StudioEffectKind,
+        kind: StudioEffectResultKind,
+        result_id: u64,
+        data: serde_json::Value,
+    ) -> Vec<StudioEffect> {
+        match kind {
             StudioEffectResultKind::Dimension => {
                 self.apply_parsed::<StudioDimensionDto>(data, "dimension", |core, dimension| {
                     core.data.dimension = Some(dimension);
                 });
             }
             StudioEffectResultKind::SourceData => {
-                if let StudioEffectKind::FetchSource { tile_id, .. } = &expected {
+                if let StudioEffectKind::FetchSource { tile_id, .. } = expected {
                     // Freshness guard: only the newest request for this key may
                     // land. An older fetch (e.g. the previously selected thread's
                     // section) resolving late is dropped, so a reused single-lens
@@ -218,7 +271,7 @@ impl StudioCore {
                         .data
                         .source_epoch
                         .get(tile_id)
-                        .map_or(true, |&latest| result.id >= latest);
+                        .map_or(true, |&latest| result_id >= latest);
                     if is_latest {
                         self.data.sources.insert(tile_id.clone(), data);
                     }
@@ -324,11 +377,11 @@ impl StudioCore {
             }
             StudioEffectResultKind::Items => {
                 self.apply_parsed::<StudioItemsDto>(data, "items", |core, items| {
-                    if effect_matches_current_items(Some(&expected), core) {
+                    if effect_matches_current_items(Some(expected), core) {
                         if let StudioEffectKind::FetchItems {
                             tile_id: Some(tile_id),
                             ..
-                        } = &expected
+                        } = expected
                         {
                             core.data.tile_items.insert(tile_id.clone(), items.clone());
                         } else {
@@ -339,11 +392,11 @@ impl StudioCore {
             }
             StudioEffectResultKind::FilesList => {
                 self.apply_parsed::<StudioFilesDto>(data, "files_list", |core, files| {
-                    if effect_matches_current_files(Some(&expected), core, &files) {
+                    if effect_matches_current_files(Some(expected), core, &files) {
                         if let StudioEffectKind::ListFiles {
                             tile_id: Some(tile_id),
                             ..
-                        } = &expected
+                        } = expected
                         {
                             core.data.tile_files.insert(tile_id.clone(), files.clone());
                         }
@@ -353,11 +406,11 @@ impl StudioCore {
             }
             StudioEffectResultKind::FileSpace => {
                 self.apply_parsed::<StudioFileSpaceDto>(data, "file_space", |core, file_space| {
-                    if effect_matches_current_file_space(Some(&expected), core, &file_space) {
+                    if effect_matches_current_file_space(Some(expected), core, &file_space) {
                         if let StudioEffectKind::FetchFileSpace {
                             tile_id: Some(tile_id),
                             ..
-                        } = &expected
+                        } = expected
                         {
                             core.data
                                 .tile_file_space
@@ -370,7 +423,7 @@ impl StudioCore {
             }
             StudioEffectResultKind::FileRead => {
                 self.apply_parsed::<StudioFileReadDto>(data, "file_read", |core, file_read| {
-                    if effect_matches_current_file_read(Some(&expected), core, &file_read) {
+                    if effect_matches_current_file_read(Some(expected), core, &file_read) {
                         core.data.file_read = Some(file_read);
                     }
                 });
@@ -1445,5 +1498,175 @@ mod tests {
         });
         assert!(effects.is_empty());
         assert!(core.data.live_delta.is_none());
+    }
+
+    // --- Dedicated coverage for the extracted ratchet path (`try_ratchet_route`
+    // and the `apply_launch_outcome` delivery tower). ---
+
+    /// Deliver a launched `Invoked` outcome after seeding a targeting route,
+    /// returning the resulting seat route. `mutate` runs between submit and
+    /// delivery (e.g. to move the route so the result is stale).
+    fn launch_and_deliver(
+        core: &mut StudioCore,
+        text: &str,
+        data: serde_json::Value,
+        mutate: impl FnOnce(&mut StudioCore),
+    ) {
+        seed_service_route(core);
+        set_focused_input(core, text);
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        mutate(core);
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(data),
+                error: None,
+            },
+        });
+    }
+
+    #[test]
+    fn ratchet_route_seq_mismatch_warns_and_leaves_route_unchanged() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "first",
+            serde_json::json!({ "thread_id": "T-stale", "delivery": "launched" }),
+            |core| {
+                // Route moves after the submit was issued → the result is stale.
+                core.seat.append_facet(
+                    crate::studio::seat::KEY_INPUT_ROUTE,
+                    serde_json::json!({
+                        "invoke": { "type": "service", "ref": "service:threads/input" },
+                        "thread": "T-other"
+                    }),
+                );
+            },
+        );
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread.as_deref(), Some("T-other"), "stale result must not retarget");
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|n| n.message.contains("Route changed since submit")
+                    && n.tone == StudioTone::Warn),
+            "a stale ratchet surfaces the route-changed warning"
+        );
+    }
+
+    #[test]
+    fn ratchet_skips_retarget_when_thread_refuses_operator_followup() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "run graph",
+            // Machine-continuing graph: continuation-capable but takes no operator input.
+            serde_json::json!({
+                "thread_id": "G-1",
+                "delivery": "launched",
+                "execution": { "supports_continuation": true, "supports_operator_followup": false }
+            }),
+            |_| {},
+        );
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "no operator follow-up → route not retargeted");
+        assert_eq!(route.chain_root, None);
+    }
+
+    #[test]
+    fn ratchet_first_turn_sets_chain_root_and_head() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "hello",
+            serde_json::json!({ "thread_id": "T-1", "delivery": "launched" }),
+            |_| {},
+        );
+        let route = core.seat.fold().input_route();
+        // First turn: the launched thread is both the chain root and the head.
+        assert_eq!(route.chain_root.as_deref(), Some("T-1"));
+        assert_eq!(route.thread.as_deref(), Some("T-1"));
+    }
+
+    #[test]
+    fn ratchet_continuation_keeps_root_and_advances_head() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "hello",
+            serde_json::json!({ "thread_id": "T-1", "delivery": "launched" }),
+            |_| {},
+        );
+        // Second turn braids onto T-1: new head, same root.
+        set_focused_input(&mut core, "again");
+        let effect = core
+            .dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::SubmitInput,
+            })
+            .pop()
+            .expect("submit effect");
+        core.dispatch(StudioEvent::EffectResult {
+            result: StudioEffectResult {
+                id: effect.id,
+                ok: true,
+                kind: StudioEffectResultKind::Invoked,
+                data: Some(serde_json::json!({ "thread_id": "T-2", "delivery": "launched" })),
+                error: None,
+            },
+        });
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread.as_deref(), Some("T-2"), "head advances to the newest turn");
+        assert_eq!(route.chain_root.as_deref(), Some("T-1"), "root is preserved across the braid");
+    }
+
+    #[test]
+    fn ratchet_refused_delivery_preserves_buffer_and_route() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "hold this",
+            serde_json::json!({
+                "thread_id": serde_json::Value::Null,
+                "delivery": "refused",
+                "notice": "thread is not continuation-capable"
+            }),
+            |_| {},
+        );
+        assert_eq!(focused_input_text(&core), "hold this", "refused delivery keeps the buffer");
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "refused → no ratchet");
+        assert_eq!(route.chain_root, None);
+    }
+
+    #[test]
+    fn ratchet_submitted_delivery_clears_buffer_without_retarget_and_warns_when_degraded() {
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        launch_and_deliver(
+            &mut core,
+            "steer it",
+            serde_json::json!({
+                "thread_id": "T-live",
+                "delivery": "submitted",
+                "notice": "interrupt degraded to steer"
+            }),
+            |_| {},
+        );
+        // Live fold into a running thread: buffer clears, but no new thread and no ratchet.
+        assert_eq!(focused_input_text(&core), "");
+        let route = core.seat.fold().input_route();
+        assert_eq!(route.thread, None, "submitted → no ratchet");
+        assert!(
+            core.ui.notices.iter().any(|n| n.message.contains("interrupt degraded to steer")
+                && n.tone == StudioTone::Warn),
+            "a degraded submitted delivery surfaces its notice as a warning"
+        );
     }
 }
