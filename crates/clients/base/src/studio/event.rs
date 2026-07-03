@@ -108,6 +108,18 @@ pub enum StudioAction {
     AimThread {
         thread_id: String,
     },
+    /// Pre-fill the routed foot input to retry a failed turn: retarget the
+    /// route at the SELECTED failed thread and stage that turn's original
+    /// stimulus for the operator to review and resubmit. The resubmit is a
+    /// continuation (a fresh successor), NOT a re-run of the terminal thread.
+    /// Deliberately not one-click — the submit goes through the normal
+    /// `threads/input` path, where the daemon enforces ownership and
+    /// continuation eligibility.
+    PrefillRetryTurn {
+        thread_id: String,
+        chain_root_id: String,
+        input: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
