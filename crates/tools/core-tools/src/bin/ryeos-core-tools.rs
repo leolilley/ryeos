@@ -291,6 +291,36 @@ enum Cmd {
         output: Option<PathBuf>,
     },
 
+    /// Author (create or upsert) a signed project item through the daemon
+    /// `runtime.author_item` callback.
+    ///
+    /// Only meaningful when dispatched inside a running thread: the daemon
+    /// injects the callback + thread-auth tokens and the thread id via env, then
+    /// authorizes `ryeos.author.<kind>.<bare_id>`, derives the path from the kind
+    /// schema, injects provenance, signs with its own identity, and writes. The
+    /// item body is proposed unsigned; the daemon owns the signature.
+    ///
+    /// Params usually arrive as `--stdin-json` (`{item_ref, content, mode,
+    /// format_ext}`); the flags are for manual invocation.
+    AuthorItem {
+        /// Canonical target ref `kind:bare_id` (no ref suffix).
+        #[arg(long)]
+        item_ref: Option<String>,
+
+        /// Unsigned item body. Read from stdin when omitted (and not
+        /// `--stdin-json`).
+        #[arg(long)]
+        content: Option<String>,
+
+        /// `create` (default; fails if the item exists) or `upsert` (replaces).
+        #[arg(long, default_value = "create")]
+        mode: String,
+
+        /// File extension including the leading dot (e.g. `.md`); required when
+        /// creating a new item.
+        #[arg(long)]
+        format_ext: Option<String>,
+    },
     /// Manage sealed secrets in the daemon vault.
     Vault {
         #[command(subcommand)]
@@ -648,8 +678,105 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             output,
             cli.stdin_json,
         ),
+        Cmd::AuthorItem {
+            item_ref,
+            content,
+            mode,
+            format_ext,
+        } => run_author_item(item_ref, content, mode, format_ext, cli.stdin_json),
         Cmd::Vault { cmd } => run_vault(cmd),
     }
+}
+
+/// Params for the `author-item` subcommand when invoked with `--stdin-json`
+/// (the dispatched-tool path; `thread_id` comes from the env, not the params).
+///
+/// `deny_unknown_fields` is intentionally NOT set: the runtime compiler injects
+/// extra context (e.g. `project_path`) into the params before expanding
+/// `{params_json}` onto stdin. Unknown keys are ignored, and the daemon request
+/// is rebuilt from only the known fields below — so nothing extra is forwarded.
+#[derive(serde::Deserialize)]
+struct AuthorItemParams {
+    item_ref: String,
+    content: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    format_ext: Option<String>,
+}
+
+/// Propose a project item to the daemon `runtime.author_item` callback. This is
+/// a capability-bounded runtime callback client — it never touches project state
+/// directly. The two proofs (callback token + thread-auth token) and the socket
+/// path come from the env the daemon set on this dispatched tool; the daemon
+/// authorizes `ryeos.author.<kind>.<bare_id>`, signs, and writes.
+fn run_author_item(
+    item_ref: Option<String>,
+    content: Option<String>,
+    mode: String,
+    format_ext: Option<String>,
+    stdin_json: bool,
+) -> anyhow::Result<()> {
+    let request = if stdin_json {
+        let params: AuthorItemParams = serde_json::from_value(read_stdin_json()?)
+            .context("invalid author-item params JSON on stdin")?;
+        let mut request = serde_json::json!({
+            "item_ref": params.item_ref,
+            "content": params.content,
+        });
+        if let Some(mode) = params.mode {
+            request["mode"] = serde_json::json!(mode);
+        }
+        if let Some(ext) = params.format_ext {
+            request["format_ext"] = serde_json::json!(ext);
+        }
+        request
+    } else {
+        let item_ref = item_ref.context("--item-ref is required (or pass --stdin-json)")?;
+        let content = match content {
+            Some(content) => content,
+            None => {
+                let mut buf = String::new();
+                io::stdin()
+                    .read_to_string(&mut buf)
+                    .context("read item body from stdin")?;
+                buf
+            }
+        };
+        let mut request = serde_json::json!({
+            "item_ref": item_ref,
+            "content": content,
+            "mode": mode,
+        });
+        if let Some(ext) = format_ext {
+            request["format_ext"] = serde_json::json!(ext);
+        }
+        request
+    };
+
+    // The daemon stamps the running thread id into the tool's env; the callback
+    // client keys authoring to this exact thread. The request is built above from
+    // only the known fields, so no caller-supplied thread_id or context leaks in.
+    let thread_id = std::env::var("RYEOSD_THREAD_ID").context(
+        "RYEOSD_THREAD_ID is not set — author-item runs only inside a thread the daemon dispatched",
+    )?;
+
+    let client = ryeos_runtime::callback_uds::UdsRuntimeClient::from_env()
+        .map_err(|e| anyhow::anyhow!("cannot build runtime callback client: {e}"))?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build callback runtime")?;
+    let response = {
+        use ryeos_runtime::callback::RuntimeCallbackAPI;
+        runtime
+            .block_on(client.author_item(&thread_id, request))
+            .map_err(|e| anyhow::anyhow!("runtime.author_item failed: {e}"))?
+    };
+
+    println!("{}", serde_json::to_string_pretty(&response)?);
+    Ok(())
 }
 
 fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
@@ -1620,7 +1747,10 @@ fn run_sign(
 
 #[derive(serde::Deserialize)]
 struct StdinSignParams {
-    #[serde(default, deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
+    #[serde(
+        default,
+        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
+    )]
     item_refs: Vec<String>,
     #[serde(default)]
     item_ref: Option<String>,

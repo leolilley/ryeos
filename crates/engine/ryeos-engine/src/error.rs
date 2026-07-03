@@ -210,6 +210,28 @@ pub enum EngineError {
     #[error("binary `{bin}` item-source sidecar invalid: {reason}")]
     BinSidecarInvalid { bin: String, reason: String },
 
+    #[error("qualified binary target bundle `{bundle}` not found (searched: {searched:?}; skipped invalid manifests: {skipped:?})")]
+    QualifiedBinBundleNotFound {
+        bundle: String,
+        searched: Vec<String>,
+        /// Registered bundles skipped because their signed manifest failed to
+        /// verify/parse — surfaced so a broken bundle registration is not
+        /// silently indistinguishable from a genuinely absent target.
+        skipped: Vec<String>,
+    },
+
+    #[error("qualified binary target bundle `{bundle}` is ambiguous (matches: {roots:?})")]
+    QualifiedBinBundleAmbiguous { bundle: String, roots: Vec<PathBuf> },
+
+    #[error("bundle `{source_bundle}` may not use binary bundle `{target_bundle}`: source requires/uses no kind provided by target")]
+    QualifiedBinDependencyMissing {
+        source_bundle: String,
+        target_bundle: String,
+    },
+
+    #[error("bundle manifest at {path} is invalid for qualified binary resolution: {reason}")]
+    QualifiedBinManifestInvalid { path: String, reason: String },
+
     #[error("unknown template token: {{{token}}}")]
     UnknownTemplateToken { token: String },
 

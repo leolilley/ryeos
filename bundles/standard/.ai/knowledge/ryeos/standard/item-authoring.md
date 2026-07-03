@@ -103,15 +103,99 @@ required_capability }`.
 
 v1 supports live-filesystem project provenance only.
 
-## Current invocation surface
+## Invoking it: the `author-item` tool
 
-The capability, the manifest declaration, the cap minting, and the daemon
-`runtime.author_item` service are wired end to end. There is **not yet an
-author-facing surface** that calls it: the callback client exposes
-`CallbackClient::author_item`, but nothing in the runtime action surface invokes
-it, and no tool, action verb, or language binding sends `runtime.author_item`.
+The callback is driven by the `ryeos-core-tools author-item` subcommand — a
+capability-bounded callback client. When the daemon dispatches it as a tool it
+reads the callback token, thread-auth token, and thread id from the env, sends
+`runtime.author_item` with `{item_ref, content, mode, format_ext}` on stdin, and
+prints the daemon's response. It never touches project state directly.
 
-To trigger authoring today a runtime must send the `runtime.author_item`
-callback directly over the callback protocol with both proofs. A runtime-facing
-surface (a tool or a graph/directive action verb that an item author can call) is
-still to be built.
+### Authority lives on the wrapper tool — scope it tightly
+
+A dispatched tool is minted its **own** callback token from its **own**
+`requires`, backed by its **own** bundle's signed manifest. The caller's
+authority does not constrain the target: the wrapper tool's
+`runtime_authority.item_authoring` **is** the authoring authority.
+
+> **Overgrant warning.** Any item that can `ryeos.execute.tool.<...>/author-item`
+> can author anywhere in that wrapper's declared namespace — its own narrower
+> `requires` will not limit `item_ref`. Granting execute on a broad authoring
+> wrapper is equivalent to granting its full authoring namespace. Declare the
+> narrowest `namespace` the wrapper is meant to expose, and prefer separate
+> wrapper tools for distinct scopes over one wide wrapper.
+
+### Where the wrapper lives — qualified binary reuse
+
+Use `command: bin:core/ryeos-core-tools` from an authoring bundle wrapper. The
+wrapper stays in the authoring bundle (so its own `requires` and signed manifest
+own the authoring authority), while the executable is resolved from the signed
+registered bundle whose manifest name is `core`.
+
+Qualified binary refs are deliberately narrow:
+
+- `bin:<name>` remains wrapper-bundle local.
+- `bin:<bundle>/<name>` resolves only from registered signed bundle roots, never
+  from project space or PATH.
+- The source wrapper bundle must have a signed dependency relationship on the
+  target bundle: one of its `requires_kinds` / `uses_kinds` must be provided by
+  the target bundle. For `core`, wrappers that use tool items naturally require
+  the `tool` kind.
+- The target binary is still verified through the target bundle's binary
+  manifest, CAS content hash, sidecar signature, trust store, and bundle
+  confinement checks before dispatch.
+
+### Wrapper tool item
+
+Placed in the authoring bundle; its manifest must declare the matching
+`runtime_authority.item_authoring`:
+
+```yaml
+# <authoring-bundle>/.ai/tools/<ns>/author-item.yaml
+version: "0.1.0"
+category: "<ns>"
+name: "author-item"
+executor_id: "@subprocess"
+required_caps: ["ryeos.execute.tool.<ns>/author-item"]
+description: "Author a signed project item via the daemon."
+config:
+  command: "bin:core/ryeos-core-tools"
+  args: ["author-item", "--stdin-json"]
+  input_data: "{params_json}"
+  timeout_secs: 30
+config_schema:
+  type: object
+  properties:
+    item_ref:   { type: string }
+    content:    { type: string }
+    mode:       { type: string, enum: [create, upsert], default: create }
+    format_ext: { type: string }
+  required: [item_ref, content]
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        item_authoring:
+          - kind: knowledge
+            namespace: runtime-authored/*   # narrow this to the exact subspace
+```
+
+The authoring bundle's `.ai/manifest.source.yaml` must both declare the matching
+authority and depend on the bundle that provides the binary's kind surface, for
+example (publish materializes `provides_kinds` into the generated
+`.ai/manifest.yaml` — don't hand-maintain it):
+
+```yaml
+# <authoring-bundle>/.ai/manifest.source.yaml
+name: <authoring-bundle>
+version: "0.1.0"
+requires_kinds:
+  - tool
+runtime_authority:
+  item_authoring:
+    - kind: knowledge
+      namespace: runtime-authored/*
+```
+
+An executing directive or graph then calls the tool as an action with
+`{item_ref, content, mode, format_ext}`, and the daemon writes the signed item.
