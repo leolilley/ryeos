@@ -80,7 +80,10 @@ jobs:
           cargo nextest --version
 
       - name: Run workspace gate
-        run: ./scripts/gate.sh
+        # --refresh-bundles populates + dev-key-signs the bundle bin trees the
+        # live-registry tests load from, then runs the suite (with per-test
+        # bundle refresh skipped so it isn't repeated).
+        run: ./scripts/gate.sh --refresh-bundles
 
   bundle-refresh:
     name: Bundle refresh
