@@ -613,6 +613,19 @@ impl Walker {
             self.record_callback_warning("graph_started", r);
         }
 
+        // Fire graph_started observer hooks before the walk begins.
+        self.fire_graph_hooks(
+            "graph_started",
+            json!({
+                "event": "graph_started",
+                "graph_id": &self.graph.graph_id,
+                "graph_run_id": &graph_run_id,
+                "state": &state,
+                "inputs": &inputs,
+            }),
+        )
+        .await;
+
         // ── F3 main loop: run_node_body → commit_step ───────────
         // Every iteration produces exactly one StepOutcome and routes
         // through commit_step. ALL persistence happens there.
@@ -1522,6 +1535,11 @@ impl Walker {
                     .await;
                 self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
                     .await;
+                self.fire_graph_hooks(
+                    "graph_step_completed",
+                    self.step_hook_context(graph_run_id, current, step, "ok", None, state),
+                )
+                .await;
 
                 match target {
                     Some(next_node) => {
@@ -1624,6 +1642,11 @@ impl Walker {
 
                 self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
                     .await;
+                self.fire_graph_hooks(
+                    "graph_step_completed",
+                    self.step_hook_context(graph_run_id, current, step, "ok", None, state),
+                )
+                .await;
 
                 match next {
                     Some(next_node) => {
@@ -1711,6 +1734,11 @@ impl Walker {
 
                 self.emit_graph_step_completed(graph_run_id, step, current, "ok", None)
                     .await;
+                self.fire_graph_hooks(
+                    "graph_step_completed",
+                    self.step_hook_context(graph_run_id, current, step, "ok", None, state),
+                )
+                .await;
 
                 match next {
                     Some(next_node) => {
@@ -1787,6 +1815,11 @@ impl Walker {
 
                 self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error))
                     .await;
+                self.fire_graph_hooks(
+                    "graph_step_completed",
+                    self.step_hook_context(graph_run_id, current, step, "error", Some(error), state),
+                )
+                .await;
 
                 match next_on_error {
                     NextOnError::Redirect(target) => {
@@ -1915,6 +1948,11 @@ impl Walker {
 
                 self.emit_graph_step_completed(graph_run_id, step, current, "error", Some(error))
                     .await;
+                self.fire_graph_hooks(
+                    "graph_step_completed",
+                    self.step_hook_context(graph_run_id, current, step, "error", Some(error), state),
+                )
+                .await;
 
                 match next_on_error {
                     NextOnError::Redirect(target) => {
@@ -2122,6 +2160,22 @@ impl Walker {
             self.record_callback_warning("graph_completed", r);
         }
 
+        // Fire graph_completed observer hooks at the terminal.
+        self.fire_graph_hooks(
+            "graph_completed",
+            json!({
+                "event": "graph_completed",
+                "graph_id": &self.graph.graph_id,
+                "graph_run_id": graph_run_id,
+                "status": &status,
+                "steps": steps,
+                "success": success,
+                "state": &graph_result.state,
+                "inputs": inputs,
+            }),
+        )
+        .await;
+
         // Write transcript.
         let r = knowledge::write_knowledge_transcript(
             &self.project_path,
@@ -2253,6 +2307,58 @@ impl Walker {
             next_step,
             next_retry_attempt,
         }
+    }
+
+    // ── Hook firing ────────────────────────────────────────────────
+
+    /// Fire authored observer hooks for `event` against `context`. Hook actions
+    /// dispatch through the same callback path node actions use (effective_caps
+    /// enforced, cost accrued, braid-visible). A failing hook is recorded as a
+    /// warning, never a graph failure — graph hooks are fire-and-forget
+    /// observers; they cannot steer the walk.
+    async fn fire_graph_hooks(&self, event: &str, context: Value) {
+        if let Err(e) = crate::hooks::run_graph_hooks(
+            &self.client,
+            &self.thread_id,
+            &self.project_path,
+            &self.graph.config.hooks,
+            event,
+            &context,
+        )
+        .await
+        {
+            self.warnings
+                .lock()
+                .unwrap()
+                .push(format!("graph hook `{event}` failed: {e}"));
+        }
+    }
+
+    /// Build the hook context for a `graph_step_completed` fire point. Carries
+    /// the node facts plus `status` (so a hook can observe a failed node before
+    /// `on_error` routing) and a clone of the graph state.
+    fn step_hook_context(
+        &self,
+        graph_run_id: &str,
+        node: &str,
+        step: u32,
+        status: &str,
+        error: Option<&str>,
+        state: &Value,
+    ) -> Value {
+        let mut ctx = json!({
+            "event": "graph_step_completed",
+            "graph_id": &self.graph.graph_id,
+            "graph_run_id": graph_run_id,
+            "node": node,
+            "step": step,
+            "status": status,
+            "state": state,
+        });
+        if let Some(err) = error {
+            ctx["error"] = json!(err);
+        }
+        ctx
     }
 
     // ── Event/receipt emission helpers (all route through record_callback_warning) ──
@@ -2810,7 +2916,7 @@ mod tests {
             max_steps: 100,
             on_error: ErrorMode::Fail,
             nodes: HashMap::new(),
-            hooks: None,
+            hooks: Vec::new(),
             config_schema: None,
             env_requires: Vec::new(),
             state: None,
@@ -4711,6 +4817,66 @@ config:
             retries, 0,
             "the persisted count was exhausted on the single remaining attempt — no new retry; \
              events={events:#?}"
+        );
+    }
+
+    // ── §B2 graph hooks ──────────────────────────────────────────────
+
+    const HOOK_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: notify
+      event: graph_completed
+      action: {item_id: "tool:test/notify", params: {}}
+  nodes:
+    done:
+      node_type: return
+"#;
+
+    #[tokio::test]
+    async fn graph_completed_hook_dispatches_through_callback() {
+        // An authored graph_completed hook fires at the terminal, dispatching
+        // its action through the same callback a node action uses.
+        let graph = make_graph(HOOK_YAML);
+        let (w, rec) = make_recording_walker(graph, vec![], None);
+        let result = w.execute(json!({}), Some("gr-hook".to_string())).await;
+        assert!(result.success, "graph completes: {result:?}");
+        assert_eq!(
+            rec.dispatch_count(),
+            1,
+            "the graph_completed hook must dispatch exactly once"
+        );
+        assert!(
+            w.take_warnings().is_empty(),
+            "a successful hook records no warning"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_hook_warns_but_does_not_fail_graph() {
+        // A hook child that fails is a recorded warning, never a graph failure —
+        // graph hooks are observers.
+        let graph = make_graph(HOOK_YAML);
+        let fail = json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "hook boom"},
+        });
+        let (w, _rec) = make_recording_walker(graph, vec![fail], None);
+        let result = w.execute(json!({}), Some("gr-hookfail".to_string())).await;
+        assert!(
+            result.success,
+            "a failing observer hook must not fail the graph: {result:?}"
+        );
+        let warnings = w.take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("graph hook") && w.contains("graph_completed")),
+            "expected a recorded hook warning, got: {warnings:?}"
         );
     }
 

@@ -2,6 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType};
 
+/// The lifecycle events the walker fires authored hooks at. A hook targeting
+/// any other `event` never runs (validation warns). Node-level observation
+/// (incl. a failed node before `on_error` routing) rides `graph_step_completed`
+/// — the context carries the node's `status` so a hook can condition on it.
+pub const GRAPH_HOOK_EVENTS: &[&str] =
+    &["graph_started", "graph_step_completed", "graph_completed"];
+
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
     pub errors: Vec<String>,
@@ -40,13 +47,18 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
             .push("config.nodes is empty — at least one node is required".into());
     }
 
-    // A `hooks:` block is parsed but not yet executed by the walker. Reject a
-    // non-empty list loudly so an author never believes an authored hook is
-    // firing when nothing reads it.
-    if cfg.hooks.as_ref().is_some_and(|h| !h.is_empty()) {
-        result
-            .errors
-            .push("graph hooks are not yet wired; remove the block".into());
+    // Authored hooks fire at graph lifecycle events. A hook whose `event` is
+    // none of the graph fire points would never run — warn so a typo surfaces.
+    for hook in &cfg.hooks {
+        if !GRAPH_HOOK_EVENTS.contains(&hook.event.as_str()) {
+            result.warnings.push(format!(
+                "hook '{}' targets event '{}', which is not a graph hook event ({}); it will \
+                 never fire",
+                hook.id,
+                hook.event,
+                GRAPH_HOOK_EVENTS.join(", ")
+            ));
+        }
     }
 
     // Bundle-event / vault capabilities are runtime authority: a signed manifest
@@ -499,9 +511,9 @@ config:
     }
 
     #[test]
-    fn validate_graph_rejects_non_empty_hooks_block() {
-        // Authored `hooks:` are not executed by the walker; a non-empty list
-        // is rejected rather than silently ignored.
+    fn validate_graph_accepts_typed_hooks_on_graph_event() {
+        // A well-formed hook targeting a real graph event parses and validates
+        // cleanly (no error, no unrecognized-event warning).
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -510,6 +522,30 @@ config:
   hooks:
     - id: obs
       event: graph_completed
+      action: {item_id: "tool:test/echo", params: {}}
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(result.errors.is_empty(), "typed hook must validate: {:?}", result.errors);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("never fire")),
+            "a graph_completed hook must not warn: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn validate_graph_warns_hook_on_unrecognized_event() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: typo
+      event: graph_finishd
       action: {item_id: "tool:test/echo"}
   nodes:
     done:
@@ -518,33 +554,35 @@ config:
         let result = validate_graph(&make_graph(yaml));
         assert!(
             result
-                .errors
+                .warnings
                 .iter()
-                .any(|e| e.contains("hooks are not yet wired")),
-            "expected non-empty hooks rejection, got: {:?}",
-            result.errors
+                .any(|w| w.contains("typo") && w.contains("never fire")),
+            "expected unrecognized-event warning, got: {:?}",
+            result.warnings
         );
     }
 
     #[test]
-    fn validate_graph_allows_absent_hooks_block() {
+    fn validate_graph_rejects_hook_with_unknown_field() {
+        // deny_unknown_fields on HookDefinition: the killed untyped form (a hook
+        // carrying arbitrary keys the walker silently ignored) fails the parse.
         let yaml = r#"
 version: "1.0.0"
 category: test
 config:
   start: done
+  hooks:
+    - id: bad
+      event: graph_completed
+      when: something
+      action: {item_id: "tool:test/echo"}
   nodes:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
         assert!(
-            !result
-                .errors
-                .iter()
-                .any(|e| e.contains("hooks are not yet wired")),
-            "absent hooks must not trip the rejection: {:?}",
-            result.errors
+            GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err(),
+            "an untyped hook field must fail the strict parse"
         );
     }
 

@@ -15,8 +15,14 @@ pub struct GraphConfig {
     pub on_error: ErrorMode,
     #[serde(default)]
     pub nodes: HashMap<String, GraphNode>,
+    /// Authored observer hooks fired at graph lifecycle events
+    /// (`graph_started`, `graph_step_completed`, `graph_completed`). Typed with
+    /// the same `HookDefinition` vocabulary directives use — one hook grammar
+    /// across runtimes. Each matching hook's action dispatches through the same
+    /// callback path a node action uses (effective_caps enforced, cost accrued,
+    /// braid-visible). Hooks observe; they do not steer the walk.
     #[serde(default)]
-    pub hooks: Option<Vec<Value>>,
+    pub hooks: Vec<ryeos_runtime::HookDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
     #[serde(default)]

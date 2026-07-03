@@ -4,6 +4,7 @@ mod dispatch;
 mod edges;
 mod env_preflight;
 mod foreach;
+mod hooks;
 mod knowledge;
 mod model;
 mod persistence;
