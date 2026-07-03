@@ -43,10 +43,6 @@ export async function runEffect(effect) {
         command_id: kind.command_id,
         args: kind.args ?? {},
       }));
-    case "cancel_thread":
-      return result(effect, "thread_cancelled", await postJson("/ui/api/studio/thread/cancel", {
-        thread_id: kind.thread_id,
-      }));
     case "submit_thread_command":
       // Steer the head thread through the shared control channel (session lane).
       return result(effect, "thread_command_submitted", await postJson("/ui/api/actions/invoke", {

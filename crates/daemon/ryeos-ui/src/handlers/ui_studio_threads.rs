@@ -237,45 +237,6 @@ fn compact_scalar(v: &Value) -> String {
     }
 }
 
-pub async fn handle_cancel(
-    params: Value,
-    ctx: HandlerContext,
-    state: Arc<AppState>,
-) -> Result<Value> {
-    use crate::seat_auth::SeatCaller;
-
-    let req: ryeos_api::handlers::threads_cancel::Request = serde_json::from_value(params)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
-
-    // Accept both seat lanes, like the list/inspect studio services: a browser
-    // session (writable + server-stored launch principal) OR a verified operator
-    // (e.g. the terminal watch dashboard). Either way the underlying
-    // `threads.cancel` still owner-checks `thread.requested_by` and runs the real
-    // cancellation.
-    let owner_ctx = match crate::seat_auth::require_seat_caller(&ctx, &state)? {
-        SeatCaller::Session(session) => {
-            if session.read_only {
-                return Err(HandlerError::Forbidden(
-                    "read-only session cannot cancel threads".into(),
-                )
-                .into());
-            }
-            let user_principal_id = session.user_principal_id.ok_or_else(|| {
-                HandlerError::Forbidden(
-                    "verified user principal required to cancel threads".into(),
-                )
-            })?;
-            HandlerContext::new(user_principal_id, session.granted_caps, true)
-        }
-        // Verified operator: pass the caller context straight through — the
-        // owner check happens in threads.cancel.
-        SeatCaller::Operator { .. } => ctx,
-    };
-    ryeos_api::handlers::threads_cancel::handle(req, owner_ctx, state)
-        .await
-        .map_err(Into::into)
-}
-
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:ui/studio/threads/list",
     endpoint: "ui.studio.threads.list",
@@ -290,14 +251,6 @@ pub const INSPECT_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
     handler: |params, ctx, state| Box::pin(async move { handle_inspect(params, ctx, state).await }),
-};
-
-pub const CANCEL_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
-    service_ref: "service:ui/studio/thread/cancel",
-    endpoint: "ui.studio.thread.cancel",
-    availability: ServiceAvailability::DaemonOnly,
-    required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle_cancel(params, ctx, state).await }),
 };
 
 #[cfg(test)]

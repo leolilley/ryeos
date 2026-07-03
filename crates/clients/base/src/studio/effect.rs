@@ -59,9 +59,6 @@ pub enum StudioEffectKind {
         command_id: String,
         args: serde_json::Value,
     },
-    CancelThread {
-        thread_id: String,
-    },
     /// Submit a typed thread-control command (continue/cancel/kill/interrupt)
     /// to a thread through the shared control channel. Semantic intent only:
     /// the executor maps it to the daemon's control endpoint — the client
@@ -138,7 +135,6 @@ pub enum StudioEffectResultKind {
     FileSpace,
     FileRead,
     ActionInvocation,
-    ThreadCancelled,
     ThreadCommandSubmitted,
     Invoked,
     SourceData,

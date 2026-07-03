@@ -322,16 +322,31 @@ impl StudioCore {
             StudioUiEvent::CycleInputTarget { forward } => self.cycle_input_target(forward),
             StudioUiEvent::CycleFilterField { forward } => self.cycle_filter_field(forward),
             StudioUiEvent::InterruptHead => {
-                // Esc while the head thread works → cancel it through the
-                // thread-control channel (reuses the read-only + dedup guards).
-                // No-op if there's no running head.
+                // Esc while the head thread works → cancel it through the single
+                // studio cancel path: `service:commands/submit { cancel }`, the
+                // same channel the launcher and row affordance use. No-op if
+                // there's no running head.
                 let Some(head) = self.seat.fold().input_route().thread else {
                     return Vec::new();
                 };
                 if !self.head_thread_running(&head) {
                     return Vec::new();
                 }
-                self.dispatch_action(StudioAction::CancelThread { thread_id: head })
+                if self.is_read_only() {
+                    self.notice("This session is read-only.", StudioTone::Warn);
+                    return Vec::new();
+                }
+                if self.has_pending_cancel(&head) {
+                    self.notice(
+                        format!("Cancel {head} is already pending."),
+                        StudioTone::Warn,
+                    );
+                    return Vec::new();
+                }
+                vec![self.emit(StudioEffectKind::SubmitThreadCommand {
+                    thread_id: head,
+                    command_type: "cancel".to_string(),
+                })]
             }
             StudioUiEvent::SubmitInput => self.submit_focused_input(false),
             StudioUiEvent::SubmitInputInterrupt => self.submit_focused_input(true),
@@ -636,20 +651,6 @@ impl StudioCore {
                     })]
                 }
             }
-            StudioAction::CancelThread { thread_id } => {
-                if self.is_read_only() {
-                    self.notice("This session is read-only.", StudioTone::Warn);
-                    Vec::new()
-                } else if self.has_pending_cancel(&thread_id) {
-                    self.notice(
-                        format!("Cancel {thread_id} is already pending."),
-                        StudioTone::Warn,
-                    );
-                    Vec::new()
-                } else {
-                    vec![self.emit(StudioEffectKind::CancelThread { thread_id })]
-                }
-            }
             StudioAction::SubmitThreadCommand { command } => {
                 if self.is_read_only() {
                     self.notice("This session is read-only.", StudioTone::Warn);
@@ -691,7 +692,8 @@ impl StudioCore {
         self.pending_effects.values().any(|kind| {
             matches!(
                 kind,
-                StudioEffectKind::CancelThread { thread_id: pending } if pending == thread_id
+                StudioEffectKind::SubmitThreadCommand { thread_id: pending, command_type }
+                    if pending == thread_id && command_type == "cancel"
             )
         })
     }
@@ -1162,24 +1164,10 @@ mod tests {
     }
 
     #[test]
-    fn writable_cancel_thread_emits_cancel_effect() {
-        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-        let effects = core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::Activate {
-                action: StudioAction::CancelThread {
-                    thread_id: "T-demo".to_string(),
-                },
-            },
-        });
-
-        assert!(matches!(
-            effects.first().map(|effect| &effect.kind),
-            Some(StudioEffectKind::CancelThread { thread_id }) if thread_id == "T-demo"
-        ));
-    }
-
-    #[test]
-    fn interrupt_head_cancels_a_running_head_thread() {
+    fn interrupt_head_cancels_a_running_head_through_command_submit() {
+        // Esc on a running head is the single studio cancel path: it emits
+        // `SubmitThreadCommand { cancel }`, routed through `commands/submit` —
+        // NOT a distinct cancel effect.
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.seat.append_facet(
             crate::studio::seat::KEY_INPUT_ROUTE,
@@ -1194,10 +1182,28 @@ mod tests {
         assert!(
             effects.iter().any(|e| matches!(
                 &e.kind,
-                StudioEffectKind::CancelThread { thread_id } if thread_id == "T-run"
+                StudioEffectKind::SubmitThreadCommand { thread_id, command_type }
+                    if thread_id == "T-run" && command_type == "cancel"
             )),
-            "running head → cancel effect: {effects:?}"
+            "running head → commands/submit cancel: {effects:?}"
         );
+    }
+
+    #[test]
+    fn cancel_thread_effect_form_is_rejected() {
+        // The `cancel_thread` effect variant is gone: its wire tag no longer
+        // deserializes into a StudioEffectKind. The one cancel path is
+        // `submit_thread_command { command_type: "cancel" }`.
+        assert!(serde_json::from_value::<StudioEffectKind>(serde_json::json!({
+            "type": "cancel_thread",
+            "thread_id": "T-x"
+        }))
+        .is_err());
+        // And its result tag is likewise gone.
+        assert!(serde_json::from_value::<
+            crate::studio::effect::StudioEffectResultKind,
+        >(serde_json::json!("thread_cancelled"))
+        .is_err());
     }
 
     #[test]
@@ -1219,21 +1225,20 @@ mod tests {
     #[test]
     fn duplicate_cancel_is_rejected_while_pending() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-run" }),
+        );
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
+        });
         let first = core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::Activate {
-                action: StudioAction::CancelThread {
-                    thread_id: "T-demo".to_string(),
-                },
-            },
+            event: StudioUiEvent::InterruptHead,
         });
         assert_eq!(first.len(), 1);
 
         let duplicate = core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::Activate {
-                action: StudioAction::CancelThread {
-                    thread_id: "T-demo".to_string(),
-                },
-            },
+            event: StudioUiEvent::InterruptHead,
         });
 
         assert!(duplicate.is_empty());
@@ -1241,7 +1246,7 @@ mod tests {
             .ui
             .notices
             .iter()
-            .any(|notice| notice.message == "Cancel T-demo is already pending."));
+            .any(|notice| notice.message == "Cancel T-run is already pending."));
     }
 
     #[test]

@@ -92,9 +92,6 @@ pub enum StudioAction {
         item_ref: String,
         parameters: serde_json::Value,
     },
-    CancelThread {
-        thread_id: String,
-    },
     /// Steer the route's head thread via `service:commands/submit`
     /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
     /// head thread at dispatch time. This is the same authority the CLI's
@@ -204,7 +201,8 @@ pub enum StudioUiEvent {
         forward: bool,
     },
     /// Cancel the running head thread (esc while it works) — terminates it
-    /// through the thread-control channel. No-op when the head isn't running.
+    /// through `service:commands/submit { command_type: cancel }`, the single
+    /// studio cancel path. No-op when the head isn't running.
     /// (Named `InterruptHead` for the esc-terminate control; the text-bearing
     /// "interrupt" is `SubmitInputInterrupt`, a redirect, not a kill.)
     InterruptHead,

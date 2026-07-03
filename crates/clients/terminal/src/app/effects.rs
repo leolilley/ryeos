@@ -95,7 +95,6 @@ async fn effect_data(
         StudioEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/studio/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
         StudioEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/studio/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         StudioEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
-        StudioEffectKind::CancelThread { thread_id } => client.signed_post("/ui/api/studio/thread/cancel", &serde_json::json!({ "thread_id": thread_id })).await,
         StudioEffectKind::SubmitThreadCommand { thread_id, command_type } => {
             // Steer the head thread through the shared control channel. Authority
             // == the CLI's `commands submit`; see .tmp/thread-authorization-review.md
@@ -173,7 +172,6 @@ fn result_kind_for(kind: &StudioEffectKind) -> StudioEffectResultKind {
         StudioEffectKind::FetchFileSpace { .. } => StudioEffectResultKind::FileSpace,
         StudioEffectKind::ReadFile { .. } => StudioEffectResultKind::FileRead,
         StudioEffectKind::InvokeAction { .. } => StudioEffectResultKind::ActionInvocation,
-        StudioEffectKind::CancelThread { .. } => StudioEffectResultKind::ThreadCancelled,
         StudioEffectKind::SubmitThreadCommand { .. } => StudioEffectResultKind::ThreadCommandSubmitted,
         StudioEffectKind::Invoke { .. } => StudioEffectResultKind::Invoked,
         StudioEffectKind::SetLocationHash { .. }

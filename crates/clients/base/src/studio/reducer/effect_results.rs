@@ -29,7 +29,6 @@ impl StudioCore {
         if matches!(
             result.kind,
             StudioEffectResultKind::ActionInvocation
-                | StudioEffectResultKind::ThreadCancelled
                 | StudioEffectResultKind::ThreadCommandSubmitted
                 | StudioEffectResultKind::Invoked
         ) {
@@ -49,7 +48,7 @@ impl StudioCore {
         self.apply_source_result(&expected, result.kind, result.id, data)
     }
 
-    /// The command-result arms (`ActionInvocation` / `ThreadCancelled` /
+    /// The command-result arms (`ActionInvocation` / `ThreadCommandSubmitted` /
     /// `Invoked`) — a synthetic-`Null`-defaulted body that always resolves to a
     /// notice plus a refresh, never to the parse-and-store path.
     fn apply_invocation_result(
@@ -65,15 +64,6 @@ impl StudioCore {
                     self.emit(StudioEffectKind::FetchDimension),
                     self.emit(StudioEffectKind::FetchThreads { limit: 100 }),
                 ]
-            }
-            StudioEffectResultKind::ThreadCancelled => {
-                self.notice(effect_success_notice(expected, &data), StudioTone::Good);
-                let mut effects = vec![
-                    self.emit(StudioEffectKind::FetchDimension),
-                    self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
-                ];
-                effects.extend(self.effects_for_hint("thread"));
-                effects
             }
             StudioEffectResultKind::ThreadCommandSubmitted => {
                 self.notice(effect_success_notice(expected, &data), StudioTone::Good);
@@ -294,7 +284,6 @@ impl StudioCore {
                 });
             }
             StudioEffectResultKind::ActionInvocation
-            | StudioEffectResultKind::ThreadCancelled
             | StudioEffectResultKind::ThreadCommandSubmitted
             | StudioEffectResultKind::Invoked => {
                 unreachable!("command results are handled before optional data extraction")
@@ -459,11 +448,6 @@ fn effect_success_notice(expected: &StudioEffectKind, data: &serde_json::Value) 
                 json_field_text(data, &["command_id"]).unwrap_or_else(|| command_id.clone());
             format!("Ran {item_ref}.")
         }
-        StudioEffectKind::CancelThread { thread_id } => {
-            let thread =
-                json_field_text(data, &["thread_id", "id"]).unwrap_or_else(|| thread_id.clone());
-            format!("Cancelled {thread}.")
-        }
         StudioEffectKind::SubmitThreadCommand {
             thread_id,
             command_type,
@@ -480,9 +464,6 @@ fn effect_failure_notice(expected: &StudioEffectKind, error: Option<&str>) -> St
     match expected {
         StudioEffectKind::InvokeAction { command_id, .. } => {
             format!("Run {command_id} failed: {reason}")
-        }
-        StudioEffectKind::CancelThread { thread_id } => {
-            format!("Cancel {thread_id} failed: {reason}")
         }
         StudioEffectKind::SubmitThreadCommand {
             thread_id,
@@ -588,9 +569,6 @@ fn effect_result_kind_matches(
         ) | (
             StudioEffectKind::InvokeAction { .. },
             StudioEffectResultKind::ActionInvocation
-        ) | (
-            StudioEffectKind::CancelThread { .. },
-            StudioEffectResultKind::ThreadCancelled
         ) | (
             StudioEffectKind::SubmitThreadCommand { .. },
             StudioEffectResultKind::ThreadCommandSubmitted
@@ -765,9 +743,9 @@ mod tests {
         // result looks superficially like a launch outcome ({thread_id, status}).
         let effect = core.emit(StudioEffectKind::Invoke {
             target: InvokeRef::Ref {
-                item_ref: "service:ui/studio/thread/cancel".to_string(),
+                item_ref: "service:commands/submit".to_string(),
             },
-            params: serde_json::json!({ "thread_id": "T-7" }),
+            params: serde_json::json!({ "thread_id": "T-7", "command_type": "cancel" }),
             // As the row Cancel affordance now emits: a Service intent carrying
             // the authored success-notice template.
             intent: crate::studio::effect::InvokeIntent::Service,
@@ -1285,14 +1263,20 @@ mod tests {
     }
 
     #[test]
-    fn thread_cancelled_result_notices_and_refreshes() {
+    fn thread_command_submitted_result_notices_and_refreshes() {
+        // The one cancel path's result: an Esc / launcher / row cancel all land
+        // as `SubmitThreadCommand { cancel }` → `ThreadCommandSubmitted`, which
+        // notices and refreshes the thread list.
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-run" }),
+        );
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
+        });
         let cancel = core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::Activate {
-                action: StudioAction::CancelThread {
-                    thread_id: "T-demo".to_string(),
-                },
-            },
+            event: StudioUiEvent::InterruptHead,
         });
         let cancel_id = cancel
             .first()
@@ -1303,10 +1287,10 @@ mod tests {
             result: StudioEffectResult {
                 id: cancel_id,
                 ok: true,
-                kind: StudioEffectResultKind::ThreadCancelled,
+                kind: StudioEffectResultKind::ThreadCommandSubmitted,
                 data: Some(serde_json::json!({
-                    "thread_id": "T-demo",
-                    "status": "cancelled"
+                    "thread_id": "T-run",
+                    "command_type": "cancel"
                 })),
                 error: None,
             },
@@ -1316,10 +1300,7 @@ mod tests {
             .ui
             .notices
             .iter()
-            .any(|notice| notice.message == "Cancelled T-demo."));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchDimension)));
+            .any(|notice| notice.message == "Sent cancel to T-run."));
         assert!(effects
             .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchThreads { limit: 200 })));
@@ -1328,12 +1309,15 @@ mod tests {
     #[test]
     fn thread_cancel_failure_names_thread() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-run" }),
+        );
+        core.data.threads = Some(StudioThreadsDto {
+            threads: vec![serde_json::json!({ "thread_id": "T-run", "status": "running" })],
+        });
         let cancel = core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::Activate {
-                action: StudioAction::CancelThread {
-                    thread_id: "T-demo".to_string(),
-                },
-            },
+            event: StudioUiEvent::InterruptHead,
         });
         let cancel_id = cancel
             .first()
@@ -1344,7 +1328,7 @@ mod tests {
             result: StudioEffectResult {
                 id: cancel_id,
                 ok: false,
-                kind: StudioEffectResultKind::ThreadCancelled,
+                kind: StudioEffectResultKind::ThreadCommandSubmitted,
                 data: None,
                 error: Some("thread already finished".to_string()),
             },
@@ -1352,7 +1336,7 @@ mod tests {
 
         assert!(effects.is_empty());
         assert!(core.ui.notices.iter().any(|notice| {
-            notice.message == "Cancel T-demo failed: thread already finished"
+            notice.message == "Sending cancel to T-run failed: thread already finished"
                 && notice.tone == StudioTone::Danger
         }));
     }
