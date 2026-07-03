@@ -120,6 +120,10 @@ pub enum RuntimeEventType {
     GraphFollowSuspended,
     GraphNodeRetry,
 
+    // ── Directive resilience / accounting ───────────────────────
+    ProviderRetry,
+    CostUntracked,
+
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
 }
@@ -164,6 +168,8 @@ impl RuntimeEventType {
             Self::GraphForeachIteration => "graph_foreach_iteration",
             Self::GraphFollowSuspended => "graph_follow_suspended",
             Self::GraphNodeRetry => "graph_node_retry",
+            Self::ProviderRetry => "provider_retry",
+            Self::CostUntracked => "cost_untracked",
             Self::ThreadUsage => "thread_usage",
         }
     }
@@ -207,6 +213,8 @@ impl RuntimeEventType {
             "graph_foreach_iteration" => Ok(Self::GraphForeachIteration),
             "graph_follow_suspended" => Ok(Self::GraphFollowSuspended),
             "graph_node_retry" => Ok(Self::GraphNodeRetry),
+            "provider_retry" => Ok(Self::ProviderRetry),
+            "cost_untracked" => Ok(Self::CostUntracked),
             "thread_usage" => Ok(Self::ThreadUsage),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
@@ -274,6 +282,8 @@ impl RuntimeEventType {
             | Self::GraphBranchTaken
             | Self::GraphFollowSuspended
             | Self::GraphNodeRetry
+            | Self::ProviderRetry
+            | Self::CostUntracked
             | Self::ThreadUsage => StorageClass::Indexed,
         }
     }
@@ -325,6 +335,8 @@ mod tests {
             RuntimeEventType::GraphForeachIteration,
             RuntimeEventType::GraphFollowSuspended,
             RuntimeEventType::GraphNodeRetry,
+            RuntimeEventType::ProviderRetry,
+            RuntimeEventType::CostUntracked,
             RuntimeEventType::ThreadUsage,
         ];
         for v in variants {
