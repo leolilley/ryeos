@@ -91,6 +91,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
     let signer = NodeIdentitySigner::from_identity(&state.identity);
     let params_clone = params.clone();
     let runtime_state_dir_for_log = runtime_state_dir.clone();
+    let state_store = state.state_store.clone();
 
     let gc_result = tokio::task::spawn_blocking(move || {
         run_gc_and_log(
@@ -99,6 +100,7 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
             &signer,
             &params_clone,
             &runtime_state_dir_for_log,
+            &state_store,
         )
     })
     .await;
@@ -119,6 +121,7 @@ fn run_gc_and_log(
     signer: &NodeIdentitySigner,
     params: &GcParams,
     runtime_state_dir: &std::path::Path,
+    state_store: &ryeos_app::state_store::StateStore,
 ) -> Result<GcResult> {
     let mut runtime_cleanup = GcResult::default();
     gc::purge_runtime_state(runtime_state_dir, params, &mut runtime_cleanup)
@@ -127,7 +130,32 @@ fn run_gc_and_log(
     let mut result =
         gc::run_gc(cas_root, refs_root, Some(signer), params).context("GC pipeline failed")?;
     result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
+    result.deleted_fire_records = runtime_cleanup.deleted_fire_records;
     result.freed_bytes += runtime_cleanup.freed_bytes;
+
+    // Retention: retire old terminal sync-job rows. Runs under the deep profile
+    // only (see GcParams docs), never on a dry run. The write barrier is
+    // quiesced here, so no concurrent sync-job writes race the delete.
+    if !params.dry_run && (params.deep || params.prune_runtime_history) {
+        let cutoff = gc::retention::iso8601_days_ago(gc::retention::SYNC_JOB_RETENTION_DAYS);
+        match state_store.with_state_db(|db| db.delete_terminal_sync_jobs_before(&cutoff)) {
+            Ok((jobs, attempts)) => {
+                result.deleted_sync_jobs = jobs;
+                result.deleted_sync_job_attempts = attempts;
+                if jobs > 0 {
+                    tracing::info!(
+                        deleted_sync_jobs = jobs,
+                        deleted_sync_job_attempts = attempts,
+                        cutoff = %cutoff,
+                        "retention: retired terminal sync jobs"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "sync-job retention sweep failed");
+            }
+        }
+    }
 
     // Log the event (best-effort)
     if let Err(err) = gc::event_log::append_event(
@@ -142,6 +170,9 @@ fn run_gc_and_log(
             deleted_objects: result.deleted_objects,
             deleted_blobs: result.deleted_blobs,
             deleted_runtime_files: result.deleted_runtime_files,
+            deleted_fire_records: result.deleted_fire_records,
+            deleted_sync_jobs: result.deleted_sync_jobs,
+            deleted_sync_job_attempts: result.deleted_sync_job_attempts,
             freed_bytes: result.freed_bytes,
             snapshots_compacted: result
                 .compaction
