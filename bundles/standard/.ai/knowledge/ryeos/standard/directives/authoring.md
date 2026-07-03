@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T01:05:59Z:9dd011676146de18218b569acab852127ccc2ce84e0513af593c0bcb35f964c3:bZCXC1Rq4yyS6pCq9VbjLnGvGK4KktyuE3O5JHCxMsKF6puUtBERPei2sjD4lQiiYRLeJID4HPZOuZfY+CyxBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-03T01:46:19Z:7817ce52a51e22e7c00e3f85894c2b415438b1b122a5877fe989e3d6e8041f9d:bfKRS9KyvxzAahj/wRIBq094EEdaK/wpKiZLqmIEOSBDzPPzRO5l3ZV7brXUjh0PHutcRJLsONi9tGAmsacgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]

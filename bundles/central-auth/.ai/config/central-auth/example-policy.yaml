@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-02T03:52:18Z:6e89d2588d76e1ff29f0296a32f0a5160259f09be3b5d9c4377e873e5a0c39f1:r53bzT6RSZvy3QmcItMNg/xETsgKr866rmkDTmUtnJtfPwNLyv5ByRwaghNSkfkQWMCnp5Cg+SLuJdacwYS7CQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-07-03T03:58:05Z:6e89d2588d76e1ff29f0296a32f0a5160259f09be3b5d9c4377e873e5a0c39f1:mSBYGAeVNpuaidwog+qHFyXX6CnXB5jqiDxgxmiRB9Q3Kp1Nnz50B/gNKtx7+7d95CBhL16NGmC2mi8X5feUCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "central-auth"
 version: "0.1.0"
 description: "Example central-auth policy for the TV tracker app."

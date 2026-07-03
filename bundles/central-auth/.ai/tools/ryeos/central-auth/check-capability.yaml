@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-02T03:52:14Z:a36a475bfc5c27e088e9456ce1b643a52c0ad6c94a674cd073a863658ee60926:65QVkh++x1T1hf5pnyNlL0OT4BpNGSmHYj4r+gJdnqOlJNMLsytXaiww3uHtv6SZZ7EvZYIQMfIAo1qTRvQBDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1
+# ryeos:signed:2026-07-03T03:58:05Z:21f65233cd3ee48178f16e1bb7fc2a8c20e468623341a195e1b4893f24df68c6:pffwP34DgQiqx6yqUa24zLUUg4xzvlCsIguBVaVoUdb/i8IonA2W2p2a7C44UhG5t1hXZ3Ey6o/P65cbwA4eBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "check-capability"
