@@ -104,6 +104,8 @@ fn install_kind_schema(root: &Path, kind: &str, signer: &SigningKey) -> anyhow::
         r##"category: "engine/kinds/{kind}"
 version: "1.0.0"
 resolution: []
+effective_trust:
+  include_references: false
 location:
   directory: {kind}_items
 execution:

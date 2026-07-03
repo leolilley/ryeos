@@ -5,3 +5,4 @@ version: "1.0.0"
 description: List the operator's running seat sessions - reattach discovery, keeps the seat_session kind daemon-side
 endpoint: seat.list
 availability: daemon_only
+required_caps: ["ryeos.execute.service.seat/list"]
