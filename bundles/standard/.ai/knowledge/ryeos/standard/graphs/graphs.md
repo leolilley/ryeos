@@ -106,6 +106,30 @@ edges:
 Supported operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`,
 `contains`, `regex`, `exists`.
 
+#### Same-node conditions: read `result.*`, not `state.*`
+
+A node's `assign` merges into state **after** its edges are evaluated, so a
+`when` on `state.<key>` where the *same node* assigns `<key>` compares against
+the value from before this node ran — unset on the first visit, one iteration
+stale inside a loop. Branch on the node's own outcome with `result.<key>`
+(the fresh result is placed in the condition context):
+
+```yaml
+recall:
+  action: { item_id: "tool:recall" }
+  assign: { found: "${result.found}" }
+  next:
+    type: conditional
+    branches:
+      - when: { path: "result.found", op: eq, value: "yes" }   # this node's outcome
+        to: warm
+      - to: study                                              # default
+```
+
+`state.<key>` is still correct for reading a value a **prior** node committed.
+Graph validation warns at signing time when a node assigns `K` and a same-node
+branch condition reads `state.K`.
+
 ## Foreach
 
 Iterate over lists with parallel or sequential execution:

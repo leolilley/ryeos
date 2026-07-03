@@ -237,6 +237,78 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             ));
         }
     }
+
+    check_conditional_reads_own_assign(name, node, result);
+}
+
+/// Same-node stale-state footgun. A node's `assign` delta is merged into
+/// state in `commit_step`, which runs AFTER edge evaluation — so a conditional
+/// branch on `state.K` where the SAME node assigns `K` compares against the
+/// pre-assign value (unset on first visit; one iteration stale in a loop).
+/// The fresh outcome is in the condition context as `result.*`, so a same-node
+/// branch must read `result.K`. Warn (not error): `state.K` is valid syntax
+/// and reading a *different* node's assigned `K` is legitimate — only the
+/// same-node assign∩condition intersection is the footgun.
+fn check_conditional_reads_own_assign(
+    name: &str,
+    node: &GraphNode,
+    result: &mut ValidationResult,
+) {
+    let assigned: HashSet<&str> = match node.assign.as_ref() {
+        Some(Value::Object(map)) => map.keys().map(String::as_str).collect(),
+        _ => return,
+    };
+    if assigned.is_empty() {
+        return;
+    }
+    let Some(EdgeSpec::Conditional { branches }) = node.next.as_ref() else {
+        return;
+    };
+    let mut condition_keys: HashSet<String> = HashSet::new();
+    for ce in branches {
+        if let Some(when) = ce.when.as_ref() {
+            collect_condition_state_keys(when, &mut condition_keys);
+        }
+    }
+    for key in &condition_keys {
+        if assigned.contains(key.as_str()) {
+            result.warnings.push(format!(
+                "node '{name}' assigns '{key}' and a same-node conditional branch reads \
+                 'state.{key}', which sees the value from before this node's assign merges; \
+                 branch on 'result.{key}' to use this node's own outcome"
+            ));
+        }
+    }
+}
+
+/// Collect the first path segment of every bare `path: "state.<seg>…"` string
+/// anywhere in a `when` condition tree (recursing through and/or/not nesting).
+/// Condition paths are bare dotted strings, not `${…}` templates, so the
+/// interpolation collectors above never see them.
+fn collect_condition_state_keys(when: &Value, out: &mut HashSet<String>) {
+    match when {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if k == "path" {
+                    if let Some(seg) = v
+                        .as_str()
+                        .and_then(|s| s.strip_prefix("state."))
+                        .and_then(|rest| rest.split('.').next())
+                        .filter(|seg| !seg.is_empty())
+                    {
+                        out.insert(seg.to_string());
+                    }
+                }
+                collect_condition_state_keys(v, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_condition_state_keys(v, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn validate_edges(
@@ -731,6 +803,93 @@ config:
                 .iter()
                 .any(|w| w.contains("check") && w.contains("no default branch")),
             "expected no-default warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_warns_same_node_conditional_on_assigned_state() {
+        // `recall` assigns `found`, then branches on `state.found` in the same
+        // node — the classic footgun: the assign merges after edge evaluation,
+        // so the branch reads the pre-assign value. Must warn toward `result.*`.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: recall
+  nodes:
+    recall:
+      action: {item_id: "tool:recall"}
+      assign:
+        found: "${result.found}"
+      next:
+        type: conditional
+        branches:
+          - when: {path: state.found, op: eq, value: "yes"}
+            to: warm
+          - to: study
+    warm:
+      node_type: return
+    study:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("recall") && w.contains("result.found")),
+            "expected same-node stale-state warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_quiet_on_result_paths_and_cross_node_state() {
+        // `recall` branches on its own outcome via `result.found` (the correct
+        // idiom); `gate2` reads `state.found` but does NOT assign it — a
+        // legitimate read of a prior node's committed state. Neither warns.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: recall
+  nodes:
+    recall:
+      action: {item_id: "tool:recall"}
+      assign:
+        found: "${result.found}"
+      next:
+        type: conditional
+        branches:
+          - when: {path: result.found, op: eq, value: "yes"}
+            to: gate2
+          - to: gate2
+    gate2:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: {path: state.found, op: eq, value: "yes"}
+            to: warm
+          - to: study
+    warm:
+      node_type: return
+    study:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("before this node's assign")),
+            "must not warn for result.* or cross-node state.*: {:?}",
             result.warnings
         );
     }
