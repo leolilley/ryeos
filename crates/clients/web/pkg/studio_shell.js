@@ -1,6 +1,7 @@
 import init, {
   studio_apply_effect_result,
   studio_dispatch,
+  studio_key,
   studio_replay_seat_events,
   studio_seat_events,
   studio_start,
@@ -159,9 +160,6 @@ function rerenderShell() {
 function shellController() {
   return {
     dimension: latestDimension,
-    openLauncher() {
-      dispatchUi({ type: "open_launcher" });
-    },
     closeLauncher() {
       dispatchUi({ type: "close_launcher" });
     },
@@ -254,88 +252,31 @@ function attachSessionEvents(session) {
 
 function attachBrowserEvents() {
   window.addEventListener("keydown", (event) => {
-    const launcherOpen = !!currentEnvelope?.view_model?.launcher?.open;
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "k") {
-      event.preventDefault();
-      shellController().openLauncher();
+    // The binding table is the SHARED studio keymap (studio_key →
+    // studio_key_command in base), identical to the terminal, so the two
+    // renderers never diverge on what a key does. Only genuinely-web key
+    // handling stays here in JS: native text entry (the input-dock textarea
+    // and the launcher search field own their own typing, submit, and
+    // completion while focused) and native activation controls. Everything
+    // else routes through the shared keymap.
+    if (isTypingTarget(event.target)) return;
+    const key = studioKeyEvent(event);
+    if (!key) return;
+    // Plain Enter on a focused native control triggers its native click.
+    if (key.key === "enter" && !hasModifiers(key) && isNativeActivationTarget(event.target)) return;
+
+    let outcome;
+    try {
+      outcome = studio_key(key);
+    } catch (error) {
+      console.warn("RyeOS Studio key handling failed", error);
       return;
     }
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "q") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "close_focused" } });
-      return;
-    }
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "m") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "toggle_focused_master" } });
-      return;
-    }
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "t") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "toggle_top_status_bar" } });
-      return;
-    }
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "b") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "toggle_bottom_status_bar" } });
-      return;
-    }
-    if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey) {
-      const direction = arrowDirection(event.key);
-      if (direction) {
-        event.preventDefault();
-        dispatchUi({ type: "activate", action: { type: "resize_focused", direction } });
-      }
-      return;
-    }
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowUp") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "move_focused_tile", direction: "up" } });
-      return;
-    }
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowDown") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "move_focused_tile", direction: "down" } });
-      return;
-    }
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowLeft") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "cycle_tab", direction: "up" } });
-      return;
-    }
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.key === "ArrowRight") {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "cycle_tab", direction: "down" } });
-      return;
-    }
-    if (event.key === "Escape" && launcherOpen) {
-      event.preventDefault();
-      shellController().closeLauncher();
-      return;
-    }
-    if (event.key === "Escape" && !isTypingTarget(event.target)) {
-      event.preventDefault();
-      dispatchUi({ type: "activate", action: { type: "close_focused" } });
-      return;
-    }
-    if (event.key === "Enter" && !isTypingTarget(event.target) && !isNativeActivationTarget(event.target)) {
-      event.preventDefault();
-      dispatchUi({ type: "activate_focused" });
-      return;
-    }
-    if (launcherOpen || isTypingTarget(event.target) || event.altKey || event.ctrlKey || event.metaKey) {
-      return;
-    }
-    const cursorDelta = rowCursorDelta(event.key);
-    if (cursorDelta && moveFocusedRowCursor(cursorDelta)) {
-      event.preventDefault();
-      return;
-    }
-    const direction = arrowDirection(event.key);
-    if (direction) {
-      event.preventDefault();
-      dispatchUi({ type: "focus_direction", direction });
-    }
+    // An unhandled key (unbound, or Ctrl+C which is native copy in the browser)
+    // leaves both the studio state and the default browser behavior untouched.
+    if (!outcome?.handled) return;
+    event.preventDefault();
+    if (outcome.envelope) void commit(outcome.envelope);
   });
   window.addEventListener("resize", debounce(() => {
     void commit(studio_dispatch({ type: "resize", viewport: viewport() }));
@@ -362,44 +303,43 @@ function attachBrowserEvents() {
   });
 }
 
-function rowCursorDelta(key) {
-  if (key === "ArrowUp") return -1;
-  if (key === "ArrowDown") return 1;
-  return 0;
+// Translate a DOM KeyboardEvent into the neutral StudioKeyEvent the shared
+// keymap consumes (`{ key, modifiers }`). Named keys map to their StudioKey
+// variant; a single printable character maps to `Char(ch)` (serialized as
+// `{ char }`). Keys with no shared binding (F-keys, Home, PageUp, dead keys)
+// return null so the browser keeps them native.
+function studioKeyEvent(event) {
+  const key = studioKeyName(event.key);
+  if (!key) return null;
+  return {
+    key,
+    modifiers: {
+      ctrl: event.ctrlKey,
+      alt: event.altKey,
+      shift: event.shiftKey,
+      meta: event.metaKey,
+    },
+  };
 }
 
-function moveFocusedRowCursor(delta) {
-  const tile = focusedTileNode(currentEnvelope?.view_model?.workspace?.root);
-  const rows = tile?.view?.rows;
-  if (!tile?.tile_id || !Array.isArray(rows) || rows.length === 0) return false;
-  const selected = rows.findIndex((row) => row.selected);
-  const current = selected >= 0 ? selected : 0;
-  const next = Math.max(0, Math.min(rows.length - 1, current + delta));
-  if (next === current) return false;
-  dispatchUi({ type: "set_tile_cursor", tile_id: tile.tile_id, index: next });
-  return true;
-}
-
-function focusedTileNode(node) {
-  if (!node) return null;
-  if (node.type === "tile") return node.focused ? node : null;
-  if (node.type === "split") return focusedTileNode(node.first) || focusedTileNode(node.second);
-  return null;
-}
-
-function arrowDirection(key) {
-  switch (key) {
-    case "ArrowLeft":
-      return "left";
-    case "ArrowRight":
-      return "right";
-    case "ArrowUp":
-      return "up";
-    case "ArrowDown":
-      return "down";
+function studioKeyName(domKey) {
+  switch (domKey) {
+    case "ArrowUp": return "arrow_up";
+    case "ArrowDown": return "arrow_down";
+    case "ArrowLeft": return "arrow_left";
+    case "ArrowRight": return "arrow_right";
+    case "Enter": return "enter";
+    case "Escape": return "escape";
+    case "Backspace": return "backspace";
+    case "Tab": return "tab";
     default:
-      return null;
+      return domKey.length === 1 ? { char: domKey } : null;
   }
+}
+
+function hasModifiers(key) {
+  const m = key.modifiers || {};
+  return !!(m.ctrl || m.alt || m.shift || m.meta);
 }
 
 function isTypingTarget(target) {
