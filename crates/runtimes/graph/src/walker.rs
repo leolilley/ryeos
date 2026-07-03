@@ -24,7 +24,10 @@ use ryeos_runtime::TerminalCompletion;
 
 /// Schema version of the graph checkpoint payload. Bump on any incompatible
 /// change to the written fields; the resume parser rejects an unknown version.
-pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds `retry_attempt` (the per-step retry counter) so a segment cut or a
+/// crash mid-retry resumes with the count instead of restarting it per resume.
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 
 /// Follow-resume field keys for the checkpoint / resume-state payload. Shared by
 /// the write (walker), read (resume), and inject (main) sites so the vocabulary
@@ -155,6 +158,24 @@ enum StepOutcome {
     /// via `spawn_follow_child`. No result exists yet — it is consumed on resume.
     /// Carries only the child item + params; the daemon derives the rest.
     FollowSuspend { item_id: String, params: Value },
+    /// Action dispatch failed and the node's `retry` policy has attempts left.
+    /// The walker checkpoints the incremented attempt count on the SAME node,
+    /// backs off, and re-dispatches on the next step (so max_steps/segment_steps
+    /// bound total retry work). Routing to `on_error` happens only once attempts
+    /// are exhausted.
+    RetryScheduled {
+        item_id: String,
+        error: String,
+        /// 1-based number of the attempt that just failed.
+        failed_attempt: u32,
+        /// Total attempts configured (`retry.attempts`).
+        total_attempts: u32,
+        /// Backoff before the re-dispatch, in milliseconds.
+        delay_ms: u64,
+        elapsed_ms: u64,
+        /// Cost a native child spent before failing this attempt, if any.
+        cost: Option<RuntimeCost>,
+    },
     /// Terminal step — return node, max-steps exhausted, or fatal fail.
     Terminal {
         status: &'static str,
@@ -176,7 +197,14 @@ enum NextOnError {
 /// Return from `commit_step`: either advance to the next node or
 /// terminate the graph run.
 enum CommitResult {
-    Advance { next_node: String, next_step: u32 },
+    Advance {
+        next_node: String,
+        next_step: u32,
+        /// Retry attempts already spent on `next_node`. Non-zero only when the
+        /// walker is re-entering the same node under a `retry` backoff; every
+        /// advance to a fresh node resets it to 0.
+        next_retry_attempt: u32,
+    },
     Terminate(GraphResult),
 }
 
@@ -241,6 +269,10 @@ struct RunNodeBodyContext<'a> {
     pub cache: &'a NodeCache,
     pub graph_run_id: &'a str,
     pub suppressed_errors: &'a mut Vec<ErrorRecord>,
+    /// Retry attempts already spent on this node (0 on a fresh entry). The
+    /// action body uses it to decide whether a further dispatch failure has
+    /// attempts remaining under the node's `retry` policy.
+    pub retry_attempt: u32,
 }
 
 struct CommitStepInput<'a> {
@@ -480,10 +512,14 @@ impl Walker {
 
         let mut current = cfg.start.clone();
         let mut step: u32 = 0;
+        // Retry attempts already spent on `current`. Rides the checkpoint (v2)
+        // so a segment cut or crash mid-retry resumes with the count instead of
+        // restarting attempts per resume. Reset to 0 on every advance to a
+        // fresh node.
+        let mut retry_attempt: u32 = 0;
         let mut suppressed_errors: Vec<ErrorRecord> = Vec::new();
         let mut receipts: Vec<NodeReceipt> = Vec::new();
         let cache = NodeCache::new(&self.graph.graph_id);
-
 
         // Resume state injected by main.rs (from the checkpoint or event
         // replay). main.rs owns the cold-start decision when RYEOS_RESUME=1.
@@ -501,6 +537,13 @@ impl Walker {
                 if let Some(rid) = resume_val.get("graph_run_id").and_then(|v| v.as_str()) {
                     graph_run_id = rid.to_string();
                 }
+                // Restore the per-step retry counter so a mid-retry segment cut
+                // or crash resumes with the attempts already spent (absent on a
+                // pre-v2 checkpoint or a fresh-node resume → 0).
+                retry_attempt = resume_val
+                    .get("retry_attempt")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
                 // Arm follow resume: if the checkpoint marks a pending follow AND a
                 // child envelope was spliced in, consume it at the follow node
                 // instead of re-suspending. Only when BOTH are present — a bare
@@ -623,6 +666,7 @@ impl Walker {
                     cache: &cache,
                     graph_run_id: &graph_run_id,
                     suppressed_errors: &mut suppressed_errors,
+                    retry_attempt,
                 })
                 .await;
 
@@ -644,9 +688,11 @@ impl Walker {
                 CommitResult::Advance {
                     next_node,
                     next_step,
+                    next_retry_attempt,
                 } => {
                     current = next_node;
                     step = next_step;
+                    retry_attempt = next_retry_attempt;
                     steps_this_segment += 1;
                 }
                 CommitResult::Terminate(result) => return result,
@@ -764,6 +810,7 @@ impl Walker {
             cache,
             graph_run_id,
             suppressed_errors,
+            retry_attempt,
         } = ctx;
         let start = Instant::now();
         let execution = exec_ctx.as_context_value();
@@ -839,6 +886,9 @@ impl Walker {
                             exec_ctx: Some(exec_ctx),
                             step,
                             current_node: &current,
+                            graph_run_id,
+                            definition_ref: &self.graph.definition_ref,
+                            definition_hash: &self.graph.definition_hash,
                         },
                         state,
                         inputs,
@@ -858,6 +908,9 @@ impl Walker {
                             exec_ctx: Some(exec_ctx),
                             step,
                             current_node: &current,
+                            graph_run_id,
+                            definition_ref: &self.graph.definition_ref,
+                            definition_hash: &self.graph.definition_hash,
                         },
                         state,
                         inputs,
@@ -927,6 +980,7 @@ impl Walker {
                         cache,
                         graph_run_id,
                         suppressed_errors,
+                        retry_attempt,
                     },
                     start,
                 )
@@ -950,6 +1004,7 @@ impl Walker {
             cache,
             graph_run_id: _graph_run_id,
             suppressed_errors: _suppressed_errors,
+            retry_attempt,
         } = ctx;
         let execution = exec_ctx.as_context_value();
         let action = match &node.action {
@@ -1144,22 +1199,55 @@ impl Walker {
         let elapsed = start.elapsed().as_millis() as u64;
 
         match outcome {
-            Err(err_detail) => StepOutcome::DispatchHardError {
-                item_id: Some(dispatched_item_id),
-                error: err_detail,
-                next_on_error: resolve_next_on_error(node, cfg),
-                elapsed_ms: elapsed,
-                // Transport/dispatch failed before the child returned — no cost.
-                cost: None,
-            },
-            Ok(dispatch::ActionOutcome::Failure(failure)) => StepOutcome::LeafSoftError {
-                item_id: dispatched_item_id,
-                error: failure.diagnostic,
-                next_on_error: resolve_next_on_error(node, cfg),
-                elapsed_ms: elapsed,
-                // A failed native child may have spent tokens — preserve it.
-                cost: failure.cost,
-            },
+            Err(err_detail) => {
+                // A transport/dispatch failure with retry attempts remaining
+                // reschedules a fresh-step re-dispatch; exhausted → on_error.
+                if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
+                    let rc = node.retry.as_ref().expect("retry present when scheduling");
+                    return StepOutcome::RetryScheduled {
+                        item_id: dispatched_item_id,
+                        error: err_detail,
+                        failed_attempt,
+                        total_attempts: rc.attempts,
+                        delay_ms: rc.delay_ms(failed_attempt),
+                        elapsed_ms: elapsed,
+                        // Transport failed before the child returned — no cost.
+                        cost: None,
+                    };
+                }
+                StepOutcome::DispatchHardError {
+                    item_id: Some(dispatched_item_id),
+                    error: err_detail,
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: elapsed,
+                    // Transport/dispatch failed before the child returned — no cost.
+                    cost: None,
+                }
+            }
+            Ok(dispatch::ActionOutcome::Failure(failure)) => {
+                // A leaf that ran but failed retries the same way; a failed
+                // native child may have spent tokens, carried on every path.
+                if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
+                    let rc = node.retry.as_ref().expect("retry present when scheduling");
+                    return StepOutcome::RetryScheduled {
+                        item_id: dispatched_item_id,
+                        error: failure.diagnostic,
+                        failed_attempt,
+                        total_attempts: rc.attempts,
+                        delay_ms: rc.delay_ms(failed_attempt),
+                        elapsed_ms: elapsed,
+                        cost: failure.cost,
+                    };
+                }
+                StepOutcome::LeafSoftError {
+                    item_id: dispatched_item_id,
+                    error: failure.diagnostic,
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: elapsed,
+                    // A failed native child may have spent tokens — preserve it.
+                    cost: failure.cost,
+                }
+            }
             Ok(dispatch::ActionOutcome::Success(success)) => {
                 let dispatch::ActionSuccess { result: val, cost } = success;
                 // Interpolate `assign` HERE (not in commit_step) so an
@@ -1328,6 +1416,88 @@ impl Walker {
                     }
                 }
             }
+            StepOutcome::RetryScheduled {
+                item_id,
+                error,
+                failed_attempt,
+                total_attempts,
+                delay_ms,
+                elapsed_ms,
+                cost,
+            } => {
+                // A failed attempt that will be retried: the same step lifecycle
+                // a soft error emits (so the attempt is visible in the braid) plus
+                // a graph_node_retry milestone, then a checkpoint that re-points at
+                // THIS node with the incremented attempt count, then the backoff.
+                // The error is NOT pushed to suppressed_errors — only the final
+                // exhausted outcome routes through on_error/continue.
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                self.emit_tool_call_start(graph_run_id, step, current, &item_id)
+                    .await;
+                self.emit_tool_call_result(graph_run_id, step, current, &item_id, "error")
+                    .await;
+
+                // A native child may have spent tokens before failing this
+                // attempt — account for it, exactly like a soft error.
+                if let Some(c) = &cost {
+                    self.accounting
+                        .lock()
+                        .unwrap()
+                        .record(current, step, &item_id, c.clone());
+                }
+
+                receipts.push(NodeReceipt {
+                    node: current.to_string(),
+                    step,
+                    definition_ref: self.graph.definition_ref.clone(),
+                    definition_hash: self.graph.definition_hash.clone(),
+                    result_hash: None,
+                    cache_hit: false,
+                    elapsed_ms,
+                    error: Some(error.clone()),
+                    cost: cost.clone(),
+                });
+                self.write_node_receipt_or_warn(graph_run_id, receipts.last().unwrap())
+                    .await;
+
+                self.emit_graph_node_retry(
+                    graph_run_id,
+                    step,
+                    current,
+                    &item_id,
+                    failed_attempt,
+                    total_attempts,
+                    delay_ms,
+                    &error,
+                )
+                .await;
+                self.emit_graph_step_completed(graph_run_id, step, current, "retry", Some(&error))
+                    .await;
+
+                // Checkpoint re-points at THIS node (same cursor, incremented
+                // attempt) so a segment cut or crash during the backoff resumes
+                // with the count instead of restarting the attempts.
+                let advance = self
+                    .write_checkpoint_or_error(
+                        graph_run_id,
+                        current,
+                        step + 1,
+                        state,
+                        suppressed_errors,
+                        guard,
+                        failed_attempt,
+                    )
+                    .await;
+                if let CommitResult::Advance { .. } = &advance {
+                    // Plain sleep: a daemon cancel kills the walker's pgid, which
+                    // kills this sleeping task — no custom cancellation plumbing.
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+                advance
+            }
             StepOutcome::Terminal { status, error } => {
                 self.commit_terminal(CommitTerminalInput {
                     graph_run_id,
@@ -1363,6 +1533,7 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
+                            0,
                         )
                         .await
                     }
@@ -1464,6 +1635,7 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
+                            0,
                         )
                         .await
                     }
@@ -1550,6 +1722,7 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
+                            0,
                         )
                         .await
                     }
@@ -1625,6 +1798,7 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
+                            0,
                         )
                         .await
                     }
@@ -1650,6 +1824,7 @@ impl Walker {
                                     state,
                                     suppressed_errors,
                                     guard,
+                                    0,
                                 )
                                 .await
                             }
@@ -1751,6 +1926,7 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
+                            0,
                         )
                         .await
                     }
@@ -1775,6 +1951,7 @@ impl Walker {
                                     state,
                                     suppressed_errors,
                                     guard,
+                                    0,
                                 )
                                 .await
                             }
@@ -1999,9 +2176,17 @@ impl Walker {
         state: &Value,
         suppressed_errors: &[ErrorRecord],
         guard: &mut RunGuard,
+        next_retry_attempt: u32,
     ) -> CommitResult {
         if let Err(e) = self
-            .write_checkpoint(graph_run_id, next_node, next_step, state, suppressed_errors)
+            .write_checkpoint(
+                graph_run_id,
+                next_node,
+                next_step,
+                state,
+                suppressed_errors,
+                next_retry_attempt,
+            )
             .await
         {
             // Checkpoint failure is a hard error — resume correctness
@@ -2066,6 +2251,7 @@ impl Walker {
         CommitResult::Advance {
             next_node: next_node.to_string(),
             next_step,
+            next_retry_attempt,
         }
     }
 
@@ -2117,6 +2303,40 @@ impl Walker {
             )
             .await;
         self.record_callback_warning("graph_follow_suspended", r);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_graph_node_retry(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        item_id: &str,
+        failed_attempt: u32,
+        total_attempts: u32,
+        delay_ms: u64,
+        error: &str,
+    ) {
+        let r = self
+            .client
+            .append_runtime_event(
+                RuntimeEventType::GraphNodeRetry,
+                json!({
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "definition_hash": &self.graph.definition_hash,
+                    "node": current,
+                    "node_ref": node_ref(&self.graph.definition_ref, current),
+                    "step": step,
+                    "item_id": item_id,
+                    "attempt": failed_attempt,
+                    "attempts": total_attempts,
+                    "delay_ms": delay_ms,
+                    "error": error,
+                }),
+            )
+            .await;
+        self.record_callback_warning("graph_node_retry", r);
     }
 
     async fn emit_tool_call_start(
@@ -2263,6 +2483,9 @@ impl Walker {
             "state": state,
             "accounting": accounting,
             "suppressed_errors": suppressed_errors,
+            // A follow node never carries retry (validation excludes the pair),
+            // so a follow suspend always checkpoints a zero attempt count.
+            "retry_attempt": 0,
             "written_at": lillux::time::iso8601_now(),
         });
         payload[follow_keys::PENDING_FOLLOW] = Value::Object(pending);
@@ -2277,6 +2500,7 @@ impl Walker {
         next_step: u32,
         state: &Value,
         suppressed_errors: &[ErrorRecord],
+        retry_attempt: u32,
     ) -> anyhow::Result<()> {
         let Some(writer) = &self.checkpoint else {
             return Ok(());
@@ -2297,6 +2521,10 @@ impl Walker {
             "state": state,
             "accounting": accounting,
             "suppressed_errors": suppressed_errors,
+            // Per-step retry counter for `next_node`: non-zero only when the
+            // walker is re-entering the SAME node under a `retry` backoff, so a
+            // segment cut or crash mid-retry resumes with the count intact.
+            "retry_attempt": retry_attempt,
             "written_at": lillux::time::iso8601_now(),
         }))?;
 
@@ -2325,6 +2553,19 @@ impl Walker {
         }
         Ok(())
     }
+}
+
+/// Whether a node whose current dispatch just failed has retry attempts left.
+///
+/// `retry_attempt` is the number of attempts already spent BEFORE this one, so
+/// the attempt that just failed is `retry_attempt + 1`. Returns that 1-based
+/// failed-attempt number when a further attempt is allowed under the node's
+/// `retry.attempts` (the total, incl. the first), and `None` when the policy is
+/// absent or exhausted (route through `on_error`).
+fn retry_attempts_remaining(node: &GraphNode, retry_attempt: u32) -> Option<u32> {
+    let rc = node.retry.as_ref()?;
+    let failed_attempt = retry_attempt + 1;
+    (failed_attempt < rc.attempts).then_some(failed_attempt)
 }
 
 /// Resolve what to do on error based on node-level `on_error` and
@@ -2559,6 +2800,7 @@ mod tests {
             max_concurrency: None,
             output: None,
             env_requires: Vec::new(),
+            retry: None,
         }
     }
 
@@ -4315,6 +4557,161 @@ config:
             checkpoint,
         );
         (w, recorder)
+    }
+
+    // ── §A per-step retry ────────────────────────────────────────────
+
+    const RETRY_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: flaky
+  nodes:
+    flaky:
+      action: {item_id: "tool:test/flaky"}
+      retry: {attempts: 3, backoff_ms: 1}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+
+    fn subprocess_failure() -> Value {
+        json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": "boom"},
+            "artifacts": [],
+        })
+    }
+
+    fn subprocess_success() -> Value {
+        json!({"outcome_code": null, "result": {"ok": true}, "error": null, "artifacts": []})
+    }
+
+    #[tokio::test]
+    async fn retry_redispatches_until_success() {
+        // First dispatch fails, the retry re-dispatches and succeeds. The
+        // failed attempt consumed a walker step, so `done` is reached at step 2.
+        let graph = make_graph(RETRY_YAML);
+        let w = make_walker(graph, vec![subprocess_failure(), subprocess_success()]);
+        let result = w.execute(json!({}), None).await;
+        assert!(result.success, "retry should recover: {result:?}");
+        assert_eq!(result.status, "completed");
+        assert_eq!(
+            result.steps, 2,
+            "one failed attempt + successful re-dispatch = 2 steps to reach the return node"
+        );
+        // A recovered retry leaves no suppressed error behind.
+        assert!(result.errors.is_none(), "recovered retry records no error");
+    }
+
+    #[tokio::test]
+    async fn retry_exhausts_then_routes_on_error() {
+        // attempts:2 → two dispatches, both fail, then `on_error` redirects to
+        // the recover return node. The retry is bounded — it does not loop
+        // forever on a persistent failure.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: flaky
+  nodes:
+    flaky:
+      action: {item_id: "tool:test/flaky"}
+      retry: {attempts: 2, backoff_ms: 1}
+      on_error: recover
+    recover:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![subprocess_failure(), subprocess_failure()]);
+        let result = w.execute(json!({}), None).await;
+        assert_eq!(result.status, "completed");
+        assert_eq!(
+            result.steps, 2,
+            "attempt 1 (retry) + attempt 2 (exhausted → redirect) = 2 steps"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_emits_braid_visible_retry_event() {
+        // A re-attempt emits exactly one graph_node_retry milestone carrying the
+        // attempt number, the total, and the backoff — indexed (braid-visible).
+        let graph = make_graph(RETRY_YAML);
+        let (w, rec) =
+            make_recording_walker(graph, vec![subprocess_failure(), subprocess_success()], None);
+        let result = w.execute(json!({}), Some("gr-retry".to_string())).await;
+        assert!(result.success, "retry should recover: {result:?}");
+
+        let events = rec.recorded_events();
+        let retries: Vec<_> = events
+            .iter()
+            .filter(|(_, ty, _, _)| ty == "graph_node_retry")
+            .collect();
+        assert_eq!(
+            retries.len(),
+            1,
+            "one failed attempt → exactly one retry event; events={events:#?}"
+        );
+        let (_, _, payload, storage_class) = retries[0];
+        assert_eq!(payload["attempt"], 1);
+        assert_eq!(payload["attempts"], 3);
+        assert_eq!(payload["delay_ms"], 1);
+        assert_eq!(payload["node"], "flaky");
+        assert_eq!(
+            storage_class, "indexed",
+            "graph_node_retry is an indexed milestone"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_resumes_with_persisted_attempt_count() {
+        // The attempt counter rides the checkpoint (v2): a walker resumed with
+        // `retry_attempt: 1` on a node whose only remaining attempt fails routes
+        // straight to on_error — it does NOT restart the count and retry again.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: flaky
+  nodes:
+    flaky:
+      action: {item_id: "tool:test/flaky"}
+      retry: {attempts: 2, backoff_ms: 1}
+      on_error: recover
+    recover:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let (w, rec) = make_recording_walker(graph, vec![subprocess_failure()], None);
+        // Resume as though attempt 1 already failed pre-cut (retry_attempt: 1).
+        let result = w
+            .execute(
+                json!({
+                    "resume_state": {
+                        "current_node": "flaky",
+                        "step_count": 5,
+                        "state": {},
+                        "graph_run_id": "gr-resumed",
+                        "retry_attempt": 1,
+                    }
+                }),
+                None,
+            )
+            .await;
+        assert_eq!(result.status, "completed", "recover is terminal");
+        let events = rec.recorded_events();
+        let retries = events
+            .iter()
+            .filter(|(_, ty, _, _)| ty == "graph_node_retry")
+            .count();
+        assert_eq!(
+            retries, 0,
+            "the persisted count was exhausted on the single remaining attempt — no new retry; \
+             events={events:#?}"
+        );
     }
 
     const FOLLOW_YAML: &str = r#"

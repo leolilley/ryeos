@@ -173,6 +173,47 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         }
     }
 
+    // Per-step retry is only meaningful for a dispatching node (a single
+    // action or a foreach's per-item dispatch). It is a loud error to combine
+    // it with `follow` in v1: retrying a follow means minting a fresh
+    // follow_key per attempt plus a waiter-lifecycle design that does not exist
+    // yet — route a failed follow with `on_error` instead.
+    if let Some(retry) = &node.retry {
+        if !matches!(node.node_type, NodeType::Action | NodeType::Foreach) {
+            result.errors.push(format!(
+                "node '{name}' declares 'retry' but is a {:?} node — retry is only valid on \
+                 action nodes",
+                node.node_type
+            ));
+        }
+        if node.follow {
+            result.errors.push(format!(
+                "node '{name}' cannot combine 'retry' and 'follow' — retrying a follow needs a \
+                 fresh follow_key and waiter lifecycle per attempt (excluded in v1); route a \
+                 failed follow with 'on_error' instead"
+            ));
+        }
+        if !(1..=10).contains(&retry.attempts) {
+            result.errors.push(format!(
+                "node '{name}' retry.attempts must be between 1 and 10 (got {})",
+                retry.attempts
+            ));
+        }
+        if retry.backoff_ms == 0 {
+            result
+                .errors
+                .push(format!("node '{name}' retry.backoff_ms must be greater than 0"));
+        }
+        if let Some(cap) = retry.max_backoff_ms {
+            if cap < retry.backoff_ms {
+                result.errors.push(format!(
+                    "node '{name}' retry.max_backoff_ms ({cap}) must be >= retry.backoff_ms ({})",
+                    retry.backoff_ms
+                ));
+            }
+        }
+    }
+
     if let Some(ref next) = node.next {
         validate_edges(name, next, cfg, result);
     }
@@ -910,6 +951,134 @@ config:
                 .iter()
                 .any(|e| e.contains("follow node") && e.contains("no 'action'")),
             "expected follow-without-action rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    // ── §A per-step retry validation ─────────────────────────────────
+
+    fn retry_graph(node_body: &str) -> GraphDefinition {
+        let yaml = format!(
+            r#"
+version: "1.0.0"
+category: test
+config:
+  start: n
+  nodes:
+    n:
+{node_body}
+    done:
+      node_type: return
+"#
+        );
+        make_graph(&yaml)
+    }
+
+    #[test]
+    fn validate_graph_accepts_valid_retry_on_action() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result.errors.is_empty(),
+            "valid retry must not error: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_attempts_out_of_range() {
+        let too_many = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            too_many
+                .errors
+                .iter()
+                .any(|e| e.contains("retry.attempts must be between 1 and 10")),
+            "expected attempts range rejection, got: {:?}",
+            too_many.errors
+        );
+        let zero = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(zero
+            .errors
+            .iter()
+            .any(|e| e.contains("retry.attempts must be between 1 and 10")));
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_zero_backoff() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry.backoff_ms must be greater than 0")),
+            "expected backoff>0 rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_max_below_backoff() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry.max_backoff_ms") && e.contains(">= retry.backoff_ms")),
+            "expected max<backoff rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_on_gate_node() {
+        let result = validate_graph(&retry_graph(
+            "      node_type: gate\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: conditional, branches: [{to: done}]}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry is only valid on")),
+            "expected non-action retry rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_plus_follow() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("cannot combine 'retry' and 'follow'")),
+            "expected retry+follow rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_accepts_retry_on_foreach() {
+        let result = validate_graph(&retry_graph(
+            "      node_type: foreach\n      over: \"${state.items}\"\n      as: item\n      action: {item_id: \"tool:x\"}\n      retry: {attempts: 2, backoff_ms: 50}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry is only valid on")),
+            "foreach is a valid retry target: {:?}",
             result.errors
         );
     }

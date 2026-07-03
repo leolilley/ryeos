@@ -270,6 +270,9 @@ fn main() -> anyhow::Result<()> {
         // instead of re-dispatching or re-suspending.
         resume_json[crate::walker::follow_keys::PENDING_FOLLOW] = json!(rs.pending_follow);
         resume_json[crate::walker::follow_keys::FOLLOW_RESULT] = json!(rs.follow_result);
+        // Per-step retry counter (checkpoint v2): the walker resumes the same
+        // node with the attempts already spent instead of restarting them.
+        resume_json["retry_attempt"] = json!(rs.retry_attempt.unwrap_or(0));
         params["resume_state"] = resume_json;
     }
 
