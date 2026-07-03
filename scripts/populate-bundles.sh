@@ -153,6 +153,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 TRIPLE="${TRIPLE:-x86_64-unknown-linux-gnu}"
 
+# Shared bundle-set definition (one source of truth with install-local-direct.sh).
+# shellcheck source=scripts/pkg/bundle-sets.sh
+source "$ROOT/scripts/pkg/bundle-sets.sh"
+
 # Resolve target directory: prefer Cargo's env override, then .cargo/config.toml,
 # then the workspace default. Keep this in sync with the cargo invocation so the
 # binary install step reads from the directory Cargo actually wrote.
@@ -180,20 +184,13 @@ INIT_SEED="$SOURCE_ROOT_AI/node/init"
 PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
 PUBLISHER_FP="$(publisher_fingerprint)"
 
-case "$BUNDLE_SET" in
-  full)
-    BUNDLE_DIRS=("$CORE" "$STD" "$WEB" "$BROWSER" "$STUDIO" "$HOSTED_NODE")
-    ;;
-  standard)
-    BUNDLE_DIRS=("$CORE" "$STD")
-    ;;
-  hosted-node)
-    BUNDLE_DIRS=("$CORE" "$HOSTED_NODE")
-    ;;
-  hosted-workflow)
-    BUNDLE_DIRS=("$CORE" "$STD" "$HOSTED_NODE")
-    ;;
-esac
+# Bin-managed bundles for this set come from the shared definition (central-auth
+# is excluded — it owns no compiled binaries and is published unconditionally
+# below, so it must never be cleaned/staged here).
+BUNDLE_DIRS=()
+while IFS= read -r _bundle_name; do
+  BUNDLE_DIRS+=("$ROOT/bundles/$_bundle_name")
+done < <(ryeos_bundle_set_bin_managed_names "$BUNDLE_SET")
 
 # ── Clean derived state from all bundles ────────────────────────────
 # Wipe everything that will be regenerated so stale artifacts (old
@@ -213,20 +210,10 @@ BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
 STUDIO_BIN="$STUDIO/.ai/bin/$TRIPLE"
 HOSTED_NODE_BIN="$HOSTED_NODE/.ai/bin/$TRIPLE"
 
-case "$BUNDLE_SET" in
-  full)
-    mkdir -p "$CORE_BIN" "$STD_BIN" "$WEB_BIN" "$BROWSER_BIN" "$STUDIO_BIN" "$HOSTED_NODE_BIN"
-    ;;
-  standard)
-    mkdir -p "$CORE_BIN" "$STD_BIN"
-    ;;
-  hosted-node)
-    mkdir -p "$CORE_BIN" "$HOSTED_NODE_BIN"
-    ;;
-  hosted-workflow)
-    mkdir -p "$CORE_BIN" "$STD_BIN" "$HOSTED_NODE_BIN"
-    ;;
-esac
+# Bin dirs for exactly the bin-managed bundles this set builds.
+for BUNDLE_DIR in "${BUNDLE_DIRS[@]}"; do
+  mkdir -p "$BUNDLE_DIR/.ai/bin/$TRIPLE"
+done
 
 # ── Build ────────────────────────────────────────────────────────────
 
@@ -259,6 +246,65 @@ jobs_args=()
 
 echo "[populate-bundles] building release binaries${JOBS:+ (jobs=$JOBS)}: ${pkgs[*]}"
 "$CARGO" build --release "${jobs_args[@]}" "${build_args[@]}"
+
+# ── Guard: no stale sibling binaries under --crates ──────────────────
+# With --crates only the named crates are rebuilt, but staging copies EVERY
+# bundle binary from target/release. A sibling built before a foundational lib
+# (ryeos-runtime / ryeos-state / ryeos-app) changed would stage linked against
+# the old lib and silently drift. Fail loudly, naming the stale binaries.
+
+# Release binaries this set stages, one per line (mirrors the staging steps).
+staged_release_bins_for_set() {
+  printf '%s\n' \
+    rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
+    rye-composer-identity ryeos-core-tools
+  case "$BUNDLE_SET" in
+    full|standard|hosted-workflow)
+      printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
+        ryeos-knowledge-runtime rye-composer-extends-chain rye-composer-graph-permissions
+      ;;
+  esac
+  case "$BUNDLE_SET" in
+    full) printf '%s\n' ryeos-tui web ryeos-web-tools ryeos-browser-tools ;;
+  esac
+}
+
+# Newest mtime (integer epoch) across the foundational library crate sources.
+foundational_newest_mtime() {
+  find \
+    "$ROOT/crates/engine/ryeos-runtime/src" \
+    "$ROOT/crates/state/ryeos-state/src" \
+    "$ROOT/crates/daemon/ryeos-app/src" \
+    -type f -name '*.rs' -printf '%T@\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d. -f1
+}
+
+if [[ -n "$CRATES_OVERRIDE" ]]; then
+  _newest_foundational="$(foundational_newest_mtime)"
+  if [[ -n "$_newest_foundational" ]]; then
+    _stale=()
+    while IFS= read -r _bin; do
+      [[ -n "$_bin" ]] || continue
+      _bin_path="$TARGET/release/$_bin"
+      [[ -f "$_bin_path" ]] || continue
+      _bin_mtime="$(stat -c %Y "$_bin_path" 2>/dev/null || echo 0)"
+      if (( _bin_mtime < _newest_foundational )); then
+        _stale+=("$_bin")
+      fi
+    done < <(staged_release_bins_for_set)
+    if (( ${#_stale[@]} > 0 )); then
+      {
+        echo "populate-bundles.sh: refusing to stage binaries older than the foundational libs."
+        echo "  The foundational crates (ryeos-runtime / ryeos-state / ryeos-app) have source newer"
+        echo "  than these staged binaries, so they would link against a stale lib:"
+        printf '    - %s\n' "${_stale[@]}"
+        echo "  Rebuild the whole '$BUNDLE_SET' set:"
+        echo "    ./scripts/populate-bundles.sh --key \"$KEY\" --owner \"$OWNER\" --bundle-set \"$BUNDLE_SET\" --all"
+      } >&2
+      exit 2
+    fi
+  fi
+fi
 
 # ── Stage binaries (only what each bundle owns) ──────────────────────
 

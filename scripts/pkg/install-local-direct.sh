@@ -4,10 +4,10 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard,studio,web,hosted-node}
-#     or, with --bundle-set standard, /usr/share/ryeos/{core,standard};
-#     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node};
-#     with --bundle-set hosted-workflow, /usr/share/ryeos/{core,standard,hosted-node}
+#   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
+#     The set membership is the single source of truth in
+#     scripts/pkg/bundle-sets.sh (full = core, central-auth, standard, web,
+#     browser, studio, hosted-node; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -21,8 +21,10 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard,studio,web,hosted-node}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard,studio,web,hosted-node}  (after init)
+  /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
+  ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
+Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
+central-auth, standard, web, browser, studio, hosted-node).
 
 Options:
   --populate            Run scripts/populate-bundles.sh first (expensive; rebuilds
@@ -125,6 +127,9 @@ bundle_payload_bins() {
         web)
             printf '%s\n' ryeos-web-tools
             ;;
+        browser)
+            printf '%s\n' ryeos-browser-tools
+            ;;
     esac
 }
 
@@ -204,6 +209,12 @@ refresh_installed_bundle_payload() {
                 --registry-root "$share_dir/core" \
                 --owner "$owner" >/dev/null
             ;;
+        browser)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
     esac
 }
 
@@ -245,6 +256,10 @@ stop_daemon_for_install() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+
+# Shared bundle-set definition (one source of truth with populate-bundles.sh).
+# shellcheck source=scripts/pkg/bundle-sets.sh
+source "$script_dir/bundle-sets.sh"
 
 run_populate=0
 run_init=1
@@ -316,23 +331,13 @@ done
 
 cd "$repo_root"
 
-case "$bundle_set" in
-    full)
-        bundle_names=(core standard studio web hosted-node)
-        ;;
-    standard)
-        bundle_names=(core standard)
-        ;;
-    hosted-node)
-        bundle_names=(core hosted-node)
-        ;;
-    hosted-workflow)
-        bundle_names=(core standard hosted-node)
-        ;;
-    *)
-        die "--bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
-        ;;
-esac
+bundle_names=()
+while IFS= read -r _bundle_name; do
+    bundle_names+=("$_bundle_name")
+done < <(ryeos_bundle_set_names "$bundle_set") || true
+if [[ ${#bundle_names[@]} -eq 0 ]]; then
+    die "--bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
+fi
 bundle_names_csv=$(IFS=,; echo "${bundle_names[*]}")
 
 if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
@@ -577,7 +582,7 @@ if [[ $run_init -eq 1 ]]; then
             die "initialized $name bundle missing from $state_root"
     done
     if [[ "$bundle_set" == "hosted-node" ]]; then
-        for name in standard studio web; do
+        for name in standard studio web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized hosted-node state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -585,7 +590,7 @@ if [[ $run_init -eq 1 ]]; then
         done
     fi
     if [[ "$bundle_set" == "standard" ]]; then
-        for name in hosted-node studio web; do
+        for name in hosted-node studio web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized standard state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -596,6 +601,31 @@ if [[ $run_init -eq 1 ]]; then
         grep -q '^  execute: client:ryeos/tui$' \
             "$state_root/.ai/bundles/studio/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"
+    fi
+
+    # ── Verify installed bundle signatures (offline doctor --strict) ──
+    # Closes the "edited YAML, forgot to re-sign, discover at runtime" loop:
+    # run the same preflight verification `ryeos doctor` wraps against every
+    # installed bundle and fail the install on any red check. Offline, no daemon.
+    core_tools_bin="$share_dir/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools"
+    if [[ -x "$core_tools_bin" ]]; then
+        echo "[install-local-direct] verifying installed bundle signatures (doctor --strict)"
+        verify_failed=0
+        for name in "${bundle_names[@]}"; do
+            if [[ "$init_user" != "$(id -un)" ]]; then
+                sudo -H -u "$init_user" env RYEOS_APP_ROOT="$state_root" \
+                    "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
+                    || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
+            else
+                RYEOS_APP_ROOT="$state_root" \
+                    "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
+                    || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
+            fi
+        done
+        [[ $verify_failed -eq 0 ]] || \
+            die "installed bundle verification failed — re-run with --populate to re-sign, or investigate the stale signature above"
+    else
+        echo "[install-local-direct] skipping bundle verification: core-tools binary not found at $core_tools_bin" >&2
     fi
 fi
 
