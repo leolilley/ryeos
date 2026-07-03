@@ -66,6 +66,12 @@ pub struct PublishOptions {
     /// such a mismatch is fatal, because the daemon hard-fails runtime-cap
     /// minting for it — a published-but-unusable manifest. Default `false`.
     pub allow_namespace_mismatch: bool,
+    /// If `true`, do not fail when a populated `.ai/<dir>` is covered by no
+    /// registered kind. Set this ONLY for a deliberately partial intermediate
+    /// publish (e.g. signing core before the bundle defining its `knowledge`
+    /// kind is available), which a later republish then completes. Default
+    /// `false`: an uncovered item directory hard-fails the publish.
+    pub allow_uncovered_item_dirs: bool,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
     /// operators to pin via `ryeos trust pin`. Default `true`.
@@ -156,6 +162,7 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         &opts.registry_roots,
         &opts.signing_key,
         opts.base_trust_store.as_ref(),
+        opts.allow_uncovered_item_dirs,
     )
     .context("sign-items phase failed")?;
     let mut partial = false;
@@ -203,24 +210,33 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
     // authority). Free-form item namespacing (e.g. core's `ryeos/...`) is left
     // unlinted so it does not produce noise.
     if let Some(expected) = lint_expected_bundle_id(&ai_dir, opts.name.as_deref())? {
-        sign_report.warnings = lint_item_namespaces(&sign_report, &expected);
-        for w in &sign_report.warnings {
+        let lint = lint_item_namespaces(&sign_report, &expected);
+        for w in &lint.warnings {
             tracing::warn!(item = %w.item_ref, "{}", w.message);
         }
-        // For a bundle that declares runtime authority, a namespace mismatch is
-        // fatal: the daemon hard-fails cap minting at runtime, so the manifest
-        // would publish but never work. Refuse unless explicitly overridden.
+        for n in &lint.notes {
+            tracing::info!(item = %n.item_ref, "{}", n.message);
+        }
+        sign_report.warnings = lint.warnings;
+        sign_report.notes = lint.notes;
+        // A cap-minting item under a divergent namespace is fatal for a bundle
+        // that declares runtime authority: the daemon hard-fails cap minting at
+        // runtime, so the manifest would publish but never work. Inert
+        // cross-namespace items are notes, not warnings, and never trip this.
         if !sign_report.warnings.is_empty()
             && !opts.allow_namespace_mismatch
             && manifest_declares_runtime_authority(&ai_dir)?
         {
             bail!(
-                "refusing to publish: {} item(s) have an effective bundle id that diverges \
-                 from '{}', but the manifest declares runtime authority (a non-empty \
-                 `runtime_authority:` block). The daemon rejects runtime-cap minting for such \
-                 items, so the manifest would be unusable. Fix the item namespaces (or pass \
-                 --allow-namespace-mismatch to override).",
+                "refusing to publish: {} cap-minting item(s) have an effective bundle id that \
+                 diverges from '{}'. The daemon mints their runtime-authority caps under the \
+                 wrong namespace and rejects them at dispatch, so the manifest would publish but \
+                 never work. Namespace these items under '{}/…' (or set the bundle --name to \
+                 match). Inert cross-namespace items (config shadows, knowledge) are reported as \
+                 notes, not errors, and need no change. As a last resort, \
+                 --allow-namespace-mismatch bypasses this check.",
                 sign_report.warnings.len(),
+                expected,
                 expected
             );
         }
@@ -554,32 +570,68 @@ fn item_effective_bundle_id(item_ref: &str) -> Option<&str> {
     bare.split('/').next().filter(|s| !s.is_empty())
 }
 
-/// Warn for every signed/validated/failed item whose effective bundle id
-/// diverges from `expected`. Such an item's runtime-authority caps would be
-/// minted under the wrong namespace and never match at dispatch.
-fn lint_item_namespaces(
-    report: &SignBundleReport,
-    expected: &str,
-) -> Vec<sign_bundle::ItemWarning> {
-    let mut warnings: Vec<sign_bundle::ItemWarning> = report
+/// Result of the effective-bundle-id lint, split by precision:
+/// - `warnings` — cap-minting items (declaring manifest-backed runtime
+///   authority) whose effective bundle id diverges. These are actionable: the
+///   daemon would mint their caps under the wrong namespace and reject them at
+///   dispatch. Only these can escalate to a fatal publish error.
+/// - `notes` — inert cross-namespace items (config shadows, knowledge) that
+///   declare no runtime authority and so cannot mint caps. Surfaced for
+///   visibility, never error-escalated.
+struct NamespaceLint {
+    warnings: Vec<sign_bundle::ItemWarning>,
+    notes: Vec<sign_bundle::ItemWarning>,
+}
+
+/// Classify every signed/validated/failed item whose effective bundle id
+/// diverges from `expected` into an actionable warning (cap-minting item) or an
+/// informational note (inert cross-namespace item).
+///
+/// The split is capability-based, not namespace-based: a foreign namespace only
+/// matters when the item participates in cap minting
+/// (`declares_runtime_authority`). A project-first config shadow keeps its
+/// foreign namespace on purpose (that is how it shadows by exact ref) and can
+/// never reach the mint path, so it is a note, not a warning.
+fn lint_item_namespaces(report: &SignBundleReport, expected: &str) -> NamespaceLint {
+    let mut warnings: Vec<sign_bundle::ItemWarning> = Vec::new();
+    let mut notes: Vec<sign_bundle::ItemWarning> = Vec::new();
+    for outcome in report
         .validated
         .iter()
         .chain(&report.signed)
         .chain(&report.failed)
-        .filter_map(|outcome| {
-            let eff = item_effective_bundle_id(&outcome.item_ref)?;
-            (eff != expected).then(|| sign_bundle::ItemWarning {
+    {
+        let Some(eff) = item_effective_bundle_id(&outcome.item_ref) else {
+            continue;
+        };
+        if eff == expected {
+            continue;
+        }
+        if outcome.declares_runtime_authority {
+            warnings.push(sign_bundle::ItemWarning {
                 item_ref: outcome.item_ref.clone(),
                 message: format!(
-                    "effective bundle id '{eff}' diverges from the bundle's '{expected}' — \
-                     runtime-authority caps for this item would be minted under '{eff}' and \
-                     never match; namespace the item under '{expected}/…' or set --name"
+                    "effective bundle id '{eff}' diverges from the bundle's '{expected}', and \
+                     this item requests manifest-backed runtime authority — its caps would be \
+                     minted under '{eff}' and never match at dispatch. Namespace the item under \
+                     '{expected}/…' or set --name."
                 ),
-            })
-        })
-        .collect();
+            });
+        } else {
+            notes.push(sign_bundle::ItemWarning {
+                item_ref: outcome.item_ref.clone(),
+                message: format!(
+                    "effective bundle id '{eff}' diverges from the bundle's '{expected}', but \
+                     this item declares no manifest-backed runtime authority, so it cannot mint \
+                     caps — an inert cross-namespace item (e.g. a project-first config shadow of \
+                     '{eff}'). No action needed."
+                ),
+            });
+        }
+    }
     warnings.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
-    warnings
+    notes.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    NamespaceLint { warnings, notes }
 }
 
 /// Generate and sign `.ai/manifest.yaml` from `.ai/manifest.source.yaml`.
@@ -700,18 +752,22 @@ mod tests {
     use super::*;
     use crate::actions::sign_bundle::ItemOutcome;
 
-    fn validated_report(refs: &[&str]) -> SignBundleReport {
+    /// Build a validated-only report from `(item_ref, declares_runtime_authority)`
+    /// pairs.
+    fn report_from(items: &[(&str, bool)]) -> SignBundleReport {
         SignBundleReport {
-            validated: refs
+            validated: items
                 .iter()
-                .map(|r| ItemOutcome {
+                .map(|(r, ra)| ItemOutcome {
                     item_ref: (*r).to_string(),
                     error: None,
+                    declares_runtime_authority: *ra,
                 })
                 .collect(),
             signed: Vec::new(),
             failed: Vec::new(),
             warnings: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
@@ -730,19 +786,48 @@ mod tests {
     }
 
     #[test]
-    fn lint_flags_only_divergent_items() {
-        let report = validated_report(&["tool:arc/play", "tool:arc/solve", "graph:other/x"]);
-        let warnings = lint_item_namespaces(&report, "arc");
-        assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert_eq!(warnings[0].item_ref, "graph:other/x");
-        assert!(warnings[0].message.contains("'other'"));
-        assert!(warnings[0].message.contains("'arc'"));
+    fn lint_warns_only_cap_minting_divergent_items() {
+        // A divergent item that requests manifest-backed runtime authority is
+        // an actionable warning; a matching-namespace cap item is clean.
+        let report = report_from(&[
+            ("tool:arc/play", true),
+            ("tool:arc/solve", true),
+            ("service:other/callback", true),
+        ]);
+        let lint = lint_item_namespaces(&report, "arc");
+        assert_eq!(lint.warnings.len(), 1, "got {:?}", lint.warnings);
+        assert_eq!(lint.warnings[0].item_ref, "service:other/callback");
+        assert!(lint.warnings[0].message.contains("'other'"));
+        assert!(lint.warnings[0].message.contains("'arc'"));
+        assert!(lint.notes.is_empty());
+    }
+
+    #[test]
+    fn lint_notes_inert_divergent_items_without_escalation() {
+        // A downstream config shadow: foreign namespace on purpose, no runtime
+        // authority. It must be a note, never a warning — the escalation must
+        // not fire for it.
+        let report = report_from(&[
+            ("config:ryeos-runtime/execution", false),
+            ("config:ryeos-runtime/limits", false),
+            ("knowledge:other/notes", false),
+        ]);
+        let lint = lint_item_namespaces(&report, "downstream");
+        assert!(
+            lint.warnings.is_empty(),
+            "inert items must not warn: {:?}",
+            lint.warnings
+        );
+        assert_eq!(lint.notes.len(), 3, "got {:?}", lint.notes);
+        assert!(lint.notes[0].message.contains("inert cross-namespace"));
     }
 
     #[test]
     fn lint_clean_when_all_items_match() {
-        let report = validated_report(&["tool:arc/play", "graph:arc/agent"]);
-        assert!(lint_item_namespaces(&report, "arc").is_empty());
+        let report = report_from(&[("tool:arc/play", true), ("graph:arc/agent", false)]);
+        let lint = lint_item_namespaces(&report, "arc");
+        assert!(lint.warnings.is_empty());
+        assert!(lint.notes.is_empty());
     }
 }
 

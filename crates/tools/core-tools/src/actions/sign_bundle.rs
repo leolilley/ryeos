@@ -37,11 +37,17 @@ pub struct SignBundleReport {
     /// Items (re-)signed because unsigned, invalid, wrong signer, or content changed.
     pub signed: Vec<ItemOutcome>,
     pub failed: Vec<ItemOutcome>,
-    /// Non-fatal authoring warnings (e.g. an item whose effective bundle id
-    /// diverges from the bundle's). Empty on a clean tree. Populated by the
-    /// publish path, not the signer loop itself.
+    /// Authoring warnings that require action (e.g. a cap-minting item whose
+    /// effective bundle id diverges from the bundle's, which the daemon would
+    /// reject at runtime). Empty on a clean tree. Populated by the publish
+    /// path, not the signer loop itself.
     #[serde(default)]
     pub warnings: Vec<ItemWarning>,
+    /// Informational notes that need no action (e.g. an inert cross-namespace
+    /// item such as a project-first config shadow). Surfaced, never
+    /// error-escalated. Populated by the publish path.
+    #[serde(default)]
+    pub notes: Vec<ItemWarning>,
 }
 
 impl SignBundleReport {
@@ -60,6 +66,13 @@ pub struct ItemOutcome {
     pub item_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// True when the item declares manifest-backed runtime-authority
+    /// requirements (`requires.capabilities.manifest.runtime_authority`) and so
+    /// participates in daemon cap minting. Drives namespace-lint precision:
+    /// only such items make a namespace divergence actionable, because only
+    /// they can mint caps under the wrong effective bundle id.
+    #[serde(default)]
+    pub declares_runtime_authority: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,7 +93,7 @@ pub fn sign_bundle_items(
     registry_roots: &[PathBuf],
     signing_key: &lillux::crypto::SigningKey,
 ) -> Result<SignBundleReport> {
-    sign_bundle_items_with_trust(source, registry_roots, signing_key, None)
+    sign_bundle_items_with_trust(source, registry_roots, signing_key, None, false)
 }
 
 /// Sign every signable item in the bundle at `source` using `signing_key`,
@@ -90,11 +103,17 @@ pub fn sign_bundle_items(
 /// kind schemas and parser descriptors come from already-installed bundles
 /// signed by the platform publisher, while source items are signed by the
 /// current user key.
+/// `allow_uncovered_item_dirs` opts out of the loud "every item directory is
+/// covered by a registered kind" check. Leave it `false` for normal publishes;
+/// set it `true` only for a deliberately partial intermediate publish (e.g.
+/// signing core before the bundle that defines its `knowledge` kind exists),
+/// which the caller then completes with a later republish carrying that kind.
 pub fn sign_bundle_items_with_trust(
     source: &Path,
     registry_roots: &[PathBuf],
     signing_key: &lillux::crypto::SigningKey,
     base_trust_store: Option<&TrustStore>,
+    allow_uncovered_item_dirs: bool,
 ) -> Result<SignBundleReport> {
     let verifying_key = signing_key.verifying_key();
     let fingerprint = ryeos_engine::trust::compute_fingerprint(&verifying_key);
@@ -168,6 +187,7 @@ pub fn sign_bundle_items_with_trust(
         signed: Vec::new(),
         failed: Vec::new(),
         warnings: Vec::new(),
+        notes: Vec::new(),
     };
 
     let mut kind_names: Vec<String> = kinds.kinds().map(str::to_owned).collect();
@@ -188,6 +208,15 @@ pub fn sign_bundle_items_with_trust(
         files.sort();
 
         for file_path in files {
+            // Node runtime state and signing secrets are never signable source.
+            // A kind walk over `.ai/node/{schedules,routes,bundles}` or
+            // `.ai/state`/`.ai/knowledge` may sweep files a running daemon
+            // wrote; excluding them here keeps them out of the report entirely,
+            // so they can neither fail as items nor raise namespace warnings.
+            if crate::actions::runtime_owned::is_runtime_owned_file(&file_path, &ai_dir) {
+                continue;
+            }
+
             let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
             if kind_schema.spec_for(&format!(".{ext}")).is_none() {
@@ -207,20 +236,31 @@ pub fn sign_bundle_items_with_trust(
                 &parser_dispatcher,
                 signing_key,
             ) {
-                Ok(SignResult::Unchanged) => report.validated.push(ItemOutcome {
-                    item_ref: display_ref,
-                    error: None,
-                }),
-                Ok(SignResult::Signed) => report.signed.push(ItemOutcome {
-                    item_ref: display_ref,
-                    error: None,
-                }),
+                Ok(info) => {
+                    let outcome = ItemOutcome {
+                        item_ref: display_ref,
+                        error: None,
+                        declares_runtime_authority: info.declares_runtime_authority,
+                    };
+                    match info.result {
+                        SignResult::Unchanged => report.validated.push(outcome),
+                        SignResult::Signed => report.signed.push(outcome),
+                    }
+                }
                 Err(e) => report.failed.push(ItemOutcome {
                     item_ref: display_ref,
                     error: Some(format!("{e:#}")),
+                    declares_runtime_authority: false,
                 }),
             }
         }
+    }
+
+    // Loud pipeline: a populated item directory with no registered kind would
+    // otherwise be skipped above with only a TRACE line. Fail before returning
+    // an incomplete report, unless the caller opted into a partial publish.
+    if !allow_uncovered_item_dirs {
+        check_all_item_dirs_covered(&ai_dir, &kinds)?;
     }
 
     report.validated.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
@@ -228,6 +268,82 @@ pub fn sign_bundle_items_with_trust(
     report.failed.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
 
     Ok(report)
+}
+
+/// Fail loudly when a populated `.ai/<dir>` is not covered by any registered
+/// kind. The kind loop only visits directories for kinds present in the loaded
+/// registry; an item directory whose kind lives in a bundle that was neither
+/// passed as a registry root nor defined by the source would otherwise be
+/// skipped with only a TRACE line, silently dropping those items from the
+/// signed bundle. This makes the "publish with the right registry roots"
+/// ordering enforced instead of advisory.
+fn check_all_item_dirs_covered(ai_dir: &Path, kinds: &KindRegistry) -> Result<()> {
+    // Top-level `.ai/` directory each registered kind owns.
+    let mut covered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for kind_name in kinds.kinds() {
+        if let Some(schema) = kinds.get(kind_name) {
+            if let Some(top) = schema.directory.split('/').next() {
+                if !top.is_empty() {
+                    covered.insert(top.to_string());
+                }
+            }
+        }
+    }
+
+    let entries = match fs::read_dir(ai_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        // Derived CAS + binary artifacts are never item directories.
+        if matches!(name, "objects" | "refs" | "bin") {
+            continue;
+        }
+        // A directory some registered kind already walks.
+        if covered.contains(name) {
+            continue;
+        }
+        // Node runtime state / signing secrets are not signable source.
+        if crate::actions::runtime_owned::is_runtime_owned_ai_path(&format!("{AI_DIR}/{name}")) {
+            continue;
+        }
+        // Empty directories sign nothing — only populated ones are a problem.
+        if !dir_contains_file(&path) {
+            continue;
+        }
+        bail!(
+            "bundle has items under `{name}/`, but no registered kind covers that directory \
+             (the `{name}` kind is absent from the loaded registry roots and the bundle's own \
+             kind schemas). Those items would be silently skipped. Pass the registry root of the \
+             bundle that defines the `{name}` kind (for example --registry-root <standard> for \
+             the `knowledge` kind), or add its kind schema to this bundle."
+        );
+    }
+    Ok(())
+}
+
+/// True when `dir` contains at least one regular file anywhere below it.
+fn dir_contains_file(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            return true;
+        }
+        if p.is_dir() && dir_contains_file(&p) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Outcome of signing a single item.
@@ -238,13 +354,21 @@ enum SignResult {
     Signed,
 }
 
+/// Signing result plus the runtime-authority fact the namespace lint needs.
+struct SignItemInfo {
+    result: SignResult,
+    /// Whether the parsed item declares manifest-backed runtime-authority
+    /// requirements (`requires.capabilities.manifest.runtime_authority`).
+    declares_runtime_authority: bool,
+}
+
 fn sign_one_item(
     file_path: &Path,
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
     ai_root: &Path,
     parsers: &ParserDispatcher,
     signing_key: &lillux::crypto::SigningKey,
-) -> Result<SignResult> {
+) -> Result<SignItemInfo> {
     let content =
         fs::read_to_string(file_path).with_context(|| format!("read {}", file_path.display()))?;
 
@@ -286,6 +410,12 @@ fn sign_one_item(
         )
     })?;
 
+    // Does this item participate in daemon cap minting? Only items whose
+    // `requires.capabilities.manifest.runtime_authority` is non-empty do; the
+    // namespace lint uses this to distinguish a cap-minting item (actionable
+    // namespace divergence) from an inert cross-namespace item (a note).
+    let declares_runtime_authority = declares_manifest_runtime_authority(&parsed);
+
     // Strip existing signature to get the canonical body
     let envelope = ryeos_engine::contracts::SignatureEnvelope {
         prefix: source_format.signature.prefix.clone(),
@@ -300,7 +430,10 @@ fn sign_one_item(
 
     // Check if the existing signature is already valid for this body and signer.
     if is_already_validly_signed(&content, &stripped, signing_key, &envelope) {
-        return Ok(SignResult::Unchanged);
+        return Ok(SignItemInfo {
+            result: SignResult::Unchanged,
+            declares_runtime_authority,
+        });
     }
 
     // Sign in place (atomic)
@@ -317,7 +450,24 @@ fn sign_one_item(
     fs::rename(&tmp, file_path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), file_path.display()))?;
 
-    Ok(SignResult::Signed)
+    Ok(SignItemInfo {
+        result: SignResult::Signed,
+        declares_runtime_authority,
+    })
+}
+
+/// True when a parsed item declares manifest-backed runtime-authority
+/// requirements — a non-empty `requires.capabilities.manifest.runtime_authority`
+/// block. Mirrors the daemon mint predicate: the same
+/// [`ryeos_bundle::runtime_authority::parse_runtime_requires`] the launch path
+/// uses, so lint precision tracks the actual cap-minting boundary. A missing or
+/// malformed `requires` block declares no runtime authority.
+fn declares_manifest_runtime_authority(parsed: &serde_json::Value) -> bool {
+    parsed
+        .get("requires")
+        .and_then(|rv| ryeos_bundle::runtime_authority::parse_runtime_requires(rv).ok())
+        .map(|reqs| reqs.manifest.runtime_authority.declares_runtime_authority())
+        .unwrap_or(false)
 }
 
 /// Check whether `existing` (the full file content) already carries a

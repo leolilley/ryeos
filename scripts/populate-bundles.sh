@@ -319,8 +319,15 @@ cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 
 echo "[populate-bundles] publishing core bundle…"
+# Core ships `knowledge/` documentation items whose kind is defined by standard,
+# which is not yet signed at this point. This first pass is a deliberately
+# partial publish: `--allow-uncovered-kind-dirs` acknowledges the uncovered
+# `knowledge/` directory so the publish does not hard-fail. The republish below
+# (with the standard registry root) signs those items and runs WITHOUT the flag,
+# so any genuinely uncovered directory there is caught loudly.
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
+  --allow-uncovered-kind-dirs \
   --owner "$OWNER" >/dev/null
 
 # central-auth ships in the source tree and is discovered/parsed at init, so its
