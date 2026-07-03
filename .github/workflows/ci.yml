@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - next
+      - main
+  pull_request:
+    branches:
+      - next
+      - main
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Run the workspace test gate"
+        required: true
+        default: true
+        type: boolean
+      refresh_bundles:
+        description: "Run the expensive bundle refresh/populate path"
+        required: true
+        default: false
+        type: boolean
+      bundle_set:
+        description: "Bundle set for refresh_bundles"
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - standard
+          - hosted-node
+          - hosted-workflow
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep CI resource usage predictable. Override in workflow YAML if the runner
+  # class changes; local gate defaults remain machine-sensitive.
+  GATE_BUILD_JOBS: 2
+  GATE_TEST_THREADS: 2
+
+jobs:
+  test:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates openssl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Show tool versions
+        run: |
+          rustc --version
+          cargo --version
+          cargo nextest --version
+
+      - name: Run workspace gate
+        run: ./scripts/gate.sh
+
+  bundle-refresh:
+    name: Bundle refresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_bundles }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates openssl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Show tool versions
+        run: |
+          rustc --version
+          cargo --version
+          openssl version
+
+      - name: Refresh bundle sources
+        run: ./scripts/gate.sh --refresh-bundles --no-tests --bundle-set "${{ inputs.bundle_set }}"

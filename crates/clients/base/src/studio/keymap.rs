@@ -48,6 +48,13 @@ pub struct StudioKeyContext {
     /// (the chat convention) rather than activating a row — terminals
     /// can't reliably send Shift+Enter, so it can't be the only submit.
     pub input_has_text: bool,
+    /// The focused input is a LIVE FILTER (feeds a source param, no submit
+    /// target). Its buffer applies live, so Enter must still activate the
+    /// focused row rather than submit — typing narrows, Enter opens.
+    pub input_is_live_filter: bool,
+    /// The focused live filter declares more than one target field, so Tab
+    /// cycles which field it filters (status → kind → source).
+    pub input_filter_fields: bool,
     /// The focused input declares a completion source.
     pub input_has_completion: bool,
     /// Completion would actually accept something right now for the focused
@@ -139,21 +146,28 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::Enter
             if context.input_visible
                 && context.input_has_text
+                && !context.input_is_live_filter
                 && event.modifiers.alt_only() =>
         {
             ui(StudioUiEvent::SubmitInputInterrupt)
         }
         // Plain Enter submits when you're typing in the input (chat
         // convention); Shift+Enter also submits where the terminal can
-        // send it. An empty input lets plain Enter activate a row.
+        // send it. An empty input lets plain Enter activate a row — as does a
+        // live filter (it applies live; Enter opens the narrowed selection).
         StudioKey::Enter
             if context.input_visible
                 && context.input_has_text
+                && !context.input_is_live_filter
                 && (event.modifiers.none() || event.modifiers.shift_only()) =>
         {
             ui(StudioUiEvent::SubmitInput)
         }
-        StudioKey::Enter if context.input_visible && event.modifiers.shift_only() => {
+        StudioKey::Enter
+            if context.input_visible
+                && !context.input_is_live_filter
+                && event.modifiers.shift_only() =>
+        {
             ui(StudioUiEvent::SubmitInput)
         }
         StudioKey::Enter if event.modifiers.none() => ui(StudioUiEvent::ActivateFocused),
@@ -169,6 +183,14 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
         StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
             ui(StudioUiEvent::DeleteInputChar)
+        }
+        // A live filter with multiple target fields owns Tab to cycle the field
+        // (it has no completion or route-target, so Tab is otherwise free here).
+        StudioKey::Tab if context.input_filter_fields && event.modifiers.none() => {
+            ui(StudioUiEvent::CycleFilterField { forward: true })
+        }
+        StudioKey::Tab if context.input_filter_fields && event.modifiers.shift_only() => {
+            ui(StudioUiEvent::CycleFilterField { forward: false })
         }
         // Tab precedence (central interaction policy, capability + buffer
         // state — never a per-view keybinding):
@@ -358,6 +380,8 @@ mod tests {
             help_open: false,
             input_visible,
             input_has_text: false,
+            input_is_live_filter: false,
+            input_filter_fields: false,
             input_has_completion: false,
             input_can_accept_completion: false,
             input_target_cycle: None,
@@ -371,6 +395,8 @@ mod tests {
             help_open: false,
             input_visible: true,
             input_has_text: true,
+            input_is_live_filter: false,
+            input_filter_fields: false,
             input_has_completion: false,
             input_can_accept_completion: false,
             input_target_cycle: None,
@@ -619,6 +645,83 @@ mod tests {
             studio_key_command(key(StudioKey::Enter), context(false, true)),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::ActivateFocused
+            }
+        ));
+    }
+
+    #[test]
+    fn live_filter_enter_activates_the_row_while_typing_still_filters() {
+        // A live-filter input (feeds, no submit) applies live: even with text,
+        // Enter activates the focused row rather than submitting the buffer.
+        let filtering = StudioKeyContext {
+            input_is_live_filter: true,
+            ..context_typing()
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Enter), filtering),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::ActivateFocused
+            }
+        ));
+        // Alt+Enter is not an interrupt for a live filter either.
+        let alt_enter = StudioKeyEvent {
+            key: StudioKey::Enter,
+            modifiers: StudioKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        };
+        assert!(!matches!(
+            studio_key_command(
+                alt_enter,
+                StudioKeyContext {
+                    input_is_live_filter: true,
+                    ..context_typing()
+                }
+            ),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::SubmitInputInterrupt
+            }
+        ));
+        // Typing still edits the filter buffer.
+        assert!(matches!(
+            studio_key_command(
+                key(StudioKey::Char('r')),
+                StudioKeyContext {
+                    input_is_live_filter: true,
+                    ..context_typing()
+                }
+            ),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::InsertInputChar { ch: 'r' }
+            }
+        ));
+    }
+
+    #[test]
+    fn tab_cycles_a_multi_field_live_filter() {
+        let ctx = StudioKeyContext {
+            input_is_live_filter: true,
+            input_filter_fields: true,
+            ..context_typing()
+        };
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Tab), ctx),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleFilterField { forward: true }
+            }
+        ));
+        assert!(matches!(
+            studio_key_command(
+                shift_tab(),
+                StudioKeyContext {
+                    input_is_live_filter: true,
+                    input_filter_fields: true,
+                    ..context_typing()
+                }
+            ),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CycleFilterField { forward: false }
             }
         ));
     }

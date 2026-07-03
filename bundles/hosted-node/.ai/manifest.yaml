@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-08T03:48:11Z:e6a4492efdbe91fbc64f4cbc0f86d0cbb30f6dfbf1b8e29eb8d6eab9ef76259d:vd6qWupw1FZjLZn9O80+UA2HVCiSW4GWAn6/iLd4HZqPWx6DdFZx1x4LB0fSrjSg8HNO7IZ+d1+Pnfc3VwQUBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T01:06:05Z:29c6164e5f7e57de8c81ac3d1e2774706be075f3ce6db6556b23d0ebabe5c7e0:utDh7W2wiB/Zs1PddrEUig/lBTVUHJw+c3ebkDGqf3XHkR3Uso08Ku2D3W2j2R0FHIv0yYQfbYiuCMVJeh3pBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: hosted-node
 version: 0.1.0
 description: Hosted RyeOS node operator policy for decentralized admission and public remote exposure
@@ -6,5 +6,4 @@ provides_kinds: []
 requires_kinds:
 - node
 uses_kinds: []
-bundle_events: []
-runtime_vault: []
+runtime_authority: {}

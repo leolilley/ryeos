@@ -242,12 +242,12 @@ pub struct HardLimits {
 impl Default for HardLimits {
     fn default() -> Self {
         Self {
-            turns: 25,
-            tokens: 200_000,
-            spend_usd: 2.0,
-            spawns: 10,
-            depth: 5,
-            duration_seconds: 300,
+            turns: 0,
+            tokens: 0,
+            spend_usd: 0.0,
+            spawns: 0,
+            depth: 0,
+            duration_seconds: 0,
         }
     }
 }
@@ -399,9 +399,9 @@ mod tests {
     #[test]
     fn hard_limits_defaults() {
         let limits = HardLimits::default();
-        assert_eq!(limits.turns, 25);
-        assert_eq!(limits.tokens, 200_000);
-        assert_eq!(limits.spawns, 10);
+        assert_eq!(limits.turns, 0);
+        assert_eq!(limits.tokens, 0);
+        assert_eq!(limits.spawns, 0);
     }
 
     #[test]

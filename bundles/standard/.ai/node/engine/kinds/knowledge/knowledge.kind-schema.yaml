@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-23T05:17:20Z:e32be7264b8a41386f9582c186f94eff42a1ca41a99de9f237ff846d64e869af:1jxRDRNMocvrBMyNAfCswOxi/ADIaS6lciMES9/A1HAhCV6HnFklw2Ex4QtjJ3mXtypO4wAIJu7qXiKzhjFTDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T01:05:59Z:b0f14eebd5ae369c13ecb22fab52b7f42a6d0737a3dae3a0c40fb869c251848d:/vq4tMwovyOEWtjagHfd/IXG5M4O8nJZcfVsJ8VQrPqoOFTV15fLHrsbY2vkgLPTkEtG6EJbNzcc6K2NNdTRCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -27,6 +27,9 @@ execution:
   methods:
     compose:
       scope: single_root
+      runtime_config:
+        token_estimation:
+          path: knowledge-runtime/token_estimation
       args:
         token_budget:
           type: integer

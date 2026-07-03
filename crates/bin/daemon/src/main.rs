@@ -484,6 +484,10 @@ async fn main() -> Result<()> {
     // bound would fail. We collect intents here and dispatch them
     // below, after the listeners are accepting connections.
     let resume_intents = reconcile::reconcile(&app_state).await?;
+    // Follow reconcile actions collected here, dispatched post-listener too: a
+    // resumed parent's (or relaunched child's) first callback must not precede a
+    // bound listener.
+    let follow_actions = reconcile::reconcile_follow(&app_state)?;
 
     // Scheduler reload channel — must be created BEFORE the router is built
     // so that HTTP handler clones of AppState carry the sender.
@@ -685,6 +689,40 @@ async fn main() -> Result<()> {
                     error = %err,
                     "resume: dispatch failed"
                 );
+            }
+        });
+    }
+
+    // Drive the follow reconcile actions collected above. Each launch is claim-
+    // guarded, so a duplicate with a live path is a benign `Skipped`. `Resume`
+    // wakes a suspended parent; `RelaunchChild` re-fires a child stranded in the
+    // pre-launch window.
+    for action in follow_actions {
+        let st = app_state.clone();
+        tokio::spawn(async move {
+            use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
+            let (label, outcome) = match action {
+                reconcile::FollowReconcileAction::Resume { follow_key } => {
+                    let outcome = ryeos_executor::execution::launch::launch_follow_resume_successor(
+                        st, &follow_key,
+                    )
+                    .await;
+                    (format!("parent-resume {follow_key}"), outcome)
+                }
+                reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
+                    // Reconcile parity: a fresh relaunch, no parent clamp/depth.
+                    let outcome = launch_follow_child(st, &child_thread_id, None, None).await;
+                    (format!("child-relaunch {child_thread_id}"), outcome)
+                }
+            };
+            match outcome {
+                Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+                Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                    tracing::debug!(action = %label, reason, "reconcile: follow action skipped");
+                }
+                Err(err) => {
+                    tracing::error!(action = %label, error = %err, "reconcile: follow action failed");
+                }
             }
         });
     }

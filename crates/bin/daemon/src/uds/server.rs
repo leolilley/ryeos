@@ -13,6 +13,7 @@ use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, Comm
 use ryeos_app::event_store_service::{
     EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
+use ryeos_app::runtime_item_author_service::{RuntimeAuthorItemParams, RuntimeItemAuthorService};
 use ryeos_app::runtime_vault_service::{
     RuntimeVaultListParams, RuntimeVaultPutParams, RuntimeVaultRefParams, RuntimeVaultService,
 };
@@ -121,8 +122,10 @@ pub async fn dispatch_runtime_method(
 ) -> Result<serde_json::Value> {
     // Validate the callback token on ALL runtime.* methods, by access class:
     //
-    //  - `runtime.dispatch_action` does its own stronger validation (per-request
-    //    thread_auth_token + project_path).
+    //  - thread-auth methods (dispatch_action, spawn_follow_child) prove a
+    //    per-request `thread_auth_token` against the caller's own thread here,
+    //    then do their own stronger validation (callback token + project_path +
+    //    server-side trust derivation) in the handler.
     //  - chain *reads* (get_thread / replay) may target any thread in the
     //    capability's own chain — a successor rehydrates by folding its
     //    predecessors. Authorized by state-checked chain membership, never an
@@ -130,34 +133,41 @@ pub async fn dispatch_runtime_method(
     //  - everything else (writes + lifecycle: append, finalize, mark_running,
     //    request_continuation, publish_artifact, vault/bundle writes) requires an
     //    exact-thread match. A chain read must never widen into a chain write.
-    let callback_cap = if method == "runtime.dispatch_action" {
-        // runtime.dispatch_action: validate thread_auth_token (per-request
-        // identity proof). Missing or invalid = hard fail, no fallback.
+    let mut validated_thread_auth: Option<ryeos_app::callback_token::ThreadAuthState> = None;
+    let callback_cap = if is_thread_auth_method(method) {
+        // Per-request identity proof against the caller's own thread. Missing or
+        // invalid = hard fail, no fallback. The handler re-validates the callback
+        // token and derives principal / provenance / caps from server-side state.
         let tat = params
             .get("thread_auth_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.dispatch_action"))?;
+            .ok_or_else(|| anyhow!("missing thread_auth_token on {method}"))?;
         let thread_id = params
             .get("thread_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_id"))?;
+            .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
-    } else if method == "runtime.poll_input" {
+    } else if matches!(method, "runtime.poll_input" | "runtime.author_item") {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
         // runtime holds: the per-request thread_auth_token (like dispatch_action)
         // AND the exact-thread callback token (write tier — it appends durable
-        // events). Either alone is insufficient.
+        // events). runtime.author_item is also a durable signed project write,
+        // so it uses the same two-proof boundary. Either proof alone is
+        // insufficient.
         let tat = params
             .get("thread_auth_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.poll_input"))?;
+            .ok_or_else(|| anyhow!("missing thread_auth_token on {method}"))?;
         let thread_id = params
             .get("thread_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
-        state.thread_auth.validate(tat, thread_id)?;
+        let thread_auth = state.thread_auth.validate(tat, thread_id)?;
+        if method == "runtime.author_item" {
+            validated_thread_auth = Some(thread_auth);
+        }
         let token = params
             .get("callback_token")
             .and_then(|v| v.as_str())
@@ -200,6 +210,9 @@ pub async fn dispatch_runtime_method(
         "runtime.dispatch_action" => {
             ryeos_executor::execution::runtime_dispatch::handle(params, state).await
         }
+        "runtime.spawn_follow_child" => {
+            ryeos_executor::execution::spawn_follow_child::handle(params, state).await
+        }
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
         "runtime.replay_events" => handle_replay_events(&clean_params, state),
@@ -224,7 +237,21 @@ pub async fn dispatch_runtime_method(
         "runtime.vault_list" => {
             handle_runtime_vault_list(&clean_params, state, callback_cap.as_ref())
         }
-        "runtime.finalize_thread" => handle_finalize(&clean_params, state),
+        "runtime.author_item" => handle_runtime_author_item(
+            &clean_params,
+            state,
+            callback_cap.as_ref(),
+            validated_thread_auth.as_ref(),
+        ),
+        "runtime.finalize_thread" => {
+            let result = handle_finalize(&clean_params, state)?;
+            // A self-finalizing follow child (the normal path) flips its waiter to
+            // `ready` here — kick the parent resume live, keyed on the child's chain.
+            if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
+                ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, chain_root_id);
+            }
+            Ok(result)
+        }
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => {
             let result = handle_request_continuation(&clean_params, state)?;
@@ -242,6 +269,17 @@ pub async fn dispatch_runtime_method(
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
+}
+
+/// Runtime methods that carry a per-request `thread_auth_token`. The prelude
+/// proves the token against the caller's own `thread_id`; the handler performs
+/// the stronger validation (callback token + project_path) and derives every
+/// trust-bearing field (principal, provenance, caps) from server-side state.
+fn is_thread_auth_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.dispatch_action" | "runtime.spawn_follow_child"
+    )
 }
 
 /// Runtime read methods a callback may invoke against any thread in its own
@@ -328,6 +366,13 @@ struct RuntimeFinalizeParams {
     error: Option<serde_json::Value>,
     #[serde(default)]
     cost: Option<serde_json::Value>,
+    /// The runtime's structured outputs + warnings. Preserved into the canonical
+    /// managed envelope so a detached follow child's return data survives to the
+    /// parent's resume. Absent from older runtimes → degraded (empty).
+    #[serde(default)]
+    outputs: serde_json::Value,
+    #[serde(default)]
+    warnings: Vec<String>,
 }
 
 /// Map a runtime self-reported terminal status. Timeout is daemon-owned — the
@@ -369,6 +414,17 @@ fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contr
 fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
+    // Build the canonical managed envelope from the RAW runtime fields (raw cost,
+    // outputs, warnings) BEFORE `completion` moves result/error, so a followed
+    // child's structured return survives to the parent's resume.
+    let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+        &params.status,
+        params.result.as_ref(),
+        params.error.as_ref(),
+        params.cost.as_ref(),
+        &params.outputs,
+        &params.warnings,
+    );
     let completion = ryeos_engine::contracts::ExecutionCompletion {
         status: terminal_status_from_str(&params.status)?,
         outcome_code: params.outcome_code,
@@ -379,11 +435,11 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
         continuation_request: None,
         metadata: None,
     };
-    serde_json::to_value(
-        state
-            .threads
-            .finalize_from_completion(&params.thread_id, &completion)?,
-    )
+    serde_json::to_value(state.threads.finalize_from_completion(
+        &params.thread_id,
+        &completion,
+        Some(managed_envelope),
+    )?)
     .context("failed to encode runtime.finalize_thread result")
 }
 
@@ -689,6 +745,26 @@ fn handle_runtime_vault_list(
         params,
     )?)
     .context("failed to encode vault.list result")
+}
+
+fn handle_runtime_author_item(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    thread_auth: Option<&ryeos_app::callback_token::ThreadAuthState>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let thread_auth = thread_auth.ok_or_else(|| anyhow::anyhow!("missing thread auth state"))?;
+    let params: RuntimeAuthorItemParams =
+        serde_json::from_value(params.clone()).context("invalid runtime.author_item params")?;
+    serde_json::to_value(RuntimeItemAuthorService::author(
+        &state.identity,
+        &state.authorizer,
+        cap,
+        thread_auth,
+        params,
+    )?)
+    .context("failed to encode runtime.author_item result")
 }
 
 fn handle_submit_command(
@@ -1104,6 +1180,1018 @@ mod tests {
             .expect("thread result row present after finalize");
         assert_eq!(persisted.outcome_code.as_deref(), Some("success"));
         assert_eq!(persisted.result, Some(json!("4")));
+    }
+
+    // ── runtime.spawn_follow_child: auth + admission rejections ──────────
+    // These reject before any mutation; the happy path / adoption / duplicate
+    // cases need a managed runtime registered in the engine (D9) and live in a
+    // dedicated fixture, not this empty-engine harness.
+
+    const FOLLOW_KEY: &str = "P/gr-1/node-a/0";
+
+    /// Create parent thread `P` (chain root `P`), make it native-resume (the
+    /// follow gate requires a checkpoint-resumable parent), and mint a callback
+    /// token (with `caps`) + a thread-auth token for it.
+    fn setup_follow_parent(state: &AppState, caps: Vec<String>) -> (String, String) {
+        state
+            .threads
+            .create_thread(&make_create_params("P", "P"))
+            .unwrap();
+        state
+            .state_store
+            .seed_launch_metadata(
+                "P",
+                &ryeos_app::launch_metadata::RuntimeLaunchMetadata {
+                    native_resume: Some(ryeos_engine::contracts::NativeResumeSpec {
+                        checkpoint_interval_secs: 30,
+                        max_auto_resume_attempts: 1,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let cbt = state.callback_tokens.generate(
+            "P",
+            std::path::PathBuf::from("/proj"),
+            std::time::Duration::from_secs(300),
+            caps,
+            test_provenance(state, "/proj"),
+        );
+        let tat = state.thread_auth.mint(
+            "P",
+            "user:test".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+        (cbt.token, tat.token)
+    }
+
+    fn follow_params(callback_token: &str, thread_auth_token: &str, child: &str) -> serde_json::Value {
+        json!({
+            "callback_token": callback_token,
+            "thread_auth_token": thread_auth_token,
+            "thread_id": "P",
+            "project_path": "/proj",
+            "graph_run_id": "gr-1",
+            "follow_node": "node-a",
+            "step_count": 0,
+            "child_item_ref": child,
+            "child_parameters": {},
+        })
+    }
+
+    fn no_waiter(state: &AppState) -> bool {
+        state
+            .state_store
+            .get_follow_waiter_by_key(FOLLOW_KEY)
+            .unwrap()
+            .is_none()
+    }
+
+    fn no_waiter_key(state: &AppState, key: &str) -> bool {
+        state
+            .state_store
+            .get_follow_waiter_by_key(key)
+            .unwrap()
+            .is_none()
+    }
+
+    fn new_successor_record(
+        thread_id: &str,
+        chain_root_id: &str,
+        upstream: Option<&str>,
+    ) -> ryeos_app::state_store::NewThreadRecord {
+        ryeos_app::state_store::NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: chain_root_id.to_string(),
+            kind: "graph".to_string(),
+            item_ref: "test/graph".to_string(),
+            executor_ref: "test/executor".to_string(),
+            launch_mode: "detached".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: upstream.map(Into::into),
+            requested_by: Some("user:test".to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+        }
+    }
+
+    /// Build a running parent "P" with a captured ResumeContext, then its REAL
+    /// graph-follow-resume successor "S" (marked + upstream-linked), advanced to
+    /// `running` — the shape the `AlreadyClaimed` cleanup must accept.
+    fn seed_marked_follow_successor(state: &AppState) {
+        use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+        use ryeos_engine::contracts::{
+            EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+        };
+        state
+            .threads
+            .create_thread(&make_create_params("P", "P"))
+            .unwrap();
+        state.threads.mark_running("P").unwrap();
+        state
+            .state_store
+            .seed_launch_metadata(
+                "P",
+                &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
+                    kind: "graph".into(),
+                    item_ref: "test/graph".into(),
+                    launch_mode: "detached".into(),
+                    parameters: json!({}),
+                    project_context: ProjectContext::LocalPath {
+                        path: std::path::PathBuf::from("/tmp/p"),
+                    },
+                    original_snapshot_hash: None,
+                    current_site_id: "site:test".into(),
+                    origin_site_id: "site:test".into(),
+                    requested_by: EffectivePrincipal::Local(Principal {
+                        fingerprint: "fp".into(),
+                        scopes: vec![],
+                    }),
+                    execution_hints: ExecutionHints::default(),
+                    effective_caps: vec![],
+                    executor_ref: None,
+                    runtime_ref: None,
+                }),
+            )
+            .unwrap();
+        state
+            .state_store
+            .create_follow_resume_successor(&new_successor_record("S", "P", Some("P")), "P", "P")
+            .unwrap();
+        state.threads.mark_running("S").unwrap();
+    }
+
+    /// Arm a `waiting` follow waiter (key `wk`) whose child chain is `child`.
+    fn arm_waiting_follow(state: &AppState, wk: &str, child: &str) {
+        arm_waiting_follow_succ(state, wk, child, "S");
+    }
+
+    /// Like [`arm_waiting_follow`] but with an explicit successor id. Use this when
+    /// a single test arms MORE than one waiter — `follow_waiter.parent_successor_thread_id`
+    /// is UNIQUE (a successor belongs to exactly one follow), so each must differ.
+    fn arm_waiting_follow_succ(state: &AppState, wk: &str, child: &str, successor: &str) {
+        state
+            .state_store
+            .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
+                follow_key: wk.to_string(),
+                parent_thread_id: "P".to_string(),
+                parent_chain_root_id: "P".to_string(),
+                follow_node: "n".to_string(),
+                graph_run_id: "g".to_string(),
+                step_count: 0,
+                frontier_id: None,
+            })
+            .unwrap();
+        state.state_store.set_follow_child(wk, child, child).unwrap();
+        state
+            .state_store
+            .set_follow_parent_successor(wk, successor)
+            .unwrap();
+        state.state_store.mark_follow_waiting(wk).unwrap();
+    }
+
+    fn finalize_child(state: &AppState, child: &str, status: &str, result: Option<serde_json::Value>) {
+        state
+            .threads
+            .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                thread_id: child.to_string(),
+                status: status.to_string(),
+                outcome_code: Some(status.to_string()),
+                result,
+                error: None,
+                metadata: None,
+                artifacts: vec![],
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
+        let (_tmp, state) = setup_app_state();
+        // A still-waiting waiter: its child chain has not been recorded terminal, so
+        // the parent resume is not yet drivable — no intent. (Distinct successors:
+        // parent_successor_thread_id is UNIQUE.)
+        arm_waiting_follow_succ(&state, "wk-waiting", "CW", "S-w");
+        // A waiter whose child chain reached terminal (flipped `waiting → ready`):
+        // the parent resume IS drivable — one intent.
+        arm_waiting_follow_succ(&state, "wk-ready", "CR", "S-r");
+        state
+            .state_store
+            .mark_follow_child_terminal("CR", "CR", "completed", &json!({"success": true}))
+            .unwrap();
+        // A waiter whose resume was interrupted mid-flight (`resuming`) — re-driven,
+        // so it too must be collected.
+        arm_waiting_follow_succ(&state, "wk-resuming", "CX", "S-x");
+        state
+            .state_store
+            .mark_follow_child_terminal("CX", "CX", "completed", &json!({"success": true}))
+            .unwrap();
+        state.state_store.mark_follow_resuming("wk-resuming").unwrap();
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        let resume_keys: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::reconcile::FollowReconcileAction::Resume { follow_key } => {
+                    Some(follow_key.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            resume_keys.contains(&"wk-ready"),
+            "a ready waiter must yield a parent-resume action, got {resume_keys:?}"
+        );
+        assert!(
+            resume_keys.contains(&"wk-resuming"),
+            "a resuming waiter must yield a parent-resume action, got {resume_keys:?}"
+        );
+        assert!(
+            !resume_keys.contains(&"wk-waiting"),
+            "a still-waiting waiter (no child row) must NOT yield a resume action, got {resume_keys:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_relaunches_pre_launch_child() {
+        // Crash in the pre-launch window: the waiter is durably `waiting` but the
+        // detached child launch never ran, so the child row is still `created`.
+        // reconcile_follow must collect a relaunch (reconcile() proper skips it
+        // rather than finalize-failing it).
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cpre", "Cpre"))
+            .unwrap();
+        arm_waiting_follow(&state, "wk-pre", "Cpre");
+        assert_eq!(
+            state.threads.get_thread("Cpre").unwrap().unwrap().status,
+            ryeos_state::objects::ThreadStatus::Created.as_str(),
+            "child must be created (never launched) for this window"
+        );
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        let relaunch: Vec<&str> = actions
+            .iter()
+            .filter_map(|a| match a {
+                crate::reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
+                    Some(child_thread_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relaunch,
+            vec!["Cpre"],
+            "a waiting waiter with a created (never-launched) child must yield a relaunch, got {relaunch:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_does_not_relaunch_child_with_attached_pgid() {
+        // A pgid attaches BEFORE the row flips created→running (launch in flight).
+        // Such a child must NOT be relaunched — that would spawn a duplicate.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Catt", "Catt"))
+            .unwrap();
+        state
+            .threads
+            .attach_process(&ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
+                thread_id: "Catt".to_string(),
+                pid: 424242,
+                pgid: 424242,
+                metadata: None,
+                launch_metadata: Default::default(),
+            })
+            .unwrap();
+        arm_waiting_follow(&state, "wk-att", "Catt");
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::RelaunchChild { .. }
+            )),
+            "a child with an attached pgid (launch in flight) must NOT be relaunched, got {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_does_not_relaunch_running_child() {
+        // A running child is recovered by reconcile()'s native-resume path, not a
+        // fresh follow relaunch.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Crun", "Crun"))
+            .unwrap();
+        state.threads.mark_running("Crun").unwrap();
+        arm_waiting_follow(&state, "wk-run", "Crun");
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::RelaunchChild { .. }
+            )),
+            "a running child must NOT be follow-relaunched, got {actions:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_failed_and_kick_readies_follow_waiter() {
+        // Regression: BOTH launch error paths (fresh follow-child launch AND
+        // native-resume relaunch) finalize a failed follow child through
+        // finalize_failed_and_kick_follow. Its finalize half must flip a waiting
+        // follow waiter to `ready` so the kick has something to drive — otherwise a
+        // relaunch failure leaves the parent suspended until the next restart.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cnr", "Cnr"))
+            .unwrap();
+        state.threads.mark_running("Cnr").unwrap();
+        arm_waiting_follow(&state, "wk-nr", "Cnr");
+
+        ryeos_executor::execution::launch::finalize_failed_and_kick_follow(
+            &state,
+            "Cnr",
+            "Cnr",
+            json!({ "error": "resume rebuild failed" }),
+        );
+
+        // The finalize half readied the waiter (synchronous; the kick is a detached
+        // spawn that hasn't run yet). A hung waiter here == the bug Oracle flagged.
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-nr")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "a failed follow-child (re)launch must ready the waiter for the parent resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_successor_budget_failure_readies_follow_waiter() {
+        // launch_successor_inner's budget-exhausted path must ready a followed
+        // parent's waiter (via finalize_failed_and_kick_follow) — else a follow child
+        // whose continuation successor can't relaunch strands the parent. Modeled
+        // with a successor row awaited by a follow waiter; the finalize+kick code path
+        // is identical whether or not it sits deeper in a chain.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Ssucc", "Ssucc"))
+            .unwrap();
+        // Exhaust the per-successor auto-launch budget.
+        for _ in 0..ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS {
+            state.state_store.bump_resume_attempts("Ssucc").unwrap();
+        }
+        // A parent follow waiter awaits this successor's chain.
+        arm_waiting_follow(&state, "wk-succ", "Ssucc");
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_successor(
+            state.clone(),
+            "Ssucc",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => {
+                panic!("a budget-exhausted successor must not launch")
+            }
+        };
+        assert_eq!(reason, "budget_exhausted");
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-succ")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "a budget-exhausted continuation successor in a followed chain must ready the waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_recovers_terminal_unrecorded_child() {
+        // Crash window: the child chain reached a terminal that was persisted, but
+        // the waiter was never flipped (record_follow_child_terminal never ran).
+        // reconcile() skips terminal threads, so reconcile_follow must recover it →
+        // ready → resume, or the parent hangs forever.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cterm", "Cterm"))
+            .unwrap();
+        state.threads.mark_running("Cterm").unwrap();
+        // RAW state-store finalize bypasses record_follow_child_terminal, leaving the
+        // waiter `waiting` — exactly the crash window.
+        state
+            .state_store
+            .finalize_thread(
+                "Cterm",
+                &ryeos_app::state_store::FinalizeThreadRecord {
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result_json: Some(json!({ "answer": 42 })),
+                    error_json: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                },
+            )
+            .unwrap();
+        arm_waiting_follow(&state, "wk-term", "Cterm");
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-term")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::WAITING,
+            "precondition: waiter is still waiting (terminal not recorded)"
+        );
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::Resume { follow_key } if follow_key == "wk-term"
+            )),
+            "a terminal-but-unrecorded child must be recovered to a resume, got {actions:?}"
+        );
+        let waiter = state
+            .state_store
+            .get_follow_waiter_by_key("wk-term")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiter.phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "recovery must flip the waiter to ready"
+        );
+        // The synthesized envelope is a VISIBLE degraded FAILURE (so the parent
+        // resumes into on_error, not a silent empty success), and carries the
+        // persisted child status/result for diagnostics.
+        let env = waiter
+            .terminal_envelope
+            .expect("recovered waiter must carry a terminal envelope");
+        assert_eq!(env["success"], json!(false), "degraded recovery is failure-shaped");
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(
+            env["result"]["child_status"],
+            json!("completed"),
+            "envelope carries the persisted child status"
+        );
+        assert_eq!(
+            env["result"]["child_result"],
+            json!({ "answer": 42 }),
+            "envelope carries the persisted child result"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_follow_child_resumes_parent_on_error() {
+        // Cancellation contract for a suspended follow: cancelling the CHILD flips the
+        // parent's waiter to ready with a VISIBLE failure envelope, so the parent
+        // resumes into on_error (not a silent success). The parent itself is
+        // `continued` and not cancellable; cancelling the resume successor instead
+        // abandons the resume (handled in launch_follow_resume_successor).
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Ccancel", "Ccancel"))
+            .unwrap();
+        state.threads.mark_running("Ccancel").unwrap();
+        arm_waiting_follow(&state, "wk-cancel", "Ccancel");
+        // What threads/cancel does to the child: finalize it `cancelled`.
+        finalize_child(&state, "Ccancel", "cancelled", None);
+
+        let waiter = state
+            .state_store
+            .get_follow_waiter_by_key("wk-cancel")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiter.phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "cancelling the child must ready the parent's waiter"
+        );
+        let env = waiter
+            .terminal_envelope
+            .expect("cancelled child must store a terminal envelope");
+        assert_eq!(
+            env["success"],
+            json!(false),
+            "a cancelled child resumes the parent into on_error, not a silent success"
+        );
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(
+            env["result"]["child_status"],
+            json!("cancelled"),
+            "envelope carries the cancelled child status"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_converges_reserved_with_child_and_successor() {
+        // Partial spawn: child + successor recorded (so the parent is continued), but
+        // crashed before mark_follow_waiting → stuck `reserved`. Converge to waiting;
+        // the still-created child then yields a relaunch.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cres", "Cres"))
+            .unwrap();
+        state
+            .state_store
+            .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
+                follow_key: "wk-res".to_string(),
+                parent_thread_id: "P".to_string(),
+                parent_chain_root_id: "P".to_string(),
+                follow_node: "n".to_string(),
+                graph_run_id: "g".to_string(),
+                step_count: 0,
+                frontier_id: None,
+            })
+            .unwrap();
+        state.state_store.set_follow_child("wk-res", "Cres", "Cres").unwrap();
+        state.state_store.set_follow_parent_successor("wk-res", "S").unwrap();
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-res")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::RESERVED,
+            "precondition: stuck reserved (mark_follow_waiting never ran)"
+        );
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } if child_thread_id == "Cres"
+            )),
+            "a reserved waiter with recorded child+successor + continued parent must converge and relaunch, got {actions:?}"
+        );
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-res")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::WAITING,
+            "convergence must mark the waiter waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_follow_leaves_reserved_when_parent_not_continued() {
+        // Reserved, child recorded, but no successor and parent not continued → the
+        // parent's own native resume re-drives spawn_follow_child; leave it.
+        let (_tmp, state) = setup_app_state();
+        state
+            .state_store
+            .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
+                follow_key: "wk-res2".to_string(),
+                parent_thread_id: "Pnc".to_string(),
+                parent_chain_root_id: "Pnc".to_string(),
+                follow_node: "n".to_string(),
+                graph_run_id: "g".to_string(),
+                step_count: 0,
+                frontier_id: None,
+            })
+            .unwrap();
+        state.state_store.set_follow_child("wk-res2", "Cnc", "Cnc").unwrap();
+
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            actions.is_empty(),
+            "a reserved waiter whose parent has not continued must be left for the parent resume, got {actions:?}"
+        );
+        assert_eq!(
+            state
+                .state_store
+                .get_follow_waiter_by_key("wk-res2")
+                .unwrap()
+                .unwrap()
+                .phase,
+            ryeos_app::runtime_db::follow_phase::RESERVED,
+            "the waiter must remain reserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_resume_claim_held_by_advanced_marked_successor_clears_waiter() {
+        // Blocker-1 recovery: a `resuming` waiter whose VALID follow-resume successor
+        // was claimed + run by another launcher (e.g. a native-resume intent) must be
+        // retired, not left `resuming` until a future restart.
+        let (_tmp, state) = setup_app_state();
+        // "S" is a real marked follow-resume successor of "P", advanced to running.
+        seed_marked_follow_successor(&state);
+        arm_waiting_follow(&state, "wk-held", "C");
+        state
+            .state_store
+            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .unwrap();
+        state.state_store.mark_follow_resuming("wk-held").unwrap();
+        // Someone else holds the launch claim on "S".
+        assert!(matches!(
+            state
+                .state_store
+                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .unwrap(),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        ));
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_follow_resume_successor(
+            state.clone(),
+            "wk-held",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => panic!("claim is held → must not launch"),
+        };
+        assert_eq!(reason, "already_claimed");
+        assert!(
+            no_waiter_key(&state, "wk-held"),
+            "a VALID advanced follow successor means the resume is done — waiter cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_resume_claim_held_by_unmarked_successor_keeps_waiter() {
+        // Blocker-1 fail-closed: a `resuming` waiter pointing at a claimed row that is
+        // NOT this parent's graph-follow-resume successor must NOT be cleared — the
+        // AlreadyClaimed cleanup validates upstream + marker before retiring.
+        let (_tmp, state) = setup_app_state();
+        // A raw running "S" with no follow-resume marker (upstream None ≠ parent "P").
+        state
+            .threads
+            .create_thread(&make_create_params("S", "S"))
+            .unwrap();
+        state.threads.mark_running("S").unwrap();
+        arm_waiting_follow(&state, "wk-unmarked", "C");
+        state
+            .state_store
+            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .unwrap();
+        state.state_store.mark_follow_resuming("wk-unmarked").unwrap();
+        assert!(matches!(
+            state
+                .state_store
+                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .unwrap(),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        ));
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_follow_resume_successor(
+            state.clone(),
+            "wk-unmarked",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => panic!("claim is held → must not launch"),
+        };
+        assert_eq!(reason, "already_claimed");
+        assert!(
+            !no_waiter_key(&state, "wk-unmarked"),
+            "claim held by an UNMARKED row must NOT clear the waiter (fail closed)"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_resume_refuses_successor_without_marker() {
+        // Blocker-2 guard: a waiter pointing at a row that is NOT the parent's
+        // graph-follow-resume successor must not be spliced or launched, and the
+        // waiter must be left intact (suspected corruption is for inspection).
+        let (_tmp, state) = setup_app_state();
+        // "S" links upstream to the parent "P" but carries NO follow-resume edge.
+        let mut params = make_create_params("S", "S");
+        params.upstream_thread_id = Some("P".to_string());
+        state.threads.create_thread(&params).unwrap();
+        arm_waiting_follow(&state, "wk-nomarker", "C");
+        state
+            .state_store
+            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .unwrap();
+
+        use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
+        let reason = match ryeos_executor::execution::launch::launch_follow_resume_successor(
+            state.clone(),
+            "wk-nomarker",
+        )
+        .await
+        .unwrap()
+        {
+            SuccessorLaunchOutcome::Skipped(r) => r,
+            SuccessorLaunchOutcome::Launched(_) => {
+                panic!("a successor without the follow-resume marker must not launch")
+            }
+        };
+        assert_eq!(reason, "not_follow_successor");
+        assert!(
+            !no_waiter_key(&state, "wk-nomarker"),
+            "refusal on a suspected-bad successor must NOT clear the waiter"
+        );
+        // "S" was never launched — still `created`.
+        assert_eq!(
+            state.threads.get_thread("S").unwrap().unwrap().status,
+            ryeos_state::objects::ThreadStatus::Created.as_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_thread_without_envelope_degrades_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-degraded", "C");
+
+        // The generic finalize path carries NO canonical envelope. A follow waiter
+        // consuming it gets a visible in-band FAILURE, not a silent empty success —
+        // so the parent resumes into its on_error path.
+        finalize_child(&state, "C", "completed", Some(json!({ "answer": 42 })));
+
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-degraded")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
+        let env = w.terminal_envelope.expect("degraded envelope stored");
+        assert_eq!(env["success"], json!(false));
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(
+            env["result"]["code"],
+            json!("degraded_follow_child_terminal_envelope")
+        );
+        assert_eq!(env["result"]["child_status"], json!("completed"));
+    }
+
+    #[tokio::test]
+    async fn finalize_with_managed_envelope_preserves_outputs_on_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-mgd", "C");
+
+        // The executor-fallback path carries the canonical envelope: outputs +
+        // warnings survive to the follow waiter as a success.
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": "directive_return",
+            "outputs": { "recommendations": ["x"] },
+            "warnings": ["w1"],
+            "cost": { "input_tokens": 5, "output_tokens": 1, "total_usd": 0.001 },
+        });
+        state
+            .threads
+            .finalize_thread_with_managed_envelope(
+                &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                    thread_id: "C".to_string(),
+                    status: "completed".to_string(),
+                    outcome_code: Some("success".to_string()),
+                    result: Some(json!("directive_return")),
+                    error: None,
+                    metadata: None,
+                    artifacts: vec![],
+                    final_cost: None,
+                    summary_json: None,
+                },
+                envelope,
+            )
+            .unwrap();
+
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-mgd")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
+        let env = w.terminal_envelope.expect("canonical envelope stored");
+        assert_eq!(env["success"], json!(true));
+        assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
+        assert_eq!(env["warnings"], json!(["w1"]));
+    }
+
+    #[tokio::test]
+    async fn finalize_continued_does_not_flip_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-cont", "C");
+
+        // A `continued` finalize is an intermediate link in the child's own chain,
+        // not the terminal tail — the waiter stays `waiting`.
+        finalize_child(&state, "C", "continued", None);
+
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-cont")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::WAITING);
+        assert!(w.terminal_envelope.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_finalize_carries_outputs_and_warnings_to_follow_waiter() {
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("C", "C"))
+            .unwrap();
+        state.threads.mark_running("C").unwrap();
+        arm_waiting_follow(&state, "wk-out", "C");
+
+        // The child SELF-finalizes via the runtime callback wire (not the executor
+        // fallback), carrying a `directive_return`-style result plus its structured
+        // outputs + warnings.
+        let cbt = state.callback_tokens.generate(
+            "C",
+            std::path::PathBuf::from("/proj"),
+            std::time::Duration::from_secs(300),
+            vec![],
+            test_provenance(&state, "/proj"),
+        );
+        let resp = dispatch(
+            rpc(
+                "runtime.finalize_thread",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "C",
+                    "status": "completed",
+                    "result": "directive_return",
+                    "outputs": { "recommendations": ["a", "b"] },
+                    "warnings": ["w1"],
+                    "cost": { "input_tokens": 10, "output_tokens": 2, "total_usd": 0.01 },
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_none(), "finalize failed: {:?}", resp.error);
+
+        // The stored follow envelope preserves outputs + warnings + raw cost — not
+        // the fabricated empty forms.
+        let w = state
+            .state_store
+            .get_follow_waiter_by_key("wk-out")
+            .unwrap()
+            .unwrap();
+        assert_eq!(w.phase, ryeos_app::runtime_db::follow_phase::READY);
+        let env = w.terminal_envelope.expect("canonical envelope stored");
+        assert_eq!(env["success"], json!(true));
+        assert_eq!(env["result"], json!("directive_return"));
+        assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));
+        assert_eq!(env["warnings"], json!(["w1"]));
+        assert_eq!(env["cost"]["input_tokens"], json!(10));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_missing_thread_auth_token() {
+        let (_tmp, state) = setup_app_state();
+        let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        let mut params = follow_params(&cbt, "unused", "tool:echo");
+        params.as_object_mut().unwrap().remove("thread_auth_token");
+        let resp = dispatch(rpc("runtime.spawn_follow_child", params), &state).await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_invalid_thread_auth_token() {
+        let (_tmp, state) = setup_app_state();
+        let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, "tat-bogus", "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_invalid_callback_token() {
+        let (_tmp, state) = setup_app_state();
+        let (_cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params("cbt-bogus", &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_chain_root_mismatch() {
+        let (_tmp, state) = setup_app_state();
+        let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
+        // Point the cap at a chain root other than the parent row's.
+        assert!(state.callback_tokens.set_chain_root(&cbt, "OTHER-CHAIN"));
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_missing_execute_cap_without_mutation() {
+        let (_tmp, state) = setup_app_state();
+        // Parent holds an unrelated cap, not execute over `tool:echo`.
+        let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.other".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_non_native_resume_parent() {
+        let (_tmp, state) = setup_app_state();
+        // Parent has full authority but is NOT native-resume (no launch metadata
+        // seeded) → refused: follow needs a checkpoint-resumable parent.
+        state
+            .threads
+            .create_thread(&make_create_params("P", "P"))
+            .unwrap();
+        let cbt = state.callback_tokens.generate(
+            "P",
+            std::path::PathBuf::from("/proj"),
+            std::time::Duration::from_secs(300),
+            vec!["ryeos.execute.tool.*".into()],
+            test_provenance(&state, "/proj"),
+        );
+        let tat = state.thread_auth.mint(
+            "P",
+            "user:test".to_string(),
+            vec!["execute".to_string()],
+            std::time::Duration::from_secs(300),
+        );
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt.token, &tat.token, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
+    }
+
+    #[tokio::test]
+    async fn spawn_follow_child_rejects_unmanaged_child_kind() {
+        let (_tmp, state) = setup_app_state();
+        // Parent HAS execute authority (wildcard), so admission passes the cap
+        // gate; the empty test engine has no runtime for `tool`, so the managed-
+        // runtime check rejects — and still no waiter is created.
+        let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.*".into()]);
+        let resp = dispatch(
+            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            &state,
+        )
+        .await;
+        assert!(resp.error.is_some());
+        assert!(no_waiter(&state));
     }
 
     #[tokio::test]

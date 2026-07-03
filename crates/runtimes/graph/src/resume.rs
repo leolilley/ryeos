@@ -44,6 +44,16 @@ pub struct ResumeState {
     /// event-replay path). The walker deserializes it into `Vec<ErrorRecord>` to
     /// restore the pre-checkpoint suppressed-error history.
     pub suppressed_errors: Option<Value>,
+    /// Present when the resume point is a follow node: local facts
+    /// (`follow_node`, `step_count`, `graph_run_id`) recorded at suspend. No
+    /// child IDs — the daemon owns the child relationship.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_follow: Option<Value>,
+    /// The child's canonical terminal envelope, spliced into the successor's
+    /// resume state by the follow-resume launcher. Consumed at the follow node
+    /// instead of re-dispatching. Absent on a plain (non-follow) resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_result: Option<Value>,
 }
 
 /// Reconstruct a [`ResumeState`] for the thread by scanning its
@@ -101,6 +111,10 @@ pub async fn load_resume_state(
         // suppressed-error history.
         accounting: None,
         suppressed_errors: None,
+        // Follow resume relies on the checkpoint (which carries the marker + the
+        // spliced child envelope); the event-replay path never resumes a follow.
+        pending_follow: None,
+        follow_result: None,
     }))
 }
 
@@ -166,6 +180,8 @@ pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
         graph_run_id,
         accounting: value.get("accounting").cloned(),
         suppressed_errors: value.get("suppressed_errors").cloned(),
+        pending_follow: value.get(crate::walker::follow_keys::PENDING_FOLLOW).cloned(),
+        follow_result: value.get(crate::walker::follow_keys::FOLLOW_RESULT).cloned(),
     })
 }
 

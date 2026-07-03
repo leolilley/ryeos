@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-23T05:17:20Z:c2f3ef591184a824abf361a3227cc2bd78b3faa68105750de75e33c69f20e504:ieJVG380nFBja3XgMv/EWkBjjRK95JZMrCOysv0gAUhNpkelvecfxgXxAGJANFYtItc6Y6ozBXCuNvpiv1ZOAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T01:05:59Z:ef7eed7666deb25c9a19b238d71879463b95ad35f593a17461e26166aa6f1846:U2/O+TjTgOUYDPnv9bs8ZcDtEzdU9vSGnuK23gDTXYuLasHB8Jdo5JCU9QZnK+N21VLwGGLMPaCr5M7ptG0jAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/directive"
 version: "1.0.0"
 location:
@@ -37,6 +37,9 @@ execution:
         system: 4000
         before: 2000
         after: 2000
+      runtime_config:
+        token_estimation:
+          path: knowledge-runtime/token_estimation
 formats:
   - extensions: [".md"]
     parser: parser:ryeos/core/markdown/directive

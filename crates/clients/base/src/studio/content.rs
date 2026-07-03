@@ -189,9 +189,49 @@ pub enum InputTargetCycle {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputFeeds {
+    /// Single-field feed: the source param the buffer writes. Optional when
+    /// `fields` declares a cyclable set instead.
+    #[serde(default)]
     pub param: String,
+    /// A cyclable set of filter fields — the box feeds ONE at a time and a key
+    /// cycles which is active. Empty → single-field via `param`.
+    #[serde(default)]
+    pub fields: Vec<FilterField>,
     #[serde(default)]
     pub debounce_ms: Option<u64>,
+}
+
+/// One field a live-filter box can target: the source param it feeds and an
+/// optional label for the prompt strip ("filter by <label>…").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilterField {
+    pub param: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+impl InputFeeds {
+    /// Count of cyclable fields (0 when single-field via `param`).
+    pub fn field_count(&self) -> usize {
+        self.fields.len()
+    }
+
+    /// The source param fed at `index`: the cyclable field when declared, else
+    /// the single `param`. `index` wraps, so callers needn't clamp.
+    pub fn active_param(&self, index: usize) -> &str {
+        if self.fields.is_empty() {
+            &self.param
+        } else {
+            &self.fields[index % self.fields.len()].param
+        }
+    }
+
+    /// The active field's prompt label, if any.
+    pub fn active_label(&self, index: usize) -> Option<&str> {
+        self.fields
+            .get(index % self.fields.len().max(1))
+            .and_then(|f| f.label.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -271,6 +311,15 @@ impl InputBlock {
             Some(SUBMIT_ROUTE) | None => None,
             Some(id) => Some(id),
         }
+    }
+
+    /// A live-filter input: its buffer feeds one of its own source params and
+    /// it has no submit target. The filter applies live (via `feeds`), so it is
+    /// never "submitted" — Enter should activate the focused row, not submit,
+    /// and the renderer composes it as a filter line above its widget rather
+    /// than replacing the widget with a prompt.
+    pub fn is_live_filter(&self) -> bool {
+        self.feeds.is_some() && self.submit.is_none()
     }
 }
 
@@ -530,15 +579,21 @@ pub fn project_records(binding: &ViewBinding, response: &Value) -> Vec<Projected
 /// (e.g. node status) beside its list sections.
 pub fn project_section(section: &SectionBinding, response: &Value) -> Vec<ProjectedRecord> {
     match section.source.collection.as_deref() {
-        Some(path) => field_path(response, path)
-            .and_then(Value::as_array)
-            .map(|records| {
-                records
-                    .iter()
-                    .map(|record| project_record(record, &section.projection))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        // A `collection` path selects a sub-value of the response. An array is a
+        // list source (one row per element); a single object is a detail source
+        // (one row) — so a section can read a nested record (e.g. a thread's
+        // `result`) out of a larger inspect response. A null/scalar (e.g.
+        // `result` before the thread finishes) degrades to no rows, never a
+        // raw-JSON dump — which is what projecting the whole response through a
+        // missing path would otherwise produce.
+        Some(path) => match field_path(response, path) {
+            Some(Value::Array(records)) => records
+                .iter()
+                .map(|record| project_record(record, &section.projection))
+                .collect(),
+            Some(value @ Value::Object(_)) => vec![project_record(value, &section.projection)],
+            _ => Vec::new(),
+        },
         None => vec![project_record(response, &section.projection)],
     }
 }
@@ -574,21 +629,36 @@ fn resolve_params_dyn(params: &Value, facet_lookup: &dyn Fn(&str) -> Option<Valu
     match params {
         Value::String(s) => {
             if let Some(rest) = s.strip_prefix("@facet:") {
+                // An optional trailing `|<default>` makes the reference
+                // DEFAULTING: when the facet is absent, resolve to the literal
+                // default instead of null. A bare `@facet:x` stays REQUIRED —
+                // an unresolved one is null, which suppresses the fetch (right
+                // for `thread_id` on an inspect source). A defaulting one keeps
+                // an unset OPTIONAL param (e.g. a list filter) from suppressing
+                // the whole list; an empty default (`@facet:x|`) resolves to ""
+                // which a service reads as "no filter".
+                let (spec, default) = match rest.split_once('|') {
+                    Some((spec, default)) => (spec, Some(default)),
+                    None => (rest, None),
+                };
                 // Facet keys themselves contain dots (`input.route`), so
                 // try every dot-prefix as the key, longest first; the
                 // remainder is a field path into the facet value.
-                let dots: Vec<usize> = rest
+                let dots: Vec<usize> = spec
                     .char_indices()
                     .filter_map(|(i, c)| (c == '.').then_some(i))
                     .collect();
-                let mut candidates: Vec<&str> = vec![rest];
-                candidates.extend(dots.iter().rev().map(|&i| &rest[..i]));
+                let mut candidates: Vec<&str> = vec![spec];
+                candidates.extend(dots.iter().rev().map(|&i| &spec[..i]));
                 for candidate in candidates {
-                    if let Some(found) = try_facet(candidate, rest, facet_lookup) {
+                    if let Some(found) = try_facet(candidate, spec, facet_lookup) {
                         return found;
                     }
                 }
-                Value::Null
+                match default {
+                    Some(default) => Value::String(default.to_string()),
+                    None => Value::Null,
+                }
             } else {
                 params.clone()
             }
@@ -807,9 +877,24 @@ pub enum AffordanceInvoke {
         facet: String,
         value: Option<Value>,
         merge: Option<Value>,
+        /// Optional view ref to open AFTER the facet write, in one activation.
+        /// Lets a row drill in — e.g. write `input.route.{thread,chain_root}`
+        /// then open the braid lens — which the facet/rye grammar alone can't
+        /// compose. Applied post-write so the opened view's fetch resolves
+        /// against the just-written facet. Single-lens: replaces the center.
+        open_view: Option<String>,
     },
     Rye {
         tokens: Vec<String>,
+        args: Value,
+    },
+    /// Invoke a service by ref with args through the daemon `/execute` path (as
+    /// the foot input does). Args reach the daemon as `parameters` — unlike the
+    /// token dispatch path. Row management (cancel / kill / continue on a
+    /// specific row) uses this so `{record.thread_id}` actually reaches the
+    /// service, targeting that row rather than the route head.
+    Service {
+        item_ref: String,
         args: Value,
     },
 }
@@ -836,20 +921,38 @@ pub fn resolve_affordance_invoke(
             merge: invoke
                 .get("merge")
                 .map(|merge| substitute_payload(merge, payload)),
+            open_view: invoke
+                .get("open_view")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }),
-        "rye" => Some(AffordanceInvoke::Rye {
-            tokens: invoke
-                .get("tokens")?
-                .as_array()?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-            args: invoke
-                .get("args")
-                .map(|args| substitute_payload(args, payload))
-                .unwrap_or(Value::Null),
-        }),
+        "rye" => {
+            // A `ref:` selects the service-invocation form (args → `/execute`
+            // parameters); otherwise it's grammar-token dispatch.
+            if let Some(item_ref) = invoke.get("ref").and_then(Value::as_str) {
+                Some(AffordanceInvoke::Service {
+                    item_ref: item_ref.to_string(),
+                    args: invoke
+                        .get("args")
+                        .map(|args| substitute_payload(args, payload))
+                        .unwrap_or(Value::Null),
+                })
+            } else {
+                Some(AffordanceInvoke::Rye {
+                    tokens: invoke
+                        .get("tokens")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                    args: invoke
+                        .get("args")
+                        .map(|args| substitute_payload(args, payload))
+                        .unwrap_or(Value::Null),
+                })
+            }
+        }
         _ => None,
     }
 }
@@ -974,6 +1077,44 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].primary, "1.0.0");
         assert_eq!(rows[0].meta.as_deref(), Some("node-xyz"));
+    }
+
+    #[test]
+    fn project_section_object_collection_is_a_single_detail_row() {
+        // A `collection` that resolves to an OBJECT (not an array) is a detail
+        // sub-record: the thread-detail lens reads `result` out of the inspect
+        // response this way, without dumping the whole payload.
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Outcome",
+            "source": { "ref": "service:ui/studio/thread/inspect", "collection": "result" },
+            "projection": { "primary": "outcome_code", "meta": "error" }
+        }))
+        .unwrap();
+        let response = json!({
+            "thread": { "thread_id": "T-ab" },
+            "result": { "outcome_code": "ok", "error": null }
+        });
+        let rows = project_section(&section, &response);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].primary, "ok");
+    }
+
+    #[test]
+    fn project_section_null_collection_yields_no_rows_not_a_dump() {
+        // `result` is null until a thread finishes. A missing/null collection
+        // must degrade to zero rows — NOT to a single row whose primary is the
+        // whole compacted response.
+        let section: SectionBinding = serde_json::from_value(json!({
+            "title": "Outcome",
+            "source": { "ref": "service:ui/studio/thread/inspect", "collection": "result" },
+            "projection": { "primary": "outcome_code", "meta": "error" }
+        }))
+        .unwrap();
+        let response = json!({ "thread": { "thread_id": "T-ab" }, "result": null });
+        assert!(project_section(&section, &response).is_empty());
+        // Absent entirely, too.
+        let bare = json!({ "thread": { "thread_id": "T-ab" } });
+        assert!(project_section(&section, &bare).is_empty());
     }
 
     #[test]
@@ -1258,6 +1399,31 @@ mod tests {
     }
 
     #[test]
+    fn defaulting_facet_param_resolves_and_falls_back() {
+        // `@facet:x|default` resolves to the facet when present…
+        let present = resolve_params(
+            &json!({ "status": "@facet:threads.filter.status|" }),
+            |key| (key == "threads.filter").then(|| json!({ "status": "running" })),
+        );
+        assert_eq!(present["status"], "running");
+
+        // …and to the literal default when the facet is absent, so an unset
+        // optional filter never resolves to null (which would suppress the
+        // list fetch). Empty default → "" (a service reads it as "no filter").
+        let absent = resolve_params(
+            &json!({ "status": "@facet:threads.filter.status|", "kind": "@facet:threads.filter.kind|all" }),
+            |_| None,
+        );
+        assert_eq!(absent["status"], "");
+        assert_eq!(absent["kind"], "all");
+
+        // A bare (non-defaulting) reference still resolves to null when unset —
+        // required params (e.g. inspect thread_id) keep suppressing the fetch.
+        let required = resolve_params(&json!({ "thread_id": "@facet:selection.thread" }), |_| None);
+        assert!(required["thread_id"].is_null());
+    }
+
+    #[test]
     fn missing_projection_degrades_to_raw() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "rows",
@@ -1269,6 +1435,40 @@ mod tests {
         let rows = project_records(&binding, &response);
         assert!(rows[0].primary.contains("\"a\""));
         assert_eq!(rows[0].raw, json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn feeds_fields_declare_a_cyclable_live_filter() {
+        let b: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:x", "params": {}, "collection": "rows" },
+            "input": { "id": "filter", "feeds": { "fields": [
+                { "param": "status", "label": "status" },
+                { "param": "requested_by", "label": "source" }
+            ] } }
+        }))
+        .unwrap();
+        let input = b.input.as_ref().unwrap();
+        let feeds = input.feeds.as_ref().unwrap();
+        assert_eq!(feeds.field_count(), 2);
+        assert_eq!(feeds.active_param(0), "status");
+        assert_eq!(feeds.active_param(1), "requested_by");
+        // The index wraps, so a caller never has to clamp.
+        assert_eq!(feeds.active_param(2), "status");
+        assert_eq!(feeds.active_label(1), Some("source"));
+        // No submit → still a live filter, just multi-field.
+        assert!(input.is_live_filter());
+
+        // Single-field feeds keep working (param, no fields).
+        let single: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:x", "params": {}, "collection": "rows" },
+            "input": { "id": "filter", "feeds": { "param": "status" } }
+        }))
+        .unwrap();
+        let feeds = single.input.as_ref().unwrap().feeds.as_ref().unwrap();
+        assert_eq!(feeds.field_count(), 0);
+        assert_eq!(feeds.active_param(0), "status");
     }
 
     #[test]
@@ -1339,6 +1539,63 @@ mod tests {
                 facet: "selection".into(),
                 value: Some(json!({ "thread": "T-1" })),
                 merge: None,
+                open_view: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ui_affordance_parses_merge_and_open_view() {
+        // The drill-in shape: merge route facets from the row, then open a view.
+        let affordance = json!({
+            "invoke": {
+                "plane": "ui",
+                "facet": "input.route",
+                "merge": { "thread": "{record.thread_id}", "chain_root": "{record.chain_root_id}" },
+                "open_view": "view:ryeos/chain/timeline"
+            }
+        });
+        let record = json!({ "thread_id": "T-9", "chain_root_id": "T-root" });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&record),
+        )
+        .expect("selection supplies record");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Ui {
+                facet: "input.route".into(),
+                value: None,
+                merge: Some(json!({ "thread": "T-9", "chain_root": "T-root" })),
+                open_view: Some("view:ryeos/chain/timeline".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn rye_affordance_with_ref_parses_as_service_invoke() {
+        // Row management: a `ref:` under the rye plane invokes a service with
+        // args (reaching the daemon as parameters), not token dispatch.
+        let affordance = json!({
+            "invoke": {
+                "plane": "rye",
+                "ref": "service:commands/submit",
+                "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" }
+            }
+        });
+        let record = json!({ "thread_id": "T-7" });
+        let invoke = resolve_affordance_invoke(
+            &affordance,
+            Producer::Selection,
+            &Payload::Selection(&record),
+        )
+        .expect("selection supplies record");
+        assert_eq!(
+            invoke,
+            AffordanceInvoke::Service {
+                item_ref: "service:commands/submit".into(),
+                args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
             }
         );
     }

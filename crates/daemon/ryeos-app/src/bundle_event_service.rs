@@ -182,10 +182,11 @@ fn authorize_bundle_event(
         .with_context(|| {
             format!(
                 "missing required capability: {required} — bundle-event access is runtime \
-                 authority: declare `bundle_events:` for event kind '{event_kind}' in this \
-                 bundle's `.ai/manifest.source.yaml` and sign it (`ryeos bundle publish`), then \
-                 request it from the item under `requires.capabilities.manifest`. It cannot be \
-                 self-granted under `requires.capabilities.declared`."
+                 authority: declare `runtime_authority.bundle_events:` for event kind \
+                 '{event_kind}' in this bundle's `.ai/manifest.source.yaml` and sign it \
+                 (`ryeos bundle publish`), then request it from the item under \
+                 `requires.capabilities.manifest.runtime_authority`. It cannot be self-granted \
+                 under `requires.capabilities.declared`."
             )
         })
 }
@@ -220,6 +221,7 @@ mod tests {
             token: "cbt-test".into(),
             invocation_id: "inv-test".into(),
             thread_id: "T-test".into(),
+            chain_root_id: "T-test".into(),
             project_path: PathBuf::from("/tmp/test"),
             expires_at: Instant::now() + Duration::from_secs(60),
             effective_caps,

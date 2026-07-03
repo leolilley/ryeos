@@ -411,7 +411,7 @@ mod tests {
             ".ai/tools/app/tool.yaml",
             ".ai/graphs/app/flow.yaml",
             ".ai/config/execution/execution.yaml",
-            ".ai/config/ryeos-runtime/limits.yaml",
+            ".ai/config/directive-runtime/limits.yaml",
             ".ai/config/schedules/snap-track.yaml",
         ]);
         validate_project_manifest_paths(&m, ProjectSyncScope::AiOnly, None).unwrap();

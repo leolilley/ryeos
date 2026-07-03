@@ -114,14 +114,13 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         thread_id: &str,
         completion: TerminalCompletion,
     ) -> Result<Value, CallbackError> {
-        let mut params = json!({
-            "thread_id": thread_id,
-            "status": completion.status,
-            "outcome_code": completion.outcome_code,
-            "result": completion.result,
-            "error": completion.error,
-            "cost": completion.cost,
-        });
+        // Serialize the whole typed completion so wire and struct can't drift — a
+        // hand-listed set previously dropped `outputs`/`warnings`, losing a follow
+        // child's structured return. The daemon deserializes this back into
+        // RuntimeFinalizeParams.
+        let mut params = serde_json::to_value(&completion)
+            .map_err(|e| CallbackError::Transport(anyhow::anyhow!("serialize completion: {e}")))?;
+        params["thread_id"] = json!(thread_id);
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.finalize_thread", params)
@@ -150,6 +149,22 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut params);
         self.rpc
             .request("runtime.request_continuation", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn spawn_follow_child(
+        &self,
+        request: crate::callback::SpawnFollowChildRequest,
+    ) -> Result<Value, CallbackError> {
+        // Serialize the whole typed request so wire and struct can't drift; the
+        // daemon deserializes it back (plus the injected tokens) server-side.
+        let mut params = serde_json::to_value(&request).map_err(|e| {
+            CallbackError::Transport(anyhow::anyhow!("serialize spawn_follow_child: {e}"))
+        })?;
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.spawn_follow_child", params)
             .await
             .map_err(Self::map_rpc_error)
     }
@@ -276,6 +291,24 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         self.inject_callback_token(&mut request);
         self.rpc
             .request("runtime.vault_list", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn author_item(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        let map = request.as_object_mut().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "runtime.author_item request must be a JSON object"
+            ))
+        })?;
+        map.insert("thread_id".to_string(), json!(thread_id));
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.author_item", request)
             .await
             .map_err(Self::map_rpc_error)
     }

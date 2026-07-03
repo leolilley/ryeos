@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T02:50:09Z:0a5b251e749a5181defc521055785c38254f4376f3b3278ff2371db805c16514:8J0yHtI/1GW19u0eqW+JY9nt1nX9dM4PjnMhre9oyMgCwO5n/8sadmkqcaq2ksFNg5DlG4py7QXKnnQqqjCeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-03T01:05:59Z:9811b00f1420b865f563eda2de07fa2eefea081285b113b9a37fcbcf07230959:3KLiykGzqjLUhoiHgXRyQpnF0WSmtKP6b4UnNZaX5O0L9U4qsRDn/tunHgUEwIczioab1XC0VsakfUBCXIfoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -69,10 +69,10 @@ description: ARC agent
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events:
-  - event_kind: arc_pattern_event
-    operations: [append, scan]   # both — the tool does create-or-append
-runtime_vault: []
+runtime_authority:
+  bundle_events:
+    - event_kind: arc_pattern_event
+      operations: [append, scan]   # both — the tool does create-or-append
 ```
 
 From this signed manifest the daemon mints, for a tool whose ref resolves under
@@ -110,15 +110,16 @@ needs under `requires.capabilities.manifest`:
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: [append]
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: [append]
 ```
 
 ## Runtime vault
 
 Runtime-vault capabilities (`ryeos.<verb>.vault.<bundle-id>/<namespace>`, verbs
-`put`/`get`/`delete`/`list`) follow the identical model: declared as
-`runtime_vault:` in the signed manifest, requested under
-`requires.capabilities.manifest`, minted by the daemon, never self-grantable
-under `requires.capabilities.declared`.
+`put`/`get`/`delete`/`list`) follow the identical model: declared under
+`runtime_authority.runtime_vault:` in the signed manifest, requested under
+`requires.capabilities.manifest.runtime_authority`, minted by the daemon, never
+self-grantable under `requires.capabilities.declared`.

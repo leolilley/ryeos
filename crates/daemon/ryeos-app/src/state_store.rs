@@ -362,6 +362,17 @@ fn append_events_locked(
         .collect()
 }
 
+/// Which kind of running-source continuation successor to create. Both kinds
+/// cut a still-running source, seed the successor's resume context, and settle
+/// the source `continued`; they differ only in the edge `reason` recorded and
+/// in whether the autonomous chain-depth cap applies. The `GraphFollowResume`
+/// marker is daemon-trusted (selectable only via the dedicated method, never a
+/// caller-supplied reason).
+enum RunningContinuationKind<'a> {
+    Machine { sanitized_reason: Option<&'a str> },
+    GraphFollowResume,
+}
+
 impl StateStore {
     pub fn new(
         runtime_state_dir: PathBuf,
@@ -924,19 +935,53 @@ impl StateStore {
         chain_root_id: &str,
         reason: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
-        // `operator_follow_up` is a DAEMON-OWNED edge marker (only the operator
-        // path writes it, alongside a request fingerprint). The machine handoff
-        // carries a free-form log reason, so strip the reserved value: a runtime
-        // must not be able to mint a machine edge that the chain-depth walk would
-        // mistake for an operator reset. (Belt-and-suspenders: the walk also
-        // requires the operator-only fingerprint before treating a link as a
-        // reset.)
-        let reason = if reason == Some(queries::ContinuationReasonMarker::OperatorFollowUp.as_str())
-        {
-            None
-        } else {
-            reason
-        };
+        // The machine handoff carries a free-form runtime LOG reason. Scrub ALL
+        // daemon-reserved markers so a runtime cannot mint an edge the chain-depth
+        // walk would treat as an operator reset or a depth-exempt follow.
+        let sanitized_reason =
+            reason.filter(|r| !queries::ContinuationReasonMarker::is_reserved_str(r));
+        self.create_running_continuation_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            RunningContinuationKind::Machine { sanitized_reason },
+        )
+    }
+
+    /// Create the parent's follow-resume successor: a running-source continuation
+    /// marked `graph_follow_resume`. Created and seeded only — NOT launched (the
+    /// resume path launches it later, once the child's result is available) and
+    /// NOT subject to the autonomous chain-depth cap (a follow is structural
+    /// progress, not an autonomous run). Daemon-only: the trusted marker cannot be
+    /// reached through a runtime-supplied reason.
+    pub fn create_follow_resume_successor(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_running_continuation_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+            RunningContinuationKind::GraphFollowResume,
+        )
+    }
+
+    /// Shared core for both running-source continuations (machine handoff and
+    /// follow-resume). One atomic op under the write permit + lock: re-verify the
+    /// source is running, enforce the single-successor invariant, require the
+    /// source's captured ResumeContext, seed the successor (runtime-db writes
+    /// first), then settle the source `continued`. A race or seed failure aborts
+    /// with the source still running — never `continued` behind an unlaunchable
+    /// successor.
+    fn create_running_continuation_successor(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+        kind: RunningContinuationKind<'_>,
+    ) -> Result<Vec<PersistedEventRecord>> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
         let source_row = g
@@ -944,14 +989,23 @@ impl StateStore {
             .get_thread(source_thread_id)?
             .ok_or_else(|| anyhow!("source thread not found: {source_thread_id}"))?;
 
-        // Machine handoff = cut-off of a still-running source. Re-checked under
-        // the lock to close the caller's check-then-commit race; a terminal
+        // A running-source continuation cuts a still-running source. Re-checked
+        // under the lock to close the caller's check-then-commit race; a terminal
         // source is the operator follow-up path, not this one.
         if source_row.status != ThreadStatus::Running.as_str() {
             bail!(
-                "machine continuation requires a running source; \
+                "running continuation requires a running source; \
                  thread {source_thread_id} is '{}'",
                 source_row.status
+            );
+        }
+
+        // Never braid a successor into the wrong chain.
+        if chain_root_id != source_row.chain_root_id {
+            bail!(
+                "chain_root_id mismatch: requested {chain_root_id}, source \
+                 {source_thread_id} is in chain {}",
+                source_row.chain_root_id
             );
         }
 
@@ -963,20 +1017,21 @@ impl StateStore {
         }
 
         // Chain-level ceiling: bound the length of an AUTONOMOUS continuation run.
-        // At the cap the cut-off thread does NOT continue — the chain terminates
-        // rather than spawning an unbounded successor chain. Operator follow-ups
-        // reset the count, so this never caps an operator conversation.
-        let machine_depth = queries::consecutive_machine_continuation_depth(
-            g.state_db.projection(),
-            source_thread_id,
-            crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH,
-        )?;
-        if machine_depth >= crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH {
-            bail!(
-                "continuation depth limit reached ({machine_depth}/{}); the autonomous \
-                 chain will not continue",
-                crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH
-            );
+        // MACHINE handoffs only — a follow-resume edge is structural progress and
+        // must be allowed even when the parent chain is already at the cap.
+        if let RunningContinuationKind::Machine { .. } = &kind {
+            let machine_depth = queries::consecutive_machine_continuation_depth(
+                g.state_db.projection(),
+                source_thread_id,
+                crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH,
+            )?;
+            if machine_depth >= crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH {
+                bail!(
+                    "continuation depth limit reached ({machine_depth}/{}); the autonomous \
+                     chain will not continue",
+                    crate::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH
+                );
+            }
         }
 
         // Require the source's captured launch identity: the successor must be
@@ -993,10 +1048,28 @@ impl StateStore {
                 )
             })?;
 
-        let mut successor_with_upstream = successor.clone();
-        if successor_with_upstream.upstream_thread_id.is_none() {
-            successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
+        // Successor preconditions BEFORE any write: it must belong to the source's
+        // chain and, if it names an upstream, name THIS source — never braid a
+        // successor into the wrong chain or contradict the edge being created (a
+        // later StateDb reject would leave an orphan runtime row behind).
+        if successor.chain_root_id != source_row.chain_root_id {
+            bail!(
+                "successor {} chain_root_id {} does not match source chain {}",
+                successor.thread_id,
+                successor.chain_root_id,
+                source_row.chain_root_id
+            );
         }
+        match successor.upstream_thread_id.as_deref() {
+            None => {}
+            Some(id) if id == source_thread_id => {}
+            Some(other) => bail!(
+                "successor {} declares upstream {other}, not the continuation source {source_thread_id}",
+                successor.thread_id
+            ),
+        }
+        let mut successor_with_upstream = successor.clone();
+        successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
 
         // Runtime-db writes FIRST: insert the successor runtime row and seed its
         // launch identity before any state-db successor snapshot or source
@@ -1047,12 +1120,18 @@ impl StateStore {
             last_chain_seq: 0,
             last_thread_seq: 0,
         };
+        let edge_reason: Option<&str> = match &kind {
+            RunningContinuationKind::Machine { sanitized_reason } => *sanitized_reason,
+            RunningContinuationKind::GraphFollowResume => {
+                Some(queries::ContinuationReasonMarker::GraphFollowResume.as_str())
+            }
+        };
         let source_event = NewEventRecord {
             event_type: "thread_continued".to_string(),
             storage_class: "indexed".to_string(),
             payload: json!({
                 "successor_thread_id": &successor.thread_id,
-                "reason": reason,
+                "reason": edge_reason,
             }),
         };
         let ste = convert_events(
@@ -1292,6 +1371,25 @@ impl StateStore {
         queries::continuation_fingerprint(g.state_db.projection(), thread_id)
     }
 
+    /// Whether `source_thread_id`'s continuation edge is a follow-resume edge
+    /// pointing at `successor_thread_id`. Such a successor has the same shape as a
+    /// stranded machine continuation but must NOT be auto-launched — it waits for
+    /// the followed child's result. Target-aware: another created row that merely
+    /// names the same upstream is NOT matched.
+    pub fn is_follow_resume_successor(
+        &self,
+        source_thread_id: &str,
+        successor_thread_id: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        Ok(matches!(
+            queries::continuation_edge(g.state_db.projection(), source_thread_id)?,
+            Some((succ, Some(reason), _))
+                if succ == successor_thread_id
+                    && reason == queries::ContinuationReasonMarker::GraphFollowResume.as_str()
+        ))
+    }
+
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
         let g = self.lock()?;
         let thread_row = match g.state_db.get_thread(thread_id)? {
@@ -1471,6 +1569,46 @@ impl StateStore {
         let g = self.lock()?;
         let thread_rows =
             queries::list_threads_filtered(g.state_db.projection(), limit, filter_principal)?;
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
+    /// As [`Self::list_threads_filtered`] but with an explicit
+    /// [`queries::ThreadSort`] — `Watch` orders active-before-terminal then
+    /// newest for the operator dashboard, without changing the default order.
+    pub fn list_threads_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: queries::ThreadSort,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows =
+            queries::list_threads_sorted(g.state_db.projection(), limit, filter_principal, sort)?;
+        Self::rows_to_list_items(&g, thread_rows)
+    }
+
+    /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
+    /// for a `chain_root_id` — the deep-watch summary of an execution and its
+    /// continuations.
+    pub fn chain_usage_totals(
+        &self,
+        chain_root_id: &str,
+    ) -> Result<queries::ThreadUsageTotals> {
+        let g = self.lock()?;
+        queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
+    }
+
+    /// As [`Self::list_threads_sorted`] but with the full optional filter set
+    /// (status / kind / requested_by) the operator dashboard narrows by.
+    pub fn list_threads_query(
+        &self,
+        limit: usize,
+        filter: &queries::ThreadListFilter,
+        sort: queries::ThreadSort,
+    ) -> Result<Vec<ThreadListItem>> {
+        let g = self.lock()?;
+        let thread_rows =
+            queries::list_threads_query(g.state_db.projection(), limit, filter, sort)?;
         Self::rows_to_list_items(&g, thread_rows)
     }
 
@@ -1746,6 +1884,90 @@ impl StateStore {
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<runtime_db::LaunchClaim>> {
         let g = self.lock()?;
         g.runtime_db.get_launch_claim(thread_id)
+    }
+
+    // ── Follow waiters ───────────────────────────────────────────────────
+
+    pub fn reserve_follow(
+        &self,
+        seed: &runtime_db::NewFollowWaiter,
+    ) -> Result<runtime_db::FollowWaiter> {
+        let g = self.lock()?;
+        g.runtime_db.reserve_follow(seed)
+    }
+
+    pub fn set_follow_child(
+        &self,
+        follow_key: &str,
+        child_thread_id: &str,
+        child_chain_root_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .set_follow_child(follow_key, child_thread_id, child_chain_root_id)
+    }
+
+    pub fn set_follow_parent_successor(
+        &self,
+        follow_key: &str,
+        successor_thread_id: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .set_follow_parent_successor(follow_key, successor_thread_id)
+    }
+
+    pub fn mark_follow_waiting(&self, follow_key: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_follow_waiting(follow_key)
+    }
+
+    pub fn mark_follow_resuming(&self, follow_key: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.mark_follow_resuming(follow_key)
+    }
+
+    pub fn mark_follow_child_terminal(
+        &self,
+        child_chain_root_id: &str,
+        child_terminal_thread_id: &str,
+        child_terminal_status: &str,
+        terminal_envelope: &serde_json::Value,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.mark_follow_child_terminal(
+            child_chain_root_id,
+            child_terminal_thread_id,
+            child_terminal_status,
+            terminal_envelope,
+        )
+    }
+
+    pub fn get_follow_waiter_by_key(
+        &self,
+        follow_key: &str,
+    ) -> Result<Option<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db.get_follow_waiter_by_key(follow_key)
+    }
+
+    pub fn get_follow_waiter_by_child_chain(
+        &self,
+        child_chain_root_id: &str,
+    ) -> Result<Option<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .get_follow_waiter_by_child_chain(child_chain_root_id)
+    }
+
+    pub fn list_follow_waiters(&self) -> Result<Vec<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db.list_follow_waiters()
+    }
+
+    pub fn clear_follow_waiter(&self, follow_key: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.clear_follow_waiter(follow_key)
     }
 
     /// Delete all launch claims — startup cleanup so a stale claim from a crashed

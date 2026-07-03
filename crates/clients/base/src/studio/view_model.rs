@@ -257,6 +257,11 @@ pub struct StudioInputVm {
     /// Completion suggestions from the input's `completion` source.
     #[serde(default)]
     pub completion: Vec<String>,
+    /// This input is a live filter (feeds a source param, no submit): the
+    /// renderer composes it as a filter line above its widget rather than
+    /// replacing the widget, and Enter activates the focused row.
+    #[serde(default)]
+    pub live_filter: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -371,6 +376,12 @@ pub struct StudioTableRowVm {
     pub action: Option<StudioAction>,
     #[serde(default)]
     pub selected: bool,
+    /// The row's raw record — base-only (not serialized to clients). The launcher
+    /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
+    /// management is reachable. Skipped to avoid duplicating every record into
+    /// the per-row wire payload.
+    #[serde(skip)]
+    pub raw: serde_json::Value,
 }
 
 /// One titled, collapsible group within a `Sections` view. `count` is the
@@ -1107,6 +1118,12 @@ fn bound_view_vm_keyed(
         }
         ("timeline", Some(response)) => {
             let mut full = timeline_entries(super::content::project_records(binding, response));
+            // Deep-watch header: a chain execution summary line at the top of the
+            // braid, from the source's `summary` (chain_replay). Absent for any
+            // timeline whose source carries no `summary`, so it never intrudes.
+            if let Some(summary) = timeline_summary_entry(response) {
+                full.insert(0, summary);
+            }
             append_live_delta(core, &mut full);
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
@@ -1156,6 +1173,7 @@ fn bound_view_vm_keyed(
                         }
                     }),
                     selected: cursor == Some(index),
+                    raw: record.raw,
                 })
                 .collect();
             StudioViewVm::Table {
@@ -1274,10 +1292,27 @@ fn input_vm(
     // Completion suggestions: an inline @-mention hint when the cursor is in
     // one, else the input's `/` command grammar.
     let completion = input_completion(core, view_ref, input, &text, cursor);
-    let hint = completion
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "Shift+Enter submit · / for commands · @ for refs".to_string());
+    let live_filter = input.is_live_filter();
+    // Cyclable live filters name their active field in the prompt and hint.
+    let feeds = input.feeds.as_ref();
+    let filter_field = buffer.map(|b| b.filter_field).unwrap_or(0);
+    let cyclable = feeds.is_some_and(|f| f.field_count() > 1);
+    let hint = completion.first().cloned().unwrap_or_else(|| {
+        if live_filter && cyclable {
+            "Tab: field · type to filter · Enter opens".to_string()
+        } else if live_filter {
+            "type to filter · ↑↓ select · Enter opens".to_string()
+        } else {
+            "Shift+Enter submit · / for commands · @ for refs".to_string()
+        }
+    });
+    // A cyclable filter's prompt names the active field ("filter by source…");
+    // otherwise the authored placeholder, else a generic prompt.
+    let placeholder = feeds
+        .and_then(|f| f.active_label(filter_field))
+        .map(|label| format!("filter by {label}…"))
+        .or_else(|| input.placeholder.clone())
+        .unwrap_or_else(|| "type RyeOS input…".to_string());
 
     let has_route_target =
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
@@ -1285,14 +1320,47 @@ fn input_vm(
     StudioInputVm {
         cursor,
         route_label,
-        placeholder: input
-            .placeholder
-            .clone()
-            .unwrap_or_else(|| "type RyeOS input…".to_string()),
+        placeholder,
         hint,
         submit_enabled: !text.trim().is_empty() && (has_route_target || has_affordance_target),
         completion,
+        live_filter,
         text,
+    }
+}
+
+/// The deep-watch header for a braid: one summary line built from the source's
+/// `summary` (chain status + chain-wide usage totals, from chain_replay).
+/// Returns `None` when the source carries no `summary` — any non-chain timeline —
+/// so the header only appears where it means something.
+fn timeline_summary_entry(response: &serde_json::Value) -> Option<StudioTimelineEntryVm> {
+    let summary = response.get("summary")?;
+    let status = summary.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let input = summary.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let output = summary.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cost = summary.get("spend_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let turns = summary.get("turns").and_then(|v| v.as_i64()).unwrap_or(0);
+    let primary = format!("{status} · ↑{input} ↓{output} · ${cost:.4} · {turns} turns");
+    Some(StudioTimelineEntryVm::Line {
+        primary,
+        meta: None,
+        tone: status_tone(status),
+        action: None,
+    })
+}
+
+/// Map a thread/chain status to a tone (the same status→tone vocabulary the
+/// list/detail tone blocks declare, in code here for the summary header). Matches
+/// the typed [`ThreadStatus`] variants so a new status is a compile error here,
+/// not a silently-neutral string.
+fn status_tone(status: &str) -> StudioTone {
+    use super::dto::ThreadStatus;
+    match ThreadStatus::from_wire(status) {
+        ThreadStatus::Running | ThreadStatus::Created => StudioTone::Accent,
+        ThreadStatus::Failed | ThreadStatus::Killed | ThreadStatus::TimedOut => StudioTone::Danger,
+        ThreadStatus::Cancelled => StudioTone::Warn,
+        ThreadStatus::Completed | ThreadStatus::Continued => StudioTone::Good,
+        ThreadStatus::Unknown => StudioTone::Neutral,
     }
 }
 
@@ -1612,6 +1680,54 @@ fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     .collect()
 }
 
+/// Launcher items for the focused table row's affordances OTHER than its
+/// activate (Enter) action — so row management (Cancel, …) is reachable. Each is
+/// rebuilt as an `InvokeAffordance` from the row's raw record and the view's
+/// declared affordances. Table lenses only (the list surfaces are all tables);
+/// rows-widget affordances are out of scope here.
+fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+    let Some(view) = core.workspace.focused_view() else {
+        return Vec::new();
+    };
+    let view_ref = view.view_ref.clone();
+    let Some(binding) = core.views.get(&view_ref) else {
+        return Vec::new();
+    };
+    let Some(row) = focused_selected_table_row(core) else {
+        return Vec::new();
+    };
+    if row.raw.is_null() {
+        return Vec::new();
+    }
+    let activate = binding.selection.as_ref().map(|s| s.activate.as_str());
+    binding
+        .affordances
+        .iter()
+        .filter_map(|aff| {
+            let id = aff.get("id").and_then(|v| v.as_str())?;
+            if Some(id) == activate {
+                return None; // already the row's Enter action
+            }
+            let label = aff
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or(id)
+                .to_string();
+            Some(StudioLauncherItemVm {
+                label,
+                hint: "focused row".to_string(),
+                action: StudioAction::InvokeAffordance {
+                    view_ref: view_ref.clone(),
+                    affordance_id: id.to_string(),
+                    record: row.raw.clone(),
+                },
+                secondary_action: None,
+                enabled: true,
+            })
+        })
+        .collect()
+}
+
 fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = Vec::new();
 
@@ -1624,6 +1740,11 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
             enabled: true,
         });
     }
+
+    // The focused row's non-activate affordances (e.g. Cancel on a thread row),
+    // so row management is reachable — the row's Enter action is only the
+    // activate affordance.
+    items.extend(focused_row_affordance_items(core));
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
@@ -2249,29 +2370,148 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(binding.widget, "table");
+        // The watch dashboard sources the operator-scoped UI-studio list,
+        // active-first (sort: watch), before the limit.
+        let source = binding.source.as_ref().expect("threads list has a source");
+        assert_eq!(source.item_ref, "service:ui/studio/threads/list");
+        assert_eq!(source.params["limit"], 200);
+        assert_eq!(source.params["sort"], "watch");
+        assert_eq!(source.collection.as_deref(), Some("threads"));
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "item", "status", "created"]
+            ["thread", "kind", "item", "status", "source", "created"]
         );
         let rows = project_table(
             &binding,
             &json!({ "threads": [
-                { "thread_id": "T-ab", "item_ref": "directive:ops/base", "status": "running", "created_at": "2026-06-29T00:00:00Z" },
-                { "thread_id": "T-cd", "item_ref": "directive:ops/scan", "status": "failed",  "created_at": "2026-06-28T00:00:00Z" }
+                { "thread_id": "T-ab", "kind": "directive", "item_ref": "directive:ops/base", "status": "running", "requested_by": "fp:claude", "created_at": "2026-06-29T00:00:00Z" },
+                { "thread_id": "T-cd", "kind": "graph", "item_ref": "directive:ops/scan", "status": "failed",  "requested_by": "fp:amp", "created_at": "2026-06-28T00:00:00Z" }
             ]}),
             &columns,
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].cells,
-            ["T-ab", "directive:ops/base", "running", "2026-06-29T00:00:00Z"]
+            ["T-ab", "directive", "directive:ops/base", "running", "fp:claude", "2026-06-29T00:00:00Z"]
         );
         // Tone reuses the shared status→tone block the rows widget would.
         assert_eq!(rows[0].tone.as_deref(), Some("accent"));
         assert_eq!(rows[1].tone.as_deref(), Some("danger"));
         // The raw record is preserved for affordance interpolation.
         assert_eq!(rows[0].raw["thread_id"], "T-ab");
+    }
+
+    #[test]
+    fn timeline_summary_entry_builds_a_header_line_from_the_summary() {
+        let response = json!({
+            "events": [],
+            "summary": {
+                "status": "running",
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "spend_usd": 0.0421,
+                "turns": 3
+            }
+        });
+        match timeline_summary_entry(&response).expect("summary present") {
+            StudioTimelineEntryVm::Line { primary, tone, .. } => {
+                assert!(primary.contains("running"), "{primary}");
+                assert!(primary.contains("1200") && primary.contains("340"), "{primary}");
+                assert!(primary.contains("$0.0421"), "{primary}");
+                assert!(primary.contains("3 turns"), "{primary}");
+                assert_eq!(tone, StudioTone::Accent);
+            }
+            other => panic!("expected a header Line, got {other:?}"),
+        }
+        // A timeline whose source carries no `summary` gets no header.
+        assert!(timeline_summary_entry(&json!({ "events": [] })).is_none());
+    }
+
+    #[test]
+    fn status_tone_maps_by_typed_status_variant() {
+        assert_eq!(status_tone("running"), StudioTone::Accent);
+        assert_eq!(status_tone("created"), StudioTone::Accent);
+        assert_eq!(status_tone("completed"), StudioTone::Good);
+        assert_eq!(status_tone("continued"), StudioTone::Good);
+        assert_eq!(status_tone("failed"), StudioTone::Danger);
+        assert_eq!(status_tone("killed"), StudioTone::Danger);
+        assert_eq!(status_tone("timed_out"), StudioTone::Danger);
+        assert_eq!(status_tone("cancelled"), StudioTone::Warn);
+        // An unrecognized status folds to Unknown → neutral, not a panic.
+        assert_eq!(status_tone("some_future_status"), StudioTone::Neutral);
+    }
+
+    #[test]
+    fn actual_thread_detail_binding_projects_inspect_sections() {
+        use crate::studio::content::{project_section, ViewBinding};
+        let binding: ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/threads/detail.yaml"
+        ))
+        .unwrap();
+        assert_eq!(binding.widget, "sections");
+        // One inspect response feeds every section; each reads a different
+        // sub-value of it (thread / result / artifacts / children).
+        let response = json!({
+            "schema_version": "studio.thread.inspect.v1",
+            "thread": { "thread_id": "T-ab", "item_ref": "directive:ops/base", "status": "running" },
+            "result": { "outcome_code": "error", "error": "boom" },
+            "artifacts": [ { "artifact_type": "file", "uri": "file://out.txt" } ],
+            "children": [ { "item_ref": "directive:ops/child", "status": "completed" } ],
+            "usage": [
+                { "label": "input tokens", "value": "1200" },
+                { "label": "cost", "value": "$0.0421" }
+            ]
+        });
+        let section = |title: &str| {
+            binding
+                .sections
+                .iter()
+                .find(|s| s.title == title)
+                .unwrap_or_else(|| panic!("section {title}"))
+        };
+
+        // Summary: the whole `thread` sub-object → one row (item • status), toned.
+        let summary = project_section(section("Summary"), &response);
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].primary, "directive:ops/base");
+        assert_eq!(summary[0].meta.as_deref(), Some("running"));
+        assert_eq!(summary[0].tone.as_deref(), Some("accent"));
+
+        // Outcome: the `result` sub-object (outcome code + error), toned danger.
+        let outcome = project_section(section("Outcome"), &response);
+        assert_eq!(outcome.len(), 1);
+        assert_eq!(outcome[0].primary, "error");
+        assert_eq!(outcome[0].meta.as_deref(), Some("boom"));
+        assert_eq!(outcome[0].tone.as_deref(), Some("danger"));
+
+        // Artifacts + children are list sub-arrays: one row each.
+        let artifacts = project_section(section("Artifacts"), &response);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].primary, "file");
+        let children = project_section(section("Children"), &response);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].primary, "directive:ops/child");
+        assert_eq!(children[0].meta.as_deref(), Some("completed"));
+
+        // Usage: one row per labeled metric (value primary, label meta).
+        let usage = project_section(section("Usage"), &response);
+        assert_eq!(usage.len(), 2);
+        assert_eq!(usage[0].primary, "1200");
+        assert_eq!(usage[0].meta.as_deref(), Some("input tokens"));
+        assert_eq!(usage[1].primary, "$0.0421");
+
+        // Re-fetches on the selection facet; each section pulls the selected
+        // thread via @facet, so an unset selection SUPPRESSES the fetch (D8)
+        // rather than sending a null thread_id to the deny_unknown inspect svc.
+        assert_eq!(
+            binding.refresh.get("on_facet").and_then(|v| v.as_str()),
+            Some("selection")
+        );
+        assert_eq!(
+            section("Summary").source.params["thread_id"],
+            "@facet:selection.thread"
+        );
     }
 
     #[test]
@@ -2387,6 +2627,65 @@ mod tests {
             }
             other => panic!("expected inspect invoke, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn launcher_surfaces_focused_row_cancel_but_not_the_activate() {
+        use crate::studio::model::{BrowserSession, BrowserViewport};
+        let session = BrowserSession {
+            effective_surface: Some(json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list"],
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "table",
+                        "source": { "ref": "service:ui/studio/threads/list", "collection": "threads" },
+                        "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
+                        "selection": { "activate": "watch" },
+                        "affordances": [
+                            { "id": "watch", "label": "Watch",
+                              "invoke": { "plane": "ui", "facet": "input.route",
+                                          "merge": { "thread": "{record.thread_id}" },
+                                          "open_view": "view:ryeos/chain/timeline" } },
+                            { "id": "cancel", "label": "Cancel",
+                              "invoke": { "plane": "rye", "ref": "service:ui/studio/thread/cancel",
+                                          "args": { "thread_id": "{record.thread_id}" } } }
+                        ]
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let key = core.workspace.focused_tile.0.to_string();
+        core.data.sources.insert(
+            key,
+            json!({ "threads": [ { "thread_id": "T-ab", "chain_root_id": "T-ab" } ] }),
+        );
+
+        let items = launcher_items_for(&core);
+        // The focused row (default cursor 0 = T-ab) exposes a reachable Cancel
+        // targeting that specific row.
+        let cancel = items
+            .iter()
+            .find(|i| i.label == "Cancel")
+            .expect("cancel launcher item");
+        assert!(
+            matches!(&cancel.action,
+                StudioAction::InvokeAffordance { view_ref, affordance_id, record }
+                    if view_ref == "view:ryeos/threads/list"
+                        && affordance_id == "cancel"
+                        && record["thread_id"] == "T-ab"),
+            "cancel item must invoke the row's cancel affordance; got {:?}",
+            cancel.action
+        );
+        // The activate (watch) affordance is NOT duplicated as a context item —
+        // it's already the row's Enter action.
+        assert!(
+            !items.iter().any(|i| i.label == "Watch"),
+            "activate affordance should not be surfaced as a context item"
+        );
     }
 
     #[test]
@@ -2572,6 +2871,7 @@ mod tests {
             crate::studio::model::StudioInputState {
                 text: "/thread ".to_string(),
                 cursor: "/thread ".len(),
+                ..Default::default()
             },
         );
         let vm = build_view_model(&core);
@@ -2601,6 +2901,7 @@ mod tests {
             crate::studio::model::StudioInputState {
                 text: "/thr".to_string(),
                 cursor: 4,
+                ..Default::default()
             },
         );
         let vm = build_view_model(&core);
@@ -2639,6 +2940,7 @@ mod tests {
             crate::studio::model::StudioInputState {
                 text: "ping @directive".to_string(),
                 cursor: "ping @directive".len(),
+                ..Default::default()
             },
         );
         let vm = build_view_model(&core);

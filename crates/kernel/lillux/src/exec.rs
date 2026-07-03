@@ -56,12 +56,17 @@ pub struct RunningProcess {
 impl RunningProcess {
     /// Wait for the process to finish (or time out) and return the result.
     pub fn wait(mut self) -> SubprocessResult {
-        let timeout_dur = Duration::from_secs_f64(self.timeout);
-        let (tx, rx) = std::sync::mpsc::channel();
-        let _timer = thread::spawn(move || {
-            thread::sleep(timeout_dur);
-            let _ = tx.send(());
-        });
+        let timeout_rx = if self.timeout > 0.0 {
+            let timeout_dur = Duration::from_secs_f64(self.timeout);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _timer = thread::spawn(move || {
+                thread::sleep(timeout_dur);
+                let _ = tx.send(());
+            });
+            Some(rx)
+        } else {
+            None
+        };
 
         loop {
             match self.child.try_wait() {
@@ -82,7 +87,10 @@ impl RunningProcess {
                     };
                 }
                 Ok(None) => {
-                    if rx.try_recv().is_ok() {
+                    if timeout_rx
+                        .as_ref()
+                        .is_some_and(|rx| rx.try_recv().is_ok())
+                    {
                         #[cfg(unix)]
                         {
                             // Kill the entire process group (child + grandchildren)
@@ -535,13 +543,18 @@ fn do_stream(
         }
     });
 
-    // Wait with timeout
-    let timeout_dur = Duration::from_secs_f64(timeout);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let _timer = thread::spawn(move || {
-        thread::sleep(timeout_dur);
-        let _ = tx.send(());
-    });
+    // Wait with timeout. A non-positive timeout is the no-timeout sentinel.
+    let timeout_rx = if timeout > 0.0 {
+        let timeout_dur = Duration::from_secs_f64(timeout);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _timer = thread::spawn(move || {
+            thread::sleep(timeout_dur);
+            let _ = tx.send(());
+        });
+        Some(rx)
+    } else {
+        None
+    };
 
     loop {
         match child.try_wait() {
@@ -551,7 +564,10 @@ fn do_stream(
                 return status.code().unwrap_or(1);
             }
             Ok(None) => {
-                if rx.try_recv().is_ok() {
+                if timeout_rx
+                    .as_ref()
+                    .is_some_and(|rx| rx.try_recv().is_ok())
+                {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stdout_thread.join();

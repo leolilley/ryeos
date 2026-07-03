@@ -104,6 +104,10 @@ pub struct StudioLauncherState {
 pub struct StudioInputState {
     pub text: String,
     pub cursor: usize,
+    /// For a cyclable live filter: which declared field the buffer currently
+    /// targets (index into `feeds.fields`). 0 for single-field inputs.
+    #[serde(default)]
+    pub filter_field: usize,
 }
 
 impl StudioInputState {
@@ -376,6 +380,14 @@ pub struct StudioDataState {
     /// system: open JSON, projected through view bindings).
     #[serde(default)]
     pub sources: HashMap<String, serde_json::Value>,
+    /// The newest fetch effect id issued for each source key. A response only
+    /// lands if it is that newest request (freshness guard): when a single-lens
+    /// tile is reused for a new selection its source keys are stable, so an
+    /// older in-flight fetch (the previous selection) resolving late must not
+    /// overwrite the current one. Without this, a detail lens with several
+    /// section fetches could render mixed data from two threads.
+    #[serde(default)]
+    pub source_epoch: HashMap<String, u64>,
     /// Transient live cognition stream for the tailed head thread —
     /// ephemeral deltas accumulated between durable snapshots. Not truth;
     /// the braid snapshot is. Cleared once a fresh snapshot supersedes it.
@@ -703,6 +715,15 @@ impl StudioCore {
                     )
                 })
                 .collect();
+            // Drop each section's prior response before refetching: a single-lens
+            // detail tile reused for a new selection keeps its (stable) section
+            // keys, so without this it would render the previous selection's
+            // sections until the new fetches return. Scoped to sections — the
+            // single-source path (list/timeline) keeps its data to avoid a blank
+            // flash on periodic refresh.
+            for (key, _, _) in &resolved {
+                self.data.sources.remove(key);
+            }
             return resolved
                 .into_iter()
                 .filter_map(|(key, source, params)| self.build_fetch_source(key, &source, params))
@@ -711,24 +732,24 @@ impl StudioCore {
         let Some(source) = binding.source.clone() else {
             return Vec::new();
         };
-        let feeds_param = binding
+        let feeds = binding
             .input
             .as_ref()
             .and_then(|input| input.feeds.as_ref())
-            .map(|feeds| feeds.param.clone());
+            .cloned();
         let input_id = binding.input.as_ref().map(|input| input.id.clone());
         let fold = self.seat.fold();
         let mut params =
             super::content::resolve_params(&source.params, |key| fold.get(key).cloned());
-        // LIVE filter: the buffer is a writer of one source param.
-        if let (Some(param), Some(input_id)) = (feeds_param, input_id) {
+        // LIVE filter: the buffer writes ONE source param — the active field of a
+        // cyclable filter, or the single declared param. Only the active field is
+        // ever sent, so cycling never leaves a stale param behind.
+        if let (Some(feeds), Some(input_id)) = (feeds, input_id) {
             let key = InputBufferKey::new(source_key.clone(), view_ref, input_id);
-            let text = self
-                .ui
-                .input_buffers
-                .get(&key.storage_key())
-                .map(|buffer| buffer.text.clone())
-                .unwrap_or_default();
+            let buffer = self.ui.input_buffers.get(&key.storage_key());
+            let text = buffer.map(|b| b.text.clone()).unwrap_or_default();
+            let field = buffer.map(|b| b.filter_field).unwrap_or(0);
+            let param = feeds.active_param(field).to_string();
             if let Some(object) = params.as_object_mut() {
                 object.insert(param, serde_json::Value::String(text));
             } else {
@@ -754,11 +775,15 @@ impl StudioCore {
         if facet_param_unresolved(&source.params, &params) {
             return None;
         }
-        Some(self.emit(StudioEffectKind::FetchSource {
-            tile_id: source_key,
+        let effect = self.emit(StudioEffectKind::FetchSource {
+            tile_id: source_key.clone(),
             source_ref: source.item_ref.clone(),
             params,
-        }))
+        });
+        // Mark this as the newest request for the key; an older in-flight fetch
+        // for the same key that resolves later is then dropped on arrival.
+        self.data.source_epoch.insert(source_key, effect.id);
+        Some(effect)
     }
 
     /// Visible content-bound slot views, keyed for source fetches.
@@ -975,6 +1000,11 @@ impl StudioCore {
             help_open: self.ui.help_open,
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
+            input_is_live_filter: input.is_some_and(|i| i.is_live_filter()),
+            input_filter_fields: input
+                .filter(|i| i.is_live_filter())
+                .and_then(|i| i.feeds.as_ref())
+                .is_some_and(|f| f.field_count() > 1),
             input_has_completion: input
                 .is_some_and(|i| i.completion.is_some() || i.mentions.is_some()),
             input_can_accept_completion,
@@ -1071,6 +1101,7 @@ mod tests {
         let mut input = StudioInputState {
             text: "é".to_string(),
             cursor: 1,
+            ..Default::default()
         };
         input.insert_char('x');
         assert_eq!(input.text, "xé");

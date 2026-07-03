@@ -223,7 +223,11 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     // entirely and never renders — a changed/broken prompt template must not be
     // able to abort a cut-off task that asks for nothing new.
     let mut runner_inst = if let Some(ref resume_id) = envelope.request.previous_thread_id {
-        let mut resume_state = resume::load_resume_state(&callback, resume_id).await?;
+        let carry_turns = bootstrap_output
+            .config
+            .continuation_runtime
+            .resolve_carry_turns(bootstrap_output.config.continuation.declared_carry_turns());
+        let mut resume_state = resume::load_resume_state(&callback, resume_id, carry_turns).await?;
 
         // R5: Resume gate — refuse resume if the prior thread has no
         // settled `thread_usage` event in the replay stream. Without

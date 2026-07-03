@@ -133,7 +133,14 @@ async fn handle_execute(
     }
 
     let caller_principal_id = thread_auth.acting_principal.clone();
-    let caller_scopes = thread_auth.caller_scopes.clone();
+    // Authority for callback-dispatched work comes from the callback
+    // capability minted at the parent launch boundary. Thread-auth proves the
+    // runtime process identity/liveness, but its scopes are intentionally
+    // narrow transport scopes (currently `execute`) and are not the parent's
+    // composed execution grants. Recursive dispatches (for example
+    // `tool:ryeos/knowledge/compose` → `knowledge:<ref>`) must see the same
+    // effective caps that `enforce_callback_caps` checked at this boundary.
+    let caller_scopes = callback_dispatch_scopes(cap);
     let site_id = state.threads.site_id();
 
     let root_canonical =
@@ -203,6 +210,10 @@ fn parent_execution_context_from_capability(
     }
 }
 
+fn callback_dispatch_scopes(cap: &ryeos_app::callback_token::CallbackCapability) -> Vec<String> {
+    cap.effective_caps.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +261,31 @@ mod tests {
         assert_eq!(ctx.parent_thread_id, "T-parent");
         assert_eq!(ctx.hard_limits, serde_json::json!({"turns": 6, "tokens": 1000}));
         assert_eq!(ctx.depth, 4);
+    }
+
+    #[test]
+    fn callback_dispatch_scopes_use_effective_caps_not_transport_scopes() {
+        let cap = ryeos_app::callback_token::CallbackCapability {
+            token: "cbt-test".to_string(),
+            invocation_id: "inv-test".to_string(),
+            thread_id: "T-parent".to_string(),
+            project_path: PathBuf::from("/project"),
+            expires_at: Instant::now() + Duration::from_secs(300),
+            effective_caps: vec!["ryeos.execute.knowledge.arc/*".to_string()],
+            provenance: ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                PathBuf::from("/project"),
+                minimal_engine(),
+            ),
+            effective_bundle_id: None,
+            item_ref: Some("graph:arc/solve".to_string()),
+            hard_limits: serde_json::json!({}),
+            depth: 0,
+        };
+
+        assert_eq!(
+            callback_dispatch_scopes(&cap),
+            vec!["ryeos.execute.knowledge.arc/*".to_string()]
+        );
     }
 
     #[test]

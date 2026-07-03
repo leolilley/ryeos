@@ -19,6 +19,12 @@ pub struct CallbackCapability {
     pub token: String,
     pub invocation_id: String,
     pub thread_id: String,
+    /// Chain root of the minting thread. Carried so the daemon can key
+    /// cross-chain wiring from a callback without re-deriving it. It is NOT an
+    /// authority source by itself — callers that act on it MUST confirm it
+    /// against the authoritative thread row via
+    /// [`CallbackCapability::assert_chain_root`].
+    pub chain_root_id: String,
     pub project_path: PathBuf,
     pub expires_at: Instant,
     /// V5.5 P2: composed effective capabilities the parent thread
@@ -42,6 +48,23 @@ pub struct CallbackCapability {
     pub hard_limits: Value,
     /// Parent thread's current spawn-tree depth. Children launch at `depth + 1`.
     pub depth: u32,
+}
+
+impl CallbackCapability {
+    /// Confirm this cap's carried `chain_root_id` against the authoritative
+    /// chain root from state. The cap value is a convenience carrier, never
+    /// trusted on its own — cross-chain wiring keys on the validated result of
+    /// this check, not the raw token value.
+    pub fn assert_chain_root(&self, authoritative_chain_root_id: &str) -> Result<()> {
+        if self.chain_root_id != authoritative_chain_root_id {
+            bail!(
+                "callback capability chain_root_id mismatch: cap={}, state={}",
+                self.chain_root_id,
+                authoritative_chain_root_id
+            );
+        }
+        Ok(())
+    }
 }
 
 pub struct CallbackCapabilityStore {
@@ -106,6 +129,10 @@ impl CallbackCapabilityStore {
             token: token.clone(),
             invocation_id,
             thread_id: thread_id.to_string(),
+            // Defaults to root (chain_root == thread_id). The managed launch
+            // path overrides this via `set_chain_root` with the thread's
+            // authoritative chain root from state.
+            chain_root_id: thread_id.to_string(),
             project_path,
             expires_at: Instant::now() + ttl,
             effective_caps,
@@ -118,6 +145,20 @@ impl CallbackCapabilityStore {
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
         cap
+    }
+
+    /// Override the carried chain root for a freshly-minted cap. Returns whether
+    /// the token was found. Root mints default `chain_root == thread_id`; the
+    /// managed launch path sets the thread's authoritative chain root (from
+    /// state) here so the cap reflects real chain lineage.
+    pub fn set_chain_root(&self, token: &str, chain_root_id: &str) -> bool {
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.chain_root_id = chain_root_id.to_string();
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn validate(
@@ -230,13 +271,21 @@ const MAX_LAUNCH_TTL_SECS: u64 = 7 * 24 * 3600;
 /// end, so a TTL that tracks the run's duration is the correct lifetime; a
 /// generous absolute backstop bounds the pathological zombie case.
 ///
-/// CAVEAT: a run whose effective `duration_seconds` exceeds
-/// [`MAX_LAUNCH_TTL_SECS`] (7 days) would re-expose the original divergence
-/// (token expiring before the run finalizes). If runs are ever allowed past that
-/// ceiling, clamp the effective runtime timeout to `MAX_LAUNCH_TTL_SECS - margin`
-/// instead of raising it silently here.
+/// A `duration_seconds` value of 0 is the launch hard-limit sentinel for
+/// "unlimited". The token still needs an explicit authority lifetime, so it gets
+/// the absolute launch-token backstop rather than the short default TTL.
+///
+/// CAVEAT: a run whose effective finite `duration_seconds` exceeds
+/// [`MAX_LAUNCH_TTL_SECS`] (7 days), or an unlimited run that actually lives
+/// that long, can outlive callback authority. Longer runs need renewal rather
+/// than a silent larger constant here.
 pub fn launch_token_ttl(duration_seconds: Option<u64>) -> Duration {
-    let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
+    let Some(secs) = duration_seconds else {
+        return Duration::from_secs(DEFAULT_CALLBACK_TTL_SECS + LAUNCH_TTL_MARGIN_SECS);
+    };
+    if secs == 0 {
+        return Duration::from_secs(MAX_LAUNCH_TTL_SECS);
+    }
     Duration::from_secs(
         secs.saturating_add(LAUNCH_TTL_MARGIN_SECS)
             .min(MAX_LAUNCH_TTL_SECS),
@@ -396,6 +445,61 @@ mod tests {
             .validate(&cap.token, "T-test123", PathBuf::from("/project").as_path())
             .unwrap();
         assert_eq!(validated.thread_id, "T-test123");
+    }
+
+    #[test]
+    fn chain_root_defaults_to_thread_id_then_set_chain_root_overrides() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate_with_context(
+            "T-succ",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+            None,
+            None,
+            serde_json::Value::Null,
+            0,
+        );
+        // Defaults to root (chain_root == thread_id).
+        assert_eq!(cap.chain_root_id, "T-succ");
+        // The managed launch path overrides with the authoritative chain root.
+        store.set_chain_root(&cap.token, "T-root");
+        let v = store
+            .validate(&cap.token, "T-succ", PathBuf::from("/p").as_path())
+            .unwrap();
+        assert_eq!(v.chain_root_id, "T-root");
+    }
+
+    #[test]
+    fn generate_uses_thread_id_as_chain_root() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-root",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+        );
+        assert_eq!(cap.chain_root_id, "T-root");
+    }
+
+    #[test]
+    fn assert_chain_root_rejects_mismatch() {
+        let store = CallbackCapabilityStore::new();
+        let cap = store.generate(
+            "T-succ",
+            PathBuf::from("/p"),
+            Duration::from_secs(300),
+            Vec::new(),
+            provenance(PathBuf::from("/p")),
+        );
+        store.set_chain_root(&cap.token, "T-root");
+        let cap = store
+            .validate(&cap.token, "T-succ", PathBuf::from("/p").as_path())
+            .unwrap();
+        assert!(cap.assert_chain_root("T-root").is_ok());
+        assert!(cap.assert_chain_root("T-other").is_err());
     }
 
     #[test]
@@ -601,6 +705,7 @@ mod tests {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test".to_string(),
+            chain_root_id: "T-test".to_string(),
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),
             effective_caps: vec![],
@@ -667,6 +772,17 @@ mod tests {
             Duration::from_secs(MAX_LAUNCH_TTL_SECS)
         );
         assert!(MAX_LAUNCH_TTL_SECS > 3600);
+    }
+
+    #[test]
+    fn launch_token_ttl_zero_duration_uses_backstop() {
+        // Launch hard-limits use 0 as the unlimited sentinel. The run token must
+        // not collapse unlimited runtime authority to only the finalization
+        // margin.
+        assert_eq!(
+            launch_token_ttl(Some(0)),
+            Duration::from_secs(MAX_LAUNCH_TTL_SECS)
+        );
     }
 
     #[test]

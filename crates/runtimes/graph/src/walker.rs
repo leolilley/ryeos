@@ -26,6 +26,19 @@ use ryeos_runtime::TerminalCompletion;
 /// change to the written fields; the resume parser rejects an unknown version.
 pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 
+/// Follow-resume field keys for the checkpoint / resume-state payload. Shared by
+/// the write (walker), read (resume), and inject (main) sites so the vocabulary
+/// lives in one place instead of scattered string literals.
+pub(crate) mod follow_keys {
+    /// Marker object recorded at a follow suspend (local facts, no child IDs).
+    pub const PENDING_FOLLOW: &str = "pending_follow";
+    /// The child's canonical terminal envelope, spliced in for resume. Shared with
+    /// the daemon splicer — one definition, in the checkpoint crate both depend on.
+    pub const FOLLOW_RESULT: &str = ryeos_runtime::checkpoint::FOLLOW_RESULT_KEY;
+    /// Nested inside `PENDING_FOLLOW`: the follow node to resume into.
+    pub const FOLLOW_NODE: &str = "follow_node";
+}
+
 /// Free-form breadcrumb passed to `request_continuation` when a segment budget
 /// is exhausted. For logs only — the substrate keys off the thread lineage, not
 /// this string.
@@ -138,6 +151,10 @@ enum StepOutcome {
         /// Aggregate cost across all iterations' native children, if any.
         cost: Option<RuntimeCost>,
     },
+    /// Follow node: suspend the graph and hand the action off to a detached child
+    /// via `spawn_follow_child`. No result exists yet — it is consumed on resume.
+    /// Carries only the child item + params; the daemon derives the rest.
+    FollowSuspend { item_id: String, params: Value },
     /// Terminal step — return node, max-steps exhausted, or fatal fail.
     Terminal {
         status: &'static str,
@@ -188,6 +205,17 @@ pub struct Walker {
     /// finalization. The lock is held for a single record/read, never
     /// across an `await`.
     accounting: Mutex<GraphAccounting>,
+    /// Armed when resuming INTO a follow node with a spliced child envelope: the
+    /// walker consumes it at that node (classifies it like a live dispatch) instead
+    /// of re-suspending. Taken once, at the follow node. Interior-mutable for the
+    /// same `&self` reason as `accounting`.
+    follow_resume: Mutex<Option<FollowResumeState>>,
+}
+
+/// A pending follow result armed at resume, consumed at its follow node.
+struct FollowResumeState {
+    follow_node: String,
+    follow_result: Value,
 }
 
 struct RunGuard {
@@ -226,6 +254,7 @@ struct CommitStepInput<'a> {
     pub guard: &'a mut RunGuard,
     pub hook_list: &'a [Value],
     pub inputs: &'a Value,
+    pub execution: &'a Value,
 }
 
 struct CommitTerminalInput<'a> {
@@ -241,6 +270,7 @@ struct CommitTerminalInput<'a> {
     /// Graph inputs, threaded so a return node's `output` template can
     /// resolve `${inputs.*}` (not just `${state.*}`).
     pub inputs: &'a Value,
+    pub execution: &'a Value,
 }
 
 impl Walker {
@@ -259,7 +289,19 @@ impl Walker {
             checkpoint,
             warnings: Mutex::new(Vec::new()),
             accounting: Mutex::new(GraphAccounting::default()),
+            follow_resume: Mutex::new(None),
         }
+    }
+
+    /// If a follow result is armed for `node`, take it (consumed once). The
+    /// resumed follow node classifies this envelope like a live dispatch instead
+    /// of re-suspending.
+    fn take_follow_result(&self, node: &str) -> Option<Value> {
+        let mut slot = self.follow_resume.lock().unwrap();
+        if slot.as_ref().is_some_and(|fr| fr.follow_node == node) {
+            return slot.take().map(|fr| fr.follow_result);
+        }
+        None
     }
 
     /// Drain the accumulated callback-drift warnings. Called by the
@@ -343,10 +385,13 @@ impl Walker {
         // run, the checkpoint accounting snapshot is restored below from
         // `resume_state`, so pre-checkpoint cost is preserved.
         *self.accounting.lock().unwrap() = GraphAccounting::default();
+        // Clear any follow-resume armed by a prior run on a reused Walker, so a
+        // stale child result can never be consumed by a later execute.
+        *self.follow_resume.lock().unwrap() = None;
 
         let mut guard = RunGuard { finalized: false };
 
-        let graph_run_id = graph_run_id.unwrap_or_else(|| {
+        let mut graph_run_id = graph_run_id.unwrap_or_else(|| {
             format!(
                 "gr-{}",
                 &lillux::cas::sha256_hex(
@@ -385,6 +430,8 @@ impl Walker {
                 result: None,
                 error: Some(json!(validation.errors.join("; "))),
                 cost: None,
+                outputs: Value::Null,
+                warnings: Vec::new(),
             };
             let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -408,8 +455,12 @@ impl Walker {
             // through action params; the daemon supplies trusted parent context
             // from the callback token when the callback dispatch reaches a
             // managed child launch.
-            params.get("hard_limits").cloned().unwrap_or_else(|| json!({})),
+            params
+                .get("hard_limits")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
         );
+        let execution_context = exec_ctx.as_context_value();
 
         // pid/pgid is registered earlier, in `main.rs` right after the callback
         // client is built — BEFORE any durable callback or this `execute()` —
@@ -447,6 +498,31 @@ impl Walker {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
                 state = resume_val.get("state").cloned().unwrap_or(json!({}));
+                // Restore the ORIGINAL run id so a follow re-entry re-drives
+                // spawn_follow_child with the same graph_run_id → same follow_key
+                // → idempotent. Done before graph_started and the run loop.
+                if let Some(rid) = resume_val.get("graph_run_id").and_then(|v| v.as_str()) {
+                    graph_run_id = rid.to_string();
+                }
+                // Arm follow resume: if the checkpoint marks a pending follow AND a
+                // child envelope was spliced in, consume it at the follow node
+                // instead of re-suspending. Only when BOTH are present — a bare
+                // pending_follow with no result re-drives the suspend (idempotent).
+                if let (Some(pf), Some(fr)) = (
+                    resume_val
+                        .get(follow_keys::PENDING_FOLLOW)
+                        .filter(|v| !v.is_null()),
+                    resume_val
+                        .get(follow_keys::FOLLOW_RESULT)
+                        .filter(|v| !v.is_null()),
+                ) {
+                    if let Some(fnode) = pf.get(follow_keys::FOLLOW_NODE).and_then(|v| v.as_str()) {
+                        *self.follow_resume.lock().unwrap() = Some(FollowResumeState {
+                            follow_node: fnode.to_string(),
+                            follow_result: fr.clone(),
+                        });
+                    }
+                }
                 // Restore accumulated cost so post-resume cost adds to the
                 // pre-checkpoint total instead of restarting at zero. A corrupt
                 // snapshot degrades to fresh accounting (under-bills) rather than
@@ -463,9 +539,7 @@ impl Walker {
                 // Restore suppressed errors accumulated before the checkpoint so
                 // the resumed run's final error count/list is complete. A corrupt
                 // snapshot degrades to empty rather than failing the resume.
-                if let Some(se_val) =
-                    resume_val.get("suppressed_errors").filter(|v| !v.is_null())
-                {
+                if let Some(se_val) = resume_val.get("suppressed_errors").filter(|v| !v.is_null()) {
                     match serde_json::from_value::<Vec<ErrorRecord>>(se_val.clone()) {
                         Ok(se) => suppressed_errors = se,
                         Err(e) => tracing::warn!(
@@ -531,6 +605,7 @@ impl Walker {
                             guard: &mut guard,
                             hook_list: &hook_list,
                             inputs: &inputs,
+                            execution: &execution_context,
                         })
                         .await
                     {
@@ -567,6 +642,7 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
+                    execution: &execution_context,
                 })
                 .await
             {
@@ -603,6 +679,7 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
+                    execution: &execution_context,
                 })
                 .await
             {
@@ -635,6 +712,7 @@ impl Walker {
                     guard: &mut guard,
                     hook_list: &hook_list,
                     inputs: &inputs,
+                    execution: &execution_context,
                 })
                 .await
             {
@@ -695,6 +773,7 @@ impl Walker {
             suppressed_errors,
         } = ctx;
         let start = Instant::now();
+        let execution = exec_ctx.as_context_value();
 
         match node.node_type {
             NodeType::Return => StepOutcome::Terminal {
@@ -704,7 +783,7 @@ impl Walker {
 
             NodeType::Gate => {
                 // Gate: evaluate conditions and pick a branch target.
-                let target = edges::evaluate_next(node, state, inputs);
+                let target = edges::evaluate_next(node, state, inputs, Some(&execution));
                 StepOutcome::GateTaken { target }
             }
 
@@ -714,6 +793,7 @@ impl Walker {
                     state: state.clone(),
                     inputs: inputs.clone(),
                     result: None,
+                    execution: Some(execution.clone()),
                 };
                 let over_val = match ryeos_runtime::interpolate(
                     &Value::String(over_expr.to_string()),
@@ -828,7 +908,7 @@ impl Walker {
                     }
                 }
 
-                let next = edges::evaluate_next(node, state, inputs);
+                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
                 StepOutcome::ForeachDone {
                     results,
                     collect_key: node.collect.clone(),
@@ -878,11 +958,12 @@ impl Walker {
             graph_run_id: _graph_run_id,
             suppressed_errors: _suppressed_errors,
         } = ctx;
+        let execution = exec_ctx.as_context_value();
         let action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 // Action node with no action — treat as terminal.
-                let next = edges::evaluate_next(node, state, inputs);
+                let next = edges::evaluate_next(node, state, inputs, Some(&execution));
                 return match next {
                     Some(n) => StepOutcome::ActionOk {
                         item_id: String::new(),
@@ -917,6 +998,7 @@ impl Walker {
             state: state.clone(),
             inputs: inputs.clone(),
             result: None,
+            execution: Some(execution.clone()),
         };
 
         let interpolated_action =
@@ -948,17 +1030,46 @@ impl Walker {
             .map(String::from)
             .unwrap_or_else(|| item_id.clone());
 
-        // Env preflight
-        if let Err(env_err) =
-            env_preflight::check_env_requires(&self.graph.config.env_requires, &node.env_requires)
-        {
-            let err_msg = format!("env preflight failed: {env_err}");
-            return StepOutcome::DispatchHardError {
-                item_id: Some(dispatched_item_id),
-                error: err_msg,
-                next_on_error: resolve_next_on_error(node, cfg),
-                elapsed_ms: elapsed,
-                cost: None,
+        // Resume INTO a follow node: consume the child's stored terminal envelope
+        // instead of re-dispatching or re-suspending. `None` on a first run, or a
+        // re-drive with no result yet (which re-suspends idempotently). Taken
+        // BEFORE env preflight so a parent-side env gap can't turn an already-
+        // completed child's result into a dispatch hard error.
+        let resumed_follow_envelope = if node.follow {
+            self.take_follow_result(current)
+        } else {
+            None
+        };
+
+        // Env preflight — skipped when consuming a stored follow result (the child
+        // already ran). Still enforced for first-run follow suspend, bare-marker
+        // re-suspend, and normal dispatches.
+        if resumed_follow_envelope.is_none() {
+            if let Err(env_err) = env_preflight::check_env_requires(
+                &self.graph.config.env_requires,
+                &node.env_requires,
+            ) {
+                let err_msg = format!("env preflight failed: {env_err}");
+                return StepOutcome::DispatchHardError {
+                    item_id: Some(dispatched_item_id),
+                    error: err_msg,
+                    next_on_error: resolve_next_on_error(node, cfg),
+                    elapsed_ms: elapsed,
+                    cost: None,
+                };
+            }
+        }
+
+        // A follow node with no stored result does not dispatch inline: hand the
+        // action off to a detached child and suspend (handled in commit_step). The
+        // result is consumed on resume, so nothing is dispatched or cached here.
+        if node.follow && resumed_follow_envelope.is_none() {
+            return StepOutcome::FollowSuspend {
+                item_id: dispatched_item_id,
+                params: stripped_action
+                    .get("params")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
             };
         }
 
@@ -966,16 +1077,40 @@ impl Walker {
         //   Err            → transport/dispatch failure (hard error)
         //   Ok(Failure(d)) → leaf ran but failed (non-zero exit, etc.)
         //   Ok(Success(v)) → bare, envelope-unwrapped leaf result
+        // On follow resume, the stored child envelope is classified byte-for-byte
+        // like a live dispatch, so the resumed node runs the identical success/
+        // failure path (receipt, cost, assign land normally in commit_step).
         let mut cache_hit = false;
-        let outcome: Result<dispatch::ActionOutcome, String> = if node.is_cacheable() {
+        let outcome: Result<dispatch::ActionOutcome, String> = if let Some(envelope) =
+            resumed_follow_envelope
+        {
+            Ok(dispatch::classify_envelope(envelope))
+        } else if node.is_cacheable() {
             let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
             if let Some(cached) = cache.lookup(&cache_key) {
                 cache_hit = true;
-                // A cache hit replays the stored result and must NOT
-                // re-bill cost — `bare` carries no cost.
-                Ok(dispatch::ActionOutcome::Success(
-                    dispatch::ActionSuccess::bare(cached),
-                ))
+                // A cache hit replays the stored result and must NOT re-bill cost —
+                // `bare` carries no cost. A stale/tampered entry still carrying a
+                // top-level continuation_id is rejected loudly, exactly like a live
+                // inline-continuation dispatch (F10 — inline continuation is retired;
+                // use a `follow: true` node). New dispatches never cache such a value.
+                if cached
+                    .get("continuation_id")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                {
+                    Ok(dispatch::ActionOutcome::Failure(dispatch::ActionFailure {
+                        diagnostic: format!(
+                            "cached result for node `{current}` carries a continuation_id; \
+                             inline continuation is retired — use a `follow: true` node"
+                        ),
+                        cost: None,
+                    }))
+                } else {
+                    Ok(dispatch::ActionOutcome::Success(
+                        dispatch::ActionSuccess::bare(cached),
+                    ))
+                }
             } else {
                 match dispatch::dispatch_action(
                     &self.client,
@@ -1044,6 +1179,7 @@ impl Walker {
                             state: state.clone(),
                             inputs: inputs.clone(),
                             result: Some(val.clone()),
+                            execution: Some(execution.clone()),
                         };
                         match ryeos_runtime::interpolate(assign_tpl, &assign_ctx.as_context()) {
                             Ok(interpolated) => Some(interpolated),
@@ -1065,7 +1201,8 @@ impl Walker {
                     }
                     None => None,
                 };
-                let next = edges::evaluate_next_with_result(node, state, inputs, &val);
+                let next =
+                    edges::evaluate_next_with_result(node, state, inputs, &val, Some(&execution));
                 StepOutcome::ActionOk {
                     item_id: dispatched_item_id,
                     result: val,
@@ -1099,8 +1236,108 @@ impl Walker {
             guard,
             hook_list,
             inputs,
+            execution,
         } = input;
         match outcome {
+            StepOutcome::FollowSuspend {
+                ref item_id,
+                ref params,
+            } => {
+                // Suspend lifecycle: started + a DISTINCT suspended event + the
+                // pending-follow checkpoint, THEN the handoff. Deliberately NO node
+                // receipt and NO graph_step_completed — the child result does not
+                // exist yet; those are emitted on resume.
+                self.emit_graph_step_started(graph_run_id, step, current)
+                    .await;
+                self.emit_graph_follow_suspended(graph_run_id, step, current, item_id)
+                    .await;
+
+                // Checkpoint at the follow node so a re-entry re-drives the suspend
+                // idempotently (by follow_key). A checkpoint failure is a hard error
+                // like any other resume-correctness failure.
+                if let Err(e) = self
+                    .write_follow_checkpoint(graph_run_id, current, step, state, suppressed_errors)
+                    .await
+                {
+                    let msg = format!("follow checkpoint write failed: {e}");
+                    return self
+                        .commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step,
+                            state,
+                            suppressed_errors,
+                            base_status: "error",
+                            error: Some(&msg),
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                            inputs,
+                            execution,
+                        })
+                        .await;
+                }
+
+                // Hand off: launch the detached child and suspend this graph. A
+                // failed handoff settles a terminal error, never `continued` with no
+                // child behind it.
+                match self
+                    .client
+                    .spawn_follow_child(graph_run_id, current, step as i64, item_id, params.clone(), None)
+                    .await
+                {
+                    Ok(_) => {
+                        // The daemon settled this thread `continued` inside the
+                        // handoff (it created the follow-resume successor), so do NOT
+                        // finalize. The pending-follow checkpoint is the resume point.
+                        guard.finalized = true;
+                        let (agg_cost, node_costs) = {
+                            let acc = self.accounting.lock().unwrap();
+                            (acc.total.clone(), acc.nodes.clone())
+                        };
+                        CommitResult::Terminate(GraphResult {
+                            success: false,
+                            graph_id: self.graph.graph_id.clone(),
+                            definition_ref: self.graph.definition_ref.clone(),
+                            definition_hash: self.graph.definition_hash.clone(),
+                            graph_run_id: graph_run_id.to_string(),
+                            status: "continued".into(),
+                            steps: step,
+                            state: state.clone(),
+                            result: None,
+                            errors_suppressed: if suppressed_errors.is_empty() {
+                                None
+                            } else {
+                                Some(suppressed_errors.len())
+                            },
+                            errors: if suppressed_errors.is_empty() {
+                                None
+                            } else {
+                                Some(suppressed_errors.clone())
+                            },
+                            error: None,
+                            cost: agg_cost,
+                            node_costs,
+                        })
+                    }
+                    Err(e) => {
+                        let msg = format!("follow handoff failed: {e}");
+                        self.commit_terminal(CommitTerminalInput {
+                            graph_run_id,
+                            steps: step,
+                            state,
+                            suppressed_errors,
+                            base_status: "error",
+                            error: Some(&msg),
+                            guard,
+                            hook_list,
+                            current_node_id: current,
+                            inputs,
+                            execution,
+                        })
+                        .await
+                    }
+                }
+            }
             StepOutcome::Terminal { status, error } => {
                 self.commit_terminal(CommitTerminalInput {
                     graph_run_id,
@@ -1113,6 +1350,7 @@ impl Walker {
                     hook_list,
                     current_node_id: current,
                     inputs,
+                    execution,
                 })
                 .await
             }
@@ -1152,6 +1390,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1254,6 +1493,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1341,6 +1581,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1415,6 +1656,7 @@ impl Walker {
                             self.graph.config.nodes.get(current).unwrap(),
                             state,
                             inputs,
+                            Some(execution),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -1442,6 +1684,7 @@ impl Walker {
                                     hook_list,
                                     current_node_id: current,
                                     inputs,
+                                    execution,
                                 })
                                 .await
                             }
@@ -1459,6 +1702,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1542,6 +1786,7 @@ impl Walker {
                             self.graph.config.nodes.get(current).unwrap(),
                             state,
                             inputs,
+                            Some(execution),
                         ) {
                             Some(next_node) => {
                                 let next_step = step + 1;
@@ -1568,6 +1813,7 @@ impl Walker {
                                     hook_list,
                                     current_node_id: current,
                                     inputs,
+                                    execution,
                                 })
                                 .await
                             }
@@ -1585,6 +1831,7 @@ impl Walker {
                             hook_list,
                             current_node_id: current,
                             inputs,
+                            execution,
                         })
                         .await
                     }
@@ -1608,6 +1855,7 @@ impl Walker {
             hook_list: _hook_list,
             current_node_id,
             inputs,
+            execution,
         } = input;
         let (success, status) = match base_status {
             "completed" => {
@@ -1642,6 +1890,7 @@ impl Walker {
                         state: state.clone(),
                         inputs: inputs.clone(),
                         result: None,
+                        execution: Some(execution.clone()),
                     };
                     // `tpl` is a `Value` (scalar, map, or list);
                     // `interpolate` recurses through all of them.
@@ -1752,6 +2001,12 @@ impl Walker {
                 .cost
                 .as_ref()
                 .and_then(|c| serde_json::to_value(c).ok()),
+            // A graph's return value is its `result`; it has no separate structured
+            // outputs. Send a snapshot of accumulated callback-drift warnings so a
+            // follow parent (which consumes THIS envelope, not the later stdout
+            // RuntimeResult) sees the same warnings a live dispatch would.
+            outputs: Value::Null,
+            warnings: self.warnings.lock().unwrap().clone(),
         };
         let r = self.client.finalize_thread(completion).await;
         self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -1825,6 +2080,8 @@ impl Walker {
                     .cost
                     .as_ref()
                     .and_then(|c| serde_json::to_value(c).ok()),
+                outputs: Value::Null,
+                warnings: self.warnings.lock().unwrap().clone(),
             };
             let r = self.client.finalize_thread(completion).await;
             self.record_callback_warning("finalize_thread", r.map(|_| ()));
@@ -1862,6 +2119,31 @@ impl Walker {
             )
             .await;
         self.record_callback_warning("graph_step_started", r);
+    }
+
+    async fn emit_graph_follow_suspended(
+        &self,
+        graph_run_id: &str,
+        step: u32,
+        current: &str,
+        item_id: &str,
+    ) {
+        let r = self
+            .client
+            .append_runtime_event(
+                RuntimeEventType::GraphFollowSuspended,
+                json!({
+                    "graph_run_id": graph_run_id,
+                    "definition_ref": &self.graph.definition_ref,
+                    "definition_hash": &self.graph.definition_hash,
+                    "node": current,
+                    "node_ref": node_ref(&self.graph.definition_ref, current),
+                    "step": step,
+                    "item_id": item_id,
+                }),
+            )
+            .await;
+        self.record_callback_warning("graph_follow_suspended", r);
     }
 
     async fn emit_tool_call_start(
@@ -1977,6 +2259,44 @@ impl Walker {
     /// `GraphAccounting` aggregate and `suppressed_errors`, so a resumed run
     /// reconstructs cost and non-fatal error history from before the checkpoint
     /// (both restored in `execute` from `resume_state`).
+    /// Write a checkpoint marking a follow suspend: `current_node` is the follow
+    /// node ITSELF (so re-entry re-drives the suspend idempotently by follow_key),
+    /// and a `pending_follow` marker carries LOCAL facts only (no child IDs) so the
+    /// resume path consumes the stored child result instead of re-dispatching.
+    async fn write_follow_checkpoint(
+        &self,
+        graph_run_id: &str,
+        follow_node: &str,
+        step: u32,
+        state: &Value,
+        suppressed_errors: &[ErrorRecord],
+    ) -> anyhow::Result<()> {
+        let Some(writer) = &self.checkpoint else {
+            return Ok(());
+        };
+        let accounting = {
+            let acc = self.accounting.lock().unwrap();
+            serde_json::to_value(&*acc).unwrap_or(Value::Null)
+        };
+        let mut pending = serde_json::Map::new();
+        pending.insert(follow_keys::FOLLOW_NODE.to_string(), json!(follow_node));
+        pending.insert("step_count".to_string(), json!(step));
+        pending.insert("graph_run_id".to_string(), json!(graph_run_id));
+        let mut payload = json!({
+            "schema_version": GRAPH_CHECKPOINT_SCHEMA_VERSION,
+            "graph_run_id": graph_run_id,
+            "current_node": follow_node,
+            "step_count": step,
+            "state": state,
+            "accounting": accounting,
+            "suppressed_errors": suppressed_errors,
+            "written_at": lillux::time::iso8601_now(),
+        });
+        payload[follow_keys::PENDING_FOLLOW] = Value::Object(pending);
+        writer.write(&payload)?;
+        Ok(())
+    }
+
     async fn write_checkpoint(
         &self,
         graph_run_id: &str,
@@ -2155,7 +2475,11 @@ mod tests {
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
@@ -2215,6 +2539,14 @@ mod tests {
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
+        async fn spawn_follow_child(
+            &self,
+            _request: ryeos_runtime::callback::SpawnFollowChildRequest,
+        ) -> Result<Value, CallbackError> {
+            // Simulate the daemon accepting the follow handoff (it would settle
+            // this thread `continued` server-side).
+            Ok(json!({ "phase": "waiting" }))
+        }
     }
 
     fn make_callback(results: Vec<Value>) -> CallbackClient {
@@ -2246,6 +2578,7 @@ mod tests {
             on_error: None,
             cache_result: false,
             cache: false,
+            follow: false,
             over: None,
             r#as: None,
             collect: None,
@@ -2294,6 +2627,35 @@ config:
         assert!(result.success);
         assert_eq!(result.status, "completed");
         assert_eq!(result.steps, 1);
+    }
+
+    #[tokio::test]
+    async fn follow_node_suspends_graph_as_continued() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action: {item_id: "directive:child", params: {}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let w = make_walker(graph, vec![]);
+        let result = w.execute(json!({}), None).await;
+        // A follow node hands off to a detached child and suspends: the daemon
+        // settled this thread `continued`, so the walker reports continued (not
+        // completed), suspended at the follow node (step 0) with no result yet.
+        assert_eq!(result.status, "continued");
+        assert!(!result.success);
+        assert_eq!(result.steps, 0);
+        assert!(result.result.is_none());
     }
 
     /// Helper: assert no graph-state value contains an unresolved
@@ -3786,6 +4148,13 @@ config:
         finalize_costs: Mutex<Vec<Option<Value>>>,
         /// Collected artifacts from publish_artifact calls.
         artifacts: Mutex<Vec<Value>>,
+        /// Recorded `spawn_follow_child` requests (for follow idempotency tests).
+        follow_requests: Mutex<Vec<ryeos_runtime::callback::SpawnFollowChildRequest>>,
+        /// When true, `spawn_follow_child` returns an error (failed-handoff test).
+        follow_should_fail: bool,
+        /// Count of `dispatch_action` calls (to prove a follow resume re-dispatches
+        /// nothing).
+        dispatch_count: Mutex<usize>,
     }
 
     impl RecordingMockClient {
@@ -3796,11 +4165,28 @@ config:
                 finalizations: Mutex::new(Vec::new()),
                 finalize_costs: Mutex::new(Vec::new()),
                 artifacts: Mutex::new(Vec::new()),
+                follow_requests: Mutex::new(Vec::new()),
+                follow_should_fail: false,
+                dispatch_count: Mutex::new(0),
             }
         }
 
         fn recorded_events(&self) -> Vec<(String, String, Value, String)> {
             self.events.lock().unwrap().clone()
+        }
+
+        fn dispatch_count(&self) -> usize {
+            *self.dispatch_count.lock().unwrap()
+        }
+
+        fn recorded_follow_requests(
+            &self,
+        ) -> Vec<ryeos_runtime::callback::SpawnFollowChildRequest> {
+            self.follow_requests.lock().unwrap().clone()
+        }
+
+        fn recorded_finalizations(&self) -> Vec<(String, String)> {
+            self.finalizations.lock().unwrap().clone()
         }
     }
 
@@ -3810,6 +4196,7 @@ config:
             &self,
             _request: DispatchActionRequest,
         ) -> Result<Value, CallbackError> {
+            *self.dispatch_count.lock().unwrap() += 1;
             let mut results = self.dispatch_results.lock().unwrap();
             if results.is_empty() {
                 Ok(json!({"thread": {}, "result": {}}))
@@ -3841,7 +4228,11 @@ config:
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(
@@ -3908,6 +4299,21 @@ config:
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
+        async fn spawn_follow_child(
+            &self,
+            request: ryeos_runtime::callback::SpawnFollowChildRequest,
+        ) -> Result<Value, CallbackError> {
+            self.follow_requests.lock().unwrap().push(request);
+            if self.follow_should_fail {
+                Err(CallbackError::ActionFailed {
+                    code: "test".to_string(),
+                    message: "simulated daemon follow failure".to_string(),
+                    retryable: false,
+                })
+            } else {
+                Ok(json!({ "phase": "waiting" }))
+            }
+        }
     }
 
     fn make_recording_callback(results: Vec<Value>) -> (CallbackClient, Arc<RecordingMockClient>) {
@@ -3936,6 +4342,394 @@ config:
             checkpoint,
         );
         (w, recorder)
+    }
+
+    const FOLLOW_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action: {item_id: "directive:child", params: {}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+
+    #[tokio::test]
+    async fn follow_suspend_emits_events_and_no_receipt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], Some(tmp.path()));
+        // Status `continued` implies write_follow_checkpoint succeeded (a failed
+        // checkpoint would route to a terminal error instead).
+        let result = w.execute(json!({}), Some("gr-follow".to_string())).await;
+        assert_eq!(result.status, "continued");
+        assert!(!result.success);
+        assert_eq!(result.steps, 0);
+        assert!(result.result.is_none());
+
+        let types: Vec<String> = rec
+            .recorded_events()
+            .into_iter()
+            .map(|(_, et, _, _)| et)
+            .collect();
+        assert!(types.iter().any(|t| t == "graph_step_started"));
+        assert!(types.iter().any(|t| t == "graph_follow_suspended"));
+        // The suspend must NOT emit the normal action lifecycle — the child result
+        // does not exist yet; those are emitted on resume.
+        for absent in [
+            "tool_call_start",
+            "tool_call_result",
+            "graph_step_completed",
+            "graph_completed",
+        ] {
+            assert!(
+                !types.iter().any(|t| t == absent),
+                "unexpected {absent} at suspend; events: {types:?}"
+            );
+        }
+        // Suspended, not finalized (the daemon settles `continued`).
+        assert!(rec.recorded_finalizations().is_empty());
+        // The handoff carried exactly the run identity that forms the follow_key.
+        let reqs = rec.recorded_follow_requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].graph_run_id, "gr-follow");
+        assert_eq!(reqs[0].follow_node, "fetch");
+        assert_eq!(reqs[0].step_count, 0);
+        assert_eq!(reqs[0].child_item_ref, "directive:child");
+    }
+
+    #[tokio::test]
+    async fn follow_reentry_preserves_graph_run_id() {
+        // First pass under the original run id records the handoff.
+        let (w1, rec1) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], None);
+        let r1 = w1.execute(json!({}), Some("gr-original".to_string())).await;
+        assert_eq!(r1.status, "continued");
+        assert_eq!(rec1.recorded_follow_requests()[0].graph_run_id, "gr-original");
+
+        // Resume with a DIFFERENT outer run id, but resume_state carrying the
+        // original (as main.rs injects it). The re-entry MUST re-drive with the
+        // ORIGINAL run id so the follow_key is unchanged — otherwise it would spawn
+        // a second, distinct follow child.
+        let (w2, rec2) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], None);
+        let resume = json!({
+            "resume_state": {
+                "current_node": "fetch",
+                "step_count": 0,
+                "state": {},
+                "graph_run_id": "gr-original",
+            }
+        });
+        let r2 = w2
+            .execute(resume, Some("gr-different-outer".to_string()))
+            .await;
+        assert_eq!(r2.status, "continued");
+        let req = &rec2.recorded_follow_requests()[0];
+        assert_eq!(
+            req.graph_run_id, "gr-original",
+            "re-entry must reuse the original run id, not the outer one"
+        );
+        assert_eq!(req.follow_node, "fetch");
+        assert_eq!(req.step_count, 0);
+    }
+
+    #[tokio::test]
+    async fn follow_failed_handoff_terminates_error() {
+        let inner: Arc<RecordingMockClient> = Arc::new(RecordingMockClient {
+            follow_should_fail: true,
+            ..RecordingMockClient::new(vec![])
+        });
+        let client =
+            CallbackClient::from_inner(inner.clone(), "thread-test", "/tmp/test-project", "tat-test");
+        let w = Walker::new(
+            make_graph(FOLLOW_YAML),
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            client,
+            None,
+        );
+        let result = w.execute(json!({}), Some("gr-fail".to_string())).await;
+
+        // A failed handoff settles a terminal error — NEVER `continued` with no
+        // child behind it.
+        assert_ne!(result.status, "continued");
+        assert!(!result.success);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("follow handoff failed"),
+            "expected follow-handoff error, got: {:?}",
+            result.error
+        );
+        // The thread is finalized, not left dangling `continued`.
+        assert!(!inner.recorded_finalizations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_resume_consumes_child_result_and_completes() {
+        // Resume INTO the follow node with a spliced child envelope: the node must
+        // consume it (classify like a live dispatch) and run the NORMAL outcome —
+        // receipt + step_completed + completion — instead of re-suspending.
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], None);
+        let resume = json!({
+            "resume_state": {
+                "current_node": "fetch",
+                "step_count": 0,
+                "state": {},
+                "graph_run_id": "gr-resume",
+                "pending_follow": {
+                    "follow_node": "fetch",
+                    "step_count": 0,
+                    "graph_run_id": "gr-resume",
+                },
+                "follow_result": { "msg": "child done" },
+            }
+        });
+        let result = w.execute(resume, Some("gr-resume".to_string())).await;
+
+        // Ran to completion, NOT continued — the child result was consumed.
+        assert!(result.success);
+        assert_eq!(result.status, "completed");
+
+        let types: Vec<String> = rec
+            .recorded_events()
+            .into_iter()
+            .map(|(_, et, _, _)| et)
+            .collect();
+        // The normal lifecycle deferred from suspend now lands on resume.
+        assert!(types.iter().any(|t| t == "graph_step_completed"));
+        assert!(types.iter().any(|t| t == "graph_completed"));
+        // It did NOT re-suspend, issued no new follow handoff, and — critically —
+        // never re-dispatched: the child already ran; the parent only consumed it.
+        assert!(!types.iter().any(|t| t == "graph_follow_suspended"));
+        assert!(rec.recorded_follow_requests().is_empty());
+        assert_eq!(rec.dispatch_count(), 0);
+    }
+
+    const FOLLOW_ON_ERROR_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action: {item_id: "directive:child", params: {}}
+      on_error: recover
+      next: {type: unconditional, to: done}
+    recover:
+      node_type: return
+      output: "recovered"
+    done:
+      node_type: return
+"#;
+
+    const FOLLOW_ENV_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      follow: true
+      action: {item_id: "directive:child", params: {}}
+      env_requires: ["RYEOS_FOLLOW_TEST_DEFINITELY_UNSET"]
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+
+    /// Build a resume_state params object for the `fetch` follow node with an
+    /// optional child envelope.
+    fn follow_resume_params(follow_result: Option<Value>) -> Value {
+        let mut rs = json!({
+            "current_node": "fetch",
+            "step_count": 0,
+            "state": {},
+            "graph_run_id": "gr-resume",
+            "pending_follow": {
+                "follow_node": "fetch",
+                "step_count": 0,
+                "graph_run_id": "gr-resume",
+            },
+        });
+        if let Some(fr) = follow_result {
+            rs["follow_result"] = fr;
+        }
+        json!({ "resume_state": rs })
+    }
+
+    #[tokio::test]
+    async fn follow_resume_success_accounts_cost() {
+        // A native child envelope with cost: resume must land the receipt AND the
+        // child cost in graph accounting, exactly like a live native dispatch.
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], None);
+        let envelope = json!({
+            "success": true,
+            "status": "completed",
+            "result": "child_ok",
+            "outputs": {"x": 1},
+            "cost": {"input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012},
+            "warnings": []
+        });
+        let result = w
+            .execute(follow_resume_params(Some(envelope)), Some("gr-resume".to_string()))
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.status, "completed");
+        // No re-dispatch, no re-suspend.
+        assert_eq!(rec.dispatch_count(), 0);
+        assert!(rec.recorded_follow_requests().is_empty());
+        // The child cost flows into the run total + per-node costs.
+        let cost = result.cost.expect("follow child cost must be accounted");
+        assert_eq!(cost.input_tokens, 120);
+        assert_eq!(cost.output_tokens, 45);
+        assert!(!result.node_costs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn follow_resume_failure_routes_on_error() {
+        // A native FAILURE envelope on resume must behave like a live leaf failure:
+        // error receipt + graph_step_completed(error), on_error redirect taken,
+        // failed-child cost preserved — and no dispatch/handoff.
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_ON_ERROR_YAML), vec![], None);
+        let envelope = json!({
+            "success": false,
+            "status": "error",
+            "result": {"error": "model refused"},
+            "outputs": null,
+            "cost": {"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008},
+            "warnings": []
+        });
+        let result = w
+            .execute(follow_resume_params(Some(envelope)), Some("gr-resume".to_string()))
+            .await;
+
+        // on_error: recover redirects to the recover return node → the run
+        // completes rather than hard-failing.
+        assert_eq!(result.status, "completed");
+        assert_eq!(rec.dispatch_count(), 0);
+        assert!(rec.recorded_follow_requests().is_empty());
+        // The follow node's step recorded an ERROR completion, and the failed
+        // child's cost was still accounted.
+        let step_completed_error = rec.recorded_events().into_iter().any(|(_, et, payload, _)| {
+            et == "graph_step_completed" && payload.get("status").and_then(|s| s.as_str()) == Some("error")
+        });
+        assert!(step_completed_error, "expected an error graph_step_completed");
+        assert_eq!(result.cost.expect("failed child cost preserved").input_tokens, 80);
+    }
+
+    #[tokio::test]
+    async fn follow_bare_marker_resuspends() {
+        // A resume with a pending_follow marker but NO spliced result must NOT
+        // consume anything — it re-drives the suspend idempotently with the
+        // original run id / node / step.
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], None);
+        let result = w
+            .execute(follow_resume_params(None), Some("gr-resume".to_string()))
+            .await;
+
+        assert_eq!(result.status, "continued");
+        assert_eq!(rec.dispatch_count(), 0);
+        let reqs = rec.recorded_follow_requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].graph_run_id, "gr-resume");
+        assert_eq!(reqs[0].follow_node, "fetch");
+        assert_eq!(reqs[0].step_count, 0);
+        assert!(rec
+            .recorded_events()
+            .into_iter()
+            .any(|(_, et, _, _)| et == "graph_follow_suspended"));
+    }
+
+    #[tokio::test]
+    async fn follow_resume_ignores_failing_env_preflight() {
+        // A follow-resume node with a failing env_requires must still consume the
+        // stored child result — the child already ran; a parent-side env gap must
+        // not turn its result into a dispatch error.
+        let (w, rec) = make_recording_walker(make_graph(FOLLOW_ENV_YAML), vec![], None);
+        let envelope = json!({ "result": {"ok": true} });
+        let result = w
+            .execute(follow_resume_params(Some(envelope)), Some("gr-resume".to_string()))
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.status, "completed");
+        assert_eq!(rec.dispatch_count(), 0);
+    }
+
+    const TWO_FOLLOW_YAML: &str = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch1
+  nodes:
+    fetch1:
+      follow: true
+      action: {item_id: "directive:child1", params: {}}
+      next: {type: unconditional, to: fetch2}
+    fetch2:
+      follow: true
+      action: {item_id: "directive:child2", params: {}}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+
+    #[tokio::test]
+    async fn two_sequential_follow_nodes_suspend_and_resume_in_order() {
+        // fetch1 (follow) → fetch2 (follow) → done. Each follow node suspends; after
+        // consuming its child result the graph advances to the NEXT follow node and
+        // suspends again, then finally completes.
+
+        // Pass 1: suspend at the first follow node.
+        let (w1, rec1) = make_recording_walker(make_graph(TWO_FOLLOW_YAML), vec![], None);
+        let r1 = w1.execute(json!({}), Some("gr-seq".to_string())).await;
+        assert_eq!(r1.status, "continued");
+        assert_eq!(rec1.recorded_follow_requests()[0].follow_node, "fetch1");
+
+        // Pass 2: resume fetch1 with its child result → advance to fetch2 → suspend
+        // there (a DISTINCT follow handoff, at the next step).
+        let (w2, rec2) = make_recording_walker(make_graph(TWO_FOLLOW_YAML), vec![], None);
+        let resume1 = json!({
+            "resume_state": {
+                "current_node": "fetch1",
+                "step_count": 0,
+                "state": {},
+                "graph_run_id": "gr-seq",
+                "pending_follow": { "follow_node": "fetch1", "step_count": 0, "graph_run_id": "gr-seq" },
+                "follow_result": { "result": "child1 done" },
+            }
+        });
+        let r2 = w2.execute(resume1, Some("gr-seq".to_string())).await;
+        assert_eq!(r2.status, "continued", "must suspend again at the second follow node");
+        let req2 = rec2.recorded_follow_requests();
+        assert_eq!(req2.len(), 1, "resuming fetch1 issues exactly one new handoff (fetch2)");
+        assert_eq!(req2[0].follow_node, "fetch2", "the second suspend is at fetch2");
+        let fetch2_step = req2[0].step_count;
+
+        // Pass 3: resume fetch2 with its child result → the graph completes.
+        let (w3, _rec3) = make_recording_walker(make_graph(TWO_FOLLOW_YAML), vec![], None);
+        let resume2 = json!({
+            "resume_state": {
+                "current_node": "fetch2",
+                "step_count": fetch2_step,
+                "state": {},
+                "graph_run_id": "gr-seq",
+                "pending_follow": { "follow_node": "fetch2", "step_count": fetch2_step, "graph_run_id": "gr-seq" },
+                "follow_result": { "result": "child2 done" },
+            }
+        });
+        let r3 = w3.execute(resume2, Some("gr-seq".to_string())).await;
+        assert_eq!(r3.status, "completed", "after both follow nodes resume, the graph completes");
+        assert!(r3.success);
     }
 
     /// Assert the R3 fence order for an action-success step:

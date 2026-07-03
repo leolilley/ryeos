@@ -14,7 +14,7 @@
 //! be signed by a trusted key. Unsigned or tampered schemas are rejected.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
@@ -605,6 +605,15 @@ pub enum MethodScope {
     Corpus,
 }
 
+/// Runtime/operator config snapshot required by a single method invocation.
+/// The daemon resolves `path` through the config loader and places the result
+/// in the method envelope under the declaration map key.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MethodRuntimeConfigRequirement {
+    pub path: String,
+}
+
 /// A single method declared on a kind's execution schema. Methods are
 /// keyed by name in `execution.methods`, so the name lives on the map
 /// key, not here.
@@ -615,6 +624,8 @@ pub struct MethodDecl {
     pub scope: MethodScope,
     #[serde(default)]
     pub args: BTreeMap<String, ArgDecl>,
+    #[serde(default)]
+    pub runtime_config: BTreeMap<String, MethodRuntimeConfigRequirement>,
 }
 
 // ── Launch augmentation types ────────────────────────────────────────
@@ -623,7 +634,7 @@ pub struct MethodDecl {
 /// data; daemon interprets each variant between resolution and parent
 /// runtime spawn. Order matters — augmentations run in declared order.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "step", rename_all = "snake_case")]
+#[serde(tag = "step", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaunchAugmentationDecl {
     /// Compose context positions by dispatching a multi-root compose
     /// handler on `target_kind`'s runtime as a child thread of the parent
@@ -653,6 +664,10 @@ pub enum LaunchAugmentationDecl {
         /// interpreter when missing.
         #[serde(default)]
         per_position_budget: BTreeMap<String, usize>,
+        /// Runtime/operator config snapshots required by the private target
+        /// method invocation. Keyed by the envelope config name.
+        #[serde(default)]
+        runtime_config: BTreeMap<String, MethodRuntimeConfigRequirement>,
     },
 }
 
@@ -1871,6 +1886,11 @@ fn parse_execution_schema(
                 serde_yaml::from_value(v.clone()).map_err(|e| EngineError::SchemaLoaderError {
                     reason: format!("{display}: invalid method declaration `{name}`: {e}"),
                 })?;
+            validate_method_runtime_config_requirements(
+                display,
+                &format!("execution.methods.{name}.runtime_config"),
+                &decl.runtime_config,
+            )?;
             methods.insert(name, decl);
         }
     }
@@ -1918,6 +1938,15 @@ fn parse_execution_schema(
                             reason: format!("{display}: invalid launch_augmentations entry: {e}"),
                         }
                     })?;
+                match &aug {
+                    LaunchAugmentationDecl::ComposeContextPositions { runtime_config, .. } => {
+                        validate_method_runtime_config_requirements(
+                            display,
+                            "execution.launch_augmentations[].runtime_config",
+                            runtime_config,
+                        )?;
+                    }
+                }
                 launch_augmentations.push(aug);
             }
         }
@@ -2015,6 +2044,52 @@ fn parse_thread_profile(
         .map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("{display}: invalid `execution.thread_profile`: {e}"),
         })
+}
+
+fn validate_method_runtime_config_requirements(
+    display: &str,
+    field_path: &str,
+    requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
+) -> Result<(), EngineError> {
+    for (name, requirement) in requirements {
+        if name.trim().is_empty() {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!("{display}: {field_path} contains an empty config name"),
+            });
+        }
+
+        let config_id = requirement.path.trim();
+        if config_id.is_empty() {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!("{display}: {field_path}.{name}.path must be non-empty"),
+            });
+        }
+
+        let path = Path::new(config_id);
+        if path.is_absolute() {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: {field_path}.{name}.path must be a config id, not an absolute path"
+                ),
+            });
+        }
+        if path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!("{display}: {field_path}.{name}.path must not contain `..`"),
+            });
+        }
+        if config_id.ends_with(".yaml") || config_id.ends_with(".yml") {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: {field_path}.{name}.path must be a config id without .yaml/.yml suffix"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Parse the `execution.delegate` block from a kind schema. Returns
@@ -3274,6 +3349,7 @@ execution:
                 output_derived,
                 meta_output_derived,
                 per_position_budget,
+                runtime_config,
             } => {
                 assert_eq!(target_kind, "knowledge");
                 assert_eq!(target_method, "compose_positions");
@@ -3282,6 +3358,7 @@ execution:
                 assert_eq!(meta_output_derived, "rendered_contexts_meta");
                 assert_eq!(per_position_budget.get("system"), Some(&4000));
                 assert_eq!(per_position_budget.get("before"), Some(&2000));
+                assert!(runtime_config.is_empty());
             }
         }
     }
@@ -3305,6 +3382,7 @@ execution:
                 output_derived,
                 meta_output_derived,
                 per_position_budget,
+                runtime_config,
             } => {
                 assert_eq!(target_kind, "knowledge");
                 assert_eq!(target_method, "compose_positions");
@@ -3312,6 +3390,7 @@ execution:
                 assert_eq!(output_derived, "rendered_contexts");
                 assert_eq!(meta_output_derived, "rendered_contexts_meta");
                 assert!(per_position_budget.is_empty());
+                assert!(runtime_config.is_empty());
             }
         }
     }

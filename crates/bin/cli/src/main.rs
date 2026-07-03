@@ -2,6 +2,7 @@ use clap::Parser;
 
 mod arg_bind;
 mod dispatcher;
+mod effective_metadata;
 mod error;
 mod exec_stream;
 mod exit;

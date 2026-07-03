@@ -133,28 +133,36 @@ pub async fn dispatch_action(
     // `response.result`; the wrapping `thread` snapshot is for audit
     // only and never feeds into graph-walker control flow. Classify the
     // envelope BEFORE unwrapping so a failed leaf becomes a structured
-    // failure rather than a silent `null`. Only success peels to the
-    // bare leaf value and chases continuations — `continuation_id`
-    // (when present) lives at the leaf result's top level.
+    // failure rather than a silent `null`. Only success peels to the bare
+    // leaf value; a leaf that still requests inline continuation
+    // (`continuation_id` at its top level) is then rejected loudly.
     match classify_envelope(response.result) {
         ActionOutcome::Failure(failure) => Ok(ActionOutcome::Failure(failure)),
-        ActionOutcome::Success(mut success) => {
-            // Continuation chasing operates on the leaf result only;
-            // cost parsed from the immediate envelope rides along
-            // unchanged. (Per the cost-accounting contract, continuation/
-            // async child cost is not chased — only the immediate native
-            // child envelope's cost is trusted.)
-            //
-            // CONTRACT: a native return carrying meaningful `outputs` is
-            // wrapped to `{result, outputs}`, which would hide a top-level
-            // `continuation_id` from `follow_continuation`. This is safe
-            // only because a directive return with declared outputs is
-            // terminal (it never also requests continuation). Subprocess
-            // and bare leaves are not wrapped, so their `continuation_id`
-            // stays visible.
-            let followed =
-                follow_continuation(client, &success.result, thread_id, project_path, 0).await?;
-            success.result = followed;
+        ActionOutcome::Success(success) => {
+            // Inline continuation-chasing is retired. A dispatched child that
+            // requests continuation must be launched from a `follow: true` node
+            // (daemon-managed suspend/resume) — never chased synchronously here, which
+            // blocked the graph on the whole child chain. A leaf still returning a
+            // top-level `continuation_id` on a non-follow node is a loud authoring
+            // error, not a silent block. (A native return with meaningful `outputs` is
+            // wrapped to `{result, outputs}` and is terminal by contract, so its
+            // `continuation_id` — which it never sets — is not the concern here;
+            // subprocess and bare leaves keep `continuation_id` at the top level.)
+            if success
+                .result
+                .get("continuation_id")
+                .and_then(|v| v.as_str())
+                .is_some()
+            {
+                return Ok(ActionOutcome::Failure(ActionFailure {
+                    diagnostic: format!(
+                        "action `{item_id}` returned a continuation_id on a non-follow node; \
+                         inline continuation is retired — mark the node `follow: true` to run a \
+                         continuing child under daemon-managed follow"
+                    ),
+                    cost: success.cost,
+                }));
+            }
             Ok(ActionOutcome::Success(success))
         }
     }
@@ -178,9 +186,9 @@ pub async fn dispatch_action(
 /// `{"result": ...}` with no envelope markers is left alone.
 ///
 /// `continuation_id` lives at the leaf's top level under the typed
-/// callback contract, so classification MUST happen before continuation
-/// chasing reads it.
-fn classify_envelope(value: Value) -> ActionOutcome {
+/// callback contract, so classification MUST happen before the inline-
+/// continuation guard reads it.
+pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
     let Some(obj) = value.as_object() else {
         return ActionOutcome::Success(ActionSuccess::bare(value));
     };
@@ -376,75 +384,6 @@ fn excerpt(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}… [truncated]")
     }
-}
-
-#[allow(clippy::only_used_in_recursion)]
-fn follow_continuation<'a>(
-    client: &'a CallbackClient,
-    result: &'a Value,
-    thread_id: &'a str,
-    project_path: &'a str,
-    depth: u32,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send + 'a>> {
-    Box::pin(async move {
-        if depth >= 20 {
-            return Ok(result.clone());
-        }
-
-        // Continuation IDs live at the leaf result's top level — one
-        // source of truth.
-        let continuation_id = result.get("continuation_id").and_then(|v| v.as_str());
-
-        let Some(cont_id) = continuation_id else {
-            return Ok(result.clone());
-        };
-
-        let thread_result = client
-            .get_thread_by_id(cont_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("continuation thread lookup failed: {e}"))?;
-
-        let thread_status = thread_result
-            .get("thread")
-            .and_then(|t| t.get("status"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("unknown");
-
-        if thread_status == "continued" {
-            // `runtime.get_thread` returns a stable `{ thread, result,
-            // artifacts, facets }` shape; a continued thread MUST
-            // advertise its successor under `thread.successor_thread_id`.
-            // A missing field is a daemon contract violation, not a soft
-            // case.
-            let successor_id = thread_result
-                .get("thread")
-                .and_then(|t| t.get("successor_thread_id"))
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "continued thread {cont_id} missing thread.successor_thread_id \
-                     in get_thread response — daemon contract violation"
-                    )
-                })?;
-
-            // Recurse with a leaf-shaped value: continuation IDs live
-            // at the leaf's top level under the typed callback contract.
-            let inner = json!({"continuation_id": successor_id});
-            return follow_continuation(client, &inner, thread_id, project_path, depth + 1).await;
-        }
-
-        // Terminal: return the leaf value directly. `runtime.get_thread`
-        // always carries `result` for non-continued threads; a missing
-        // field is a daemon contract violation.
-        let terminal_result = thread_result.get("result").cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "thread {cont_id} status={thread_status:?} missing top-level \
-                 `result` field in get_thread response — daemon contract violation"
-            )
-        })?;
-
-        Ok(terminal_result)
-    })
 }
 
 #[cfg(test)]
@@ -753,23 +692,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn follow_continuation_respects_max_depth() {
-        // Leaf-shaped continuation: typed contract puts continuation_id
-        // at the leaf's top level, and follow_continuation recurses on
-        // leaves. The mock get_thread always returns "continued" so the
-        // chain runs to depth 20 and then returns the leaf as-is.
+    async fn inline_continuation_is_a_loud_error() {
+        // Inline continuation-chasing is retired: a non-follow action whose leaf
+        // returns a continuation_id must FAIL loudly (directing the author to
+        // `follow: true`), never silently block chasing the chain.
         let client = make_mock_client(vec![json!({"continuation_id": "cont-1"})]);
         let action = json!({"item_id": "tool:test/deep"});
         let outcome = dispatch_action(&client, &action, "t-1", "/tmp/test", None)
             .await
             .unwrap();
-        let result = expect_success(outcome);
+        let failure = expect_action_failure(outcome);
         assert!(
-            result
-                .get("continuation_id")
-                .and_then(|v| v.as_str())
-                .is_some(),
-            "expected leaf continuation_id at top level after max-depth abort, got: {result}"
+            failure.diagnostic.contains("continuation_id") && failure.diagnostic.contains("follow"),
+            "expected a loud inline-continuation error mentioning follow, got: {}",
+            failure.diagnostic
         );
     }
 

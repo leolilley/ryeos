@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-tools"
-version = "0.5.23"
+version = "0.5.24"
 edition = "2021"
 
 [lib]
@@ -34,6 +34,12 @@ lillux = { workspace = true }
 ryeos-vault = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-app = { workspace = true }
+
+# A current-thread tokio runtime to block on the async `runtime.author_item`
+# callback from the sync `author-item` subcommand. Owns the features it uses
+# (`enable_all` needs the IO driver via `net`, plus `time`) rather than relying
+# on unification through ryeos-runtime / ryeos-app.
+tokio = { workspace = true, features = ["rt", "net", "time"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -81,10 +81,11 @@ pub struct RuntimeLaunchMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkpoint_dir: Option<PathBuf>,
 
-    /// Minimum context required for `reconcile.rs` to re-spawn the
-    /// thread under the same `thread_id` after a daemon restart.
-    /// Populated by the runner at attach time when `native_resume` is
-    /// declared. `None` for threads that didn't opt in to resume.
+    /// Minimum context required to reconstruct the thread's launch identity —
+    /// for `reconcile.rs` to re-spawn it under the same `thread_id` after a
+    /// daemon restart, and for a continuation/follow-resume successor to
+    /// relaunch it. Populated at managed launch time for continuation-capable
+    /// OR native-resume launches. `None` for threads that are neither.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_context: Option<ResumeContext>,
 }
@@ -142,11 +143,16 @@ pub struct ResumeContext {
     /// verbatim so executor-specific flags survive resume.
     #[serde(default = "default_execution_hints")]
     pub execution_hints: ExecutionHints,
-    /// V5.5 P2: composed `effective_caps` captured at original spawn
-    /// time. The reconciler re-mints a callback token for the resumed
-    /// subprocess and the daemon enforces caps on every callback
-    /// dispatch — this set is what gets enforced. Empty `Vec` means
-    /// deny-all.
+    /// Composed `effective_caps` captured at original spawn time. The
+    /// reconciler re-mints a callback token for the resumed subprocess and
+    /// the daemon enforces caps on every callback dispatch — this set is
+    /// what gets enforced. Empty `Vec` means deny-all.
+    ///
+    /// Overload: on an *unlaunched follow-child root row* this instead
+    /// carries the PARENT's effective caps — the bounding authority the
+    /// launcher feeds to `CapabilityPolicy::FollowChildHybrid`. The child's
+    /// own composed caps overwrite it in launch metadata once the child is
+    /// launched and policy resolution succeeds.
     #[serde(default)]
     pub effective_caps: Vec<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that

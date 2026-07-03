@@ -179,6 +179,55 @@ fn record_callback_warning(
     }
 }
 
+fn normalize_hook_dispatch_result(
+    result: Value,
+) -> Result<Value, ryeos_runtime::callback::CallbackError> {
+    let Some(obj) = result.as_object() else {
+        return Ok(result);
+    };
+
+    let is_native_runtime_envelope = obj.contains_key("success")
+        && obj.contains_key("status")
+        && obj.contains_key("result")
+        && (obj.contains_key("outputs") || obj.contains_key("warnings") || obj.contains_key("cost"));
+    if is_native_runtime_envelope {
+        let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
+        let status = obj.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        if !success || status != "completed" {
+            let message = obj
+                .get("error")
+                .or_else(|| obj.get("result"))
+                .map(Value::to_string)
+                .unwrap_or_else(|| format!("hook child returned status `{status}`"));
+            return Err(ryeos_runtime::callback::CallbackError::ActionFailed {
+                code: "hook_child_failed".to_string(),
+                message,
+                retryable: false,
+            });
+        }
+
+        return Ok(obj.get("result").cloned().unwrap_or(Value::Null));
+    }
+
+    let is_managed_envelope =
+        obj.contains_key("outcome_code") && obj.contains_key("result") && obj.contains_key("error");
+    if is_managed_envelope {
+        let error = obj.get("error").filter(|value| !value.is_null());
+        if let Some(error) = error {
+            let message = error.to_string();
+            return Err(ryeos_runtime::callback::CallbackError::ActionFailed {
+                code: "hook_child_failed".to_string(),
+                message,
+                retryable: false,
+            });
+        }
+
+        return Ok(obj.get("result").cloned().unwrap_or(Value::Null));
+    }
+
+    Ok(result)
+}
+
 pub struct RunnerConfig {
     pub messages: Vec<ProviderMessage>,
     pub tools: Vec<ToolSchema>,
@@ -343,15 +392,14 @@ impl Runner {
     /// leave the input unanswered and turn a clean completion into a limit
     /// failure. A late steer stays queued and is cleared at finalize; the operator
     /// resubmits it as a settled continuation.
-    fn can_start_another_turn(&self, turn: u32, max_turns: u32) -> bool {
-        turn < max_turns && !self.budget.is_exhausted() && self.harness.check_limits().is_ok()
+    fn can_start_another_turn(&self) -> bool {
+        !self.budget.is_exhausted() && self.harness.check_limits().is_ok()
     }
 
     pub async fn run(&mut self) -> RuntimeResult {
         let mut guard = RunGuard { finalized: false };
         let mut state = State::Init;
         let mut turn = self.initial_turn;
-        let max_turns = 100;
         // Collected non-fatal callback failures. P2.2 — runtime no
         // longer silently drops `append_event` errors; everything that
         // would have hit `let _ = ...` is now recorded here and
@@ -383,12 +431,6 @@ impl Runner {
                             continue;
                         }
                         state = State::Errored { error: e };
-                        continue;
-                    }
-                    if turn >= max_turns {
-                        state = State::Errored {
-                            error: "max turns reached".to_string(),
-                        };
                         continue;
                     }
                     // Steer drain (between-turns boundary): fold any operator
@@ -752,7 +794,7 @@ impl Runner {
                                 // the late input stays queued (cleared at finalize)
                                 // and the operator resubmits as a settled
                                 // continuation.
-                                if self.can_start_another_turn(turn, max_turns) {
+                                if self.can_start_another_turn() {
                                     match self.poll_pending_input().await {
                                         Ok(true) => State::CheckingLimits,
                                         Ok(false) => State::Finalizing { result: content },
@@ -1116,6 +1158,11 @@ impl Runner {
                                     result: Some(json!("directive_return")),
                                     error: None,
                                     cost: serde_json::to_value(self.budget.cost()).ok(),
+                                    // The structured return lives in `outputs`, not
+                                    // `result` — carry it so a follow parent can
+                                    // consume `${result.outputs.*}` on resume.
+                                    outputs: args.clone(),
+                                    warnings: warnings.clone(),
                                 };
                                 if let Err(e) = self.callback.finalize_thread(completion).await {
                                     guard.finalized = true;
@@ -1207,11 +1254,11 @@ impl Runner {
                                 // Hooks run on the leaf result only —
                                 // the parent-thread snapshot has no
                                 // bearing on hook control flow.
-                                Ok(response.result)
+                                normalize_hook_dispatch_result(response.result)
                             })
                         });
 
-                    let hook_result = match ryeos_runtime::hooks_eval::run_hooks(
+                    match ryeos_runtime::hooks_eval::run_hooks(
                         &event,
                         &context,
                         &self.hooks,
@@ -1220,51 +1267,52 @@ impl Runner {
                     )
                     .await
                     {
-                        Ok(result) => result,
-                        Err(e) => {
-                            tracing::warn!(hook_event = %event, "hook evaluation error, skipping: {e}");
-                            None
-                        }
-                    };
+                        Ok(hook_result) => {
+                            // Hook events ("before_step", "after_step", …)
+                            // are not in the daemon's event-vocabulary
+                            // allow-list; map them to `cognition_reasoning`
+                            // (journal_only) and stash the original hook name
+                            // in the payload so consumers can still
+                            // discriminate.
+                            record_callback_warning(
+                                &mut warnings,
+                                &format!("cognition_reasoning(hook={event})"),
+                                self.callback
+                                    .append_event(
+                                        "cognition_reasoning",
+                                        json!({
+                                            "hook_event": event.clone(),
+                                            "hook_result": hook_result.clone(),
+                                        }),
+                                    )
+                                    .await,
+                            );
 
-                    // Hook events ("before_step", "after_step", …)
-                    // are not in the daemon's event-vocabulary
-                    // allow-list; map them to `cognition_reasoning`
-                    // (journal_only) and stash the original hook name
-                    // in the payload so consumers can still
-                    // discriminate.
-                    record_callback_warning(
-                        &mut warnings,
-                        &format!("cognition_reasoning(hook={event})"),
-                        self.callback
-                            .append_event(
-                                "cognition_reasoning",
-                                json!({
-                                    "hook_event": event,
-                                    "hook_result": hook_result,
-                                }),
-                            )
-                            .await,
-                    );
-
-                    match hook_result {
-                        Some(ref val) => {
-                            let action = HookAction::from_value(val);
-                            match action {
-                                HookAction::Retry => State::CallingProvider,
-                                HookAction::Abort | HookAction::Fail => State::Errored {
-                                    error: format!("hook aborted: {}", event),
-                                },
-                                HookAction::Suspend | HookAction::Escalate => {
-                                    tracing::warn!(action = ?action, "unsupported hook action, failing closed");
-                                    State::Errored {
-                                        error: format!("unsupported hook action: {:?}", action),
+                            match hook_result.as_ref().map(HookAction::from_value) {
+                                Some(Ok(action)) => match action {
+                                    HookAction::Retry => State::CallingProvider,
+                                    HookAction::Abort | HookAction::Fail => State::Errored {
+                                        error: format!("hook aborted: {}", event),
+                                    },
+                                    HookAction::Suspend | HookAction::Escalate => {
+                                        tracing::warn!(action = ?action, "unsupported hook action, failing closed");
+                                        State::Errored {
+                                            error: format!("unsupported hook action: {:?}", action),
+                                        }
                                     }
-                                }
-                                HookAction::Continue => *resume_to,
+                                    HookAction::Continue => *resume_to,
+                                },
+                                Some(Err(e)) => State::Errored {
+                                    error: format!(
+                                        "hook event `{event}` returned invalid control action: {e}"
+                                    ),
+                                },
+                                None => *resume_to,
                             }
                         }
-                        None => *resume_to,
+                        Err(e) => State::Errored {
+                            error: format!("hook event `{event}` failed: {e}"),
+                        },
                     }
                 }
 
@@ -1288,10 +1336,14 @@ impl Runner {
                         // current state — no nudge, no granted turn, no output
                         // enforcement. Emitting outputs before the boundary is the
                         // directive's job; the runtime does not do it for them.
-                        // (Enabled is plain chain-fold for now; the hook/seed/
-                        // carry_turns substrate is a later chunk.)
+                        // (Enabled is plain chain-fold; resume applies the
+                        // resolved carry_turns policy when folding history.)
                         if self.continuation_config.enabled() {
-                            State::Continued
+                            State::FiringHooks {
+                                event: "continuation".to_string(),
+                                context: self.continuation_hook_context(live_context, threshold),
+                                resume_to: Box::new(State::Continued),
+                            }
                         } else {
                             let result = self
                                 .messages
@@ -1324,6 +1376,8 @@ impl Runner {
                         result: Some(result.clone()),
                         error: None,
                         cost: serde_json::to_value(self.budget.cost()).ok(),
+                        outputs: json!({}),
+                        warnings: warnings.clone(),
                     };
                     if let Err(e) = self.callback.finalize_thread(completion).await {
                         let runtime_result = RuntimeResult {
@@ -1396,6 +1450,8 @@ impl Runner {
                         result: None,
                         error: Some(json!(error)),
                         cost: serde_json::to_value(self.budget.cost()).ok(),
+                        outputs: json!({}),
+                        warnings: warnings.clone(),
                     };
                     if let Err(e) = self.callback.finalize_thread(completion).await {
                         // Finalize failed — surface in the error result
@@ -1431,6 +1487,25 @@ impl Runner {
                 }
             };
         }
+    }
+
+    fn continuation_hook_context(&self, live_context_tokens: u64, threshold_tokens: u64) -> Value {
+        let remaining_spend_usd = self.budget.remaining_spend_usd();
+        json!({
+            "event": {
+                "name": "continuation",
+                "reason": CONTINUATION_LOG_REASON,
+                "live_context_tokens": live_context_tokens,
+                "threshold_tokens": threshold_tokens,
+                "messages": self.messages.clone(),
+                "usage": self.budget.cost(),
+                "budget_remaining": {
+                    "spend_usd": remaining_spend_usd,
+                    "spend_unlimited": remaining_spend_usd.is_none(),
+                },
+                "declared_outputs": self.directive_outputs.clone().unwrap_or_default(),
+            }
+        })
     }
 
     fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> f64 {
@@ -1694,6 +1769,144 @@ mod tests {
 
         assert!(runner.directive_outputs.is_some());
         assert_eq!(runner.directive_outputs.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn continuation_hook_context_is_event_namespaced() {
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            profiles: vec![],
+        };
+        let mut budget = BudgetTracker::new(1.0);
+        budget.report(10, 5, 0.25);
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![ProviderMessage {
+                role: "assistant".to_string(),
+                content: Some(json!("hello")),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
+            budget,
+            callback: make_callback(),
+            context_window: 200_000,
+            context_threshold_ratio: 0.9,
+            provider_config: provider,
+            provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+            outputs: None,
+            sampling: None,
+        });
+
+        let context = runner.continuation_hook_context(123, 456);
+
+        assert!(context.get("messages").is_none());
+        assert_eq!(context["event"]["name"], "continuation");
+        assert_eq!(context["event"]["reason"], "context_window");
+        assert_eq!(context["event"]["live_context_tokens"], 123);
+        assert_eq!(context["event"]["threshold_tokens"], 456);
+        assert!(context["event"]["messages"].is_array());
+        assert_eq!(context["event"]["usage"]["input_tokens"], 10);
+        assert_eq!(context["event"]["usage"]["output_tokens"], 5);
+        assert_eq!(context["event"]["budget_remaining"]["spend_usd"], 0.75);
+        assert_eq!(context["event"]["budget_remaining"]["spend_unlimited"], false);
+        assert_eq!(context["event"]["declared_outputs"], json!([]));
+    }
+
+    #[test]
+    fn hook_dispatch_result_unwraps_successful_runtime_envelope() {
+        let result = normalize_hook_dispatch_result(json!({
+            "success": true,
+            "status": "completed",
+            "result": {"action": "abort"},
+            "outputs": {},
+            "warnings": []
+        }))
+        .unwrap();
+
+        assert_eq!(result, json!({"action": "abort"}));
+    }
+
+    #[test]
+    fn hook_dispatch_result_rejects_failed_runtime_envelope() {
+        let err = normalize_hook_dispatch_result(json!({
+            "success": false,
+            "status": "failed",
+            "result": null,
+            "error": "boom",
+            "outputs": {},
+            "warnings": []
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("hook_child_failed"));
+    }
+
+    #[test]
+    fn hook_dispatch_result_unwraps_successful_managed_envelope() {
+        let result = normalize_hook_dispatch_result(json!({
+            "outcome_code": "success",
+            "result": {"action": "abort"},
+            "error": null,
+            "artifacts": []
+        }))
+        .unwrap();
+
+        assert_eq!(result, json!({"action": "abort"}));
+    }
+
+    #[test]
+    fn hook_dispatch_result_rejects_failed_managed_envelope() {
+        let err = normalize_hook_dispatch_result(json!({
+            "outcome_code": "failed",
+            "result": null,
+            "error": "boom",
+            "artifacts": []
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("hook_child_failed"));
+    }
+
+    #[test]
+    fn hook_dispatch_result_preserves_raw_tool_result() {
+        let result = normalize_hook_dispatch_result(json!({"action": "abort"})).unwrap();
+
+        assert_eq!(result, json!({"action": "abort"}));
+
+        let result = normalize_hook_dispatch_result(json!({"success": true, "value": 42})).unwrap();
+
+        assert_eq!(result, json!({"success": true, "value": 42}));
+
+        let result = normalize_hook_dispatch_result(json!({
+            "success": true,
+            "status": "completed",
+            "action": "abort"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            result,
+            json!({"success": true, "status": "completed", "action": "abort"})
+        );
     }
 
     #[test]

@@ -64,6 +64,13 @@ pub struct GraphNode {
     pub cache_result: bool,
     #[serde(default, alias = "cache")]
     pub cache: bool,
+    /// FOLLOW node: instead of dispatching the action inline, the daemon launches
+    /// it as a detached child and suspends this graph until the child's whole
+    /// continuation chain reaches terminal, then resumes with its result. Only
+    /// valid on an action node, and never cacheable (the result does not exist at
+    /// suspend time). Validated in `validation.rs`.
+    #[serde(default)]
+    pub follow: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,6 +318,7 @@ pub struct WalkContext {
     pub state: Value,
     pub inputs: Value,
     pub result: Option<Value>,
+    pub execution: Option<Value>,
 }
 
 impl WalkContext {
@@ -320,6 +328,9 @@ impl WalkContext {
         ctx.insert("inputs".into(), self.inputs.clone());
         if let Some(ref r) = self.result {
             ctx.insert("result".into(), r.clone());
+        }
+        if let Some(ref execution) = self.execution {
+            ctx.insert("_execution".into(), execution.clone());
         }
         ctx.insert("_now".into(), Value::String(lillux::time::iso8601_now()));
         ctx.insert(
@@ -458,12 +469,13 @@ requires:
     declared:
       - ryeos.execute.tool.echo
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: [append]
-      runtime_vault:
-        - namespace: oauth
-          operations: [get]
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: [append]
+        runtime_vault:
+          - namespace: oauth
+            operations: [get]
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert_eq!(
@@ -495,9 +507,10 @@ config:
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: []
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: []
 "#;
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
@@ -513,10 +526,11 @@ config:
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: [append]
-          extra: nope
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: [append]
+            extra: nope
 "#;
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }

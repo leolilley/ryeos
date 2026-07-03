@@ -614,21 +614,16 @@ pub fn compile_with_handlers(
         })?;
     let cmd_expanded = expand_template(&command, &template_ctx)?;
 
-    // Resolve `bin:` prefix — look up the binary from the bundle's
-    // `.ai/bin/<triple>/` directory instead of PATH.
+    // Resolve `bin:` prefix — look up the binary from signed bundle `.ai/bin/`
+    // material instead of PATH. Unqualified refs stay wrapper-local;
+    // qualified refs (`bin:<bundle>/<name>`) resolve from a registered bundle
+    // while keeping runtime authority on the wrapper item.
     let cmd = if cmd_expanded.starts_with("bin:") {
-        let bundle_root =
-            find_bundle_root(root_source_path).ok_or_else(|| EngineError::InvalidBinPrefix {
-                raw: cmd_expanded.clone(),
-                detail: format!(
-                    "cannot find bundle root (no .ai/ ancestor of {})",
-                    root_source_path.display()
-                ),
-            })?;
-        let resolved = crate::binary_resolver::resolve_bundle_binary_ref(
+        let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
             &cmd_expanded,
-            &bundle_root,
-            |fp| trust_ref.get(fp).map(|signer| signer.verifying_key),
+            root_source_path,
+            roots,
+            trust_ref,
             ctx.root_trust_class,
         )?;
         resolved.absolute_path.to_string_lossy().into_owned()
@@ -674,17 +669,6 @@ pub fn compile_with_handlers(
         timeout_secs,
         execution: spec_overrides.execution,
     })
-}
-
-/// Walk up from `path` to find the first ancestor containing `.ai/`.
-fn find_bundle_root(path: &Path) -> Option<PathBuf> {
-    let mut current = path;
-    loop {
-        if current.join(".ai").is_dir() {
-            return Some(current.to_path_buf());
-        }
-        current = current.parent()?;
-    }
 }
 
 #[cfg(test)]

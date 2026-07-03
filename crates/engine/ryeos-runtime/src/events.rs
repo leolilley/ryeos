@@ -117,6 +117,7 @@ pub enum RuntimeEventType {
     GraphStepCompleted,
     GraphBranchTaken,
     GraphForeachIteration,
+    GraphFollowSuspended,
 
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
@@ -160,6 +161,7 @@ impl RuntimeEventType {
             Self::GraphStepCompleted => "graph_step_completed",
             Self::GraphBranchTaken => "graph_branch_taken",
             Self::GraphForeachIteration => "graph_foreach_iteration",
+            Self::GraphFollowSuspended => "graph_follow_suspended",
             Self::ThreadUsage => "thread_usage",
         }
     }
@@ -201,6 +203,7 @@ impl RuntimeEventType {
             "graph_step_completed" => Ok(Self::GraphStepCompleted),
             "graph_branch_taken" => Ok(Self::GraphBranchTaken),
             "graph_foreach_iteration" => Ok(Self::GraphForeachIteration),
+            "graph_follow_suspended" => Ok(Self::GraphFollowSuspended),
             "thread_usage" => Ok(Self::ThreadUsage),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
@@ -266,6 +269,7 @@ impl RuntimeEventType {
             | Self::GraphStepStarted
             | Self::GraphStepCompleted
             | Self::GraphBranchTaken
+            | Self::GraphFollowSuspended
             | Self::ThreadUsage => StorageClass::Indexed,
         }
     }
@@ -315,6 +319,7 @@ mod tests {
             RuntimeEventType::GraphStepCompleted,
             RuntimeEventType::GraphBranchTaken,
             RuntimeEventType::GraphForeachIteration,
+            RuntimeEventType::GraphFollowSuspended,
             RuntimeEventType::ThreadUsage,
         ];
         for v in variants {

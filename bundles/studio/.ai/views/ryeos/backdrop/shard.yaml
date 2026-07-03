@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T11:23:26Z:95eaea06634327f93e0f69294e62ff09af65c689861a2887a1d046d5dc22d2da:oNpUV47ciqhAx0VuZ2JcgyhwNIbE9VHeMp2BmNY1hN6Vuuik5qpyq///PAlhiy0WphBTvX5jey8LmXRVTD2vBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-02T23:15:02Z:26bf75794bf5cb6ca835852a46fe9671b1d0efbac2afeaa30eb11bd0bb87090e:CvMSkJWcs1mrdMyfG7Lp5x0on2MROOWY6dBvoE2PiJX+0cyhu9f2CFAh7kEZz2ZTC2lQw70f17w1qg7SZCcbCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: backdrop-shard
 version: "1.0.0"
 description: >-
@@ -48,5 +48,5 @@ body:
     - { kind: particle, position: [13.5, 2.0], scale: 0.5, color: "#d5c4a1", tone: neutral, opacity: 0.7 }
     # brand / welcome / hints as text objects
     - { kind: text, position: [0.0, -8.2], label: "RYE OS", color: "#d65d0e", tone: accent }
-    - { kind: text, position: [0.0, -9.6], label: "portable operating system for ai", color: "#a89984", tone: neutral }
+    - { kind: text, position: [0.0, -9.6], label: "portable verified execution", color: "#a89984", tone: neutral }
     - { kind: text, position: [0.0, -11.0], label: "ctrl+k launcher · ctrl+c quit", color: "#a89984", tone: neutral }

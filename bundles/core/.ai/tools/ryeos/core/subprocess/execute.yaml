@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-07T05:18:56Z:f6133765c1629cce0ee578276cb72f094b179e84151b0ed5dd7c8fd3a39646e2:vgIwY6ayMYH+66LtlxO3FeXOvKCs3RLQQKWCSELlALbnhfrGOowcDERkE447WJyNzZIGmJ3W03GWxiz99fWFCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-02T02:39:08Z:578797400274ac57509d29246361f49b2d9c615bdca1ee8c4397518d25a5e27f:HAjp6XcO9K/KIlinjXK+9Vf5nAOR1wpWOOwLPoSPXBnZRaMd2ppWhbbq+kme49ehY0vXTXHsytgSBGpwptgyBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/subprocess"
 version: "1.0.0"
 executor_id: null
 description: "Internal terminal executor for @subprocess. Not directly executable; wrap it with a tool that declares executor_id: \"@subprocess\" and a config block."
+
+terminal_executor:
+  kind: subprocess
 
 # Schema for wrapper `config:` blocks consumed by @subprocess. This is
 # not a direct public tool input schema; this terminal item is not

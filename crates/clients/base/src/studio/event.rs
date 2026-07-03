@@ -185,6 +185,12 @@ pub enum StudioUiEvent {
     CycleInputTarget {
         forward: bool,
     },
+    /// Cycle a live-filter box to its next (forward) / previous target field —
+    /// e.g. status → kind → source. The buffer clears (the prior field's text
+    /// doesn't apply to the new one) and the list refetches on the new field.
+    CycleFilterField {
+        forward: bool,
+    },
     /// Cancel the running head thread (esc while it works) — terminates it
     /// through the thread-control channel. No-op when the head isn't running.
     /// (Named `InterruptHead` for the esc-terminate control; the text-bearing

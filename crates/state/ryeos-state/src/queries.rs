@@ -359,35 +359,121 @@ pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<Threa
 ///
 /// When `filter_principal` is `Some(fp)`, only threads with
 /// `requested_by = fp` are returned. `None` returns all threads.
+/// Row ordering for a thread listing. `Default` is the historical
+/// oldest-first order (public `threads.list`, CLI); `Watch` is the operator
+/// watch-console order: active threads (non-terminal status) first, then newest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadSort {
+    #[default]
+    Default,
+    Watch,
+}
+
 pub fn list_threads_filtered(
     db: &ProjectionDb,
     limit: usize,
     filter_principal: Option<&str>,
 ) -> anyhow::Result<Vec<ThreadRow>> {
-    let sql = match filter_principal {
-        Some(_) => format!(
-            "SELECT {THREAD_COLUMNS} FROM threads WHERE requested_by = ? ORDER BY created_at LIMIT ?"
-        ),
-        None => format!(
-            "SELECT {THREAD_COLUMNS} FROM threads ORDER BY created_at LIMIT ?"
-        ),
+    list_threads_sorted(db, limit, filter_principal, ThreadSort::Default)
+}
+
+/// Optional filters for a thread listing. `principal` is the authorization
+/// scope (public listings restrict to the caller's own threads, matched
+/// EXACTLY); `status`/`kind`/`requested_by` are the operator dashboard's
+/// optional facets, matched by substring so a type-to-filter box narrows.
+/// Every `None` field is simply omitted from the `WHERE`, so an unset filter
+/// widens rather than empties the list. Set fields are ANDed.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadListFilter {
+    pub principal: Option<String>,
+    pub status: Option<String>,
+    pub kind: Option<String>,
+    pub requested_by: Option<String>,
+}
+
+pub fn list_threads_sorted(
+    db: &ProjectionDb,
+    limit: usize,
+    filter_principal: Option<&str>,
+    sort: ThreadSort,
+) -> anyhow::Result<Vec<ThreadRow>> {
+    list_threads_query(
+        db,
+        limit,
+        &ThreadListFilter {
+            principal: filter_principal.map(str::to_string),
+            ..Default::default()
+        },
+        sort,
+    )
+}
+
+/// The general thread listing: optional [`ThreadListFilter`] + [`ThreadSort`].
+/// The `Watch` order sorts active-before-terminal, then newest — for the
+/// operator dashboard — without changing the default order the public list /
+/// CLI use. Ordering is applied BEFORE `LIMIT`, so a limited watch list still
+/// shows the most relevant (active + recent) rows. Each present filter is ANDed
+/// (principal exact, dashboard facets substring); absent ones are omitted so
+/// the list stays wide.
+pub fn list_threads_query(
+    db: &ProjectionDb,
+    limit: usize,
+    filter: &ThreadListFilter,
+    sort: ThreadSort,
+) -> anyhow::Result<Vec<ThreadRow>> {
+    // Terminal statuses inlined from the shared constant (stable substrate
+    // vocabulary, not user input), so `active` = status NOT terminal.
+    let order = match sort {
+        ThreadSort::Default => "ORDER BY created_at".to_string(),
+        ThreadSort::Watch => {
+            let terminal_in = TERMINAL_STATUSES
+                .iter()
+                .map(|s| format!("'{s}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "ORDER BY CASE WHEN status IN ({terminal_in}) THEN 1 ELSE 0 END, created_at DESC"
+            )
+        }
     };
+    // Build the WHERE from the present filters only; each contributes one bound
+    // parameter, so there is no injection surface and an absent filter widens.
+    // The owner-scope `principal` is EXACT (an authorization boundary must not
+    // widen by substring); the dashboard facets are substring (contains) so a
+    // type-to-filter box narrows as the operator types.
+    let mut conditions: Vec<&str> = Vec::new();
+    let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+    if let Some(principal) = &filter.principal {
+        conditions.push("requested_by = ?");
+        params.push(principal);
+    }
+    if let Some(status) = &filter.status {
+        conditions.push("status LIKE '%' || ? || '%'");
+        params.push(status);
+    }
+    if let Some(kind) = &filter.kind {
+        conditions.push("kind LIKE '%' || ? || '%'");
+        params.push(kind);
+    }
+    if let Some(requested_by) = &filter.requested_by {
+        conditions.push("requested_by LIKE '%' || ? || '%'");
+        params.push(requested_by);
+    }
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+    let sql =
+        format!("SELECT {THREAD_COLUMNS} FROM threads {where_clause} {order} LIMIT ?");
+    params.push(&limit);
     let mut stmt = db
         .connection()
         .prepare(&sql)
-        .context("prepare list_threads_filtered")?;
-    let rows = match filter_principal {
-        Some(fp) => {
-            let params: [&dyn rusqlite::types::ToSql; 2] = [&fp, &limit];
-            stmt.query_map(params, ThreadRow::from_row)
-                .context("query list_threads_filtered")?
-        }
-        None => {
-            let params: [&dyn rusqlite::types::ToSql; 1] = [&limit];
-            stmt.query_map(params, ThreadRow::from_row)
-                .context("query list_threads_filtered")?
-        }
-    };
+        .context("prepare list_threads_query")?;
+    let rows = stmt
+        .query_map(params.as_slice(), ThreadRow::from_row)
+        .context("query list_threads_query")?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
@@ -613,13 +699,33 @@ pub fn continuation_fingerprint(
 pub enum ContinuationReasonMarker {
     /// An operator follow-up (the explicit-user-turn path).
     OperatorFollowUp,
+    /// A parent resuming after a followed child chain terminates. Daemon-written
+    /// only — runtime-facing continuation paths scrub all reserved markers — so
+    /// it needs no fingerprint to be trusted.
+    GraphFollowResume,
 }
 
 impl ContinuationReasonMarker {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::OperatorFollowUp => "operator_follow_up",
+            Self::GraphFollowResume => "graph_follow_resume",
         }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "operator_follow_up" => Some(Self::OperatorFollowUp),
+            "graph_follow_resume" => Some(Self::GraphFollowResume),
+            _ => None,
+        }
+    }
+
+    /// Whether `value` is any daemon-reserved marker. Runtime-facing continuation
+    /// paths scrub these from caller-supplied reasons so a runtime cannot forge
+    /// an operator reset or a depth-exempt follow edge.
+    pub fn is_reserved_str(value: &str) -> bool {
+        Self::from_str(value).is_some()
     }
 }
 
@@ -709,6 +815,10 @@ pub fn consecutive_machine_continuation_depth(
             && fingerprint.is_some()
         {
             break; // VERIFIED operator link resets the autonomous run
+        }
+        if reason.as_deref() == Some(ContinuationReasonMarker::GraphFollowResume.as_str()) {
+            break; // graph follow-resume edge (daemon-only marker) — structural
+                   // progress, not an autonomous segment-cut; resets the run
         }
         count += 1; // verified machine continuation link
         current = upstream;
@@ -1091,6 +1201,29 @@ mod tests {
         project_cont_edge(&db2, "K2", "a", "c", 2, Some("turn_limit"), None);
         // from c: c←a machine (1); a←r spoofed-operator-no-fp → counts machine (2).
         assert_eq!(consecutive_machine_continuation_depth(&db2, "c", 100).unwrap(), 2);
+    }
+
+    #[test]
+    fn machine_depth_resets_on_graph_follow_resume() {
+        // A graph follow-resume edge (daemon-only marker, no fingerprint) is
+        // structural progress, not an autonomous run, so it resets the count: a
+        // machine edge above it has depth 1, not prior-depth + 1.
+        let db = test_db();
+        insert_thread(&db, "r", "K", ThreadStatus::Continued);
+        insert_thread_with_upstream(&db, "a", "K", ThreadStatus::Continued, Some("r"));
+        insert_thread_with_upstream(&db, "c", "K", ThreadStatus::Created, Some("a"));
+        project_cont_edge(
+            &db,
+            "K",
+            "r",
+            "a",
+            1,
+            Some(ContinuationReasonMarker::GraphFollowResume.as_str()),
+            None,
+        );
+        project_cont_edge(&db, "K", "a", "c", 2, Some("turn_limit"), None);
+        // from c: c←a machine (1); a←r follow-resume → stop. depth 1.
+        assert_eq!(consecutive_machine_continuation_depth(&db, "c", 100).unwrap(), 1);
     }
 
     fn project_usage_event(
@@ -1643,5 +1776,136 @@ mod tests {
         assert_eq!(rows[0].thread_count, 1);
         assert_eq!(rows[0].input_tokens, 150);
         assert_eq!(rows[0].output_tokens, 15);
+    }
+
+    /// Raw insert with a controlled `created_at`, so watch ordering (which lives
+    /// in SQL) can be asserted deterministically across timestamps.
+    fn insert_thread_at(db: &ProjectionDb, id: &str, status: &str, created_at: &str) {
+        db.connection()
+            .execute(
+                "INSERT INTO threads \
+                 (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
+                  launch_mode, current_site_id, origin_site_id, created_at, updated_at) \
+                 VALUES (?1, ?1, 'directive', ?2, 'directive:test', 'test/exec', \
+                  'inline', 'site:test', 'site:test', ?3, ?3)",
+                rusqlite::params![id, status, created_at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn watch_sort_orders_active_first_then_newest_limit_after() {
+        let db = test_db();
+        insert_thread_at(&db, "T-old-run", "running", "2026-01-01T00:00:00Z");
+        insert_thread_at(&db, "T-old-done", "completed", "2026-02-01T00:00:00Z");
+        insert_thread_at(&db, "T-new-run", "running", "2026-03-01T00:00:00Z");
+        insert_thread_at(&db, "T-new-done", "completed", "2026-04-01T00:00:00Z");
+
+        // Watch: active (non-terminal) before terminal, newest-first per bucket.
+        let watch = list_threads_sorted(&db, 10, None, ThreadSort::Watch).unwrap();
+        assert_eq!(
+            watch.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            ["T-new-run", "T-old-run", "T-new-done", "T-old-done"]
+        );
+
+        // Default order is unchanged: oldest-first by created_at.
+        let default = list_threads_filtered(&db, 10, None).unwrap();
+        assert_eq!(
+            default.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            ["T-old-run", "T-old-done", "T-new-run", "T-new-done"]
+        );
+
+        // LIMIT applies AFTER watch ordering — the single row is the top active,
+        // not an arbitrary oldest row.
+        let top = list_threads_sorted(&db, 1, None, ThreadSort::Watch).unwrap();
+        assert_eq!(
+            top.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            ["T-new-run"]
+        );
+    }
+
+    /// Raw insert controlling kind and requested_by too, for filter assertions.
+    fn insert_thread_full(db: &ProjectionDb, id: &str, status: &str, kind: &str, requested_by: &str) {
+        db.connection()
+            .execute(
+                "INSERT INTO threads \
+                 (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
+                  launch_mode, current_site_id, origin_site_id, requested_by, created_at, updated_at) \
+                 VALUES (?1, ?1, ?2, ?3, 'directive:test', 'test/exec', \
+                  'inline', 'site:test', 'site:test', ?4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![id, kind, status, requested_by],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn thread_filters_narrow_by_status_kind_source_and_widen_when_unset() {
+        let db = test_db();
+        insert_thread_full(&db, "T-1", "running", "directive", "fp:claude");
+        insert_thread_full(&db, "T-2", "completed", "directive", "fp:amp");
+        insert_thread_full(&db, "T-3", "running", "graph", "fp:claude");
+
+        let ids = |rows: Vec<ThreadRow>| {
+            let mut v = rows.iter().map(|r| r.thread_id.clone()).collect::<Vec<_>>();
+            v.sort();
+            v
+        };
+
+        // No filter → all rows: an unset filter widens, never empties.
+        let all =
+            list_threads_query(&db, 10, &ThreadListFilter::default(), ThreadSort::Default).unwrap();
+        assert_eq!(ids(all), ["T-1", "T-2", "T-3"]);
+
+        // Each present dashboard filter narrows by substring, so a partial
+        // value (as a type-to-filter box produces) still matches.
+        let running = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                status: Some("run".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(running), ["T-1", "T-3"]);
+
+        let graph = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                kind: Some("graph".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(graph), ["T-3"]);
+
+        let amp = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                requested_by: Some("fp:amp".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(amp), ["T-2"]);
+
+        // Present filters are ANDed.
+        let combined = list_threads_query(
+            &db,
+            10,
+            &ThreadListFilter {
+                status: Some("running".into()),
+                requested_by: Some("fp:claude".into()),
+                ..Default::default()
+            },
+            ThreadSort::Default,
+        )
+        .unwrap();
+        assert_eq!(ids(combined), ["T-1", "T-3"]);
     }
 }

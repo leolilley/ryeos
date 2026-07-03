@@ -16,7 +16,10 @@
 //!   deserialize via [`crate::scalar_or_vec`] to accept both forms.
 //! - Empty input → `{}`
 
-use crate::command::{CommandArgumentKind, CommandArgumentSlot, CommandDef};
+use crate::command::{
+    CommandArgumentKind, CommandArgumentSlot, CommandDef, InvocationInputContract,
+    InvocationInputType,
+};
 
 /// Normalise a flag key: strip the `--` prefix (already done by caller)
 /// and replace hyphens with underscores so `--public-key` becomes `public_key`.
@@ -80,8 +83,19 @@ pub fn bind_argv_with_command(
     argv: &[String],
     command: Option<&CommandDef>,
 ) -> Result<serde_json::Value, String> {
+    bind_argv_with_command_and_contract(argv, command, None)
+}
+
+/// Command-aware binding plus optional kind-agnostic invocation contract
+/// normalization. Existing descriptor/form binding runs first; the contract
+/// then coerces and validates present top-level fields.
+pub fn bind_argv_with_command_and_contract(
+    argv: &[String],
+    command: Option<&CommandDef>,
+    contract: Option<&InvocationInputContract>,
+) -> Result<serde_json::Value, String> {
     let Some(command) = command else {
-        return Ok(bind_argv(argv));
+        return normalize_params_with_contract(bind_argv(argv), contract);
     };
 
     let mut value = bind_argv(argv);
@@ -91,11 +105,11 @@ pub fn bind_argv_with_command(
     if forms.is_empty() {
         apply_command_defaults(&mut value, command);
         reject_undeclared_positionals(&value, command)?;
-        return Ok(value);
+        return normalize_params_with_contract(value, contract);
     }
 
     let Some(obj) = value.as_object_mut() else {
-        return Ok(value);
+        return normalize_params_with_contract(value, contract);
     };
     let positionals: Vec<String> = obj
         .remove("_args")
@@ -124,7 +138,7 @@ pub fn bind_argv_with_command(
             })
         }) {
             apply_command_defaults(&mut value, command);
-            return Ok(value);
+            return normalize_params_with_contract(value, contract);
         }
         let required = forms
             .first()
@@ -180,7 +194,7 @@ pub fn bind_argv_with_command(
                     ),
                 );
                 apply_command_defaults(&mut value, command);
-                return Ok(value);
+                return normalize_params_with_contract(value, contract);
             }
         }
         if unset_slots.len() != positionals.len() {
@@ -198,7 +212,7 @@ pub fn bind_argv_with_command(
                 );
             }
             apply_command_defaults(&mut value, command);
-            return Ok(value);
+            return normalize_params_with_contract(value, contract);
         }
     }
 
@@ -206,6 +220,103 @@ pub fn bind_argv_with_command(
         "positional arguments {:?} do not match any positional form for alias {:?}",
         positionals, command.tokens
     ))
+}
+
+/// Normalize already-bound JSON parameters using a kind-agnostic input
+/// contract. Only present top-level fields are checked here; missing required
+/// fields remain the responsibility of the downstream item/handler contract.
+pub fn normalize_params_with_contract(
+    value: serde_json::Value,
+    contract: Option<&InvocationInputContract>,
+) -> Result<serde_json::Value, String> {
+    let Some(contract) = contract else {
+        return Ok(value);
+    };
+    let mut obj = match value {
+        serde_json::Value::Object(obj) => obj,
+        other => {
+            return Err(format!(
+                "invocation parameters must be an object when a schema contract is declared, got {}",
+                json_type(&other)
+            ))
+        }
+    };
+
+    for (field, decl) in &contract.fields {
+        let Some(raw) = obj.get(field).cloned() else {
+            continue;
+        };
+        let normalized = normalize_field_value(field, raw, decl.ty)?;
+        obj.insert(field.clone(), normalized);
+    }
+
+    Ok(serde_json::Value::Object(obj))
+}
+
+fn normalize_field_value(
+    field: &str,
+    value: serde_json::Value,
+    ty: InvocationInputType,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    match ty {
+        InvocationInputType::String => match value {
+            Value::String(_) => Ok(value),
+            other => Err(format!("--{} must be a string, got {}", flag_name(field), json_type(&other))),
+        },
+        InvocationInputType::Integer => match value {
+            Value::Number(n) if n.is_i64() || n.is_u64() => Ok(Value::Number(n)),
+            Value::String(s) => s
+                .parse::<i64>()
+                .map(|n| serde_json::json!(n))
+                .map_err(|_| format!("--{} must be an integer", flag_name(field))),
+            other => Err(format!("--{} must be an integer, got {}", flag_name(field), json_type(&other))),
+        },
+        InvocationInputType::Number => match value {
+            Value::Number(_) => Ok(value),
+            Value::String(s) => s
+                .parse::<serde_json::Value>()
+                .ok()
+                .and_then(|value| match value {
+                    Value::Number(_) => Some(value),
+                    _ => None,
+                })
+                .ok_or_else(|| format!("--{} must be a number", flag_name(field))),
+            other => Err(format!("--{} must be a number, got {}", flag_name(field), json_type(&other))),
+        },
+        InvocationInputType::Boolean => match value {
+            Value::Bool(_) => Ok(value),
+            Value::String(s) if s == "true" => Ok(Value::Bool(true)),
+            Value::String(s) if s == "false" => Ok(Value::Bool(false)),
+            Value::String(_) => Err(format!("--{} must be true or false", flag_name(field))),
+            other => Err(format!("--{} must be a boolean, got {}", flag_name(field), json_type(&other))),
+        },
+        InvocationInputType::Json => Ok(value),
+        InvocationInputType::Object => match value {
+            Value::Object(_) => Ok(value),
+            other => Err(format!("--{} must be an object, got {}", flag_name(field), json_type(&other))),
+        },
+        InvocationInputType::Array => match value {
+            Value::Array(_) => Ok(value),
+            Value::String(s) => Ok(Value::Array(vec![Value::String(s)])),
+            other => Err(format!("--{} must be an array, got {}", flag_name(field), json_type(&other))),
+        },
+    }
+}
+
+fn flag_name(field: &str) -> String {
+    field.replace('_', "-")
+}
+
+fn json_type(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn apply_command_defaults(value: &mut serde_json::Value, command: &CommandDef) {
@@ -588,6 +699,161 @@ mod tests {
         assert_eq!(result["schedule_id"], "daily");
         assert_eq!(result["params"]["skip_shows"], true);
         assert_eq!(result["params"]["limit"], 5000);
+    }
+
+    #[test]
+    fn command_contract_coerces_integer_flag_value() {
+        let command = test_command(vec!["thread".into(), "list".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "limit": "integer?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &["--limit".into(), "5".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["limit"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn command_contract_coerces_integer_equals_value() {
+        let command = test_command(vec!["thread".into(), "list".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "limit": "integer?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &["--limit=5".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["limit"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn command_contract_rejects_invalid_integer_value() {
+        let command = test_command(vec!["thread".into(), "list".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "limit": "integer?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let err = bind_argv_with_command_and_contract(
+            &["--limit".into(), "five".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("--limit must be an integer"));
+    }
+
+    #[test]
+    fn command_contract_coerces_boolean_value() {
+        let command = test_command(vec!["scheduler".into(), "list".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "enabled": "boolean?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &["--enabled".into(), "false".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["enabled"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn command_contract_keeps_declared_string_numeric_text() {
+        let command = test_command(vec!["demo".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "name": "string" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &["--name".into(), "5".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["name"], serde_json::json!("5"));
+    }
+
+    #[test]
+    fn command_contract_accepts_repeated_array_values() {
+        let command = test_command(vec!["remote".into(), "authorize".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "scopes": "string[]?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &[
+                "--scopes".into(),
+                "a".into(),
+                "--scopes".into(),
+                "b".into(),
+            ],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["scopes"], serde_json::json!(["a", "b"]));
+    }
+
+    #[test]
+    fn command_contract_promotes_single_array_value() {
+        let command = test_command(vec!["remote".into(), "authorize".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "scopes": "string[]?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &["--scopes".into(), "a".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["scopes"], serde_json::json!(["a"]));
+    }
+
+    #[test]
+    fn command_contract_rejects_non_object_parameters() {
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "limit": "integer?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let err = normalize_params_with_contract(
+            serde_json::json!(["not", "an", "object"]),
+            Some(&contract),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("invocation parameters must be an object"));
     }
 
     #[test]

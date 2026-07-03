@@ -26,6 +26,10 @@ use ryeos_engine::contracts::{
 use ryeos_engine::engine::Engine;
 use ryeos_state::UsageSubject;
 
+/// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
+/// can name the watch sort without a direct `ryeos-state` dependency.
+pub use ryeos_state::queries::{ThreadListFilter, ThreadSort};
+
 pub struct ThreadLifecycleService {
     state_store: Arc<StateStore>,
     kind_profiles: Arc<KindProfileRegistry>,
@@ -678,6 +682,7 @@ impl ThreadLifecycleService {
         &self,
         thread_id: &str,
         completion: &ExecutionCompletion,
+        managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
         let terminal_status = match completion.status {
             ThreadTerminalStatus::Completed => "completed",
@@ -768,6 +773,16 @@ impl ThreadLifecycleService {
         // a thread that completes — with or without a question — takes the
         // operator follow-up path. So finalize does NOT spawn a successor here.
 
+        self.record_follow_child_terminal(
+            &finalized.chain_root_id,
+            thread_id,
+            terminal_status,
+            completion.result.as_ref(),
+            completion.error.as_ref(),
+            completion.final_cost.as_ref(),
+            managed_envelope,
+        );
+
         Ok(finalized)
     }
 
@@ -781,6 +796,30 @@ impl ThreadLifecycleService {
         )
     )]
     pub fn finalize_thread(&self, params: &ThreadFinalizeParams) -> Result<ThreadDetail> {
+        // No canonical envelope on the generic path (cancel / reconcile / pre-run
+        // failure). A follow child that finalizes here degrades to a visible
+        // failure envelope; the normal follow terminal carries its envelope via
+        // the callback or `finalize_thread_with_managed_envelope`.
+        self.finalize_thread_inner(params, None)
+    }
+
+    /// Like [`finalize_thread`], but carries the runtime's canonical managed
+    /// envelope (outputs / warnings / raw cost). The executor-supervised fallback
+    /// finalization uses this so a followed child's structured return survives even
+    /// when the runtime exited without self-finalizing over the callback.
+    pub fn finalize_thread_with_managed_envelope(
+        &self,
+        params: &ThreadFinalizeParams,
+        managed_envelope: Value,
+    ) -> Result<ThreadDetail> {
+        self.finalize_thread_inner(params, Some(managed_envelope))
+    }
+
+    fn finalize_thread_inner(
+        &self,
+        params: &ThreadFinalizeParams,
+        managed_envelope: Option<Value>,
+    ) -> Result<ThreadDetail> {
         let persisted = self.state_store.finalize_thread(
             &params.thread_id,
             &FinalizeThreadRecord {
@@ -805,8 +844,139 @@ impl ThreadLifecycleService {
             params.result.as_ref(),
         );
 
-        self.get_thread(&params.thread_id)?
-            .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))
+        let finalized = self
+            .get_thread(&params.thread_id)?
+            .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))?;
+
+        self.record_follow_child_terminal(
+            &finalized.chain_root_id,
+            &params.thread_id,
+            terminal_status,
+            params.result.as_ref(),
+            params.error.as_ref(),
+            params.final_cost.as_ref(),
+            managed_envelope,
+        );
+
+        Ok(finalized)
+    }
+
+    /// After a thread finalizes, record its result on any follow waiter awaiting
+    /// this child chain. A `continued` finalize is an intermediate link in the
+    /// child's OWN continuation chain, not the terminal tail the parent awaits, so
+    /// it is skipped. This only stores the canonical envelope and flips the waiter
+    /// to `ready`; kicking the parent resume is the follow-resume path's job.
+    /// A no-op when no waiter awaits this chain (the common case).
+    #[allow(clippy::too_many_arguments)]
+    fn record_follow_child_terminal(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+        terminal_status: &str,
+        result: Option<&Value>,
+        error: Option<&Value>,
+        final_cost: Option<&ryeos_engine::contracts::FinalCost>,
+        managed_envelope: Option<Value>,
+    ) {
+        if terminal_status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
+            return;
+        }
+        // Prefer the canonical envelope carried through finalization (preserves
+        // outputs/warnings/raw cost). When none is present, this is a cancel /
+        // reconcile / pre-run finalize or an old runtime — only a REAL follow
+        // waiter needs a stored result, and it must be a visible in-band FAILURE
+        // (not a silently-empty success) so the parent resumes into on_error.
+        let envelope = match managed_envelope {
+            Some(env) => env,
+            None => match self.state_store.get_follow_waiter_by_child_chain(chain_root_id) {
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        thread_id,
+                        chain_root_id,
+                        "follow child finalized without a canonical envelope; storing a \
+                         DEGRADED FAILURE envelope (outputs/warnings unavailable)",
+                    );
+                    degraded_follow_envelope(terminal_status, result, error, final_cost)
+                }
+                // No waiter awaits this chain — nothing to record (the common,
+                // non-follow case). No noise.
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        thread_id,
+                        chain_root_id,
+                        error = %e,
+                        "failed to look up follow waiter for terminal recording",
+                    );
+                    return;
+                }
+            },
+        };
+        if let Err(e) = self.state_store.mark_follow_child_terminal(
+            chain_root_id,
+            thread_id,
+            terminal_status,
+            &envelope,
+        ) {
+            tracing::warn!(
+                thread_id,
+                chain_root_id,
+                error = %e,
+                "failed to record follow child terminal result",
+            );
+        }
+    }
+
+    /// Recover a `waiting` follow waiter whose child chain already reached a
+    /// non-continued terminal but was never recorded — the crash window between
+    /// persisting the child's terminal and `record_follow_child_terminal`.
+    /// `reconcile` proper cannot catch it (it skips terminal threads), so without
+    /// this the parent hangs forever. Synthesizes a DEGRADED FAILURE envelope from
+    /// the persisted terminal record (canonical outputs/warnings are gone after a
+    /// restart) and flips the waiter to `ready`. Returns the `follow_key` if it
+    /// flipped, so the caller can drive the parent resume; `None` if the chain is not
+    /// yet terminal or no `waiting` waiter awaits it.
+    pub fn recover_terminal_follow_child(
+        &self,
+        child_chain_root_id: &str,
+    ) -> Result<Option<String>> {
+        let waiter = match self
+            .state_store
+            .get_follow_waiter_by_child_chain(child_chain_root_id)?
+        {
+            Some(w) if w.phase == crate::runtime_db::follow_phase::WAITING => w,
+            _ => return Ok(None),
+        };
+        let chain = match self.get_chain(child_chain_root_id)? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        // The chain tail the parent awaits: a NON-continued terminal thread
+        // (`continued` links are intermediate handoffs of the child's own chain).
+        let terminal = chain.threads.iter().map(|v| &v.thread).find(|t| {
+            t.status != ryeos_state::objects::ThreadStatus::Continued.as_str()
+                && ryeos_state::objects::ThreadStatus::from_str_lossy(&t.status)
+                    .is_some_and(|s| s.is_terminal())
+        });
+        let terminal = match terminal {
+            Some(t) => t,
+            // Chain not yet terminal — reconcile's native resume / the finalize kick
+            // still own it; nothing to recover here.
+            None => return Ok(None),
+        };
+        let (result, error) = self
+            .get_thread_result(&terminal.thread_id)?
+            .map(|r| (r.result, r.error))
+            .unwrap_or((None, None));
+        let envelope =
+            degraded_follow_envelope(&terminal.status, result.as_ref(), error.as_ref(), None);
+        let flipped = self.state_store.mark_follow_child_terminal(
+            child_chain_root_id,
+            &terminal.thread_id,
+            &terminal.status,
+            &envelope,
+        )?;
+        Ok(flipped.then_some(waiter.follow_key))
     }
 
     fn update_scheduler_fire_on_thread_terminal(
@@ -1031,6 +1201,26 @@ impl ThreadLifecycleService {
         })
     }
 
+    /// Create a parent's follow-resume successor (created, NOT launched) and
+    /// settle the parent `continued` in one atomic op, then publish the resulting
+    /// events. The daemon follow keystone calls this to suspend the parent; the
+    /// successor is launched later, on child-terminal, by the follow-resume path.
+    /// Wraps the raw state-store op so event publishing stays a lifecycle concern.
+    pub fn create_follow_resume_successor(
+        &self,
+        successor: &NewThreadRecord,
+        source_thread_id: &str,
+        chain_root_id: &str,
+    ) -> Result<()> {
+        let persisted = self.state_store.create_follow_resume_successor(
+            successor,
+            source_thread_id,
+            chain_root_id,
+        )?;
+        self.publish_records(&persisted);
+        Ok(())
+    }
+
     #[tracing::instrument(
         level = "debug",
         name = "artifact:publish",
@@ -1105,6 +1295,39 @@ impl ThreadLifecycleService {
             .collect())
     }
 
+    /// As [`Self::list_thread_views_filtered`] but with an explicit sort — the
+    /// watch console requests [`ryeos_state::queries::ThreadSort::Watch`]
+    /// (active-first, newest) while the default list/CLI order is unchanged.
+    pub fn list_thread_views_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Vec<ThreadListView>> {
+        Ok(self
+            .state_store
+            .list_threads_sorted(limit, filter_principal, sort)?
+            .into_iter()
+            .map(|item| self.decorate_list_item(item))
+            .collect())
+    }
+
+    /// As [`Self::list_thread_views_sorted`] but with the full optional filter
+    /// set (status / kind / requested_by) the operator dashboard narrows by.
+    pub fn list_thread_views_query(
+        &self,
+        limit: usize,
+        filter: &ryeos_state::queries::ThreadListFilter,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Vec<ThreadListView>> {
+        Ok(self
+            .state_store
+            .list_threads_query(limit, filter, sort)?
+            .into_iter()
+            .map(|item| self.decorate_list_item(item))
+            .collect())
+    }
+
     /// `threads.list` service envelope: the decorated rows plus a cursor.
     pub fn list_threads_filtered(
         &self,
@@ -1147,6 +1370,71 @@ fn normalize_terminal_status(status: &str) -> Result<&str> {
         "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued" => Ok(status),
         other => bail!("invalid terminal status: {other}"),
     }
+}
+
+/// Build the native managed-dispatch envelope shape
+/// (`{success, status, result, outputs, warnings, cost}`) from a runtime's RAW
+/// terminal fields, so a stored follow result classifies byte-for-byte like a live
+/// child dispatch. `raw_cost` is the runtime's own cost object (not the lossy
+/// re-serialized `FinalCost`). A failure carries its cause in `result` (the native
+/// envelope has no separate error field).
+pub fn managed_runtime_envelope(
+    status: &str,
+    result: Option<&Value>,
+    error: Option<&Value>,
+    raw_cost: Option<&Value>,
+    outputs: &Value,
+    warnings: &[String],
+) -> Value {
+    let success = status == ryeos_state::objects::ThreadStatus::Completed.as_str();
+    let payload = result.or(error).cloned().unwrap_or(Value::Null);
+    json!({
+        "success": success,
+        "status": status,
+        "result": payload,
+        "outputs": outputs,
+        "warnings": warnings,
+        "cost": raw_cost.cloned(),
+    })
+}
+
+/// Marker code stored in a degraded follow envelope's result + warnings so the
+/// loss of the canonical envelope is visible in-band, not just in logs.
+pub const DEGRADED_FOLLOW_ENVELOPE_CODE: &str = "degraded_follow_child_terminal_envelope";
+
+/// Build a DEGRADED FAILURE envelope for a follow child that finalized without a
+/// canonical runtime envelope (outputs/warnings unavailable — e.g. a cancel /
+/// reconcile / pre-run finalize, or an old runtime). Deliberately `success:false`
+/// so the parent's resume takes its child-failure / on_error path rather than
+/// resuming with silently-missing outputs. Used ONLY when a real waiter would
+/// otherwise consume an unmarked result.
+fn degraded_follow_envelope(
+    child_status: &str,
+    child_result: Option<&Value>,
+    child_error: Option<&Value>,
+    final_cost: Option<&ryeos_engine::contracts::FinalCost>,
+) -> Value {
+    let raw_cost = final_cost.map(|c| {
+        json!({
+            "input_tokens": c.input_tokens,
+            "output_tokens": c.output_tokens,
+            "total_usd": c.spend,
+        })
+    });
+    json!({
+        "success": false,
+        "status": "failed",
+        "result": {
+            "code": DEGRADED_FOLLOW_ENVELOPE_CODE,
+            "message": "follow child finalized without a canonical runtime envelope; \
+                        outputs/warnings unavailable",
+            "child_status": child_status,
+            "child_result": child_result.or(child_error).cloned().unwrap_or(Value::Null),
+        },
+        "outputs": Value::Null,
+        "warnings": [DEGRADED_FOLLOW_ENVELOPE_CODE],
+        "cost": raw_cost,
+    })
 }
 
 fn validate_kind(kind: &str, profiles: &KindProfileRegistry) -> Result<()> {
@@ -1693,6 +1981,42 @@ fn map_to_thread_kind(canonical_kind: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_envelope_is_native_success_with_outputs_and_cost() {
+        let result = json!("directive_return");
+        let outputs = json!({ "answer": 42 });
+        let raw_cost = json!({ "input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012 });
+        let env = managed_runtime_envelope(
+            "completed",
+            Some(&result),
+            None,
+            Some(&raw_cost),
+            &outputs,
+            &["w1".to_string()],
+        );
+        assert_eq!(env["success"], json!(true));
+        assert_eq!(env["status"], json!("completed"));
+        assert_eq!(env["result"], result);
+        // Structured outputs + warnings are preserved verbatim (raw cost too).
+        assert_eq!(env["outputs"], outputs);
+        assert_eq!(env["warnings"], json!(["w1"]));
+        assert_eq!(env["cost"]["input_tokens"], json!(120));
+    }
+
+    #[test]
+    fn degraded_envelope_is_visible_failure() {
+        let child_result = json!({ "answer": 42 });
+        let env = degraded_follow_envelope("completed", Some(&child_result), None, None);
+        // A lost canonical envelope becomes a visible in-band FAILURE so the parent
+        // resumes into on_error, not a silent empty success.
+        assert_eq!(env["success"], json!(false));
+        assert_eq!(env["status"], json!("failed"));
+        assert_eq!(env["result"]["code"], json!(DEGRADED_FOLLOW_ENVELOPE_CODE));
+        assert_eq!(env["result"]["child_status"], json!("completed"));
+        assert_eq!(env["result"]["child_result"], child_result);
+        assert_eq!(env["cost"], json!(null));
+    }
 
     #[test]
     fn validate_thread_id_accepts_valid_format() {

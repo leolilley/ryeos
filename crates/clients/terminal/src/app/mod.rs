@@ -27,6 +27,7 @@ pub async fn run(
     project_path: &str,
     read_only: bool,
     loaded_surface: LoadedSurface,
+    diagnostics: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = DaemonClient::try_connect().await?;
     let surface_ref = loaded_surface
@@ -58,6 +59,13 @@ pub async fn run(
     });
     dispatch_effects(&mut core, &client, start_effects).await;
 
+    // Surface startup diagnostics (surface/view resolution warnings) as in-TUI
+    // notices. Otherwise they print to stderr BEFORE the alternate screen is
+    // entered, so they scroll off above the render where they can't be read.
+    for message in diagnostics {
+        core.notice(message, ryeos_client_base::studio::view_model::StudioTone::Warn);
+    }
+
     // The seat is itself a thread: braided, owned, replayable. Reattach
     // to the latest running owned seat for this surface when possible;
     // otherwise open one. Mirror every new local seat event into its
@@ -81,6 +89,9 @@ pub async fn run(
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    // A live-filter edit defers its list refetch to the tick (debounce), so
+    // typing a filter never blocks on a per-keystroke daemon round-trip.
+    let mut feed_dirty = false;
 
     loop {
         if dirty {
@@ -113,7 +124,17 @@ pub async fn run(
                         if should_quit(&core, &key) {
                             break;
                         }
+                        let before = core.focused_input_buffer().map(|b| b.text.clone());
                         let effects = handle_key(&mut core, key);
+                        // A live-filter edit applies instantly but returns no
+                        // effects — its list refetch is debounced to the tick so
+                        // typing never blocks on a daemon round-trip per key.
+                        if effects.is_empty()
+                            && core.key_context().input_is_live_filter
+                            && core.focused_input_buffer().map(|b| b.text.clone()) != before
+                        {
+                            feed_dirty = true;
+                        }
                         dispatch_effects(&mut core, &client, effects).await;
                         sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
                         dirty = true;
@@ -151,6 +172,12 @@ pub async fn run(
                 }
             }
             _ = tick.tick() => {
+                // Flush a debounced live-filter refetch once typing has settled.
+                if feed_dirty {
+                    feed_dirty = false;
+                    let effects = core.refresh_focused_feeds();
+                    dispatch_effects(&mut core, &client, effects).await;
+                }
                 let effects = core.dispatch(StudioEvent::Tick { now_ms: now_ms() });
                 dispatch_effects(&mut core, &client, effects).await;
                 sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;

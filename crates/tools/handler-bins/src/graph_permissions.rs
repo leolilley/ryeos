@@ -222,7 +222,7 @@ mod tests {
     }
 
     fn manifest(inner: Value) -> Value {
-        json!({ "requires": { "capabilities": { "manifest": inner } } })
+        json!({ "requires": { "capabilities": { "manifest": { "runtime_authority": inner } } } })
     }
 
     #[test]
@@ -235,12 +235,33 @@ mod tests {
     }
 
     #[test]
-    fn manifest_unknown_key_rejected() {
-        let err = compose_err(manifest(json!({ "frob": [] })));
+    fn manifest_stray_key_rejected() {
+        // Only `runtime_authority` may sit directly under `manifest`.
+        let err = compose_err(json!({ "requires": { "capabilities": {
+            "manifest": { "frob": [] }
+        } } }));
         assert!(
             err.contains("unknown key `requires.capabilities.manifest.frob`"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn manifest_unknown_family_rejected() {
+        let err = compose_err(manifest(json!({ "frob": [] })));
+        assert!(
+            err.contains("unknown key `requires.capabilities.manifest.runtime_authority.frob`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn manifest_item_authoring_passes() {
+        let view = run(manifest(json!({
+            "item_authoring": [{ "kind": "knowledge", "namespace": "runtime-authored/*" }]
+        })));
+        // Runtime authority is minted at launch, never lifted into effective_caps.
+        assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());
     }
 
     #[test]
