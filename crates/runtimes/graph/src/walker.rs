@@ -252,7 +252,6 @@ struct CommitStepInput<'a> {
     pub suppressed_errors: &'a mut Vec<ErrorRecord>,
     pub outcome: StepOutcome,
     pub guard: &'a mut RunGuard,
-    pub hook_list: &'a [Value],
     pub inputs: &'a Value,
     pub execution: &'a Value,
 }
@@ -265,7 +264,6 @@ struct CommitTerminalInput<'a> {
     pub base_status: &'a str,
     pub error: Option<&'a str>,
     pub guard: &'a mut RunGuard,
-    pub hook_list: &'a [Value],
     pub current_node_id: &'a str,
     /// Graph inputs, threaded so a return node's `output` template can
     /// resolve `${inputs.*}` (not just `${state.*}`).
@@ -486,7 +484,6 @@ impl Walker {
         let mut receipts: Vec<NodeReceipt> = Vec::new();
         let cache = NodeCache::new(&self.graph.graph_id);
 
-        let hook_list: Vec<Value> = self.graph.config.hooks.clone().unwrap_or_default();
 
         // Resume state injected by main.rs (from the checkpoint or event
         // replay). main.rs owns the cold-start decision when RYEOS_RESUME=1.
@@ -603,7 +600,6 @@ impl Walker {
                             suppressed_errors: &mut suppressed_errors,
                             outcome,
                             guard: &mut guard,
-                            hook_list: &hook_list,
                             inputs: &inputs,
                             execution: &execution_context,
                         })
@@ -640,7 +636,6 @@ impl Walker {
                     suppressed_errors: &mut suppressed_errors,
                     outcome,
                     guard: &mut guard,
-                    hook_list: &hook_list,
                     inputs: &inputs,
                     execution: &execution_context,
                 })
@@ -677,7 +672,6 @@ impl Walker {
                     suppressed_errors: &mut suppressed_errors,
                     outcome,
                     guard: &mut guard,
-                    hook_list: &hook_list,
                     inputs: &inputs,
                     execution: &execution_context,
                 })
@@ -710,7 +704,6 @@ impl Walker {
                     suppressed_errors: &mut suppressed_errors,
                     outcome,
                     guard: &mut guard,
-                    hook_list: &hook_list,
                     inputs: &inputs,
                     execution: &execution_context,
                 })
@@ -1234,7 +1227,6 @@ impl Walker {
             suppressed_errors,
             outcome,
             guard,
-            hook_list,
             inputs,
             execution,
         } = input;
@@ -1269,7 +1261,6 @@ impl Walker {
                             base_status: "error",
                             error: Some(&msg),
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1329,7 +1320,6 @@ impl Walker {
                             base_status: "error",
                             error: Some(&msg),
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1347,7 +1337,6 @@ impl Walker {
                     base_status: status,
                     error: error.as_deref(),
                     guard,
-                    hook_list,
                     current_node_id: current,
                     inputs,
                     execution,
@@ -1374,7 +1363,6 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
-                            hook_list,
                         )
                         .await
                     }
@@ -1387,7 +1375,6 @@ impl Walker {
                             base_status: "completed",
                             error: None,
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1477,7 +1464,6 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
-                            hook_list,
                         )
                         .await
                     }
@@ -1490,7 +1476,6 @@ impl Walker {
                             base_status: "completed",
                             error: None,
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1565,7 +1550,6 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
-                            hook_list,
                         )
                         .await
                     }
@@ -1578,7 +1562,6 @@ impl Walker {
                             base_status: "completed",
                             error: None,
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1642,7 +1625,6 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
-                            hook_list,
                         )
                         .await
                     }
@@ -1668,7 +1650,6 @@ impl Walker {
                                     state,
                                     suppressed_errors,
                                     guard,
-                                    hook_list,
                                 )
                                 .await
                             }
@@ -1681,7 +1662,6 @@ impl Walker {
                                     base_status: "completed",
                                     error: None,
                                     guard,
-                                    hook_list,
                                     current_node_id: current,
                                     inputs,
                                     execution,
@@ -1699,7 +1679,6 @@ impl Walker {
                             base_status: "error",
                             error: Some(&format!("node '{}' failed: {}", current, error)),
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1772,7 +1751,6 @@ impl Walker {
                             state,
                             suppressed_errors,
                             guard,
-                            hook_list,
                         )
                         .await
                     }
@@ -1797,7 +1775,6 @@ impl Walker {
                                     state,
                                     suppressed_errors,
                                     guard,
-                                    hook_list,
                                 )
                                 .await
                             }
@@ -1810,7 +1787,6 @@ impl Walker {
                                     base_status: "completed",
                                     error: None,
                                     guard,
-                                    hook_list,
                                     current_node_id: current,
                                     inputs,
                                     execution,
@@ -1828,7 +1804,6 @@ impl Walker {
                             base_status: "error",
                             error: Some(&format!("node '{}' failed: {}", current, error)),
                             guard,
-                            hook_list,
                             current_node_id: current,
                             inputs,
                             execution,
@@ -1852,7 +1827,6 @@ impl Walker {
             base_status,
             error,
             guard,
-            hook_list: _hook_list,
             current_node_id,
             inputs,
             execution,
@@ -2025,7 +1999,6 @@ impl Walker {
         state: &Value,
         suppressed_errors: &[ErrorRecord],
         guard: &mut RunGuard,
-        _hook_list: &[Value],
     ) -> CommitResult {
         if let Err(e) = self
             .write_checkpoint(graph_run_id, next_node, next_step, state, suppressed_errors)

@@ -40,6 +40,15 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
             .push("config.nodes is empty — at least one node is required".into());
     }
 
+    // A `hooks:` block is parsed but not yet executed by the walker. Reject a
+    // non-empty list loudly so an author never believes an authored hook is
+    // firing when nothing reads it.
+    if cfg.hooks.as_ref().is_some_and(|h| !h.is_empty()) {
+        result
+            .errors
+            .push("graph hooks are not yet wired; remove the block".into());
+    }
+
     // Bundle-event / vault capabilities are runtime authority: a signed manifest
     // mints them; a graph's `permissions:` cannot. Surface the SAME refusals the
     // daemon applies at cap-assembly time — both well-formed reserved grants AND
@@ -446,6 +455,56 @@ config:
             .errors
             .iter()
             .any(|e| e.contains("config.nodes is empty")));
+    }
+
+    #[test]
+    fn validate_graph_rejects_non_empty_hooks_block() {
+        // Authored `hooks:` are not executed by the walker; a non-empty list
+        // is rejected rather than silently ignored.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: obs
+      event: graph_completed
+      action: {item_id: "tool:test/echo"}
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("hooks are not yet wired")),
+            "expected non-empty hooks rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_allows_absent_hooks_block() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.contains("hooks are not yet wired")),
+            "absent hooks must not trip the rejection: {:?}",
+            result.errors
+        );
     }
 
     #[test]
