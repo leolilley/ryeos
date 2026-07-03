@@ -111,7 +111,9 @@ fn run_times_out_and_terminates() {
 
 #[test]
 fn spawn_then_wait_returns_output() {
-    let running = spawn(sh(&["-c", "printf done"])).expect("spawn");
+    let Ok(running) = spawn(sh(&["-c", "printf done"])) else {
+        panic!("spawn failed");
+    };
     let r = running.wait();
     assert!(r.success);
     assert_eq!(r.stdout, "done");
@@ -121,7 +123,9 @@ fn spawn_then_wait_returns_output() {
 fn spawned_process_is_alive_then_reaped() {
     let mut request = sh(&["-c", "sleep 1"]);
     request.envs = path_env();
-    let running = spawn(request).expect("spawn");
+    let Ok(running) = spawn(request) else {
+        panic!("spawn failed");
+    };
     let pid = running.pid;
 
     assert!(is_alive(pid), "process must be alive while running");

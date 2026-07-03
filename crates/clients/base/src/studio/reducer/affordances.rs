@@ -1,6 +1,5 @@
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::model::StudioCore;
-use crate::ids::TileId;
 use crate::workspace::ViewSpec;
 
 impl StudioCore {
@@ -409,7 +408,7 @@ mod tests {
         // affordance drills a row into its braid.
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         let binding: crate::studio::content::ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
+            "../../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
         ))
         .unwrap();
         core.views
@@ -475,7 +474,7 @@ mod tests {
         // (`service:ui/studio/thread/cancel`, `service:threads/cancel`) must be
         // gone from every affordance in the view.
         let binding: crate::studio::content::ViewBinding = serde_yaml::from_str(include_str!(
-            "../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
+            "../../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
         ))
         .unwrap();
 

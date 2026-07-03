@@ -558,7 +558,7 @@ fn row_is_suspended_parent(row: &serde_json::Value) -> bool {
 
 /// A route-chain target the input can cycle onto.
 #[derive(Debug, Clone, PartialEq)]
-enum TargetSlot {
+pub(crate) enum TargetSlot {
     /// No target thread/root — a submit starts a fresh chain.
     NewConversation,
     /// Braid onto an existing chain: `head` is the turn the next submit

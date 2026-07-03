@@ -1,19 +1,13 @@
 //! Shared test fixtures for the reducer cluster test modules.
 
-pub(crate) use crate::ids::TileId;
 pub(crate) use crate::studio::dto::StudioThreadsDto;
 pub(crate) use crate::studio::effect::{
-    InvokeRef, StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind,
+    StudioEffectKind, StudioEffectResult, StudioEffectResultKind,
 };
-pub(crate) use crate::studio::event::{
-    StudioAction, StudioEvent, StudioFilterField, StudioStackMoveDirection, StudioUiEvent,
-};
+pub(crate) use crate::studio::event::{StudioAction, StudioEvent, StudioUiEvent};
 pub(crate) use crate::studio::model::{BrowserSession, BrowserViewport, StudioCore};
-pub(crate) use crate::studio::view_model::{
-    action_for_focused_row, build_view_model, launcher_items, launcher_items_for,
-    StudioMotionEventVm, StudioSplitAxisVm, StudioTone,
-};
-pub(crate) use crate::workspace::{ArrangeSpec, FocusDirection, ViewLocalState, ViewSpec};
+pub(crate) use crate::studio::view_model::{build_view_model, launcher_items};
+pub(crate) use crate::workspace::{FocusDirection, ViewSpec};
 
     pub(crate) fn session() -> BrowserSession {
         BrowserSession {

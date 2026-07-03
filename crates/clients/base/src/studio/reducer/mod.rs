@@ -28,7 +28,6 @@ use super::effect::{StudioEffect, StudioEffectKind};
 use super::event::{StudioAction, StudioEvent, StudioStackMoveDirection, StudioUiEvent};
 use super::model::StudioCore;
 use super::view_model::{action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioTone};
-use crate::ids::TileId;
 use crate::workspace::{ViewSpec};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
 
@@ -764,7 +763,6 @@ fn route_for_view(view: &ViewSpec) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::studio::reducer::test_support::*;
 
     #[test]

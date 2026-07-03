@@ -238,7 +238,8 @@ async fn graph_segment_cuts_resume_across_multiple_continuations() {
     let exec = spawn_execute(&h, project.path(), "graph:segment_chain");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let events = poll_until_completed(&h.state_path, deadline, &mut h).await;
+    let state_path = h.state_path.clone();
+    let events = poll_until_completed(&state_path, deadline, &mut h).await;
     exec.abort();
 
     // The chain reached a clean terminal.
@@ -301,7 +302,8 @@ async fn graph_retry_attempt_count_survives_a_segment_cut() {
     let exec = spawn_execute(&h, project.path(), "graph:retry_segment");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let events = poll_until_completed(&h.state_path, deadline, &mut h).await;
+    let state_path = h.state_path.clone();
+    let events = poll_until_completed(&state_path, deadline, &mut h).await;
     exec.abort();
 
     // The run terminated (the exhausted retry routed to the recover return node).

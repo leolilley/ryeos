@@ -2085,6 +2085,7 @@ fn tile_id_text(id: TileId) -> String {
 mod tests {
     use super::*;
     use crate::studio::content::{ProjectedRecord, TimelineRole};
+    use crate::studio::{StudioEvent, StudioUiEvent};
     use serde_json::json;
 
     fn record(
