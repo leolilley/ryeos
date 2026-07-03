@@ -491,6 +491,7 @@ mod tests {
         async fn complete_command(
             &self,
             _: &str,
+            _: i64,
             _: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {
@@ -584,6 +585,7 @@ mod tests {
         async fn complete_command(
             &self,
             _: &str,
+            _: i64,
             _: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {

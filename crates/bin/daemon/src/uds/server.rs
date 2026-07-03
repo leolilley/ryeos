@@ -787,14 +787,34 @@ fn handle_claim_commands(
         .context("failed to encode commands.claim result")
 }
 
+/// Runtime-facing params for `runtime.complete_command`. Unlike the service-side
+/// `CommandCompleteParams`, it carries `thread_id` — validated against the
+/// callback token at the exact-thread trust boundary before this handler runs —
+/// which is then dropped when mapping to the service params.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCompleteCommandParams {
+    #[allow(dead_code)]
+    thread_id: String,
+    command_id: i64,
+    status: String,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+}
+
 fn handle_complete_command(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
-    let params: CommandCompleteParams =
-        serde_json::from_value(params.clone()).context("invalid commands.complete params")?;
-    serde_json::to_value(state.commands.complete(&params)?)
-        .context("failed to encode commands.complete result")
+    let rt: RuntimeCompleteCommandParams = serde_json::from_value(params.clone())
+        .context("invalid runtime.complete_command params")?;
+    let complete = CommandCompleteParams {
+        command_id: rt.command_id,
+        status: rt.status,
+        result: rt.result,
+    };
+    serde_json::to_value(state.commands.complete(&complete)?)
+        .context("failed to encode runtime.complete_command result")
 }
 
 fn handle_publish_artifact(

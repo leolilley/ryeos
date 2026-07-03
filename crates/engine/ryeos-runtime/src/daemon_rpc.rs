@@ -326,16 +326,16 @@ impl ThreadLifecycleClient {
 
     pub async fn complete_command(
         &self,
-        thread_id: &str,
-        command_id: &str,
+        command_id: i64,
+        status: &str,
         result: Value,
     ) -> Result<Value, RpcError> {
         self.rpc
             .request(
                 "commands.complete",
                 serde_json::json!({
-                    "thread_id": thread_id,
                     "command_id": command_id,
+                    "status": status,
                     "result": result,
                 }),
             )
