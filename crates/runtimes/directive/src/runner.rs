@@ -179,6 +179,61 @@ fn record_callback_warning(
     }
 }
 
+/// Where a turn's computed cost came from — lets the run loop flag untracked
+/// spend and one-time provider-default fallbacks (§2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PricingSource {
+    /// A per-model pricing entry matched `model_name`.
+    PerModel,
+    /// No per-model entry; the provider-level default rates were used.
+    ProviderDefault,
+    /// No pricing configured at all, or configured but with no rate for the
+    /// model — cost could not be computed and is reported as `$0`.
+    Unpriced,
+}
+
+/// A computed turn cost plus its pricing provenance.
+struct CostBreakdown {
+    usd: f64,
+    source: PricingSource,
+}
+
+/// Decide whether a failed provider call should be retried, and if so, how long
+/// to back off first (§1). Returns `None` when the error is not retryable or the
+/// retry budget (`execution.retries`) is spent.
+///
+/// Only a [`ProviderStreamError`](crate::provider_adapter::ProviderStreamError)
+/// is retryable — the adapter classifies these as pre-stream failures, so a
+/// retry cannot duplicate a persisted cognition_out. `never_retry` (status
+/// codes as strings) is an absolute denylist that overrides
+/// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
+/// (`base * 2^attempt`).
+fn retry_backoff(
+    err: &anyhow::Error,
+    attempt: u32,
+    execution: &ExecutionConfig,
+) -> Option<std::time::Duration> {
+    use crate::provider_adapter::ProviderStreamError;
+
+    if attempt >= execution.retries {
+        return None;
+    }
+    let retryable = match err.downcast_ref::<ProviderStreamError>() {
+        Some(ProviderStreamError::Status { code, .. }) => {
+            !execution.never_retry.contains(&code.to_string())
+                && execution.retry_status_codes.contains(code)
+        }
+        Some(ProviderStreamError::Timeout { .. }) => execution.retry_on_timeout,
+        None => false,
+    };
+    if !retryable {
+        return None;
+    }
+    let factor = 1u64 << attempt.min(16);
+    let delay_ms = execution.backoff_base_ms.saturating_mul(factor);
+    Some(std::time::Duration::from_millis(delay_ms))
+}
+
 fn normalize_hook_dispatch_result(
     result: Value,
 ) -> Result<Value, ryeos_runtime::callback::CallbackError> {
@@ -407,6 +462,12 @@ impl Runner {
         // operator can see contract drift (rejected event names,
         // transport hiccups, etc.).
         let mut warnings: Vec<String> = Vec::new();
+        // §2: the provider-default fallback and the untracked-cost condition are
+        // steady-state per run (a run has one model + one pricing config), so
+        // each contributes at most one entry to `warnings`. The per-turn
+        // `tracing::warn!` still fires every turn for log visibility.
+        let mut provider_default_pricing_logged = false;
+        let mut cost_untracked_warned = false;
 
         loop {
             state = match state {
@@ -459,13 +520,6 @@ impl Runner {
                         continue;
                     }
 
-                    if self.budget.is_exhausted() {
-                        state = State::Errored {
-                            error: "budget_exceeded".to_string(),
-                        };
-                        continue;
-                    }
-
                     let cancel_flag = self.harness.cancelled_flag();
                     // Clear any interrupt requested OUTSIDE active streaming (e.g.
                     // during tool dispatch or between turns): that input has
@@ -501,33 +555,165 @@ impl Runner {
                             visible_tools_owned.push(build_directive_return_tool(outputs));
                         }
                     }
-                    match crate::provider_adapter::call_provider_streaming(
-                        crate::provider_adapter::StreamingCallInput {
-                            client: &self.http_client,
-                            provider: &self.provider_config,
-                            provider_id: &self.provider_id,
-                            matched_profile: self.matched_profile.as_deref(),
-                            config_hash: &self.config_hash,
-                            execution: &self.execution,
-                            model: &self.model_name,
-                            messages: &self.messages,
-                            tools: &visible_tools_owned,
-                            callback: &self.callback,
-                            turn,
-                            sampling: self.sampling.as_ref(),
-                            cancel_flag: Some(cancel_flag),
-                            interrupt_flag: Some(interrupt_flag),
-                        },
-                    )
-                    .await
-                    {
+                    // §1 retry loop. A retryable provider failure (a configured
+                    // HTTP status or a send timeout) is re-attempted with
+                    // exponential backoff. Both classes are classified at the
+                    // source as occurring STRICTLY BEFORE any SSE byte — the HTTP
+                    // status check and the send timeout both precede stream
+                    // consumption — so a retry can never duplicate an
+                    // already-persisted cognition_out. This is the explicit
+                    // persistence-first decision: retry ONLY errors before first
+                    // content; any failure surfacing after the stream opens is
+                    // not a `ProviderStreamError`, so `retry_backoff` returns
+                    // `None` and it routes to `State::Errored` unchanged.
+                    //
+                    // Budget is re-checked before every attempt so a retry never
+                    // pushes spend past the wall. `record_turn`/`emit_turn_start`
+                    // ran once above — a retry is a transparent re-attempt of the
+                    // SAME turn, not a new one. Each retry is logged (tracing +
+                    // a run warning surfaced on `RuntimeResult.warnings`) so the
+                    // stall is visible instead of silent.
+                    let mut attempt: u32 = 0;
+                    let stream_result = loop {
+                        if self.budget.is_exhausted() {
+                            break Err(anyhow::anyhow!("budget_exceeded"));
+                        }
+                        let call = crate::provider_adapter::call_provider_streaming(
+                            crate::provider_adapter::StreamingCallInput {
+                                client: &self.http_client,
+                                provider: &self.provider_config,
+                                provider_id: &self.provider_id,
+                                matched_profile: self.matched_profile.as_deref(),
+                                config_hash: &self.config_hash,
+                                execution: &self.execution,
+                                model: &self.model_name,
+                                messages: &self.messages,
+                                tools: &visible_tools_owned,
+                                callback: &self.callback,
+                                turn,
+                                sampling: self.sampling.as_ref(),
+                                cancel_flag: Some(cancel_flag.clone()),
+                                interrupt_flag: Some(interrupt_flag.clone()),
+                            },
+                        )
+                        .await;
+                        match call {
+                            Err(e) => match retry_backoff(&e, attempt, &self.execution) {
+                                Some(delay) => {
+                                    attempt += 1;
+                                    tracing::warn!(
+                                        turn,
+                                        attempt,
+                                        max_retries = self.execution.retries,
+                                        backoff_ms = delay.as_millis() as u64,
+                                        error = %e,
+                                        "provider call failed with a retryable error; \
+                                         backing off before retry"
+                                    );
+                                    warnings.push(format!(
+                                        "provider retry {attempt}/{max} on turn {turn} \
+                                         after {ms}ms backoff: {e}",
+                                        max = self.execution.retries,
+                                        ms = delay.as_millis(),
+                                    ));
+                                    // Durable braid record so the stall shows in
+                                    // the timeline, not just the terminal warning
+                                    // summary. `provider_retry` is a canonical
+                                    // RuntimeEventType (ryeos-runtime events.rs).
+                                    record_callback_warning(
+                                        &mut warnings,
+                                        "provider_retry",
+                                        self.callback
+                                            .append_event(
+                                                "provider_retry",
+                                                json!({
+                                                    "turn": turn,
+                                                    "attempt": attempt,
+                                                    "max_retries": self.execution.retries,
+                                                    "backoff_ms": delay.as_millis() as u64,
+                                                    "error": e.to_string(),
+                                                }),
+                                            )
+                                            .await,
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                None => break Err(e),
+                            },
+                            ok => break ok,
+                        }
+                    };
+                    match stream_result {
                         Ok(crate::provider_adapter::StreamOutcome::Completed {
                             response: resp,
                             events,
                         }) => {
                             let input_tok = resp.usage.as_ref().map_or(0, |u| u.input_tokens);
                             let output_tok = resp.usage.as_ref().map_or(0, |u| u.output_tokens);
-                            let usd = self.compute_cost(input_tok, output_tok);
+                            let cost = self.compute_cost(input_tok, output_tok);
+                            let usd = cost.usd;
+                            // §2: an operator auditing spend must be able to tell
+                            // "free" from "untracked", and know when a model's
+                            // cost came from provider-default rates rather than a
+                            // per-model entry. Default policy is warn (not
+                            // fail-closed): missing pricing does not error the
+                            // turn — it records a loud signal and keeps running.
+                            match cost.source {
+                                PricingSource::Unpriced => {
+                                    if input_tok + output_tok > 0 {
+                                        tracing::warn!(
+                                            model = %self.model_name,
+                                            provider_id = %self.provider_id,
+                                            input_tokens = input_tok,
+                                            output_tokens = output_tok,
+                                            "turn consumed tokens but computed cost is $0 — no \
+                                             pricing configured for this model; spend is untracked"
+                                        );
+                                        if !cost_untracked_warned {
+                                            cost_untracked_warned = true;
+                                            warnings.push(format!(
+                                                "cost untracked: turns consumed tokens but no \
+                                                 pricing is configured for model `{model}`; \
+                                                 spend is recorded as $0 (first seen turn {turn})",
+                                                model = self.model_name,
+                                            ));
+                                            // Braid record so an operator auditing
+                                            // spend can see the untracked turn inline.
+                                            // `cost_untracked` is a canonical
+                                            // RuntimeEventType (ryeos-runtime events.rs).
+                                            record_callback_warning(
+                                                &mut warnings,
+                                                "cost_untracked",
+                                                self.callback
+                                                    .append_event(
+                                                        "cost_untracked",
+                                                        json!({
+                                                            "turn": turn,
+                                                            "model": self.model_name,
+                                                            "input_tokens": input_tok,
+                                                            "output_tokens": output_tok,
+                                                            "reason": "pricing_missing",
+                                                        }),
+                                                    )
+                                                    .await,
+                                            );
+                                        }
+                                    }
+                                }
+                                PricingSource::ProviderDefault => {
+                                    if !provider_default_pricing_logged {
+                                        provider_default_pricing_logged = true;
+                                        tracing::info!(
+                                            model = %self.model_name,
+                                            provider_id = %self.provider_id,
+                                            "model has no per-model pricing entry; costing this \
+                                             run at provider-default rates"
+                                        );
+                                    }
+                                }
+                                PricingSource::PerModel => {}
+                            }
 
                             let proposed_usage = ryeos_state::ThreadUsage {
                                 completed_turns: self.harness.turns_used(),
@@ -1508,16 +1694,40 @@ impl Runner {
         })
     }
 
-    fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> f64 {
+    fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> CostBreakdown {
         let Some(ref pricing) = self.provider_config.pricing else {
-            return 0.0;
+            return CostBreakdown {
+                usd: 0.0,
+                source: PricingSource::Unpriced,
+            };
         };
-        let Some(rates) = pricing.for_model(&self.model_name) else {
-            return 0.0;
+        // Distinguish a per-model entry from the provider-default fallback so
+        // the caller can flag the (otherwise silent) fallback exactly once.
+        let (rates, source) = if let Some(p) = pricing.models.get(&self.model_name) {
+            (p.clone(), PricingSource::PerModel)
+        } else {
+            match (pricing.input_per_million, pricing.output_per_million) {
+                (Some(i), Some(o)) => (
+                    ryeos_runtime::model_resolution::ModelPricing {
+                        input_per_million: i,
+                        output_per_million: o,
+                    },
+                    PricingSource::ProviderDefault,
+                ),
+                _ => {
+                    return CostBreakdown {
+                        usd: 0.0,
+                        source: PricingSource::Unpriced,
+                    }
+                }
+            }
         };
         let input_cost = (input_tokens as f64 / 1_000_000.0) * rates.input_per_million;
         let output_cost = (output_tokens as f64 / 1_000_000.0) * rates.output_per_million;
-        input_cost + output_cost
+        CostBreakdown {
+            usd: input_cost + output_cost,
+            source,
+        }
     }
 
     /// Drain the run-loop's accumulated warnings into a finished
@@ -1627,8 +1837,10 @@ mod tests {
             sampling: None,
         });
 
+        // Model not in the (empty) per-model table → provider-default rates.
         let cost = runner.compute_cost(1_000_000, 500_000);
-        assert!((cost - 10.5).abs() < f64::EPSILON);
+        assert!((cost.usd - 10.5).abs() < f64::EPSILON);
+        assert_eq!(cost.source, PricingSource::ProviderDefault);
     }
 
     #[test]
@@ -2008,9 +2220,11 @@ mod tests {
         // 1M input + 1M output → 0.80 + 4.00 = 4.80
         let cost = runner.compute_cost(1_000_000, 1_000_000);
         assert!(
-            (cost - 4.80).abs() < f64::EPSILON,
-            "expected $4.80 for per-model pricing, got ${cost}"
+            (cost.usd - 4.80).abs() < f64::EPSILON,
+            "expected $4.80 for per-model pricing, got ${}",
+            cost.usd
         );
+        assert_eq!(cost.source, PricingSource::PerModel);
     }
 
     #[test]
@@ -2058,8 +2272,140 @@ mod tests {
         // Falls back to provider defaults: 1M input + 1M output → 1.0 + 5.0 = 6.0
         let cost = runner.compute_cost(1_000_000, 1_000_000);
         assert!(
-            (cost - 6.0).abs() < f64::EPSILON,
-            "expected $6.00 for provider default pricing, got ${cost}"
+            (cost.usd - 6.0).abs() < f64::EPSILON,
+            "expected $6.00 for provider default pricing, got ${}",
+            cost.usd
         );
+        assert_eq!(cost.source, PricingSource::ProviderDefault);
+    }
+
+    #[test]
+    fn compute_cost_unpriced_when_no_pricing_config() {
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            profiles: vec![],
+        };
+
+        let runner = Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
+            budget: BudgetTracker::new(1.0),
+            callback: make_callback(),
+            context_window: 200_000,
+            context_threshold_ratio: 0.9,
+            provider_config: provider,
+            provider_id: "openai".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
+            execution: ExecutionConfig::default(),
+            model_name: "test-model".to_string(),
+            thread_id: "T-test".to_string(),
+            hooks: vec![],
+            outputs: None,
+            sampling: None,
+        });
+
+        // No pricing configured: nonzero tokens but $0 cost, flagged Unpriced so
+        // the run loop can warn that spend is untracked (not free).
+        let cost = runner.compute_cost(1_000_000, 1_000_000);
+        assert_eq!(cost.usd, 0.0);
+        assert_eq!(cost.source, PricingSource::Unpriced);
+    }
+
+    // ── §1 retry classification ──────────────────────────────────────
+
+    fn retry_cfg() -> ExecutionConfig {
+        ExecutionConfig {
+            retries: 2,
+            retry_status_codes: vec![429, 500, 502, 503],
+            never_retry: vec!["401".into(), "403".into(), "404".into()],
+            backoff_base_ms: 1000,
+            retry_on_timeout: true,
+            ..ExecutionConfig::default()
+        }
+    }
+
+    fn status_err(code: u16) -> anyhow::Error {
+        anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
+            code,
+            detail: format!("provider returned {code}"),
+        })
+    }
+
+    #[test]
+    fn retry_backoff_retries_allowlisted_status_with_exponential_delay() {
+        use std::time::Duration;
+        let cfg = retry_cfg();
+        let e = status_err(429);
+        assert_eq!(retry_backoff(&e, 0, &cfg), Some(Duration::from_millis(1000)));
+        assert_eq!(retry_backoff(&e, 1, &cfg), Some(Duration::from_millis(2000)));
+        // Retry budget spent once attempt reaches `retries`.
+        assert_eq!(retry_backoff(&e, 2, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_never_retry_overrides_allowlist() {
+        // 403 is not in the allowlist anyway, but never_retry is the absolute
+        // guard: even a code that WERE allowlisted would be denied.
+        let cfg = retry_cfg();
+        assert_eq!(retry_backoff(&status_err(403), 0, &cfg), None);
+        let mut cfg2 = retry_cfg();
+        cfg2.retry_status_codes.push(404);
+        assert_eq!(retry_backoff(&status_err(404), 0, &cfg2), None);
+    }
+
+    #[test]
+    fn retry_backoff_status_not_in_allowlist_is_not_retried() {
+        let cfg = retry_cfg();
+        assert_eq!(retry_backoff(&status_err(418), 0, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_timeout_gated_by_retry_on_timeout() {
+        use std::time::Duration;
+        let timeout = || {
+            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Timeout {
+                detail: "timed out".into(),
+            })
+        };
+        let mut cfg = retry_cfg();
+        assert_eq!(
+            retry_backoff(&timeout(), 0, &cfg),
+            Some(Duration::from_millis(1000))
+        );
+        cfg.retry_on_timeout = false;
+        assert_eq!(retry_backoff(&timeout(), 0, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_never_retries_post_stream_errors() {
+        // The persistence-first decision, guarded: any failure that is NOT a
+        // classified pre-stream `ProviderStreamError` (i.e. anything that could
+        // have occurred after cognition_out began persisting) is never retried,
+        // so a retry can never duplicate streamed content.
+        let cfg = retry_cfg();
+        let e = anyhow::anyhow!("SSE parse failure mid-stream");
+        assert_eq!(retry_backoff(&e, 0, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_disabled_when_retries_zero() {
+        let cfg = ExecutionConfig {
+            retries: 0,
+            ..retry_cfg()
+        };
+        assert_eq!(retry_backoff(&status_err(429), 0, &cfg), None);
     }
 }
