@@ -66,6 +66,14 @@ pub enum StudioEffectKind {
     CancelThread {
         thread_id: String,
     },
+    /// Submit a typed thread-control command (continue/cancel/kill/interrupt)
+    /// to a thread through the shared control channel. Semantic intent only:
+    /// the executor maps it to the daemon's control endpoint — the client
+    /// never spells the service ref.
+    SubmitThreadCommand {
+        thread_id: String,
+        command_type: String,
+    },
     /// THE generic rye-plane invocation. The client never interprets the
     /// target; the substrate decides. `route_seq` carries the seat-braid
     /// seq of `input.route` at issue time when the invocation came from
@@ -122,6 +130,7 @@ pub enum StudioEffectResultKind {
     FileRead,
     ActionInvocation,
     ThreadCancelled,
+    ThreadCommandSubmitted,
     Invoked,
     Commands,
     SourceData,

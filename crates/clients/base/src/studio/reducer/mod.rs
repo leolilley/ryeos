@@ -622,19 +622,12 @@ impl StudioCore {
                     self.notice("This session is read-only.", StudioTone::Warn);
                     Vec::new()
                 } else if let Some(thread_id) = self.seat.fold().input_route().thread {
-                    // Steer the head thread through the shared control channel.
-                    // Authority == the CLI's `commands submit`; see
-                    // .tmp/thread-authorization-review.md for the authz model.
-                    vec![self.emit(StudioEffectKind::Invoke {
-                        target: super::effect::InvokeRef::Ref {
-                            item_ref: "service:commands/submit".to_string(),
-                        },
-                        params: serde_json::json!({
-                            "thread_id": thread_id,
-                            "command_type": command.as_str(),
-                        }),
-                        route_seq: None,
-                        ratchet_on_thread_id: false,
+                    // Steer the head thread through the shared control channel:
+                    // semantic intent as a typed effect, the executor maps it to
+                    // the daemon's control endpoint.
+                    vec![self.emit(StudioEffectKind::SubmitThreadCommand {
+                        thread_id,
+                        command_type: command.as_str().to_string(),
                     })]
                 } else {
                     self.notice(
@@ -1331,7 +1324,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_thread_command_targets_commands_submit_for_head_thread() {
+    fn submit_thread_command_emits_typed_effect_for_head_thread() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         core.seat.append_facet(
             crate::studio::seat::KEY_INPUT_ROUTE,
@@ -1345,16 +1338,15 @@ mod tests {
             },
         });
         assert_eq!(effects.len(), 1);
-        let StudioEffectKind::Invoke { target, params, .. } = &effects[0].kind else {
-            panic!("expected an Invoke effect");
+        let StudioEffectKind::SubmitThreadCommand {
+            thread_id,
+            command_type,
+        } = &effects[0].kind
+        else {
+            panic!("expected a SubmitThreadCommand effect");
         };
-        assert!(matches!(
-            target,
-            crate::studio::effect::InvokeRef::Ref { item_ref }
-                if item_ref == "service:commands/submit"
-        ));
-        assert_eq!(params["thread_id"], "T-1");
-        assert_eq!(params["command_type"], "interrupt");
+        assert_eq!(thread_id, "T-1");
+        assert_eq!(command_type, "interrupt");
     }
 
     #[test]

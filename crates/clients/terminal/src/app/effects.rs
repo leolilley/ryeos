@@ -101,6 +101,18 @@ async fn effect_data(
         StudioEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/studio/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         StudioEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
         StudioEffectKind::CancelThread { thread_id } => client.signed_post("/ui/api/studio/thread/cancel", &serde_json::json!({ "thread_id": thread_id })).await,
+        StudioEffectKind::SubmitThreadCommand { thread_id, command_type } => {
+            // Steer the head thread through the shared control channel. Authority
+            // == the CLI's `commands submit`; see .tmp/thread-authorization-review.md
+            // for the authz model. The control service denies unknown fields (no
+            // project_path), so it receives only its declared params.
+            let body = serde_json::json!({
+                "item_ref": "service:commands/submit",
+                "parameters": { "thread_id": thread_id, "command_type": command_type },
+            });
+            let envelope = client.signed_post("/execute", &body).await?;
+            Ok(envelope.get("result").cloned().unwrap_or(envelope))
+        }
         StudioEffectKind::Invoke { target, params, .. } => match target {
             ryeos_client_base::studio::effect::InvokeRef::Ref { item_ref } => {
                 let mut params = params.clone();
@@ -168,6 +180,7 @@ fn result_kind_for(kind: &StudioEffectKind) -> StudioEffectResultKind {
         StudioEffectKind::ReadFile { .. } => StudioEffectResultKind::FileRead,
         StudioEffectKind::InvokeAction { .. } => StudioEffectResultKind::ActionInvocation,
         StudioEffectKind::CancelThread { .. } => StudioEffectResultKind::ThreadCancelled,
+        StudioEffectKind::SubmitThreadCommand { .. } => StudioEffectResultKind::ThreadCommandSubmitted,
         StudioEffectKind::Invoke { .. } => StudioEffectResultKind::Invoked,
         StudioEffectKind::SetLocationHash { .. }
         | StudioEffectKind::CopyToClipboard { .. }

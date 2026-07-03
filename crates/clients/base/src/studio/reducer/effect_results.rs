@@ -30,6 +30,7 @@ impl StudioCore {
             result.kind,
             StudioEffectResultKind::ActionInvocation
                 | StudioEffectResultKind::ThreadCancelled
+                | StudioEffectResultKind::ThreadCommandSubmitted
                 | StudioEffectResultKind::Invoked
         ) {
             let data = result
@@ -71,6 +72,12 @@ impl StudioCore {
                     self.emit(StudioEffectKind::FetchDimension),
                     self.emit(StudioEffectKind::FetchThreads { limit: 200 }),
                 ];
+                effects.extend(self.effects_for_hint("thread"));
+                effects
+            }
+            StudioEffectResultKind::ThreadCommandSubmitted => {
+                self.notice(effect_success_notice(expected, &data), StudioTone::Good);
+                let mut effects = vec![self.emit(StudioEffectKind::FetchThreads { limit: 200 })];
                 effects.extend(self.effects_for_hint("thread"));
                 effects
             }
@@ -300,6 +307,7 @@ impl StudioCore {
             }
             StudioEffectResultKind::ActionInvocation
             | StudioEffectResultKind::ThreadCancelled
+            | StudioEffectResultKind::ThreadCommandSubmitted
             | StudioEffectResultKind::Invoked => {
                 unreachable!("command results are handled before optional data extraction")
             }
@@ -468,6 +476,10 @@ fn effect_success_notice(expected: &StudioEffectKind, data: &serde_json::Value) 
                 json_field_text(data, &["thread_id", "id"]).unwrap_or_else(|| thread_id.clone());
             format!("Cancelled {thread}.")
         }
+        StudioEffectKind::SubmitThreadCommand {
+            thread_id,
+            command_type,
+        } => format!("Sent {command_type} to {thread_id}."),
         StudioEffectKind::Invoke { .. } => "Invocation completed.".to_string(),
         _ => "RyeOS command completed.".to_string(),
     }
@@ -484,6 +496,10 @@ fn effect_failure_notice(expected: &StudioEffectKind, error: Option<&str>) -> St
         StudioEffectKind::CancelThread { thread_id } => {
             format!("Cancel {thread_id} failed: {reason}")
         }
+        StudioEffectKind::SubmitThreadCommand {
+            thread_id,
+            command_type,
+        } => format!("Sending {command_type} to {thread_id} failed: {reason}"),
         StudioEffectKind::Invoke { .. } => format!("Invocation failed: {reason}"),
         _ => reason,
     }
@@ -565,6 +581,9 @@ fn effect_result_kind_matches(
         ) | (
             StudioEffectKind::CancelThread { .. },
             StudioEffectResultKind::ThreadCancelled
+        ) | (
+            StudioEffectKind::SubmitThreadCommand { .. },
+            StudioEffectResultKind::ThreadCommandSubmitted
         ) | (
             StudioEffectKind::Invoke { .. },
             StudioEffectResultKind::Invoked
