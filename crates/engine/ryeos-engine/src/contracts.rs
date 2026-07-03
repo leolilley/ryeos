@@ -3256,12 +3256,6 @@ pub enum PlanNode {
         #[serde(default)]
         executor_chain: Vec<String>,
     },
-    SpawnChild {
-        id: PlanNodeId,
-        child_ref: String,
-        thread_kind: String,
-        edge_type: String,
-    },
     Complete {
         id: PlanNodeId,
     },
@@ -3270,9 +3264,7 @@ pub enum PlanNode {
 impl PlanNode {
     pub fn id(&self) -> &PlanNodeId {
         match self {
-            Self::DispatchSubprocess { id, .. }
-            | Self::SpawnChild { id, .. }
-            | Self::Complete { id, .. } => id,
+            Self::DispatchSubprocess { id, .. } | Self::Complete { id, .. } => id,
         }
     }
 }
