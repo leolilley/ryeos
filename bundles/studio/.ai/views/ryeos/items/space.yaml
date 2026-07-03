@@ -38,3 +38,15 @@ affordances:
       facet: selection
       value:
         item: "{record.canonical_ref}"
+  # Explain swaps the center lens to the item's "why" read: write the selected
+  # item FIRST (the explain sources read @facet:selection.item), then open the
+  # lens — the open_view ordering guarantees the facet is set before the new
+  # lens fetches service:items/effective.
+  - id: explain
+    label: Explain
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/explain

@@ -38,11 +38,6 @@ pub fn execute_plan(
                 );
                 result = Some(completion);
             }
-            PlanNode::SpawnChild { child_ref, .. } => {
-                return Err(EngineError::Internal(format!(
-                    "SpawnChild not yet supported (child_ref={child_ref})"
-                )));
-            }
             PlanNode::Complete { .. } => {
                 return Ok(result.unwrap_or(ExecutionCompletion {
                     status: ThreadTerminalStatus::Completed,
@@ -332,11 +327,6 @@ pub fn spawn_plan(
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
                 return spawn_subprocess(spec, plan.debug_raw, ctx);
-            }
-            PlanNode::SpawnChild { child_ref, .. } => {
-                return Err(EngineError::Internal(format!(
-                    "SpawnChild not yet supported (child_ref={child_ref})"
-                )));
             }
             PlanNode::Complete { .. } => {
                 return Err(EngineError::Internal(

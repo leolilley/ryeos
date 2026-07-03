@@ -92,9 +92,6 @@ pub enum StudioAction {
         item_ref: String,
         parameters: serde_json::Value,
     },
-    CancelThread {
-        thread_id: String,
-    },
     /// Steer the route's head thread via `service:commands/submit`
     /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
     /// head thread at dispatch time. This is the same authority the CLI's
@@ -107,6 +104,18 @@ pub enum StudioAction {
     /// Activating a forked-subthread feed entry "enters" that subthread.
     AimThread {
         thread_id: String,
+    },
+    /// Pre-fill the routed foot input to retry a failed turn: retarget the
+    /// route at the SELECTED failed thread and stage that turn's original
+    /// stimulus for the operator to review and resubmit. The resubmit is a
+    /// continuation (a fresh successor), NOT a re-run of the terminal thread.
+    /// Deliberately not one-click — the submit goes through the normal
+    /// `threads/input` path, where the daemon enforces ownership and
+    /// continuation eligibility.
+    PrefillRetryTurn {
+        thread_id: String,
+        chain_root_id: String,
+        input: String,
     },
 }
 
@@ -192,7 +201,8 @@ pub enum StudioUiEvent {
         forward: bool,
     },
     /// Cancel the running head thread (esc while it works) — terminates it
-    /// through the thread-control channel. No-op when the head isn't running.
+    /// through `service:commands/submit { command_type: cancel }`, the single
+    /// studio cancel path. No-op when the head isn't running.
     /// (Named `InterruptHead` for the esc-terminate control; the text-bearing
     /// "interrupt" is `SubmitInputInterrupt`, a redirect, not a kill.)
     InterruptHead,

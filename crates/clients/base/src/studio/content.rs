@@ -65,6 +65,15 @@ pub struct ViewBinding {
     /// Open JSON — projected by renderers, never typed per-view.
     #[serde(default)]
     pub body: Value,
+    /// A seat-fold facet path this view renders directly as its data, in
+    /// place of a service fetch — e.g. an inspector showing `selection.summary`
+    /// (an inline event detail written by an inspect action) without a round
+    /// trip. Reuses the `@facet:` grammar: when the facet resolves to a value
+    /// it becomes the view's response; when it is absent the view falls back
+    /// to its `source` fetch. Mechanism, not a view ref — the engine names no
+    /// view, only a fold path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
     /// Row-activation binding intrinsic to the `rows` widget:
@@ -263,6 +272,27 @@ pub struct InputMentions {
 /// `FetchSource` path carries mentions with no bespoke effect.
 pub fn mention_source_key(view_ref: &str, input_id: &str) -> String {
     format!("mentions\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// The data-store key a view's `completion` source response lands under —
+/// derived identically by the fetch emitter and the slash-completion readers,
+/// so the line-start `/` grammar rides the generic `FetchSource` path with no
+/// bespoke effect (the same shape mentions use).
+pub fn completion_source_key(view_ref: &str, input_id: &str) -> String {
+    format!("completion\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// The record array a `completion` source response projects to, pulled through
+/// the input's declared `collection`. Absent/mismatched collection → no
+/// records (fails closed), like mentions.
+pub fn completion_records<'v>(completion: &InputCompletion, response: &'v Value) -> &'v [Value] {
+    completion
+        .collection
+        .as_deref()
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 /// Project a mentions source response into normalized `{ref,label}` records the
@@ -867,6 +897,32 @@ pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
     None
 }
 
+/// The closed set of `refresh:` rule keys a view may declare. A view refetches
+/// on a facet write (`on_facet`) or a hint (`on_hint`).
+pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
+
+/// Returns a degradation reason when a `refresh:` rule names a key outside the
+/// known set — a typo (e.g. `on_face`) that would otherwise silently never
+/// refresh. Surfaced as the same class of binding error the parser produces, so
+/// the tile shows the mistake instead of quietly not updating.
+pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
+    let unknown: Vec<&str> = binding
+        .refresh
+        .as_object()?
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !REFRESH_KEYS.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "invalid view binding: unknown refresh key(s) {}; expected one of: {}",
+        unknown.join(", "),
+        REFRESH_KEYS.join(", ")
+    ))
+}
+
 /// A parsed affordance invocation — the closed grammar bound producers can
 /// trigger. `Ui` writes a seat facet (value replaces, merge folds into
 /// the existing facet value); `Rye` dispatches command tokens through
@@ -887,6 +943,10 @@ pub enum AffordanceInvoke {
     Rye {
         tokens: Vec<String>,
         args: Value,
+        /// Optional success-notice template (`{result.<field>}` placeholders,
+        /// rendered against the invocation outcome), carried from the
+        /// affordance's `notice:` and surfaced when the invocation succeeds.
+        notice: Option<String>,
     },
     /// Invoke a service by ref with args through the daemon `/execute` path (as
     /// the foot input does). Args reach the daemon as `parameters` — unlike the
@@ -896,6 +956,10 @@ pub enum AffordanceInvoke {
     Service {
         item_ref: String,
         args: Value,
+        /// Optional success-notice template (`{result.<field>}` placeholders,
+        /// rendered against the invocation outcome), carried from the
+        /// affordance's `notice:` and surfaced when the invocation succeeds.
+        notice: Option<String>,
     },
 }
 
@@ -929,6 +993,13 @@ pub fn resolve_affordance_invoke(
         "rye" => {
             // A `ref:` selects the service-invocation form (args → `/execute`
             // parameters); otherwise it's grammar-token dispatch.
+            // The success-notice template is rendered later against the result
+            // outcome (`{result.<field>}`), so it is carried raw, not
+            // payload-substituted here.
+            let notice = invoke
+                .get("notice")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             if let Some(item_ref) = invoke.get("ref").and_then(Value::as_str) {
                 Some(AffordanceInvoke::Service {
                     item_ref: item_ref.to_string(),
@@ -936,6 +1007,7 @@ pub fn resolve_affordance_invoke(
                         .get("args")
                         .map(|args| substitute_payload(args, payload))
                         .unwrap_or(Value::Null),
+                    notice,
                 })
             } else {
                 Some(AffordanceInvoke::Rye {
@@ -950,6 +1022,7 @@ pub fn resolve_affordance_invoke(
                         .get("args")
                         .map(|args| substitute_payload(args, payload))
                         .unwrap_or(Value::Null),
+                    notice,
                 })
             }
         }
@@ -983,6 +1056,8 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
                         ),
                     )
                 } else if let Some(reason) = target_without_route_error(&binding) {
+                    ViewBinding::degraded(view_ref, reason)
+                } else if let Some(reason) = refresh_keys_error(&binding) {
                     ViewBinding::degraded(view_ref, reason)
                 } else {
                     binding.view_ref = Some(view_ref.clone());
@@ -1207,6 +1282,39 @@ mod tests {
         assert!(
             b.degraded.as_deref().is_some_and(|m| m.contains("invalid view binding")),
             "unknown cycle vocabulary degrades, not silently ignored: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn unknown_refresh_key_degrades() {
+        // A typo'd refresh rule (e.g. `on_face`) would silently never refresh;
+        // it must degrade visibly like any other binding mistake.
+        let surface = json!({ "views": {
+            "view:ryeos/badrefresh": { "widget": "text", "refresh": { "on_face": "selection" } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/badrefresh").expect("present");
+        assert!(
+            b.degraded
+                .as_deref()
+                .is_some_and(|m| m.contains("invalid view binding") && m.contains("on_face")),
+            "a typo'd refresh key degrades visibly, not silently: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn known_refresh_keys_parse() {
+        let surface = json!({ "views": {
+            "view:ryeos/okrefresh": { "widget": "text",
+                "refresh": { "on_facet": "selection", "on_hint": "thread" } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/okrefresh").expect("present");
+        assert!(
+            b.degraded.is_none(),
+            "known refresh keys parse cleanly: {:?}",
             b.degraded
         );
     }
@@ -1596,6 +1704,7 @@ mod tests {
             AffordanceInvoke::Service {
                 item_ref: "service:commands/submit".into(),
                 args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
+                notice: None,
             }
         );
     }
@@ -1613,6 +1722,7 @@ mod tests {
             AffordanceInvoke::Rye {
                 tokens: vec!["thread".into(), "input".into()],
                 args: json!({ "line": "hello world" }),
+                notice: None,
             }
         );
     }

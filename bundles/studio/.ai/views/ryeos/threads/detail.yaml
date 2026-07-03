@@ -32,6 +32,25 @@ sections:
           completed: good
         default: neutral
 
+  # Follow: the graph `follow:` lineage, present only when this thread issued or
+  # resumed a follow. Sourced from the daemon-emitted labeled-rows `follow`
+  # collection (`{label, value}` — the same shape as Usage / Execution), so each
+  # lineage fact renders as its own row: `state` (suspended / resumed), phase,
+  # follow node, child chain, child thread, child status, resume successor.
+  # Absent rows (a still-running child, or a durably-recognized successor that no
+  # longer carries the child identity) are dropped by the daemon, and a non-follow
+  # thread yields an empty collection — so the section degrades to empty rather
+  # than dumping the thread record.
+  - title: Follow
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: follow
+    projection:
+      primary: value
+      meta: label
+
   # Usage: chain-wide execution totals (tokens, cost, turns, thread count), one
   # metric per row — the deep-watch summary of what this execution consumed.
   - title: Usage
@@ -40,6 +59,20 @@ sections:
       params:
         thread_id: "@facet:selection.thread"
       collection: usage
+    projection:
+      primary: value
+      meta: label
+
+  # Execution: the thread's durable execution posture — capabilities minted,
+  # hard limits, effective trust class, model, runtime — one labeled metric per
+  # row, read from the signed thread.json audit record (plus the projection's
+  # executor identity). Empty when the thread carries no audit record.
+  - title: Execution
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: execution_meta
     projection:
       primary: value
       meta: label

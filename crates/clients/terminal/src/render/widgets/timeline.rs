@@ -363,6 +363,7 @@ mod tests {
             meta: None,
             tone: StudioTone::Neutral,
             action: None,
+            secondary_action: None,
         }
     }
 

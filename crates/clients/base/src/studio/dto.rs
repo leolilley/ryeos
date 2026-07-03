@@ -112,9 +112,74 @@ pub struct ExecutionFacts {
     pub supports_operator_followup: bool,
 }
 
+/// Daemon-authored graph follow-lineage fact, surfaced on a thread projection's
+/// `follow` field when the thread participates in a `follow:` relationship —
+/// either the suspended parent awaiting a child chain, or the resume successor
+/// that consumes the child's result. Instance-derived (distinct from the
+/// kind-derived [`ExecutionFacts`]); absent (`None` on the row) for non-follow
+/// threads. Mirrors the daemon `FollowFact` wire shape exactly.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct FollowFact {
+    /// [`follow_role::SUSPENDED_PARENT`] or [`follow_role::RESUME_SUCCESSOR`].
+    #[serde(default)]
+    pub role: String,
+    /// Computed display state ([`follow_display_state::SUSPENDED`] /
+    /// [`follow_display_state::RESUMED`]): the coarse, tone-friendly lineage
+    /// state a view labels off so a suspended parent reads distinctly from a
+    /// stalled `continued`. Mirrors the daemon `FollowFact.display_state`.
+    #[serde(default)]
+    pub display_state: String,
+    /// Live waiter phase (`waiting`/`ready`/`resuming`); `suspended_parent` only.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// The graph node id that issued the follow.
+    #[serde(default)]
+    pub follow_node: Option<String>,
+    /// The followed child chain's head thread.
+    #[serde(default)]
+    pub child_thread_id: Option<String>,
+    /// The followed child chain's root id.
+    #[serde(default)]
+    pub child_chain_root_id: Option<String>,
+    /// The child chain's terminal status once known; `None` while still running.
+    #[serde(default)]
+    pub child_terminal_status: Option<String>,
+    /// The parent's resume-successor thread id.
+    #[serde(default)]
+    pub parent_successor_thread_id: Option<String>,
+}
+
+/// The `follow.role` wire strings a client branches on. Kept in sync with the
+/// daemon `thread_lifecycle::follow_role`.
+pub mod follow_role {
+    pub const SUSPENDED_PARENT: &str = "suspended_parent";
+    pub const RESUME_SUCCESSOR: &str = "resume_successor";
+}
+
+/// The `follow.display_state` wire strings — the coarse tone/label state. Kept in
+/// sync with the daemon `thread_lifecycle::follow_display_state`.
+pub mod follow_display_state {
+    pub const SUSPENDED: &str = "suspended";
+    pub const RESUMED: &str = "resumed";
+}
+
+impl FollowFact {
+    /// This thread issued a follow and is suspended (`continued`) awaiting its
+    /// child chain — never a valid operator-input target while suspended.
+    pub fn is_suspended_parent(&self) -> bool {
+        self.role == follow_role::SUSPENDED_PARENT
+    }
+
+    /// This thread is the parent's resume successor (consumes the child result).
+    pub fn is_resume_successor(&self) -> bool {
+        self.role == follow_role::RESUME_SUCCESSOR
+    }
+}
+
 /// The typed result of a `service:threads/input` submit
-/// (`{ thread_id?, delivery, notice?, execution? }`). A non-launch invocation
-/// (e.g. a slash command) deserializes to all-default — `delivery` absent.
+/// (`{ thread_id?, delivery, notice?, pending?, execution? }`). A non-launch
+/// invocation (e.g. a slash command) deserializes to all-default — `delivery`
+/// absent.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct LaunchOutcome {
     #[serde(default)]
@@ -123,6 +188,11 @@ pub struct LaunchOutcome {
     pub delivery: Option<ThreadDelivery>,
     #[serde(default)]
     pub notice: Option<String>,
+    /// Staged-input depth after an accepted live steer (`delivery: submitted`) —
+    /// the count of operator inputs queued behind the not-yet-folded ones.
+    /// Absent on launch/refuse outcomes.
+    #[serde(default)]
+    pub pending: Option<u64>,
     /// Present on a continuation launch (kind known synchronously); absent on a
     /// fresh async launch (the thread is created later).
     #[serde(default)]
@@ -561,5 +631,63 @@ mod tests {
             serde_json::from_value::<ThreadStatus>(serde_json::json!("timed_out")).unwrap(),
             ThreadStatus::TimedOut
         );
+    }
+
+    #[test]
+    fn follow_fact_deserializes_daemon_suspended_parent_shape() {
+        // The exact wire shape the daemon emits on a `continued` follow parent.
+        let row = serde_json::json!({
+            "role": "suspended_parent",
+            "display_state": "suspended",
+            "phase": "waiting",
+            "follow_node": "n_follow",
+            "child_thread_id": "T-child",
+            "child_chain_root_id": "T-child",
+            "child_terminal_status": null,
+            "parent_successor_thread_id": "T-succ"
+        });
+        let f: FollowFact = serde_json::from_value(row).unwrap();
+        assert!(f.is_suspended_parent());
+        assert!(!f.is_resume_successor());
+        assert_eq!(f.display_state, "suspended");
+        assert_eq!(f.phase.as_deref(), Some("waiting"));
+        assert_eq!(f.follow_node.as_deref(), Some("n_follow"));
+        assert_eq!(f.child_chain_root_id.as_deref(), Some("T-child"));
+        assert!(f.child_terminal_status.is_none());
+        assert_eq!(f.parent_successor_thread_id.as_deref(), Some("T-succ"));
+    }
+
+    #[test]
+    fn follow_fact_deserializes_minimal_resume_successor_shape() {
+        // The waiter-cleared durable form: only role + successor identity.
+        let row = serde_json::json!({
+            "role": "resume_successor",
+            "display_state": "resumed",
+            "child_terminal_status": null,
+            "parent_successor_thread_id": "T-succ"
+        });
+        let f: FollowFact = serde_json::from_value(row).unwrap();
+        assert!(f.is_resume_successor());
+        assert_eq!(f.display_state, "resumed");
+        assert!(f.phase.is_none(), "resume_successor carries no phase");
+        assert!(f.follow_node.is_none());
+        assert!(f.child_thread_id.is_none());
+    }
+
+    #[test]
+    fn launch_outcome_reads_pending_on_submitted() {
+        let resp = serde_json::json!({
+            "thread_id": "T-1",
+            "delivery": "submitted",
+            "notice": "Input queued (2 staged).",
+            "pending": 2,
+            "execution": { "supports_continuation": true, "supports_operator_followup": true }
+        });
+        let out: LaunchOutcome = serde_json::from_value(resp).unwrap();
+        assert_eq!(out.delivery, Some(ThreadDelivery::Submitted));
+        assert_eq!(out.pending, Some(2));
+        // A launch/refuse outcome without the field stays None.
+        let bare: LaunchOutcome = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(bare.pending, None);
     }
 }

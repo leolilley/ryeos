@@ -690,6 +690,38 @@ pub fn continuation_fingerprint(
         .map(|s| s.to_string()))
 }
 
+/// # Follow lineage: the two projected edge kinds (and the one that is NOT)
+///
+/// A graph `follow:` relationship spans two distinct lineage links. Only the
+/// first is recorded in the projection today; the second is NOT, by current
+/// design:
+///
+/// 1. **Parent → resume-successor (within-chain, projected).** When a followed
+///    child terminates, the suspended parent is resumed by minting a successor
+///    in the SAME chain (`upstream_thread_id = parent`, same `chain_root_id`).
+///    `project_thread_snapshot` derives a `thread_edges` row for it
+///    (`spawn_reason = 'spawned'`), and the `thread_continued` payload carries
+///    [`ContinuationReasonMarker::GraphFollowResume`] as its `reason` — that
+///    marker (read via [`continuation_edge`]) is the discriminator that tells a
+///    follow-resume successor from an ordinary segment-cut continuation.
+///
+/// 2. **Parent → followed child chain root (cross-chain, NOT projected).** The
+///    followed child is spawned as a FRESH ROOT — its own `chain_root_id`, no
+///    `upstream_thread_id` — so `project_thread_snapshot` derives no edge, and
+///    the parent↔child link lives ONLY in the operational `follow_waiter` table
+///    (runtime_db), never in CAS-derived projection data. Once the waiter is
+///    cleared, that historical "this thread followed into child chain X" fact is
+///    gone from durable state.
+///
+/// Recording kind (2) durably would require emitting a new cross-chain spawn
+/// event from the follow-spawn path (executor side) through the event/projection
+/// pipeline AND extending the chain-scoped `thread_edges` model to hold a
+/// cross-chain edge — a deliberate change deferred to the wave that owns the
+/// follow spawn/event path (it pairs with nested child-braid rendering). Until
+/// then, a client reads live follow lineage from the waiter-sourced `follow`
+/// fact on a thread projection, and terminal-history resume lineage from kind (1)
+/// above; the cross-chain child link is not queryable from the projection.
+///
 /// Daemon-owned markers stored as the `reason` on a `thread_continued` edge.
 /// Centralizes the wire value so it is not a scattered string literal a runtime
 /// could typo or spoof. Machine continuations carry a free-form *log* reason

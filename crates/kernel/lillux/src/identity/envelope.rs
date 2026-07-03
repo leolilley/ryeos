@@ -763,3 +763,142 @@ fn resolve_box_pub_from_identity_doc(path: &str) -> Result<Vec<u8>, String> {
     // The inner bytes are the b64url-encoded raw public key
     b64url_decode(std::str::from_utf8(&inner).map_err(|e| format!("box_key not UTF-8: {e}"))?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    /// Deterministic X25519 keypair from a fixed seed. Returns
+    /// `(public_bytes, private_bytes)`.
+    fn keypair(seed: u8) -> ([u8; 32], [u8; 32]) {
+        let secret = StaticSecret::from([seed; 32]);
+        let public = PublicKey::from(&secret);
+        (*public.as_bytes(), secret.to_bytes())
+    }
+
+    fn sample_env() -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        env.insert("API_KEY".to_string(), "secret-value".to_string());
+        env.insert("REGION".to_string(), "us-east".to_string());
+        env
+    }
+
+    #[test]
+    fn seal_open_round_trip() {
+        let (pk, sk) = keypair(1);
+        let env = sample_env();
+        let sealed = seal_envelope(&env, &pk).expect("seal");
+        let opened = open_envelope(&sealed, &sk).expect("open");
+        assert_eq!(opened.env, env);
+        assert!(opened.skipped.is_empty());
+    }
+
+    #[test]
+    fn open_rejects_wrong_recipient_key() {
+        let (pk_a, _sk_a) = keypair(1);
+        let (_pk_b, sk_b) = keypair(2);
+        let sealed = seal_envelope(&sample_env(), &pk_a).expect("seal");
+        let err = open_envelope(&sealed, &sk_b).expect_err("wrong key must fail");
+        assert!(err.contains("recipient mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn open_rejects_truncated_ciphertext() {
+        // The AEAD tag lives at the tail of the ciphertext, so a truncated
+        // envelope must fail authenticated decryption. Dropping a multiple
+        // of four base64 chars keeps the string decodable but short.
+        let (pk, sk) = keypair(3);
+        let mut sealed = seal_envelope(&sample_env(), &pk).expect("seal");
+        let len = sealed.ciphertext.len();
+        sealed.ciphertext.truncate(len - 8);
+        let err = open_envelope(&sealed, &sk).expect_err("truncated must fail");
+        assert!(err.contains("decryption failed"), "got: {err}");
+    }
+
+    #[test]
+    fn open_rejects_tampered_ciphertext() {
+        let (pk, sk) = keypair(3);
+        let mut sealed = seal_envelope(&sample_env(), &pk).expect("seal");
+        let first = sealed.ciphertext.chars().next().unwrap();
+        let flipped = if first == 'A' { 'B' } else { 'A' };
+        sealed.ciphertext.replace_range(0..1, &flipped.to_string());
+        let err = open_envelope(&sealed, &sk).expect_err("tamper must fail");
+        assert!(err.contains("decryption failed"), "got: {err}");
+    }
+
+    #[test]
+    fn open_rejects_unsupported_version() {
+        let (pk, sk) = keypair(4);
+        let mut sealed = seal_envelope(&sample_env(), &pk).expect("seal");
+        sealed.version = 2;
+        let err = open_envelope(&sealed, &sk).expect_err("bad version must fail");
+        assert!(err.contains("unsupported envelope version"), "got: {err}");
+    }
+
+    #[test]
+    fn open_rejects_unexpected_kind() {
+        let (pk, sk) = keypair(4);
+        let mut sealed = seal_envelope(&sample_env(), &pk).expect("seal");
+        sealed.aad_fields.kind = "some-other-kind/v1".to_string();
+        let err = open_envelope(&sealed, &sk).expect_err("bad kind must fail");
+        assert!(err.contains("unexpected envelope kind"), "got: {err}");
+    }
+
+    #[test]
+    fn seal_rejects_reserved_env_name() {
+        let (pk, _sk) = keypair(5);
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), "/evil".to_string());
+        let err = seal_envelope(&env, &pk).expect_err("reserved name must be refused");
+        assert!(err.contains("unsafe env names"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_flags_reserved_name_and_counts_entries() {
+        let mut env = BTreeMap::new();
+        env.insert("SAFE_NAME".to_string(), "ok".to_string());
+        env.insert("LD_PRELOAD".to_string(), "x".to_string());
+        let result = validate_envelope_env(&env);
+        assert!(!result.valid);
+        assert!(result.unsafe_names.contains(&"LD_PRELOAD".to_string()));
+        assert_eq!(result.count, 2);
+    }
+
+    #[test]
+    fn validate_flags_nul_byte_in_value() {
+        let mut env = BTreeMap::new();
+        env.insert("TOKEN".to_string(), "abc\0def".to_string());
+        let result = validate_envelope_env(&env);
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|e| e.contains("NUL byte")));
+    }
+
+    #[test]
+    fn inspect_reports_wellformed_sealed_envelope() {
+        let (pk, _sk) = keypair(6);
+        let sealed = seal_envelope(&sample_env(), &pk).expect("seal");
+        let raw = serde_json::to_value(&sealed).expect("serialize");
+        let report = inspect_envelope(&raw);
+        assert!(report.well_formed, "warnings: {:?}", report.warnings);
+        assert_eq!(report.version, Some(1));
+        assert_eq!(report.enc_bytes, Some(32));
+        assert_eq!(report.declared_kind.as_deref(), Some(ENVELOPE_KIND));
+    }
+
+    #[test]
+    fn inspect_flags_bad_base64_enc() {
+        let raw = serde_json::json!({
+            "version": 1,
+            "enc": "not*base64*",
+            "ciphertext": "AAAA",
+            "aad_fields": { "kind": ENVELOPE_KIND, "recipient": "fp:abc" }
+        });
+        let report = inspect_envelope(&raw);
+        assert!(!report.well_formed);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("enc is not valid base64url")));
+    }
+}

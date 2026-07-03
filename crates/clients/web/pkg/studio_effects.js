@@ -23,10 +23,6 @@ export async function runEffect(effect) {
       const resp = await postJson("/ui/api/actions/invoke", { command_id: kind.source_ref, args: kind.params ?? {} });
       return result(effect, "source_data", resp?.result?.result ?? resp?.result ?? resp);
     }
-    case "fetch_commands": {
-      const resp = await postJson("/ui/api/actions/invoke", { command_id: "service:commands/list", args: {} });
-      return result(effect, "commands", resp?.result?.result ?? resp?.result ?? resp);
-    }
     case "list_files":
       return result(effect, "files_list", await fileJson("/ui/api/studio/files/list", kind));
     case "fetch_file_space":
@@ -43,9 +39,11 @@ export async function runEffect(effect) {
         command_id: kind.command_id,
         args: kind.args ?? {},
       }));
-    case "cancel_thread":
-      return result(effect, "thread_cancelled", await postJson("/ui/api/studio/thread/cancel", {
-        thread_id: kind.thread_id,
+    case "submit_thread_command":
+      // Steer the head thread through the shared control channel (session lane).
+      return result(effect, "thread_command_submitted", await postJson("/ui/api/actions/invoke", {
+        command_id: "service:commands/submit",
+        args: { thread_id: kind.thread_id, command_type: kind.command_type },
       }));
     case "invoke": {
       // One daemon path, session-authed: refs and tokens both dispatch
@@ -136,7 +134,7 @@ function resultKindFor(effect) {
   if (type === "fetch_file_space") return "file_space";
   if (type === "read_file") return "file_read";
   if (type === "invoke_action") return "action_invocation";
-  if (type === "cancel_thread") return "thread_cancelled";
+  if (type === "submit_thread_command") return "thread_command_submitted";
   if (type === "invoke") return "invoked";
   return "browser_only";
 }

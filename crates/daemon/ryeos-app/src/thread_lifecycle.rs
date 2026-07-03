@@ -148,26 +148,154 @@ pub struct ExecutionFacts {
     pub supports_operator_followup: bool,
 }
 
-/// A `ThreadDetail` projection decorated with daemon-authored
-/// [`ExecutionFacts`]. The detail's fields serialize flat alongside an
+/// Which side of a graph `follow:` relationship a thread sits on. Serialized as
+/// the `follow.role` wire string a client branches on.
+pub mod follow_role {
+    /// This thread issued a follow and settled `continued`, suspended until its
+    /// followed child chain reaches terminal.
+    pub const SUSPENDED_PARENT: &str = "suspended_parent";
+    /// This thread is the suspended parent's resume successor — created (and
+    /// later launched) to consume the child's result and continue the parent.
+    pub const RESUME_SUCCESSOR: &str = "resume_successor";
+}
+
+/// The computed, display-facing lineage state a view tones and labels off,
+/// serialized as `follow.display_state`. Coarser than [`follow_role`]: it drops
+/// the parent/successor mechanics into the operator-legible question "is this
+/// thread WAITING on a child, or RESUMING from one" — so a suspended follow
+/// parent reads distinctly from a stalled segment-cut `continued` thread (which
+/// carries no follow fact at all).
+pub mod follow_display_state {
+    /// A suspended parent awaiting its followed child chain
+    /// ([`follow_role::SUSPENDED_PARENT`]).
+    pub const SUSPENDED: &str = "suspended";
+    /// A resume successor consuming (or having consumed) the child's result
+    /// ([`follow_role::RESUME_SUCCESSOR`]).
+    pub const RESUMED: &str = "resumed";
+}
+
+/// Instance-derived follow-lineage fact decorated onto a thread projection when
+/// the thread participates in a graph `follow:` relationship. Distinct from
+/// [`ExecutionFacts`] (which are KIND-derived policy): this is per-thread INSTANCE
+/// state, sourced live from the follow waiter (`runtime_db`) and, for terminal
+/// history that outlives the waiter, from the projected `graph_follow_resume`
+/// continuation edge (CAS is truth). Absent — the whole `follow` field is omitted
+/// — for non-follow threads, so they pay nothing.
+#[derive(Debug, Clone, Serialize)]
+pub struct FollowFact {
+    /// `suspended_parent` | `resume_successor` (see [`follow_role`]).
+    pub role: &'static str,
+    /// Computed display state (`suspended` | `resumed`, see
+    /// [`follow_display_state`]): the coarse, tone-friendly lineage state a view
+    /// labels/tones off so a suspended parent reads distinctly from a stalled
+    /// `continued` thread. Always present alongside `role`.
+    pub display_state: &'static str,
+    /// Live waiter phase (`waiting` | `ready` | `resuming`); present for
+    /// `suspended_parent` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// The graph node id that issued the follow. Absent only on a waiter-cleared
+    /// resume successor recognized from the projection edge alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow_node: Option<String>,
+    /// The followed child chain's head thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_thread_id: Option<String>,
+    /// The followed child chain's root id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_chain_root_id: Option<String>,
+    /// The child chain's terminal status once known; `null` while the child is
+    /// still running. Always present (nullable) for a waiter-sourced fact.
+    pub child_terminal_status: Option<String>,
+    /// The parent's resume-successor thread id (the thread that consumes the
+    /// child's result).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_successor_thread_id: Option<String>,
+}
+
+impl FollowFact {
+    /// A suspended parent (found by its own thread id in the live waiter).
+    fn suspended_parent(w: &crate::runtime_db::FollowWaiter) -> Self {
+        Self {
+            role: follow_role::SUSPENDED_PARENT,
+            display_state: follow_display_state::SUSPENDED,
+            phase: Some(w.phase.clone()),
+            follow_node: Some(w.follow_node.clone()),
+            child_thread_id: w.child_thread_id.clone(),
+            child_chain_root_id: w.child_chain_root_id.clone(),
+            child_terminal_status: w.child_terminal_status.clone(),
+            parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+        }
+    }
+
+    /// A resume successor recognized from the still-live waiter.
+    fn resume_successor_live(w: &crate::runtime_db::FollowWaiter) -> Self {
+        Self {
+            role: follow_role::RESUME_SUCCESSOR,
+            display_state: follow_display_state::RESUMED,
+            phase: None,
+            follow_node: Some(w.follow_node.clone()),
+            child_thread_id: w.child_thread_id.clone(),
+            child_chain_root_id: w.child_chain_root_id.clone(),
+            child_terminal_status: w.child_terminal_status.clone(),
+            parent_successor_thread_id: w.parent_successor_thread_id.clone(),
+        }
+    }
+
+    /// A resume successor recognized after the waiter is cleared, from the
+    /// predecessor's projected `graph_follow_resume` continuation edge. The child
+    /// identities did not survive the waiter, so only the lineage role and this
+    /// thread's own identity are known.
+    fn resume_successor_durable(successor_thread_id: &str) -> Self {
+        Self {
+            role: follow_role::RESUME_SUCCESSOR,
+            display_state: follow_display_state::RESUMED,
+            phase: None,
+            follow_node: None,
+            child_thread_id: None,
+            child_chain_root_id: None,
+            child_terminal_status: None,
+            parent_successor_thread_id: Some(successor_thread_id.to_string()),
+        }
+    }
+}
+
+/// A `ThreadDetail` projection decorated with daemon-authored [`ExecutionFacts`]
+/// (kind-policy) plus per-instance follow lineage ([`FollowFact`]) and the live
+/// operator-input staging depth. The detail's fields serialize flat alongside an
 /// `execution` object, so a client gates affordances on
 /// `execution.{supports_continuation, supports_operator_followup}` (substrate
 /// authority for the actual target thread) rather than a self-declared surface
-/// flag.
+/// flag; `follow` names the graph follow lineage when present; `pending` is the
+/// count of operator inputs staged for delivery (omitted when zero).
 #[derive(Debug, Serialize)]
 pub struct ThreadView {
     #[serde(flatten)]
     pub thread: ThreadDetail,
     pub execution: ExecutionFacts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowFact>,
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub pending: usize,
 }
 
 /// A `ThreadListItem` projection decorated with daemon-authored
-/// [`ExecutionFacts`] — the list-row analogue of [`ThreadView`].
+/// [`ExecutionFacts`], follow lineage, and staged-input depth — the list-row
+/// analogue of [`ThreadView`].
 #[derive(Debug, Serialize)]
 pub struct ThreadListView {
     #[serde(flatten)]
     pub item: ThreadListItem,
     pub execution: ExecutionFacts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub follow: Option<FollowFact>,
+    #[serde(skip_serializing_if = "is_zero_usize")]
+    pub pending: usize,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1097,23 +1225,122 @@ impl ThreadLifecycleService {
         }
     }
 
-    /// Decorate a state-store thread projection with daemon-authored execution
-    /// facts. Kept here (not in `StateStore`) because kind policy is a daemon
-    /// concern, not state-store row data.
-    fn decorate_thread(&self, thread: ThreadDetail) -> ThreadView {
-        let execution = self.execution_facts(&thread.kind);
-        ThreadView { thread, execution }
+    /// The count of operator inputs staged (not yet folded) for a thread, read
+    /// from the shared live-input queue. `0` when the queue is unwired (tests) or
+    /// the thread has no staged input.
+    fn pending_input(&self, thread_id: &str) -> usize {
+        self.live_input
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|q| q.pending_len(thread_id))
+            .unwrap_or(0)
     }
 
-    fn decorate_list_item(&self, item: ThreadListItem) -> ThreadListView {
-        let execution = self.execution_facts(&item.kind);
-        ThreadListView { item, execution }
+    /// Compute a thread's follow-lineage fact from a single-thread lookup: the
+    /// live waiter (suspended parent / resume successor) first, then — for a
+    /// resume successor whose waiter was already cleared — the projected
+    /// `graph_follow_resume` continuation edge. Returns `None` for a non-follow
+    /// thread. Not used on the list hot path (see `decorate_list_items`, which
+    /// batches the waiter read).
+    fn follow_fact_for(
+        &self,
+        thread_id: &str,
+        status: &str,
+        upstream_thread_id: Option<&str>,
+    ) -> Result<Option<FollowFact>> {
+        if status == "continued" {
+            if let Some(w) = self.state_store.get_follow_waiter_by_parent_thread(thread_id)? {
+                return Ok(Some(FollowFact::suspended_parent(&w)));
+            }
+        }
+        if let Some(w) = self.state_store.get_follow_waiter_by_successor(thread_id)? {
+            return Ok(Some(FollowFact::resume_successor_live(&w)));
+        }
+        if let Some(upstream) = upstream_thread_id {
+            if self
+                .state_store
+                .is_follow_resume_successor(upstream, thread_id)?
+            {
+                return Ok(Some(FollowFact::resume_successor_durable(thread_id)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Decorate a state-store thread projection with daemon-authored execution
+    /// facts, follow lineage, and staged-input depth. Kept here (not in
+    /// `StateStore`) because kind policy and follow lineage are daemon concerns,
+    /// not state-store row data. Single-thread path: for the top-level list use
+    /// `decorate_list_items`, which batches the follow-waiter read.
+    fn decorate_thread(&self, thread: ThreadDetail) -> Result<ThreadView> {
+        let execution = self.execution_facts(&thread.kind);
+        let follow = self.follow_fact_for(
+            &thread.thread_id,
+            &thread.status,
+            thread.upstream_thread_id.as_deref(),
+        )?;
+        let pending = self.pending_input(&thread.thread_id);
+        Ok(ThreadView {
+            thread,
+            execution,
+            follow,
+            pending,
+        })
+    }
+
+    /// Decorate a page of list rows. Batches the follow lineage: ONE
+    /// `list_follow_waiters` read, joined in memory against the page, so the list
+    /// path never issues a per-row runtime_db query. The durable
+    /// (waiter-cleared) resume-successor derivation is deliberately NOT done here
+    /// — it is a per-row projection query reserved for single-thread inspect;
+    /// once the waiter is gone the successor is an ordinary recoverable thread and
+    /// its lineage shows in inspect, not the list.
+    fn decorate_list_items(&self, items: Vec<ThreadListItem>) -> Result<Vec<ThreadListView>> {
+        let waiters = self.state_store.list_follow_waiters()?;
+        let mut by_parent: std::collections::HashMap<&str, &crate::runtime_db::FollowWaiter> =
+            std::collections::HashMap::new();
+        let mut by_successor: std::collections::HashMap<&str, &crate::runtime_db::FollowWaiter> =
+            std::collections::HashMap::new();
+        for w in &waiters {
+            by_parent.insert(w.parent_thread_id.as_str(), w);
+            if let Some(succ) = &w.parent_successor_thread_id {
+                by_successor.insert(succ.as_str(), w);
+            }
+        }
+        Ok(items
+            .into_iter()
+            .map(|item| {
+                let execution = self.execution_facts(&item.kind);
+                let follow = if item.status == "continued" {
+                    by_parent
+                        .get(item.thread_id.as_str())
+                        .map(|w| FollowFact::suspended_parent(w))
+                } else {
+                    None
+                }
+                .or_else(|| {
+                    by_successor
+                        .get(item.thread_id.as_str())
+                        .map(|w| FollowFact::resume_successor_live(w))
+                });
+                let pending = self.pending_input(&item.thread_id);
+                ThreadListView {
+                    item,
+                    execution,
+                    follow,
+                    pending,
+                }
+            })
+            .collect())
     }
 
     /// `get_thread` for client-facing callers: the projection plus its
-    /// daemon-authored execution facts.
+    /// daemon-authored execution facts, follow lineage, and staged-input depth.
     pub fn get_thread_view(&self, thread_id: &str) -> Result<Option<ThreadView>> {
-        Ok(self.get_thread(thread_id)?.map(|t| self.decorate_thread(t)))
+        self.get_thread(thread_id)?
+            .map(|t| self.decorate_thread(t))
+            .transpose()
     }
 
     pub fn get_thread_result(&self, thread_id: &str) -> Result<Option<ThreadResultRecord>> {
@@ -1265,12 +1492,7 @@ impl ThreadLifecycleService {
     }
 
     pub fn list_threads(&self, limit: usize) -> Result<Value> {
-        let threads: Vec<ThreadListView> = self
-            .state_store
-            .list_threads(limit)?
-            .into_iter()
-            .map(|item| self.decorate_list_item(item))
-            .collect();
+        let threads = self.decorate_list_items(self.state_store.list_threads(limit)?)?;
         Ok(json!({ "threads": threads, "next_cursor": null }))
     }
 
@@ -1287,12 +1509,7 @@ impl ThreadLifecycleService {
         limit: usize,
         filter_principal: Option<&str>,
     ) -> Result<Vec<ThreadListView>> {
-        Ok(self
-            .state_store
-            .list_threads_filtered(limit, filter_principal)?
-            .into_iter()
-            .map(|item| self.decorate_list_item(item))
-            .collect())
+        self.decorate_list_items(self.state_store.list_threads_filtered(limit, filter_principal)?)
     }
 
     /// As [`Self::list_thread_views_filtered`] but with an explicit sort — the
@@ -1304,12 +1521,10 @@ impl ThreadLifecycleService {
         filter_principal: Option<&str>,
         sort: ryeos_state::queries::ThreadSort,
     ) -> Result<Vec<ThreadListView>> {
-        Ok(self
-            .state_store
-            .list_threads_sorted(limit, filter_principal, sort)?
-            .into_iter()
-            .map(|item| self.decorate_list_item(item))
-            .collect())
+        self.decorate_list_items(
+            self.state_store
+                .list_threads_sorted(limit, filter_principal, sort)?,
+        )
     }
 
     /// As [`Self::list_thread_views_sorted`] but with the full optional filter
@@ -1320,12 +1535,7 @@ impl ThreadLifecycleService {
         filter: &ryeos_state::queries::ThreadListFilter,
         sort: ryeos_state::queries::ThreadSort,
     ) -> Result<Vec<ThreadListView>> {
-        Ok(self
-            .state_store
-            .list_threads_query(limit, filter, sort)?
-            .into_iter()
-            .map(|item| self.decorate_list_item(item))
-            .collect())
+        self.decorate_list_items(self.state_store.list_threads_query(limit, filter, sort)?)
     }
 
     /// `threads.list` service envelope: the decorated rows plus a cursor.
@@ -1339,12 +1549,11 @@ impl ThreadLifecycleService {
     }
 
     pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadView>> {
-        Ok(self
-            .state_store
+        self.state_store
             .list_thread_children(thread_id)?
             .into_iter()
             .map(|thread| self.decorate_thread(thread))
-            .collect())
+            .collect()
     }
 
     pub fn get_chain(&self, thread_id: &str) -> Result<Option<ThreadChainResult>> {
@@ -1357,7 +1566,7 @@ impl ThreadLifecycleService {
             .list_chain_threads(&thread.chain_root_id)?
             .into_iter()
             .map(|thread| self.decorate_thread(thread))
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(Some(ThreadChainResult {
             threads,
             edges: self.state_store.list_chain_edges(&thread.chain_root_id)?,
@@ -2016,6 +2225,117 @@ mod tests {
         assert_eq!(env["result"]["child_status"], json!("completed"));
         assert_eq!(env["result"]["child_result"], child_result);
         assert_eq!(env["cost"], json!(null));
+    }
+
+    fn waiter(phase: &str, terminal: Option<&str>) -> crate::runtime_db::FollowWaiter {
+        crate::runtime_db::FollowWaiter {
+            follow_key: "parent-1/gr-1/n_follow/3".to_string(),
+            parent_thread_id: "parent-1".to_string(),
+            parent_chain_root_id: "chain-parent".to_string(),
+            parent_successor_thread_id: Some("succ-1".to_string()),
+            follow_node: "n_follow".to_string(),
+            graph_run_id: "gr-1".to_string(),
+            step_count: 3,
+            frontier_id: None,
+            child_thread_id: Some("child-1".to_string()),
+            child_chain_root_id: Some("chain-child".to_string()),
+            child_terminal_thread_id: terminal.map(|_| "child-tail".to_string()),
+            child_terminal_status: terminal.map(str::to_string),
+            terminal_envelope: None,
+            phase: phase.to_string(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn follow_fact_suspended_parent_wire_shape() {
+        let f = FollowFact::suspended_parent(&waiter(
+            crate::runtime_db::follow_phase::WAITING,
+            None,
+        ));
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["role"], json!("suspended_parent"));
+        assert_eq!(v["display_state"], json!("suspended"));
+        assert_eq!(v["phase"], json!("waiting"));
+        assert_eq!(v["follow_node"], json!("n_follow"));
+        assert_eq!(v["child_thread_id"], json!("child-1"));
+        assert_eq!(v["child_chain_root_id"], json!("chain-child"));
+        // Still running → terminal status present but null.
+        assert!(v.get("child_terminal_status").is_some());
+        assert_eq!(v["child_terminal_status"], json!(null));
+        assert_eq!(v["parent_successor_thread_id"], json!("succ-1"));
+    }
+
+    #[test]
+    fn follow_fact_resume_successor_live_omits_phase_carries_terminal() {
+        let f = FollowFact::resume_successor_live(&waiter(
+            crate::runtime_db::follow_phase::READY,
+            Some("completed"),
+        ));
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["role"], json!("resume_successor"));
+        assert_eq!(v["display_state"], json!("resumed"));
+        // `phase` is a suspended_parent-only field.
+        assert!(v.get("phase").is_none(), "resume_successor carries no phase");
+        assert_eq!(v["child_terminal_status"], json!("completed"));
+        assert_eq!(v["child_chain_root_id"], json!("chain-child"));
+    }
+
+    #[test]
+    fn follow_fact_resume_successor_durable_is_minimal() {
+        let f = FollowFact::resume_successor_durable("succ-9");
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["role"], json!("resume_successor"));
+        assert_eq!(v["display_state"], json!("resumed"));
+        assert!(v.get("phase").is_none());
+        assert!(v.get("follow_node").is_none());
+        assert!(v.get("child_thread_id").is_none());
+        assert!(v.get("child_chain_root_id").is_none());
+        // Present-but-null (the field is always emitted when the fact exists).
+        assert_eq!(v["child_terminal_status"], json!(null));
+        assert_eq!(v["parent_successor_thread_id"], json!("succ-9"));
+    }
+
+    #[test]
+    fn thread_view_omits_absent_follow_and_zero_pending() {
+        // A non-follow, un-steered thread pays nothing for the new fields.
+        let view = ThreadListView {
+            item: ThreadListItem {
+                thread_id: "T-x".to_string(),
+                chain_root_id: "T-x".to_string(),
+                kind: "directive".to_string(),
+                status: "running".to_string(),
+                item_ref: "directive:demo".to_string(),
+                launch_mode: "managed_async".to_string(),
+                current_site_id: "site:test".to_string(),
+                origin_site_id: "site:test".to_string(),
+                upstream_thread_id: None,
+                successor_thread_id: None,
+                requested_by: None,
+                created_at: "t".to_string(),
+                updated_at: "t".to_string(),
+            },
+            execution: ExecutionFacts {
+                supports_continuation: true,
+                supports_operator_followup: true,
+            },
+            follow: None,
+            pending: 0,
+        };
+        let v = serde_json::to_value(&view).unwrap();
+        assert!(v.get("follow").is_none(), "absent follow omitted");
+        assert!(v.get("pending").is_none(), "zero pending omitted");
+        // Execution facts still flatten as before.
+        assert_eq!(v["execution"]["supports_continuation"], json!(true));
+
+        // A staged input surfaces the count.
+        let steered = ThreadListView {
+            pending: 2,
+            ..view
+        };
+        let v2 = serde_json::to_value(&steered).unwrap();
+        assert_eq!(v2["pending"], json!(2));
     }
 
     #[test]

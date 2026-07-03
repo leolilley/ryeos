@@ -15,8 +15,14 @@ pub struct GraphConfig {
     pub on_error: ErrorMode,
     #[serde(default)]
     pub nodes: HashMap<String, GraphNode>,
+    /// Authored observer hooks fired at graph lifecycle events
+    /// (`graph_started`, `graph_step_completed`, `graph_completed`). Typed with
+    /// the same `HookDefinition` vocabulary directives use — one hook grammar
+    /// across runtimes. Each matching hook's action dispatches through the same
+    /// callback path a node action uses (effective_caps enforced, cost accrued,
+    /// braid-visible). Hooks observe; they do not steer the walk.
     #[serde(default)]
-    pub hooks: Option<Vec<Value>>,
+    pub hooks: Vec<ryeos_runtime::HookDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<Value>,
     #[serde(default)]
@@ -89,6 +95,13 @@ pub struct GraphNode {
     pub output: Option<Value>,
     #[serde(default)]
     pub env_requires: Vec<String>,
+    /// Per-step dispatch retry. When a dispatch fails and attempts remain, the
+    /// walker sleeps the backoff and re-dispatches — each attempt consuming a
+    /// walker step and the attempt count riding the checkpoint. Only valid on
+    /// action nodes (incl. foreach); rejected on `follow` nodes. Validated in
+    /// `validation.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryConfig>,
 }
 
 impl GraphNode {
@@ -98,6 +111,38 @@ impl GraphNode {
 
     pub fn foreach_var(&self) -> &str {
         self.r#as.as_deref().unwrap_or("item")
+    }
+}
+
+/// Per-step retry policy on an action node.
+///
+/// `attempts` is the TOTAL number of dispatches including the first, so
+/// `attempts: 3` means one initial dispatch plus up to two retries. The
+/// backoff before the retry that follows a failed attempt `n` (1-based) is
+/// `backoff_ms * 2^(n-1)`, capped at `max_backoff_ms` when set. Bounds
+/// (`attempts` 1..=10, `backoff_ms` > 0, `max_backoff_ms` >= `backoff_ms`)
+/// are enforced in `validation.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RetryConfig {
+    pub attempts: u32,
+    pub backoff_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_backoff_ms: Option<u64>,
+}
+
+impl RetryConfig {
+    /// Backoff before the retry that follows `failed_attempt` (1-based: the
+    /// number of the attempt that just failed). Exponential, capped.
+    pub fn delay_ms(&self, failed_attempt: u32) -> u64 {
+        // `failed_attempt` is validated to be at least 1; the shift exponent is
+        // clamped so a pathological attempt count can never overflow the shift.
+        let exp = failed_attempt.saturating_sub(1).min(63);
+        let grown = self.backoff_ms.saturating_mul(1u64 << exp);
+        match self.max_backoff_ms {
+            Some(cap) => grown.min(cap),
+            None => grown,
+        }
     }
 }
 
@@ -575,6 +620,74 @@ config:
 
         assert_eq!(a.definition_hash, b.definition_hash);
         assert_ne!(a.definition_hash, changed.definition_hash);
+    }
+
+    #[test]
+    fn retry_delay_is_exponential_and_capped() {
+        let rc = RetryConfig {
+            attempts: 5,
+            backoff_ms: 100,
+            max_backoff_ms: Some(500),
+        };
+        // failed_attempt 1 → 100 * 2^0, 2 → 200, 3 → 400, 4 → 800 capped to 500.
+        assert_eq!(rc.delay_ms(1), 100);
+        assert_eq!(rc.delay_ms(2), 200);
+        assert_eq!(rc.delay_ms(3), 400);
+        assert_eq!(rc.delay_ms(4), 500, "capped at max_backoff_ms");
+        assert_eq!(rc.delay_ms(10), 500, "still capped");
+    }
+
+    #[test]
+    fn retry_delay_uncapped_when_no_max() {
+        let rc = RetryConfig {
+            attempts: 3,
+            backoff_ms: 250,
+            max_backoff_ms: None,
+        };
+        assert_eq!(rc.delay_ms(1), 250);
+        assert_eq!(rc.delay_ms(3), 1000);
+    }
+
+    #[test]
+    fn retry_block_parses_on_action_node() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      action: {item_id: "tool:test/fetch"}
+      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
+        let retry = def.config.nodes["fetch"].retry.as_ref().expect("retry parsed");
+        assert_eq!(retry.attempts, 3);
+        assert_eq!(retry.backoff_ms, 1000);
+        assert_eq!(retry.max_backoff_ms, Some(30000));
+    }
+
+    #[test]
+    fn retry_block_rejects_unknown_field() {
+        // deny_unknown_fields: a typo'd retry key fails the parse rather than
+        // being silently ignored.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: fetch
+  nodes:
+    fetch:
+      action: {item_id: "tool:test/fetch"}
+      retry: {attempts: 3, backoff_ms: 1000, backof_max: 30000}
+      next: {type: unconditional, to: done}
+    done:
+      node_type: return
+"#;
+        assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
 
     #[test]

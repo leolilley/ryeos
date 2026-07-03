@@ -87,15 +87,46 @@ fn check_manifest(source: &Path) -> CheckResult {
             json!({ "note": "no .ai/manifest.source.yaml — manifests are optional" }),
         );
     }
-    let source_manifest = match std::fs::read_to_string(&source_path).ok().and_then(|raw| {
-        serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(&raw).ok()
-    }) {
-        Some(src) => src,
-        None => {
+    let raw = match std::fs::read_to_string(&source_path) {
+        Ok(raw) => raw,
+        Err(e) => {
             return CheckResult::new(
                 "manifest",
                 FAIL,
-                json!({ "error": "manifest.source.yaml is unreadable or malformed" }),
+                json!({ "error": format!("manifest.source.yaml is unreadable: {e}") }),
+            );
+        }
+    };
+    let source_manifest = match serde_yaml::from_str::<
+        ryeos_bundle::manifest::BundleManifestSource,
+    >(&raw)
+    {
+        Ok(src) => src,
+        Err(e) => {
+            let msg = e.to_string();
+            // `deny_unknown_fields` rejects a manifest still carrying the flat,
+            // pre-nesting runtime-authority fields. Name the exact fix instead
+            // of swallowing the error behind a generic "malformed" string.
+            let old_shape_field = ["bundle_events", "runtime_vault", "item_authoring"]
+                .into_iter()
+                .find(|f| msg.contains(&format!("unknown field `{f}`")));
+            if let Some(field) = old_shape_field {
+                return CheckResult::new(
+                    "manifest",
+                    FAIL,
+                    json!({
+                        "error": format!(
+                            "manifest.source.yaml declares `{field}` as a top-level field"
+                        ),
+                        "remedy": "nest bundle_events / runtime_vault / item_authoring under a single `runtime_authority:` block",
+                        "serde_error": msg,
+                    }),
+                );
+            }
+            return CheckResult::new(
+                "manifest",
+                FAIL,
+                json!({ "error": format!("manifest.source.yaml is malformed: {msg}") }),
             );
         }
     };
@@ -346,6 +377,52 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("manifest-sign"));
+    }
+
+    #[test]
+    fn manifest_check_hints_old_shape_runtime_authority_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A manifest still carrying the flat pre-nesting field. `deny_unknown_fields`
+        // rejects it; doctor must name the field and the nesting fix, not a
+        // generic "malformed" string.
+        write(
+            &tmp.path().join(".ai/manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\nbundle_events:\n  - event_kind: ev\n    operations: [append]\n",
+        );
+        let r = check_manifest(tmp.path());
+        assert_eq!(r.status, FAIL);
+        assert!(
+            r.detail["error"]
+                .as_str()
+                .unwrap()
+                .contains("bundle_events"),
+            "error should name the offending field: {:?}",
+            r.detail
+        );
+        assert!(r.detail["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("runtime_authority:"));
+        // The raw serde error is preserved for context.
+        assert!(r.detail["serde_error"].is_string());
+    }
+
+    #[test]
+    fn manifest_check_surfaces_raw_serde_error_for_other_malformations() {
+        let tmp = tempfile::tempdir().unwrap();
+        // An unknown field that is NOT one of the old-shape runtime-authority
+        // fields: the raw serde error must surface rather than a generic string,
+        // and no nesting remedy applies.
+        write(
+            &tmp.path().join(".ai/manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\nbogus_field: true\n",
+        );
+        let r = check_manifest(tmp.path());
+        assert_eq!(r.status, FAIL);
+        let err = r.detail["error"].as_str().unwrap();
+        assert!(err.contains("malformed"), "unexpected: {err}");
+        assert!(err.contains("bogus_field"), "raw serde error preserved: {err}");
+        assert!(r.detail.get("remedy").is_none());
     }
 
     #[test]

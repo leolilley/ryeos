@@ -1,0 +1,29 @@
+# Bundle-authored maintenance schedule declaration (standard bundle).
+#
+# The daemon reconciles this into a signed node schedule spec at init
+# (crates/bin/daemon/src/maintenance_schedule.rs), filling in its own identity
+# as the acting principal and signing with the node key. The scheduler reconcile
+# then projects and fires it like any other schedule, so `ryeos thread list`
+# shows maintenance fires and `scheduler pause maintenance-gc` pauses them.
+#
+# This is the source of record for the maintenance cadence/params; it mirrors
+# the daemon's built-in default so a fresh node schedules maintenance even
+# before this file materialises. Edit here to change the default cadence.
+#
+# Runs the deep GC profile daily (see GcParams profile docs): CAS sweep plus
+# cache purge, trace truncation, runtime-history pruning, and the retention
+# sweeps. overlap_policy `skip` never stacks a second GC over a running one.
+spec_version: 1
+schedules:
+  - schedule_id: maintenance-gc
+    item_ref: "service:maintenance/gc"
+    schedule_type: cron
+    expression: "0 0 4 * * *"   # 04:00:00 UTC daily
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    enabled: true
+    params:
+      deep: true
+    capabilities:
+      - "ryeos.execute.service.maintenance/gc"
