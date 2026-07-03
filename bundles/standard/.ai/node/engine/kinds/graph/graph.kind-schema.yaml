@@ -18,7 +18,17 @@ execution:
   thread_profile:
     name: graph_run
     root_executable: true
-    supports_interrupt: true
+    # A graph walker has NO interrupt contract. There is no in-flight signal a
+    # running segment-walk honors and reseals as a partial turn (the way a
+    # directive folds SIGUSR1 into an `interrupted: true` cognition_out).
+    # Declaring interrupt support would let `allowed_actions` offer — and
+    # `commands/submit` accept — an `interrupt` command the walker cannot
+    # service, i.e. undefined behavior. So the profile withholds it:
+    # `allowed_actions(graph_run, running, …)` omits `interrupt` and
+    # `commands/submit` refuses it (belt), and no client surfaces an interrupt
+    # control for a graph (suspenders). To stop a graph, cancel or kill it. See
+    # docs/decisions/steering-graph-interrupt-and-cancel-path.md.
+    supports_interrupt: false
     # A graph self-continues by MACHINE only: when a segment-step budget is
     # exhausted the walker checkpoints the frontier and a machine successor
     # resumes it from that checkpoint. So the kind IS continuation-capable.

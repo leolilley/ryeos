@@ -467,6 +467,70 @@ mod tests {
     }
 
     #[test]
+    fn shipped_threads_list_cancel_uses_the_single_command_submit_path() {
+        // Steering guard (05c §3): the studio has exactly ONE cancel path — the
+        // audited command channel `service:commands/submit` with
+        // `command_type: cancel`. The row Cancel affordance in the shipped
+        // list.yaml must target that, and the killed raw-cancel service refs
+        // (`service:ui/studio/thread/cancel`, `service:threads/cancel`) must be
+        // gone from every affordance in the view.
+        let binding: crate::studio::content::ViewBinding = serde_yaml::from_str(include_str!(
+            "../../../../../bundles/studio/.ai/views/ryeos/threads/list.yaml"
+        ))
+        .unwrap();
+
+        let cancel = binding
+            .affordances
+            .iter()
+            .find(|a| a.get("id").and_then(|v| v.as_str()) == Some("cancel"))
+            .expect("shipped threads/list must offer a `cancel` affordance");
+        let invoke = cancel.get("invoke").expect("cancel affordance has invoke");
+        assert_eq!(
+            invoke.get("ref").and_then(|v| v.as_str()),
+            Some("service:commands/submit"),
+            "cancel must route through the single audited command path"
+        );
+        assert_eq!(
+            invoke
+                .get("args")
+                .and_then(|a| a.get("command_type"))
+                .and_then(|v| v.as_str()),
+            Some("cancel"),
+            "cancel affordance submits command_type: cancel"
+        );
+
+        // The killed cancel forms appear nowhere in the view's affordances.
+        let all = serde_json::to_string(&binding.affordances).unwrap();
+        assert!(
+            !all.contains("service:ui/studio/thread/cancel"),
+            "the ui/studio/thread/cancel affordance route is gone"
+        );
+        assert!(
+            !all.contains("service:threads/cancel"),
+            "the raw threads/cancel affordance route is gone"
+        );
+
+        // Resolving it emits a Service-intent /execute Invoke carrying the row's
+        // thread and the cancel command — the same shape every other row-service
+        // affordance uses (no bespoke cancel effect).
+        let record = serde_json::json!({ "thread_id": "T-42" });
+        let resolved = crate::studio::content::resolve_affordance_invoke(
+            cancel,
+            crate::studio::content::Producer::Selection,
+            &crate::studio::content::Payload::Selection(&record),
+        )
+        .expect("cancel affordance resolves for a row");
+        match resolved {
+            crate::studio::content::AffordanceInvoke::Service { item_ref, args, .. } => {
+                assert_eq!(item_ref, "service:commands/submit");
+                assert_eq!(args["thread_id"], "T-42");
+                assert_eq!(args["command_type"], "cancel");
+            }
+            other => panic!("cancel must resolve to a Service invoke; got {other:?}"),
+        }
+    }
+
+    #[test]
     fn invoke_affordance_rye_plane_emits_token_invoke_with_args() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_view_value(

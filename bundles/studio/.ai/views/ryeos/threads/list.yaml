@@ -84,17 +84,22 @@ affordances:
       value:
         thread: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
-  # Row-specific cancel through the operator-scoped studio service (args reach
-  # the daemon as parameters via /execute — the token path would drop them).
+  # Row-specific cancel through the ONE studio cancel path: the audited command
+  # channel `service:commands/submit` with `command_type: cancel`. It carries
+  # the per-thread ownership check and writes a command record, unlike the raw
+  # cancel services. Args reach the daemon as /execute parameters (the token
+  # path would drop them), so `{record.thread_id}` targets THIS row rather than
+  # the route head. See docs/decisions/steering-graph-interrupt-and-cancel-path.md.
   - id: cancel
     label: Cancel
     invoke:
       plane: rye
-      ref: service:ui/studio/thread/cancel
+      ref: service:commands/submit
       args:
         thread_id: "{record.thread_id}"
+        command_type: cancel
       # Success copy lives in view data, not the reducer: rendered against the
-      # invocation outcome ({result.<field>}) when the cancel succeeds.
+      # command record ({result.<field>}) when the submit succeeds.
       notice: "Cancelled {result.thread_id}."
 # Inline live filter: typing narrows the list (substring) as you type; the buffer
 # feeds ONE source param (empty buffer = unfiltered), and Tab cycles which field it
