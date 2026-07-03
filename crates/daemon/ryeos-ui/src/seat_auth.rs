@@ -46,8 +46,9 @@ pub fn require_seat_caller(
     state: &AppState,
 ) -> Result<SeatCaller, HandlerError> {
     if let Some(session_id) = ctx.fingerprint.strip_prefix("session:") {
-        return get_ui_state(state)
-            .expect("UiState not set")
+        let ui = get_ui_state(state)
+            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+        return ui
             .browser_sessions
             .get_session(session_id)
             .map(SeatCaller::Session)

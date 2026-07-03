@@ -16,6 +16,7 @@ use ryeos_app::principal::{
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
+use crate::seat_auth::require_seat_caller;
 use crate::state::get_ui_state;
 
 const PROJECTS_VERSION: u32 = 1;
@@ -147,7 +148,7 @@ pub async fn handle_projects_list(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_read_session(&ctx, &state)?;
+    require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     Ok(json!({
@@ -161,7 +162,9 @@ pub async fn handle_projects_add(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_writable_session(&ctx, &state)?;
+    if require_seat_caller(&ctx, &state)?.read_only() {
+        return Err(HandlerError::Forbidden("session is read-only".into()).into());
+    }
     let req: AddProjectRequest = parse_request(params)?;
     let root = canonical_project_root(&req.root)?;
     let root_text = root.display().to_string();
@@ -202,7 +205,9 @@ pub async fn handle_projects_forget(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_writable_session(&ctx, &state)?;
+    if require_seat_caller(&ctx, &state)?.read_only() {
+        return Err(HandlerError::Forbidden("session is read-only".into()).into());
+    }
     let req: ForgetProjectRequest = parse_request(params)?;
     if req.local_id.is_none() && req.root.is_none() {
         return Err(HandlerError::BadRequest("local_id or root is required".into()).into());
@@ -243,7 +248,7 @@ pub async fn handle_projects_resolve(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_read_session(&ctx, &state)?;
+    require_seat_caller(&ctx, &state)?;
     let req: ResolveProjectRequest = parse_request(params)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
@@ -260,7 +265,9 @@ pub async fn handle_projects_open(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_writable_session(&ctx, &state)?;
+    if require_seat_caller(&ctx, &state)?.read_only() {
+        return Err(HandlerError::Forbidden("session is read-only".into()).into());
+    }
     let req: OpenProjectRequest = parse_request(params)?;
     let session_id = session_id_from_context(&ctx)
         .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
@@ -298,7 +305,9 @@ pub async fn handle_recent_touch(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_writable_session(&ctx, &state)?;
+    if require_seat_caller(&ctx, &state)?.read_only() {
+        return Err(HandlerError::Forbidden("session is read-only".into()).into());
+    }
     let req: TouchRecentRequest = parse_request(params)?;
     let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
@@ -315,7 +324,7 @@ pub async fn handle_recent_list(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_read_session(&ctx, &state)?;
+    require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let recent = store.load_recent()?;
     Ok(json!(recent))
@@ -326,7 +335,7 @@ pub async fn handle_config_get(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_read_session(&ctx, &state)?;
+    require_seat_caller(&ctx, &state)?;
     let store = resolve_principal_store(&ctx, &state)?;
     let config = store.load_studio_config()?;
     Ok(json!(config))
@@ -337,7 +346,9 @@ pub async fn handle_config_update(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    ensure_writable_session(&ctx, &state)?;
+    if require_seat_caller(&ctx, &state)?.read_only() {
+        return Err(HandlerError::Forbidden("session is read-only".into()).into());
+    }
     let req: UpdateConfigRequest = parse_request(params)?;
     if let Some(theme) = req.theme.as_deref() {
         validate_choice("theme", theme, &["system", "light", "dark"])?;
@@ -511,31 +522,6 @@ fn validate_choice(field: &str, value: &str, allowed: &[&str]) -> Result<()> {
 
 fn session_id_from_context(ctx: &HandlerContext) -> Option<&str> {
     ctx.fingerprint.strip_prefix("session:")
-}
-
-fn ensure_read_session(ctx: &HandlerContext, state: &AppState) -> Result<()> {
-    let session_id = session_id_from_context(ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    get_ui_state(state)
-        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-        .browser_sessions
-        .get_session(session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-    Ok(())
-}
-
-fn ensure_writable_session(ctx: &HandlerContext, state: &AppState) -> Result<()> {
-    let session_id = session_id_from_context(ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
-    let session = get_ui_state(state)
-        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-        .browser_sessions
-        .get_session(session_id)
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-    if session.read_only {
-        return Err(HandlerError::Forbidden("session is read-only".into()).into());
-    }
-    Ok(())
 }
 
 fn inferred_project_name(root: &Path) -> String {
