@@ -624,8 +624,8 @@ impl Runner {
                                         &mut warnings,
                                         "provider_retry",
                                         self.callback
-                                            .append_event(
-                                                "provider_retry",
+                                            .append_runtime_event(
+                                                ryeos_runtime::RuntimeEventType::ProviderRetry,
                                                 json!({
                                                     "turn": turn,
                                                     "attempt": attempt,
@@ -686,8 +686,8 @@ impl Runner {
                                                 &mut warnings,
                                                 "cost_untracked",
                                                 self.callback
-                                                    .append_event(
-                                                        "cost_untracked",
+                                                    .append_runtime_event(
+                                                        ryeos_runtime::RuntimeEventType::CostUntracked,
                                                         json!({
                                                             "turn": turn,
                                                             "model": self.model_name,
