@@ -328,6 +328,11 @@ enum Cmd {
         /// creating a new item.
         #[arg(long)]
         format_ext: Option<String>,
+
+        /// Compare-and-swap guard for `--mode upsert`: the incumbent's authored
+        /// `content_digest` must equal this or the upsert fails with a conflict.
+        #[arg(long)]
+        expected_digest: Option<String>,
     },
     /// Manage sealed secrets in the daemon vault.
     Vault {
@@ -693,7 +698,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             content,
             mode,
             format_ext,
-        } => run_author_item(item_ref, content, mode, format_ext, cli.stdin_json),
+            expected_digest,
+        } => run_author_item(
+            item_ref,
+            content,
+            mode,
+            format_ext,
+            expected_digest,
+            cli.stdin_json,
+        ),
         Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
@@ -713,6 +726,8 @@ struct AuthorItemParams {
     mode: Option<String>,
     #[serde(default)]
     format_ext: Option<String>,
+    #[serde(default)]
+    expected_digest: Option<String>,
 }
 
 /// Propose a project item to the daemon `runtime.author_item` callback. This is
@@ -725,6 +740,7 @@ fn run_author_item(
     content: Option<String>,
     mode: String,
     format_ext: Option<String>,
+    expected_digest: Option<String>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     let request = if stdin_json {
@@ -739,6 +755,9 @@ fn run_author_item(
         }
         if let Some(ext) = params.format_ext {
             request["format_ext"] = serde_json::json!(ext);
+        }
+        if let Some(digest) = params.expected_digest {
+            request["expected_digest"] = serde_json::json!(digest);
         }
         request
     } else {
@@ -760,6 +779,9 @@ fn run_author_item(
         });
         if let Some(ext) = format_ext {
             request["format_ext"] = serde_json::json!(ext);
+        }
+        if let Some(digest) = expected_digest {
+            request["expected_digest"] = serde_json::json!(digest);
         }
         request
     };
