@@ -323,6 +323,15 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE"
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
+# central-auth ships in the source tree and is discovered/parsed at init, so its
+# manifest must stay current with the manifest schema. It depends only on core's
+# tool + config kinds, so publish it right after core (now that core carries a
+# published refs root) with core as its registry root.
+echo "[populate-bundles] publishing central-auth bundle…"
+RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$ROOT/bundles/central-auth" \
+  --registry-root "$CORE" \
+  --owner "$OWNER" >/dev/null
+
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   echo "[populate-bundles] publishing standard bundle…"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
