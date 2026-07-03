@@ -761,6 +761,88 @@ body {
 .studio-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-row small { color: var(--studio-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 
+/* Table widget: aligned cells under column headers with a leading tone-glyph
+   gutter. Header and rows share the same grid template so cells line up under
+   their column, mirroring the terminal's widgets/table.rs. */
+.studio-table { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 8px; min-height: 100%; }
+.studio-table-grid { --table-cols: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 0; }
+.studio-table-head,
+.studio-table-row {
+  display: grid;
+  grid-template-columns: 2ch repeat(var(--table-cols), minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+.studio-table-head {
+  padding: 0 8px 6px;
+  border-bottom: 1px solid rgba(var(--studio-warn-rgb), 0.18);
+  margin-bottom: 2px;
+}
+.studio-table-col {
+  color: var(--studio-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.studio-table-row {
+  padding: 4px 8px;
+  border: 0;
+  border-left: 3px solid transparent;
+  background: transparent;
+  color: var(--studio-fg-soft);
+  text-align: left;
+  font: inherit;
+  min-height: 26px;
+}
+.studio-table-glyph { color: var(--studio-muted); text-align: center; }
+.studio-table-cell { color: var(--studio-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-table-cell.lead { color: var(--studio-fg-soft); }
+.studio-table-row.good .studio-table-glyph { color: var(--studio-good); }
+.studio-table-row.warn .studio-table-glyph { color: var(--studio-warn); }
+.studio-table-row.danger .studio-table-glyph { color: var(--studio-danger); }
+.studio-table-row.accent .studio-table-glyph { color: var(--studio-accent); }
+.studio-table-row.selected {
+  border-color: var(--studio-accent);
+  background: rgba(var(--studio-accent-rgb), 0.16);
+  color: var(--studio-fg);
+}
+.studio-table-row.selected .studio-table-cell,
+.studio-table-row.selected .studio-table-glyph { color: var(--studio-fg); }
+.studio-table-row:disabled { cursor: default; }
+.studio-table-row:hover {
+  border-color: rgba(var(--studio-warn-rgb), 0.5);
+  background: rgba(var(--studio-warn-rgb), 0.08);
+  color: var(--studio-fg);
+}
+.studio-table-empty { color: var(--studio-muted); padding: 6px 8px; }
+
+/* Sections widget: a foldable multi-section list (the magit-style status
+   surface). Each `▾/▸ Title (count)` header is followed by its rows, indented
+   one fold column deep; collapsed sections show only their header. Rows reuse
+   the rows-widget renderer, so they inherit .studio-row styling. */
+.studio-sections { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 8px; min-height: 100%; }
+.studio-sections-body { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
+.studio-section-header {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr) max-content;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 8px;
+  border-left: 3px solid transparent;
+}
+.studio-section-header strong { color: var(--studio-fg); }
+.studio-section-fold { color: var(--studio-muted); text-align: center; }
+.studio-section-count { color: var(--studio-muted); }
+.studio-section-header.selected {
+  border-color: var(--studio-accent);
+  background: rgba(var(--studio-accent-rgb), 0.16);
+}
+.studio-section .studio-rows { padding-left: 2ch; }
+.studio-sections-empty { color: var(--studio-muted); padding: 6px 8px; }
+
 .studio-code {
   border: 2px solid var(--studio-shadow);
   background: var(--studio-bg);
