@@ -123,6 +123,12 @@ pub struct FollowFact {
     /// [`follow_role::SUSPENDED_PARENT`] or [`follow_role::RESUME_SUCCESSOR`].
     #[serde(default)]
     pub role: String,
+    /// Computed display state ([`follow_display_state::SUSPENDED`] /
+    /// [`follow_display_state::RESUMED`]): the coarse, tone-friendly lineage
+    /// state a view labels off so a suspended parent reads distinctly from a
+    /// stalled `continued`. Mirrors the daemon `FollowFact.display_state`.
+    #[serde(default)]
+    pub display_state: String,
     /// Live waiter phase (`waiting`/`ready`/`resuming`); `suspended_parent` only.
     #[serde(default)]
     pub phase: Option<String>,
@@ -148,6 +154,13 @@ pub struct FollowFact {
 pub mod follow_role {
     pub const SUSPENDED_PARENT: &str = "suspended_parent";
     pub const RESUME_SUCCESSOR: &str = "resume_successor";
+}
+
+/// The `follow.display_state` wire strings — the coarse tone/label state. Kept in
+/// sync with the daemon `thread_lifecycle::follow_display_state`.
+pub mod follow_display_state {
+    pub const SUSPENDED: &str = "suspended";
+    pub const RESUMED: &str = "resumed";
 }
 
 impl FollowFact {
@@ -625,6 +638,7 @@ mod tests {
         // The exact wire shape the daemon emits on a `continued` follow parent.
         let row = serde_json::json!({
             "role": "suspended_parent",
+            "display_state": "suspended",
             "phase": "waiting",
             "follow_node": "n_follow",
             "child_thread_id": "T-child",
@@ -635,6 +649,7 @@ mod tests {
         let f: FollowFact = serde_json::from_value(row).unwrap();
         assert!(f.is_suspended_parent());
         assert!(!f.is_resume_successor());
+        assert_eq!(f.display_state, "suspended");
         assert_eq!(f.phase.as_deref(), Some("waiting"));
         assert_eq!(f.follow_node.as_deref(), Some("n_follow"));
         assert_eq!(f.child_chain_root_id.as_deref(), Some("T-child"));
@@ -647,11 +662,13 @@ mod tests {
         // The waiter-cleared durable form: only role + successor identity.
         let row = serde_json::json!({
             "role": "resume_successor",
+            "display_state": "resumed",
             "child_terminal_status": null,
             "parent_successor_thread_id": "T-succ"
         });
         let f: FollowFact = serde_json::from_value(row).unwrap();
         assert!(f.is_resume_successor());
+        assert_eq!(f.display_state, "resumed");
         assert!(f.phase.is_none(), "resume_successor carries no phase");
         assert!(f.follow_node.is_none());
         assert!(f.child_thread_id.is_none());

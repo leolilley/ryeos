@@ -412,7 +412,35 @@ fn feed_event_type(record: &ProjectedRecord) -> Option<FeedEventType> {
 }
 
 fn is_plumbing_event(record: &ProjectedRecord) -> bool {
+    // A follow-resume `thread_continued` is the ONE continued edge that is NOT
+    // plumbing: it marks where a suspended parent resumed with its child's
+    // result, so it renders as a braid boundary. Every other `thread_continued`
+    // (segment cut, operator follow-up) stays plumbing and is dropped.
+    if is_follow_resume_continuation(record) {
+        return false;
+    }
     feed_event_type(record).is_some_and(FeedEventType::is_plumbing)
+}
+
+/// The daemon-written `reason` marking a `thread_continued` as a graph follow
+/// resume — a suspended parent resuming with its followed child's result. Mirrors
+/// `ryeos_state::queries::ContinuationReasonMarker::GraphFollowResume`; carried as
+/// a literal because this renderer-neutral base crate does not depend on the
+/// state crate.
+const GRAPH_FOLLOW_RESUME_REASON: &str = "graph_follow_resume";
+
+/// Whether a record is a `thread_continued` whose payload `reason` marks it a
+/// graph follow resume. The discriminator that un-plumbs the resume boundary from
+/// the ordinary (dropped) continuation edges and selects its `execution_entry`
+/// arm.
+fn is_follow_resume_continuation(record: &ProjectedRecord) -> bool {
+    feed_event_type(record) == Some(FeedEventType::ThreadContinued)
+        && record
+            .raw
+            .get("payload")
+            .and_then(|payload| payload.get("reason"))
+            .and_then(Value::as_str)
+            == Some(GRAPH_FOLLOW_RESUME_REASON)
 }
 
 /// Whether a record is a `cognition_out` sealed by a live interrupt — a
@@ -466,6 +494,17 @@ fn execution_entry(
         FeedEventType::GraphFollowSuspended => (
             "suspended · following child".to_string(),
             payload.and_then(follow_suspend_node),
+            StudioTone::Accent,
+        ),
+        // The mirror of the suspend boundary: a `thread_continued` whose
+        // `reason == graph_follow_resume` marks where the suspended parent picked
+        // its child's result back up and continued. Un-plumbed by
+        // `is_plumbing_event` so it reaches here; ordinary continuations stay
+        // plumbing and never do. Carries NO drill-in — the child braid is reached
+        // from the row's `watch child` affordance, not this boundary.
+        FeedEventType::ThreadContinued if is_follow_resume_continuation(record) => (
+            "resumed with child result".to_string(),
+            None,
             StudioTone::Accent,
         ),
         FeedEventType::ThreadUsage => (usage_summary(payload?)?, None, StudioTone::Neutral),
@@ -983,17 +1022,45 @@ mod tests {
         // dispatched after the checkpoint), so it renders as an accent milestone
         // with the follow node in the meta and NO action — there is no child ref
         // to aim at (drill-in to the child is the row's `watch child` affordance).
-        let entry = execution_entry(&raw_record(json!({
+        let entry = exec(json!({
             "event_type": "graph_follow_suspended",
             "payload": { "node": "fetch", "item_id": "root", "step": 3 }
-        })));
-        let Some(StudioTimelineEntryVm::Line { primary, meta, tone, action }) = entry else {
+        }));
+        let Some(StudioTimelineEntryVm::Line { primary, meta, tone, action, .. }) = entry else {
             panic!("expected a suspend milestone line");
         };
         assert_eq!(primary, "suspended · following child");
         assert_eq!(meta.as_deref(), Some("fetch"));
         assert!(matches!(tone, StudioTone::Accent));
         assert!(action.is_none(), "the suspend event carries no child ref to drill into");
+    }
+
+    #[test]
+    fn graph_follow_resume_renders_a_boundary_and_ordinary_continued_is_dropped() {
+        // A `thread_continued` marked `graph_follow_resume` is un-plumbed and
+        // renders as an accent boundary ("resumed with child result") with no
+        // drill-in; an ordinary continued (segment cut / operator follow-up)
+        // stays plumbing and is dropped. Both flow through `timeline_entries`.
+        let entries = timeline_entries(vec![
+            raw_record(json!({
+                "event_type": "thread_continued",
+                "payload": { "reason": "turn_limit", "successor_thread_id": "T-seg" }
+            })),
+            raw_record(json!({
+                "event_type": "thread_continued",
+                "payload": { "reason": "graph_follow_resume", "successor_thread_id": "T-succ" }
+            })),
+        ]);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [StudioTimelineEntryVm::Line { primary, tone, action, .. }]
+                    if primary == "resumed with child result"
+                        && matches!(tone, StudioTone::Accent)
+                        && action.is_none()
+            ),
+            "only the follow-resume boundary survives; the segment-cut continued is dropped: {entries:?}"
+        );
     }
 
     #[test]
