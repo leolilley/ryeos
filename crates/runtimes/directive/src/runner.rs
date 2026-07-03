@@ -616,6 +616,26 @@ impl Runner {
                                         max = self.execution.retries,
                                         ms = delay.as_millis(),
                                     ));
+                                    // Durable braid record so the stall shows in
+                                    // the timeline, not just the terminal warning
+                                    // summary. `provider_retry` is a canonical
+                                    // RuntimeEventType (ryeos-runtime events.rs).
+                                    record_callback_warning(
+                                        &mut warnings,
+                                        "provider_retry",
+                                        self.callback
+                                            .append_event(
+                                                "provider_retry",
+                                                json!({
+                                                    "turn": turn,
+                                                    "attempt": attempt,
+                                                    "max_retries": self.execution.retries,
+                                                    "backoff_ms": delay.as_millis() as u64,
+                                                    "error": e.to_string(),
+                                                }),
+                                            )
+                                            .await,
+                                    );
                                     tokio::time::sleep(delay).await;
                                     continue;
                                 }
@@ -658,6 +678,26 @@ impl Runner {
                                                  spend is recorded as $0 (first seen turn {turn})",
                                                 model = self.model_name,
                                             ));
+                                            // Braid record so an operator auditing
+                                            // spend can see the untracked turn inline.
+                                            // `cost_untracked` is a canonical
+                                            // RuntimeEventType (ryeos-runtime events.rs).
+                                            record_callback_warning(
+                                                &mut warnings,
+                                                "cost_untracked",
+                                                self.callback
+                                                    .append_event(
+                                                        "cost_untracked",
+                                                        json!({
+                                                            "turn": turn,
+                                                            "model": self.model_name,
+                                                            "input_tokens": input_tok,
+                                                            "output_tokens": output_tok,
+                                                            "reason": "pricing_missing",
+                                                        }),
+                                                    )
+                                                    .await,
+                                            );
                                         }
                                     }
                                 }
