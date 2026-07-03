@@ -25,6 +25,13 @@ projections:
       field: status
     - label: source
       field: requested_by
+    # Graph `follow:` lineage: `suspended_parent` (issued a follow, awaiting its
+    # child chain) or `resume_successor` (consumes the child result). Blank for
+    # non-follow rows (the `follow` fact is absent). The full child chain + child
+    # terminal status live in the thread detail lens; this column is the at-a-
+    # glance "waiting on child" marker the watch console reads.
+    - label: follow
+      field: follow.role
     - label: created
       field: created_at
   tone:
@@ -49,6 +56,21 @@ affordances:
       merge:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/chain/timeline
+  # Watch the followed CHILD chain of a suspended parent — same shape as `watch`
+  # but aims the route at the child chain root the daemon recorded on the follow
+  # fact (`follow.child_chain_root_id`, head thread `follow.child_thread_id`), so
+  # activating it on a suspended parent opens the child's braid. Meaningful only
+  # on a suspended-parent row; on a non-follow row both merge fields resolve to
+  # null (per-row affordance gating does not exist yet — see follow-up).
+  - id: watch-child
+    label: Watch child
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.follow.child_thread_id}"
+        chain_root: "{record.follow.child_chain_root_id}"
       open_view: view:ryeos/chain/timeline
   # Inspect swaps the center lens to the thread's detail sections. Write the
   # selected thread FIRST (the detail sources read @facet:selection.thread),
