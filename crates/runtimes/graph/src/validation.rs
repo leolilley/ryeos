@@ -2,6 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::{EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType};
 
+/// The lifecycle events the walker fires authored hooks at. A hook targeting
+/// any other `event` never runs (validation warns). Node-level observation
+/// (incl. a failed node before `on_error` routing) rides `graph_step_completed`
+/// — the context carries the node's `status` so a hook can condition on it.
+pub const GRAPH_HOOK_EVENTS: &[&str] =
+    &["graph_started", "graph_step_completed", "graph_completed"];
+
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
     pub errors: Vec<String>,
@@ -38,6 +45,20 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
         result
             .errors
             .push("config.nodes is empty — at least one node is required".into());
+    }
+
+    // Authored hooks fire at graph lifecycle events. A hook whose `event` is
+    // none of the graph fire points would never run — warn so a typo surfaces.
+    for hook in &cfg.hooks {
+        if !GRAPH_HOOK_EVENTS.contains(&hook.event.as_str()) {
+            result.warnings.push(format!(
+                "hook '{}' targets event '{}', which is not a graph hook event ({}); it will \
+                 never fire",
+                hook.id,
+                hook.event,
+                GRAPH_HOOK_EVENTS.join(", ")
+            ));
+        }
     }
 
     // Bundle-event / vault capabilities are runtime authority: a signed manifest
@@ -164,6 +185,47 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         }
     }
 
+    // Per-step retry is only meaningful for a dispatching node (a single
+    // action or a foreach's per-item dispatch). It is a loud error to combine
+    // it with `follow` in v1: retrying a follow means minting a fresh
+    // follow_key per attempt plus a waiter-lifecycle design that does not exist
+    // yet — route a failed follow with `on_error` instead.
+    if let Some(retry) = &node.retry {
+        if !matches!(node.node_type, NodeType::Action | NodeType::Foreach) {
+            result.errors.push(format!(
+                "node '{name}' declares 'retry' but is a {:?} node — retry is only valid on \
+                 action nodes",
+                node.node_type
+            ));
+        }
+        if node.follow {
+            result.errors.push(format!(
+                "node '{name}' cannot combine 'retry' and 'follow' — retrying a follow needs a \
+                 fresh follow_key and waiter lifecycle per attempt (excluded in v1); route a \
+                 failed follow with 'on_error' instead"
+            ));
+        }
+        if !(1..=10).contains(&retry.attempts) {
+            result.errors.push(format!(
+                "node '{name}' retry.attempts must be between 1 and 10 (got {})",
+                retry.attempts
+            ));
+        }
+        if retry.backoff_ms == 0 {
+            result
+                .errors
+                .push(format!("node '{name}' retry.backoff_ms must be greater than 0"));
+        }
+        if let Some(cap) = retry.max_backoff_ms {
+            if cap < retry.backoff_ms {
+                result.errors.push(format!(
+                    "node '{name}' retry.max_backoff_ms ({cap}) must be >= retry.backoff_ms ({})",
+                    retry.backoff_ms
+                ));
+            }
+        }
+    }
+
     if let Some(ref next) = node.next {
         validate_edges(name, next, cfg, result);
     }
@@ -174,6 +236,78 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 "on_error target '{on_err}' in node '{name}' does not exist"
             ));
         }
+    }
+
+    check_conditional_reads_own_assign(name, node, result);
+}
+
+/// Same-node stale-state footgun. A node's `assign` delta is merged into
+/// state in `commit_step`, which runs AFTER edge evaluation — so a conditional
+/// branch on `state.K` where the SAME node assigns `K` compares against the
+/// pre-assign value (unset on first visit; one iteration stale in a loop).
+/// The fresh outcome is in the condition context as `result.*`, so a same-node
+/// branch must read `result.K`. Warn (not error): `state.K` is valid syntax
+/// and reading a *different* node's assigned `K` is legitimate — only the
+/// same-node assign∩condition intersection is the footgun.
+fn check_conditional_reads_own_assign(
+    name: &str,
+    node: &GraphNode,
+    result: &mut ValidationResult,
+) {
+    let assigned: HashSet<&str> = match node.assign.as_ref() {
+        Some(Value::Object(map)) => map.keys().map(String::as_str).collect(),
+        _ => return,
+    };
+    if assigned.is_empty() {
+        return;
+    }
+    let Some(EdgeSpec::Conditional { branches }) = node.next.as_ref() else {
+        return;
+    };
+    let mut condition_keys: HashSet<String> = HashSet::new();
+    for ce in branches {
+        if let Some(when) = ce.when.as_ref() {
+            collect_condition_state_keys(when, &mut condition_keys);
+        }
+    }
+    for key in &condition_keys {
+        if assigned.contains(key.as_str()) {
+            result.warnings.push(format!(
+                "node '{name}' assigns '{key}' and a same-node conditional branch reads \
+                 'state.{key}', which sees the value from before this node's assign merges; \
+                 branch on 'result.{key}' to use this node's own outcome"
+            ));
+        }
+    }
+}
+
+/// Collect the first path segment of every bare `path: "state.<seg>…"` string
+/// anywhere in a `when` condition tree (recursing through and/or/not nesting).
+/// Condition paths are bare dotted strings, not `${…}` templates, so the
+/// interpolation collectors above never see them.
+fn collect_condition_state_keys(when: &Value, out: &mut HashSet<String>) {
+    match when {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if k == "path" {
+                    if let Some(seg) = v
+                        .as_str()
+                        .and_then(|s| s.strip_prefix("state."))
+                        .and_then(|rest| rest.split('.').next())
+                        .filter(|seg| !seg.is_empty())
+                    {
+                        out.insert(seg.to_string());
+                    }
+                }
+                collect_condition_state_keys(v, out);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                collect_condition_state_keys(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -449,6 +583,82 @@ config:
     }
 
     #[test]
+    fn validate_graph_accepts_typed_hooks_on_graph_event() {
+        // A well-formed hook targeting a real graph event parses and validates
+        // cleanly (no error, no unrecognized-event warning).
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: obs
+      event: graph_completed
+      action: {item_id: "tool:test/echo", params: {}}
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(result.errors.is_empty(), "typed hook must validate: {:?}", result.errors);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("never fire")),
+            "a graph_completed hook must not warn: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn validate_graph_warns_hook_on_unrecognized_event() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: typo
+      event: graph_finishd
+      action: {item_id: "tool:test/echo"}
+  nodes:
+    done:
+      node_type: return
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("typo") && w.contains("never fire")),
+            "expected unrecognized-event warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_hook_with_unknown_field() {
+        // deny_unknown_fields on HookDefinition: the killed untyped form (a hook
+        // carrying arbitrary keys the walker silently ignored) fails the parse.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: bad
+      event: graph_completed
+      when: something
+      action: {item_id: "tool:test/echo"}
+  nodes:
+    done:
+      node_type: return
+"#;
+        assert!(
+            GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err(),
+            "an untyped hook field must fail the strict parse"
+        );
+    }
+
+    #[test]
     fn validate_graph_rejects_missing_config_start_node() {
         let yaml = r#"
 version: "1.0.0"
@@ -593,6 +803,93 @@ config:
                 .iter()
                 .any(|w| w.contains("check") && w.contains("no default branch")),
             "expected no-default warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_warns_same_node_conditional_on_assigned_state() {
+        // `recall` assigns `found`, then branches on `state.found` in the same
+        // node — the classic footgun: the assign merges after edge evaluation,
+        // so the branch reads the pre-assign value. Must warn toward `result.*`.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: recall
+  nodes:
+    recall:
+      action: {item_id: "tool:recall"}
+      assign:
+        found: "${result.found}"
+      next:
+        type: conditional
+        branches:
+          - when: {path: state.found, op: eq, value: "yes"}
+            to: warm
+          - to: study
+    warm:
+      node_type: return
+    study:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("recall") && w.contains("result.found")),
+            "expected same-node stale-state warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn analyze_graph_quiet_on_result_paths_and_cross_node_state() {
+        // `recall` branches on its own outcome via `result.found` (the correct
+        // idiom); `gate2` reads `state.found` but does NOT assign it — a
+        // legitimate read of a prior node's committed state. Neither warns.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: recall
+  nodes:
+    recall:
+      action: {item_id: "tool:recall"}
+      assign:
+        found: "${result.found}"
+      next:
+        type: conditional
+        branches:
+          - when: {path: result.found, op: eq, value: "yes"}
+            to: gate2
+          - to: gate2
+    gate2:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: {path: state.found, op: eq, value: "yes"}
+            to: warm
+          - to: study
+    warm:
+      node_type: return
+    study:
+      node_type: return
+"#;
+        let result = analyze_graph(&make_graph(yaml));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("before this node's assign")),
+            "must not warn for result.* or cross-node state.*: {:?}",
             result.warnings
         );
     }
@@ -851,6 +1148,134 @@ config:
                 .iter()
                 .any(|e| e.contains("follow node") && e.contains("no 'action'")),
             "expected follow-without-action rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    // ── §A per-step retry validation ─────────────────────────────────
+
+    fn retry_graph(node_body: &str) -> GraphDefinition {
+        let yaml = format!(
+            r#"
+version: "1.0.0"
+category: test
+config:
+  start: n
+  nodes:
+    n:
+{node_body}
+    done:
+      node_type: return
+"#
+        );
+        make_graph(&yaml)
+    }
+
+    #[test]
+    fn validate_graph_accepts_valid_retry_on_action() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result.errors.is_empty(),
+            "valid retry must not error: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_attempts_out_of_range() {
+        let too_many = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            too_many
+                .errors
+                .iter()
+                .any(|e| e.contains("retry.attempts must be between 1 and 10")),
+            "expected attempts range rejection, got: {:?}",
+            too_many.errors
+        );
+        let zero = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(zero
+            .errors
+            .iter()
+            .any(|e| e.contains("retry.attempts must be between 1 and 10")));
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_zero_backoff() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry.backoff_ms must be greater than 0")),
+            "expected backoff>0 rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_max_below_backoff() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry.max_backoff_ms") && e.contains(">= retry.backoff_ms")),
+            "expected max<backoff rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_on_gate_node() {
+        let result = validate_graph(&retry_graph(
+            "      node_type: gate\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: conditional, branches: [{to: done}]}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry is only valid on")),
+            "expected non-action retry rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_retry_plus_follow() {
+        let result = validate_graph(&retry_graph(
+            "      action: {item_id: \"tool:x\"}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("cannot combine 'retry' and 'follow'")),
+            "expected retry+follow rejection, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_accepts_retry_on_foreach() {
+        let result = validate_graph(&retry_graph(
+            "      node_type: foreach\n      over: \"${state.items}\"\n      as: item\n      action: {item_id: \"tool:x\"}\n      retry: {attempts: 2, backoff_ms: 50}\n      next: {type: unconditional, to: done}",
+        ));
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.contains("retry is only valid on")),
+            "foreach is a valid retry target: {:?}",
             result.errors
         );
     }
