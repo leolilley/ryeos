@@ -34,6 +34,7 @@ library:
   - view:ryeos/bundles/list
   - view:ryeos/node/status
   - view:ryeos/items/space
+  - view:ryeos/item/explain
   - view:ryeos/files/list
   - view:ryeos/gc/status
 
