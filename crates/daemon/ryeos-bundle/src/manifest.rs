@@ -72,7 +72,7 @@ pub struct BundleManifestSource {
     pub requires_kinds: Vec<String>,
     #[serde(default)]
     pub uses_kinds: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "RuntimeAuthorityDecls::is_empty")]
     pub runtime_authority: RuntimeAuthorityDecls,
 }
 
@@ -88,7 +88,7 @@ pub struct BundleManifest {
     pub requires_kinds: Vec<String>,
     #[serde(default)]
     pub uses_kinds: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "RuntimeAuthorityDecls::is_empty")]
     pub runtime_authority: RuntimeAuthorityDecls,
 }
 
