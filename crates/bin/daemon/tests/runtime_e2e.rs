@@ -111,7 +111,11 @@ location:
 execution:
   delegate:
     via: runtime_registry
-  thread_profile: {kind}_run
+  thread_profile:
+    name: {kind}_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
