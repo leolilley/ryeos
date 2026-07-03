@@ -97,8 +97,15 @@ fn discover_bundle_roots() -> Vec<PathBuf> {
             .map(|d| d.join("ryeos"))
             .expect("could not determine XDG data directory"),
     };
-    let bundles_dir = app_root.join(".ai").join("bundles");
     let mut roots = Vec::new();
+    // When RYEOS_APP_ROOT is itself a bundle tree (it carries a signed
+    // `.ai/manifest.yaml`), it IS the content root and the installed-bundle
+    // layout (`.ai/bundles/*`) is absent. Include it so single-bundle app
+    // roots resolve.
+    if app_root.join(".ai").join("manifest.yaml").is_file() {
+        roots.push(app_root.clone());
+    }
+    let bundles_dir = app_root.join(".ai").join("bundles");
     if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {

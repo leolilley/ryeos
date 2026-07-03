@@ -152,15 +152,20 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
     let mock = MockProvider::start(vec![MockResponse::Text("Context was loaded.".into())]).await;
     let mock_url = mock.base_url.clone();
 
+    // Items resolve from the project space (project → bundles); the user
+    // space is no longer a resolution tier. Plant into the project dir that
+    // is passed to /execute.
+    let project = tempfile::tempdir().expect("temp project dir");
+    let project_path = project.path().to_path_buf();
     let plant =
-        |state_path: &Path, user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        |state_path: &Path, _user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user_space, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user_space, &fixture.publisher)?;
+            plant_mock_provider(&project_path, &mock_url, &fixture.publisher)?;
+            plant_model_routing(&project_path, &fixture.publisher)?;
 
             // Plant a knowledge item with a distinctive body.
             plant_knowledge_item(
-                user_space,
+                &project_path,
                 "test/important_fact",
                 "", // no extra frontmatter
                 "The sky is blue on a clear day.",
@@ -170,7 +175,7 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
             // Plant a directive that references the knowledge item in its
             // context block.
             plant_directive_with_context(
-                user_space,
+                &project_path,
                 "test/ctx_dir",
                 "Repeat whatever context was provided.",
                 &["knowledge:test/important_fact"],
@@ -182,11 +187,10 @@ async fn e2e_directive_with_knowledge_context_succeeds() {
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon should start");
-
-    let project = tempfile::tempdir().expect("temp project dir");
     let (status, body) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         h.post_execute(
@@ -216,15 +220,19 @@ async fn e2e_directive_without_context_still_works() {
     let mock = MockProvider::start(vec![MockResponse::Text("Hello!".into())]).await;
     let mock_url = mock.base_url.clone();
 
+    // Items resolve from the project space (project → bundles); plant into
+    // the project dir that is passed to /execute.
+    let project = tempfile::tempdir().expect("temp project dir");
+    let project_path = project.path().to_path_buf();
     let plant =
-        |state_path: &Path, user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        |state_path: &Path, _user_space: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
-            plant_mock_provider(user_space, &mock_url, &fixture.publisher)?;
-            plant_model_routing(user_space, &fixture.publisher)?;
+            plant_mock_provider(&project_path, &mock_url, &fixture.publisher)?;
+            plant_model_routing(&project_path, &fixture.publisher)?;
 
             // Directive with NO context block.
             plant_directive_with_context(
-                user_space,
+                &project_path,
                 "test/no_ctx",
                 "Say hello.",
                 &[], // empty — no context
@@ -236,11 +244,10 @@ async fn e2e_directive_without_context_still_works() {
 
     let (h, _fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env("RUST_LOG", "info");
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("daemon should start");
-
-    let project = tempfile::tempdir().expect("temp project dir");
     let (status, body) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         h.post_execute(

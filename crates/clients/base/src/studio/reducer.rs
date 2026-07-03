@@ -4512,8 +4512,12 @@ mod tests {
         let edit = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::InsertInputChar { ch: 'x' },
         });
+        // A live-filter keystroke is debounced: no synchronous refetch.
+        assert!(edit.is_empty());
+        // The deferred refetch is what the client loop drives; read-only.
         assert!(
-            edit.iter()
+            core.refresh_focused_feeds()
+                .iter()
                 .any(|e| matches!(e.kind, StudioEffectKind::FetchSource { .. })),
             "feeds refetch is allowed read-only"
         );

@@ -719,15 +719,23 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
     // First event must be stream_started.
     assert_eq!(events[0].event, "stream_started");
 
-    // Find the stream_error event.
+    // The rejection surfaces as a terminal carrying `not_root_executable`.
+    // The data-driven dispatch path finalizes a placeholder row `failed`, so
+    // the terminal may be a durable `thread_failed` rather than the inline
+    // `stream_error` — accept either.
     let err = events
         .iter()
-        .find(|e| e.event == "stream_error")
-        .expect("expected a stream_error event for non-root-executable kind");
+        .find(|e| e.event == "stream_error" || e.event == "thread_failed")
+        .expect("expected a terminal event carrying not_root_executable");
 
     let payload: serde_json::Value =
-        serde_json::from_str(&err.data).expect("stream_error data is JSON");
-    assert_eq!(payload["code"], "not_root_executable");
+        serde_json::from_str(&err.data).expect("terminal data is JSON");
+    let code = payload["code"].as_str().or_else(|| {
+        payload
+            .pointer("/payload/error/code")
+            .and_then(|v| v.as_str())
+    });
+    assert_eq!(code, Some("not_root_executable"));
 
     drop(project);
 }

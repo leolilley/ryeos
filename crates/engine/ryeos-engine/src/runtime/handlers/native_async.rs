@@ -272,7 +272,10 @@ impl RuntimeHandler for NativeAsyncHandler {
                     ctx,
                     default_mode,
                     default_grace,
-                    ctx.current_index > 0,
+                    // An explicit rich form is per-item intent: execution.yaml
+                    // *defaults* must not override it (item-level overrides and
+                    // direct cancellation_* params still win independently).
+                    false,
                 )?;
                 let cancellation_mode = match policy.mode.as_str() {
                     "hard" => CancellationMode::Hard,
