@@ -117,6 +117,15 @@ pub(crate) use crate::workspace::{ArrangeSpec, FocusDirection, ViewLocalState, V
             .unwrap_or_default()
     }
 
+    /// Seed the `view:ryeos/input` completion source (the slash grammar) into
+    /// the generic keyed source store, as `initial_effects`' FetchSource would.
+    pub(crate) fn seed_commands(core: &mut StudioCore, commands: serde_json::Value) {
+        core.data.sources.insert(
+            crate::studio::content::completion_source_key("view:ryeos/input", "line"),
+            commands,
+        );
+    }
+
     pub(crate) fn seed_service_route(core: &mut StudioCore) {
         seed_input_view(core);
         core.seat.append_facet(

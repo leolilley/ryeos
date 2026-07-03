@@ -36,10 +36,6 @@ pub enum StudioEffectKind {
         source_ref: String,
         params: Value,
     },
-    /// Command records for completion (the grammar shown is the grammar
-    /// held — records carry per-session invocability, evaluated
-    /// daemon-side).
-    FetchCommands,
     ListFiles {
         tile_id: Option<String>,
         root: String,
@@ -145,7 +141,6 @@ pub enum StudioEffectResultKind {
     ThreadCancelled,
     ThreadCommandSubmitted,
     Invoked,
-    Commands,
     SourceData,
     BrowserOnly,
 }

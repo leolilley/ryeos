@@ -295,11 +295,15 @@ impl StudioCore {
                         .unwrap_or_default();
                     super::tokenize::accept_mention_completion(&records, &buffer.text, buffer.cursor)
                 } else {
-                    self.data
-                        .commands
-                        .as_ref()
-                        .and_then(|data| data.get("commands").and_then(serde_json::Value::as_array))
-                        .and_then(|records| {
+                    self.views
+                        .get(&view_ref)
+                        .and_then(|binding| binding.input.as_ref())
+                        .and_then(|input| input.completion.as_ref())
+                        .and_then(|completion| {
+                            let response = self.data.sources.get(
+                                &super::content::completion_source_key(&view_ref, &key.input_id),
+                            )?;
+                            let records = super::content::completion_records(completion, response);
                             super::tokenize::accept_slash_completion(
                                 records,
                                 &buffer.text,
@@ -750,9 +754,6 @@ mod tests {
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchProjects)));
         assert!(effects
             .iter()
-            .any(|effect| matches!(effect.kind, StudioEffectKind::FetchCommands)));
-        assert!(effects
-            .iter()
             .any(|effect| matches!(effect.kind, StudioEffectKind::FetchTopology)));
     }
 
@@ -998,9 +999,12 @@ mod tests {
     fn key_context_completion_is_cursor_aware() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core); // completion: service:commands/list + target
-        core.data.commands = Some(serde_json::json!({
-            "commands": [{ "tokens": ["deploy"], "description": "d" }]
-        }));
+        seed_commands(
+            &mut core,
+            serde_json::json!({
+                "commands": [{ "tokens": ["deploy"], "description": "d" }]
+            }),
+        );
 
         // Cursor at the end of "/de" with a matching record → can accept.
         set_focused_input(&mut core, "/de");
@@ -1032,12 +1036,15 @@ mod tests {
     fn complete_input_accepts_top_slash_candidate() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core);
-        core.data.commands = Some(serde_json::json!({
-            "commands": [
-                { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
-                { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread", "arguments": [{ "name": "thread_id" }] }
-            ]
-        }));
+        seed_commands(
+            &mut core,
+            serde_json::json!({
+                "commands": [
+                    { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
+                    { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread", "arguments": [{ "name": "thread_id" }] }
+                ]
+            }),
+        );
         set_focused_input(&mut core, "/thr");
 
         let effects = core.dispatch(StudioEvent::Ui {

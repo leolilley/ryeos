@@ -279,12 +279,6 @@ impl StudioCore {
                     self.bump_generation();
                 }
             }
-            StudioEffectResultKind::Commands => {
-                // Open JSON: projected for completion, never typed
-                // per-command.
-                self.data.commands = Some(data);
-                self.bump_generation();
-            }
             StudioEffectResultKind::Projects => {
                 self.apply_parsed::<super::dto::StudioProjectsDto>(
                     data,
@@ -579,9 +573,6 @@ fn effect_result_kind_matches(
         ) | (
             StudioEffectKind::FetchItems { .. },
             StudioEffectResultKind::Items
-        ) | (
-            StudioEffectKind::FetchCommands,
-            StudioEffectResultKind::Commands
         ) | (
             StudioEffectKind::FetchSource { .. },
             StudioEffectResultKind::SourceData

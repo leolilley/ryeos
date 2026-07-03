@@ -265,6 +265,27 @@ pub fn mention_source_key(view_ref: &str, input_id: &str) -> String {
     format!("mentions\u{1f}{view_ref}\u{1f}{input_id}")
 }
 
+/// The data-store key a view's `completion` source response lands under —
+/// derived identically by the fetch emitter and the slash-completion readers,
+/// so the line-start `/` grammar rides the generic `FetchSource` path with no
+/// bespoke effect (the same shape mentions use).
+pub fn completion_source_key(view_ref: &str, input_id: &str) -> String {
+    format!("completion\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// The record array a `completion` source response projects to, pulled through
+/// the input's declared `collection`. Absent/mismatched collection → no
+/// records (fails closed), like mentions.
+pub fn completion_records<'v>(completion: &InputCompletion, response: &'v Value) -> &'v [Value] {
+    completion
+        .collection
+        .as_deref()
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 /// Project a mentions source response into normalized `{ref,label}` records the
 /// `@`-completion matchers consume: pull the collection, map each record's
 /// declared `reference`/`label` fields. Records missing the ref field drop out.

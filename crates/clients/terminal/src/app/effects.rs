@@ -89,11 +89,6 @@ async fn effect_data(
             let envelope = client.signed_post("/execute", &body).await?;
             Ok(envelope.get("result").cloned().unwrap_or(envelope))
         }
-        StudioEffectKind::FetchCommands => {
-            let body = serde_json::json!({ "item_ref": "service:commands/list", "parameters": {} });
-            let envelope = client.signed_post("/execute", &body).await?;
-            Ok(envelope.get("result").cloned().unwrap_or(envelope))
-        }
         StudioEffectKind::AddProject { root } => client.signed_post("/ui/api/studio/projects/add", &serde_json::json!({ "root": root })).await,
         StudioEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/studio/projects/open", &serde_json::json!({ "local_id": local_id })).await,
         StudioEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/studio/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
@@ -173,7 +168,6 @@ fn result_kind_for(kind: &StudioEffectKind) -> StudioEffectResultKind {
         StudioEffectKind::OpenProject { .. } => StudioEffectResultKind::ProjectOpened,
         StudioEffectKind::FetchThreads { .. } => StudioEffectResultKind::Threads,
         StudioEffectKind::FetchItems { .. } => StudioEffectResultKind::Items,
-        StudioEffectKind::FetchCommands => StudioEffectResultKind::Commands,
         StudioEffectKind::FetchSource { .. } => StudioEffectResultKind::SourceData,
         StudioEffectKind::ListFiles { .. } => StudioEffectResultKind::FilesList,
         StudioEffectKind::FetchFileSpace { .. } => StudioEffectResultKind::FileSpace,

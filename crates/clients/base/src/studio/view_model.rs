@@ -1470,19 +1470,16 @@ fn input_completion(
     let Some(completion) = input.completion.as_ref() else {
         return Vec::new();
     };
-    // The command grammar is fetched into `core.data.commands`.
-    if completion.item_ref != "service:commands/list" {
-        return Vec::new();
-    }
-    let Some(records) = core
+    // The completion grammar is fetched through the generic keyed source path
+    // (identical to mentions), keyed per (view_ref, input.id).
+    let Some(response) = core
         .data
-        .commands
-        .as_ref()
-        .and_then(|data| data.get("commands"))
-        .and_then(serde_json::Value::as_array)
+        .sources
+        .get(&super::content::completion_source_key(view_ref, &input.id))
     else {
         return Vec::new();
     };
+    let records = super::content::completion_records(completion, response);
     super::tokenize::slash_completion_hint(records, text)
         .into_iter()
         .collect()
@@ -2859,12 +2856,15 @@ mod tests {
                 "completion": { "ref": "service:commands/list", "collection": "commands" }
             }
         }));
-        core.data.commands = Some(json!({
-            "commands": [
-                { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
-                { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread" }
-            ]
-        }));
+        core.data.sources.insert(
+            crate::studio::content::completion_source_key("view:ryeos/input", "line"),
+            json!({
+                "commands": [
+                    { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
+                    { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread" }
+                ]
+            }),
+        );
         core.ui.input_buffers.insert(
             crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
                 .storage_key(),
@@ -2892,9 +2892,12 @@ mod tests {
             "widget": "text",
             "input": { "id": "line", "submit": "route" }
         }));
-        core.data.commands = Some(json!({ "commands": [
-            { "invocable": true, "tokens": ["thread", "list"] }
-        ] }));
+        core.data.sources.insert(
+            crate::studio::content::completion_source_key("view:ryeos/input", "line"),
+            json!({ "commands": [
+                { "invocable": true, "tokens": ["thread", "list"] }
+            ] }),
+        );
         core.ui.input_buffers.insert(
             crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
                 .storage_key(),
