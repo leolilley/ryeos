@@ -92,6 +92,11 @@ pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
         true,
     ),
     surface(
+        ".ai/config/directive-runtime",
+        ProjectAiSurfaceKind::ProjectConfig,
+        true,
+    ),
+    surface(
         ".ai/config/ryeos-runtime",
         ProjectAiSurfaceKind::ProjectConfig,
         true,

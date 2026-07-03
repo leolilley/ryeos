@@ -5,3 +5,4 @@ version: "1.0.0"
 description: Settle a seat session thread
 endpoint: seat.close
 availability: daemon_only
+required_caps: ["ryeos.execute.service.seat/close"]

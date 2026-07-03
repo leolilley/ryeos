@@ -859,13 +859,12 @@ async fn execute_stream_emits_structured_required_secret_missing_event() {
     //   data: {"payload":{"outcome_code":"required_secret_missing",
     //          "error":{"code":"required_secret_missing","env_var":...}},...}
     let mut found_error = false;
-    let mut current_event_type = String::new();
     for line in text.lines() {
-        if let Some(ev) = line.strip_prefix("event: ") {
-            current_event_type = ev.trim().to_string();
-        }
         if let Some(data) = line.strip_prefix("data: ") {
-            if current_event_type == "thread_failed" {
+            // SSE frames emit `data:` before `event:`, so the terminal is
+            // identified by the payload itself (order-independent) rather than
+            // a tracked event-type line.
+            {
                 let parsed: serde_json::Value =
                     serde_json::from_str(data.trim()).unwrap_or(serde_json::json!({}));
 

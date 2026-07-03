@@ -5,3 +5,4 @@ version: "1.0.0"
 description: Append seat facet events to an owned running seat braid (operator-signed, owner-only, seat.* namespace)
 endpoint: seat.append
 availability: daemon_only
+required_caps: ["ryeos.execute.service.seat/append"]

@@ -593,6 +593,7 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
 mod tests {
     use super::*;
     use ryeos_app::node_config::NodeConfigSnapshot;
+    use std::path::PathBuf;
 
     #[test]
     fn installed_help_reads_command_and_effective_item_metadata() {
