@@ -27,7 +27,7 @@
 //!     `work`) and the successor (ran post-follow `mark`) each reach
 //!     `thread_completed` exactly once.
 //!   - Value flow: the child returns a sentinel that the resumed parent consumes
-//!     (`${result.result.child_ran}`) and re-returns, so the successor's persisted
+//!     (`${result.child_ran}`) and re-returns, so the successor's persisted
 //!     result carries it — proving the child's result was actually consumed, not
 //!     merely stepped past.
 
@@ -37,6 +37,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 use serde_json::Value;
@@ -102,10 +103,11 @@ fn plant_parent_follow_graph(project_dir: &Path, signer: &SigningKey) -> anyhow:
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     // `fetch` consumes the child result on resume and assigns the child's value
-    // into state via `${result.result.child_ran}` — for a graph child the follow
-    // result binds to the child's bare GraphResult, so its output lives at
-    // `result.result`. `done` re-returns it so the successor's persisted result
-    // carries the sentinel iff the follow result was consumed correctly.
+    // into state via `${result.child_ran}` — the follow result binds to the child's
+    // terminal `result`, which for a graph child is its return `output`
+    // (`graph_result.result`), so the child's `child_ran` output is at the top
+    // level. `done` re-returns it so the successor's persisted result carries the
+    // sentinel iff the follow result was consumed correctly.
     let body = r#"category: ""
 version: "1.0.0"
 requires:
@@ -122,7 +124,7 @@ config:
         item_id: "graph:child"
         params: {}
       assign:
-        child_ran: "${result.result.child_ran}"
+        child_ran: "${result.child_ran}"
       next:
         type: unconditional
         to: mark
@@ -380,7 +382,7 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
 
     // 6. Value flow: the child's returned value reached the resumed parent's
     //    persisted result. A missing / mis-shaped follow result would break the
-    //    `${result.result.child_ran}` assign and the sentinel would be absent.
+    //    `${result.child_ran}` assign and the sentinel would be absent.
     let (get_status, get_body) = h
         .post_execute(
             "service:threads/get",
@@ -398,5 +400,579 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
         get_str.contains(CHILD_SENTINEL),
         "the resumed parent's persisted result must carry the child's returned value \
          `{CHILD_SENTINEL}` (proves the follow result was consumed); threads/get={get_body:#}"
+    );
+}
+
+// ══ #25 daemon e2e: child failure routes the parent into on_error ══════════════
+
+/// A CHILD graph that FAILS: its action dispatches an item the child has no cap for
+/// (the follow child declares no caps), so the dispatch is denied and the child
+/// terminates with a failure envelope.
+fn plant_failing_child_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+config:
+  start: boom
+  nodes:
+    boom:
+      action:
+        item_id: "tool:nonexistent/boom"
+        params: {}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("child_fail.yaml"), signed)?;
+    Ok(())
+}
+
+/// A PARENT following the failing child with an `on_error` branch: the child's
+/// failure must route the resumed parent to `recover`, NOT the success `unreached`.
+fn plant_parent_on_error_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.child_fail
+config:
+  start: fetch
+  nodes:
+    fetch:
+      node_type: action
+      follow: true
+      action:
+        item_id: "graph:child_fail"
+        params: {}
+      on_error: recover
+      next:
+        type: unconditional
+        to: unreached
+    recover:
+      node_type: gate
+      assign: {recovered: true}
+      next:
+        type: conditional
+        branches:
+          - to: done
+    unreached:
+      node_type: gate
+      assign: {wrong: true}
+      next:
+        type: conditional
+        branches:
+          - to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("parent_onerr.yaml"), signed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_follow_child_failure_routes_parent_on_error() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_failing_child_graph(project.path(), &fixture.publisher).expect("plant failing child");
+    plant_parent_on_error_graph(project.path(), &fixture.publisher).expect("plant parent");
+
+    let post_fut = h.post_execute(
+        "graph:parent_onerr",
+        project.path().to_str().unwrap(),
+        serde_json::json!({}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()),
+        Some("continued"),
+        "parent must suspend at the follow node; body={body:#}"
+    );
+    let parent_tid = body
+        .get("thread")
+        .and_then(|t| t.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .expect("parent thread id")
+        .to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let events = loop {
+        let events = all_events(&h.state_path);
+        let child_terminal = threads_that_ran(&events, "boom").into_iter().any(|tid| {
+            thread_has_event(&events, &tid, "thread_failed")
+                || thread_has_event(&events, &tid, "thread_completed")
+        });
+        let recovered = threads_that_ran(&events, "recover")
+            .into_iter()
+            .any(|tid| tid != parent_tid && thread_has_event(&events, &tid, "thread_completed"));
+        if child_terminal && recovered {
+            break events;
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "failure round trip did not complete (child_terminal={child_terminal}, recovered={recovered}).\nevents={events:#?}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    // The resumed successor took the on_error branch (`recover`), NOT the success
+    // branch (`unreached`) — the child's FAILURE routed the parent into on_error.
+    let recover_tids = threads_that_ran(&events, "recover");
+    assert_eq!(
+        recover_tids.len(),
+        1,
+        "exactly one successor runs the on_error `recover` node; events={events:#?}"
+    );
+    assert_ne!(
+        &recover_tids[0], &parent_tid,
+        "recover runs in the resumed successor, not the suspended parent"
+    );
+    assert!(
+        threads_that_ran(&events, "unreached").is_empty(),
+        "the success `unreached` branch must NOT run on child failure; events={events:#?}"
+    );
+}
+
+// ══ #25 daemon e2e: two sequential follow nodes ════════════════════════════════
+
+fn plant_seq_child_a(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+config:
+  start: worka
+  nodes:
+    worka:
+      node_type: gate
+      assign: {tick: true}
+      next:
+        type: conditional
+        branches:
+          - to: fin
+    fin:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("child_a.yaml"), signed)?;
+    Ok(())
+}
+
+fn plant_seq_child_b(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+config:
+  start: workb
+  nodes:
+    workb:
+      node_type: gate
+      assign: {tick: true}
+      next:
+        type: conditional
+        branches:
+          - to: fin
+    fin:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("child_b.yaml"), signed)?;
+    Ok(())
+}
+
+/// fetch1 (follow child_a) → fetch2 (follow child_b) → done.
+fn plant_parent_sequential_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.graph.child_a
+      - ryeos.execute.graph.child_b
+config:
+  start: fetch1
+  nodes:
+    fetch1:
+      node_type: action
+      follow: true
+      action:
+        item_id: "graph:child_a"
+        params: {}
+      next:
+        type: unconditional
+        to: fetch2
+    fetch2:
+      node_type: action
+      follow: true
+      action:
+        item_id: "graph:child_b"
+        params: {}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("parent_seq.yaml"), signed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeosd=debug,ryeos_graph_runtime=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_seq_child_a(project.path(), &fixture.publisher).expect("plant child_a");
+    plant_seq_child_b(project.path(), &fixture.publisher).expect("plant child_b");
+    plant_parent_sequential_graph(project.path(), &fixture.publisher).expect("plant parent");
+
+    let post_fut = h.post_execute(
+        "graph:parent_seq",
+        project.path().to_str().unwrap(),
+        serde_json::json!({}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()),
+        Some("continued"),
+        "parent must suspend at the first follow node; body={body:#}"
+    );
+    let parent_tid = body
+        .get("thread")
+        .and_then(|t| t.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .expect("parent thread id")
+        .to_string();
+
+    // Full sequence resolved when THREE graphs have completed: child_a, child_b, and
+    // the final parent successor (past fetch2). The suspended parent + the first
+    // successor (suspended at fetch2) are `continued`, never `graph_completed`.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let events = loop {
+        let events = all_events(&h.state_path);
+        let completed = events
+            .iter()
+            .filter(|(_, et, _)| et == "graph_completed")
+            .count();
+        if completed >= 3 {
+            break events;
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "sequential follow did not complete (graph_completed={completed}/3).\nevents={events:#?}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    // Both children ran their work nodes to completion.
+    assert!(
+        threads_that_ran(&events, "worka").into_iter().any(|t| thread_has_event(&events, &t, "thread_completed")),
+        "child_a must run `worka` to completion; events={events:#?}"
+    );
+    assert!(
+        threads_that_ran(&events, "workb").into_iter().any(|t| thread_has_event(&events, &t, "thread_completed")),
+        "child_b must run `workb` to completion; events={events:#?}"
+    );
+
+    // EXACTLY two follow suspends, at fetch1 then fetch2, on DISTINCT threads: the
+    // original parent suspends at fetch1; its resumed successor suspends at fetch2.
+    let suspends: Vec<(String, String)> = events
+        .iter()
+        .filter(|(_, et, _)| et == "graph_follow_suspended")
+        .filter_map(|(tid, _, p)| {
+            p.get("node")
+                .and_then(|v| v.as_str())
+                .map(|n| (tid.clone(), n.to_string()))
+        })
+        .collect();
+    assert_eq!(suspends.len(), 2, "exactly two follow suspends; got {suspends:?}");
+    let fetch1 = suspends.iter().find(|(_, n)| n == "fetch1").expect("a fetch1 suspend");
+    let fetch2 = suspends.iter().find(|(_, n)| n == "fetch2").expect("a fetch2 suspend");
+    assert_eq!(fetch1.0, parent_tid, "fetch1 suspends the original parent thread");
+    assert_ne!(fetch1.0, fetch2.0, "fetch2 suspends a DISTINCT resumed successor thread");
+}
+
+// ══ #25 daemon e2e: followed child cost appears in the resumed parent ══════════
+
+/// Plant the mock `chat_completions` provider (the mock returns a fixed
+/// `usage: {prompt_tokens: 10, completion_tokens: 5}` on every call).
+fn plant_mock_provider(root: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime/model-providers");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"base_url: "{mock_base_url}"
+family: chat_completions
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
+auth: {{}}
+headers: {{}}
+pricing:
+  input_per_million: 0.0
+  output_per_million: 0.0
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(dir.join("mock.yaml"), signed)?;
+    Ok(())
+}
+
+/// Map the `general` tier to the mock provider.
+fn plant_model_routing(root: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime");
+    std::fs::create_dir_all(&dir)?;
+    let body = r#"tiers:
+  general:
+    provider: mock
+    model: mock-model
+    context_window: 200000
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(dir.join("model_routing.yaml"), signed)?;
+    Ok(())
+}
+
+/// A cost-bearing follow CHILD: a directive that calls the (mock) LLM, incurring
+/// 10 input / 5 output tokens.
+fn plant_cost_directive_child(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let dir = project_dir.join(".ai/directives");
+    std::fs::create_dir_all(&dir)?;
+    let body = r#"---
+name: costchild
+category: ""
+description: "follow cost e2e child"
+model:
+  tier: general
+---
+Say hello.
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "<!--", Some("-->"));
+    std::fs::write(dir.join("costchild.md"), signed)?;
+    Ok(())
+}
+
+/// A PARENT graph that follows the cost-bearing directive child.
+fn plant_parent_cost_graph(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let graphs_dir = project_dir.join(".ai/graphs");
+    std::fs::create_dir_all(&graphs_dir)?;
+    let body = r#"category: ""
+version: "1.0.0"
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.directive.costchild
+config:
+  start: fetch
+  nodes:
+    fetch:
+      node_type: action
+      follow: true
+      action:
+        item_id: "directive:costchild"
+        params: {}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(graphs_dir.join("parent_cost.yaml"), signed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_follow_child_cost_flows_into_resumed_parent() {
+    let mock = MockProvider::start(vec![MockResponse::Text("hi from child".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "info,ryeosd=debug,ryeos_graph_runtime=debug,ryeos_directive_runtime=debug".into()
+            }),
+        );
+        // Allow the project-level mock provider config the directive child resolves.
+        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
+    })
+    .await
+    .expect("start daemon with mock provider + standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_cost_directive_child(project.path(), &fixture.publisher).expect("plant child directive");
+    plant_parent_cost_graph(project.path(), &fixture.publisher).expect("plant parent");
+
+    let post_fut = h.post_execute(
+        "graph:parent_cost",
+        project.path().to_str().unwrap(),
+        serde_json::json!({}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(45), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("POST /execute timed out.\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()),
+        Some("continued"),
+        "parent must suspend at the follow node; body={body:#}"
+    );
+    let parent_tid = body
+        .get("thread")
+        .and_then(|t| t.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .expect("parent thread id")
+        .to_string();
+
+    // The suspended parent never completes; only the resumed successor emits a
+    // graph_completed. Wait for it, then read its persisted result.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let successor_tid = loop {
+        let events = all_events(&h.state_path);
+        let successor = events
+            .iter()
+            .find(|(tid, et, _)| et == "graph_completed" && *tid != parent_tid)
+            .map(|(tid, _, _)| tid.clone());
+        if let Some(tid) = successor {
+            break tid;
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "resumed parent never completed.\nevents={:#?}\n--- daemon stderr ---\n{stderr}",
+                all_events(&h.state_path)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    // The child's 10 input tokens must appear in the resumed parent successor's
+    // persisted result (the follow node accounts the child's cost on resume).
+    let (get_status, get_body) = h
+        .post_execute(
+            "service:threads/get",
+            ".",
+            serde_json::json!({ "thread_id": successor_tid }),
+        )
+        .await
+        .expect("post service:threads/get for successor");
+    assert!(
+        get_status.is_success(),
+        "threads.get failed: status={get_status}; body={get_body:#}"
+    );
+    drop(mock);
+
+    // Prove the resumed parent recorded the child's cost in its FOLLOW-NODE RECEIPT
+    // (not merely somewhere in the response string): the `fetch` graph_node_receipt
+    // must carry the child's 10/5 token cost and no error.
+    let result = get_body.get("result").expect("threads/get result");
+    let artifacts = result
+        .get("artifacts")
+        .and_then(|v| v.as_array())
+        .expect("threads/get artifacts array");
+    let fetch_receipt = artifacts
+        .iter()
+        .find(|a| {
+            a.get("artifact_type").and_then(|v| v.as_str()) == Some("graph_node_receipt")
+                && a.get("metadata")
+                    .and_then(|m| m.get("node"))
+                    .and_then(|v| v.as_str())
+                    == Some("fetch")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "resumed parent must persist a graph_node_receipt for the follow node `fetch`; \
+                 threads/get={get_body:#}"
+            )
+        });
+    assert_eq!(
+        fetch_receipt["metadata"]["cost"]["input_tokens"],
+        serde_json::json!(10),
+        "the fetch receipt must record the followed child's 10 input tokens; receipt={fetch_receipt:#}"
+    );
+    assert_eq!(
+        fetch_receipt["metadata"]["cost"]["output_tokens"],
+        serde_json::json!(5),
+        "the fetch receipt must record the followed child's 5 output tokens; receipt={fetch_receipt:#}"
+    );
+    assert_eq!(
+        fetch_receipt["metadata"]["error"],
+        serde_json::Value::Null,
+        "the followed child succeeded, so the fetch receipt must carry no error; receipt={fetch_receipt:#}"
     );
 }

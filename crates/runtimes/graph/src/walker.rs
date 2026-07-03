@@ -1089,11 +1089,28 @@ impl Walker {
             let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
             if let Some(cached) = cache.lookup(&cache_key) {
                 cache_hit = true;
-                // A cache hit replays the stored result and must NOT
-                // re-bill cost — `bare` carries no cost.
-                Ok(dispatch::ActionOutcome::Success(
-                    dispatch::ActionSuccess::bare(cached),
-                ))
+                // A cache hit replays the stored result and must NOT re-bill cost —
+                // `bare` carries no cost. A stale/tampered entry still carrying a
+                // top-level continuation_id is rejected loudly, exactly like a live
+                // inline-continuation dispatch (F10 — inline continuation is retired;
+                // use a `follow: true` node). New dispatches never cache such a value.
+                if cached
+                    .get("continuation_id")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                {
+                    Ok(dispatch::ActionOutcome::Failure(dispatch::ActionFailure {
+                        diagnostic: format!(
+                            "cached result for node `{current}` carries a continuation_id; \
+                             inline continuation is retired — use a `follow: true` node"
+                        ),
+                        cost: None,
+                    }))
+                } else {
+                    Ok(dispatch::ActionOutcome::Success(
+                        dispatch::ActionSuccess::bare(cached),
+                    ))
+                }
             } else {
                 match dispatch::dispatch_action(
                     &self.client,
