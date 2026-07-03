@@ -159,11 +159,11 @@ fn gate_02_all_service_refs_resolve_and_verify() {
 }
 
 // ── Gate 3: Bare UDS namespace ───────────────────────────────────────
-// TODO: requires daemon-spawn for full coverage. The UDS server namespace
-// registration lives in the binary-only `service_handlers` module.
-// This test verifies the structural invariant from the descriptor table:
-// the only method the UDS server should expose is `system.health` (derived
-// from the bare UDS-only endpoint list).
+// Structural half of the invariant, from the descriptor table: the only
+// method the bare UDS server should expose is `system.health` (the
+// UDS-only endpoint). The daemon-spawn half — a live UDS server rejecting
+// service methods — is covered by
+// `cleanup_e2e::uds_namespace_rejects_service_methods` (Test 9).
 
 #[test]
 fn gate_03_uds_namespace_exposes_only_health() {
@@ -271,9 +271,10 @@ fn gate_07_both_services_count() {
 }
 
 // ── Gate 8: State lock prevents concurrent ───────────────────────────
-// TODO: requires daemon-spawn for full coverage. The real StateLock is
-// in the binary-only daemon startup path. This tests the filesystem-level
-// exclusion invariant using create_new.
+// Filesystem-level exclusion invariant (create_new). The daemon-spawn
+// half — a second real daemon refusing to start against a held StateLock
+// and exiting with an error — is covered by
+// `cleanup_e2e::state_lock_prevents_concurrent_daemons` (Test 10).
 
 #[test]
 fn gate_08_filesystem_lock_prevents_concurrent() {
@@ -387,9 +388,9 @@ fn gate_11_every_service_has_required_caps_field() {
 }
 
 // ── Gate 12: Bundle path canonicalization ────────────────────────────
-// TODO: requires daemon-spawn for full coverage. The node_config::loader
-// that calls canonicalize is in a binary-only module. This tests the
-// canonicalization logic inline.
+// Canonicalization logic tested inline. The daemon-spawn half — a live
+// startup rejecting a symlinked node-config item — is covered by
+// `cleanup_e2e::symlinked_node_config_rejected_at_startup` (Test 11).
 
 #[test]
 fn gate_12_bundle_path_canonicalization() {
@@ -421,9 +422,10 @@ fn gate_12_bundle_path_canonicalization() {
 }
 
 // ── Gate 13: Bundle YAML files parse correctly ───────────────────────
-// TODO: requires daemon-spawn for full coverage. Standalone bundle.list
-// needs AppState which is binary-only. This reads bundle YAML files
-// from the live bundle directory and verifies they parse.
+// Reads the live bundle directory and verifies each bundle YAML parses.
+// The daemon-spawn half — a real daemon loading every bundle YAML at
+// startup — is covered by
+// `cleanup_e2e::daemon_startup_proves_bundle_yamls_parse` (Test 12).
 
 #[test]
 fn gate_13_bundle_yaml_files_parse() {

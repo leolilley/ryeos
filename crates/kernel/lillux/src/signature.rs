@@ -503,4 +503,166 @@ mod tests {
         let b = sign_content_at(body, &sk, "#", None, "2026-01-01T00:00:00Z");
         assert_eq!(a, b, "same inputs must produce identical bytes");
     }
+
+    // ── verify hardening: wrong key / truncated / non-base64 signature ──
+
+    #[test]
+    fn verify_signature_rejects_wrong_key() {
+        // A signature made by one key must not verify against a different
+        // key's verifying half — even for the same hash.
+        let signer = SigningKey::from_bytes(&[1u8; 32]);
+        let other = SigningKey::from_bytes(&[2u8; 32]);
+        let hash = content_hash("payload\n");
+        let sig: ed25519_dalek::Signature = signer.sign(hash.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+        assert!(!verify_signature(&hash, &sig_b64, &other.verifying_key()));
+    }
+
+    #[test]
+    fn verify_signature_rejects_truncated_signature() {
+        // A truncated envelope: the signature bytes are short of the
+        // 64-byte Ed25519 length, so `Signature::from_slice` rejects them.
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let hash = content_hash("payload\n");
+        let sig: ed25519_dalek::Signature = sk.sign(hash.as_bytes());
+        let full = sig.to_bytes();
+        let truncated = base64::engine::general_purpose::STANDARD.encode(&full[..63]);
+        assert!(!verify_signature(&hash, &truncated, &sk.verifying_key()));
+    }
+
+    #[test]
+    fn verify_signature_rejects_non_base64_payload() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let hash = content_hash("payload\n");
+        assert!(!verify_signature(&hash, "not*valid*base64", &sk.verifying_key()));
+    }
+
+    #[test]
+    fn verify_signature_accepts_urlsafe_nopad_encoding() {
+        // The verifier falls back to URL-safe base64 with no padding, so a
+        // signature encoded that way must still verify.
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let hash = content_hash("payload\n");
+        let sig: ed25519_dalek::Signature = sk.sign(hash.as_bytes());
+        let sig_url = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
+        assert!(verify_signature(&hash, &sig_url, &sk.verifying_key()));
+    }
+
+    // ── is_valid_signature_for: the canonical three-part validity check ──
+
+    fn signed_triple(body: &str, sk: &SigningKey) -> (String, String, String) {
+        let hash = content_hash(body);
+        let sig: ed25519_dalek::Signature = sk.sign(hash.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+        let fp = compute_fingerprint(&sk.verifying_key());
+        (hash, sig_b64, fp)
+    }
+
+    #[test]
+    fn is_valid_signature_for_accepts_matching_triple() {
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let body = "authentic body\n";
+        let (hash, sig_b64, fp) = signed_triple(body, &sk);
+        assert!(is_valid_signature_for(
+            &hash,
+            &sig_b64,
+            &fp,
+            body,
+            &sk.verifying_key(),
+            &fp
+        ));
+    }
+
+    #[test]
+    fn is_valid_signature_for_rejects_tampered_body() {
+        // Header signs the original body; verifying against a mutated body
+        // fails at the content-hash comparison before any crypto check.
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let (hash, sig_b64, fp) = signed_triple("authentic body\n", &sk);
+        assert!(!is_valid_signature_for(
+            &hash,
+            &sig_b64,
+            &fp,
+            "TAMPERED body\n",
+            &sk.verifying_key(),
+            &fp
+        ));
+    }
+
+    #[test]
+    fn is_valid_signature_for_rejects_wrong_fingerprint() {
+        let sk = SigningKey::from_bytes(&[3u8; 32]);
+        let body = "authentic body\n";
+        let (hash, sig_b64, fp) = signed_triple(body, &sk);
+        let bogus_fp = "0".repeat(64);
+        assert!(!is_valid_signature_for(
+            &hash,
+            &sig_b64,
+            &bogus_fp,
+            body,
+            &sk.verifying_key(),
+            &fp
+        ));
+    }
+
+    #[test]
+    fn is_valid_signature_for_rejects_wrong_key() {
+        // Hash and fingerprint fields are internally consistent, but the
+        // verifying key belongs to a different signer, so the crypto check
+        // is the sole gate that fails.
+        let signer = SigningKey::from_bytes(&[3u8; 32]);
+        let other = SigningKey::from_bytes(&[4u8; 32]);
+        let body = "authentic body\n";
+        let (hash, sig_b64, fp) = signed_triple(body, &signer);
+        assert!(!is_valid_signature_for(
+            &hash,
+            &sig_b64,
+            &fp,
+            body,
+            &other.verifying_key(),
+            &fp
+        ));
+    }
+
+    #[test]
+    fn signed_document_tamper_detected_end_to_end() {
+        // Parse a real signed document's header, then validate it against a
+        // body whose content line was altered: detection must fire.
+        let sk = SigningKey::from_bytes(&[5u8; 32]);
+        let expected_fp = compute_fingerprint(&sk.verifying_key());
+        let signed = sign_content("original line\n", &sk, "#", None);
+        let header = parse_signature_line(signed.lines().next().unwrap(), "#", None).unwrap();
+
+        assert!(
+            is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                "original line\n",
+                &sk.verifying_key(),
+                &expected_fp,
+            ),
+            "untampered document must validate"
+        );
+        assert!(
+            !is_valid_signature_for(
+                &header.content_hash,
+                &header.signature_b64,
+                &header.signer_fingerprint,
+                "tampered line\n",
+                &sk.verifying_key(),
+                &expected_fp,
+            ),
+            "post-signing body edit must be rejected"
+        );
+    }
+
+    #[test]
+    fn parse_signature_line_rejects_truncated_field_set() {
+        // A signature line carrying fewer than the four required
+        // colon-separated components (timestamp:hash:sig:fingerprint) is a
+        // truncated envelope and must not parse into a header.
+        let truncated = "# ryeos:signed:onlytwo:fields";
+        assert!(parse_signature_line(truncated, "#", None).is_none());
+    }
 }

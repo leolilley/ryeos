@@ -194,19 +194,17 @@ async fn e2e_direct_runtime_routes_through_native_dispatch() {
     // OR the bundle manifest. The KEY assertion: the error path is
     // taken, NOT a 200 silently fallthrough or a 500 generic.
     //
-    // V5.4 P2.1 note: the `standard` bundle now ships
-    // `ryeos-directive-runtime` and `ryeos-graph-runtime` in its
-    // SourceManifest, but this harness uses `bundles/core` as
-    // RYEOS_APP_ROOT (see `crates/bin/daemon/tests/common/mod.rs::workspace_core_dir`)
-    // and `core` has no `bin/` directory. Real coverage would plant a
-    // signed `bundles` registration under
-    // `<workspace_core_dir>/.ai/node/bundles/standard.yaml` so the engine
-    // also walks `bundles/standard` (kinds from `core`, binaries
-    // from `standard`). TODO(V5.4): wire that registration into the
-    // harness once the bundle install/registration writer is exposed
-    // to tests; for now this test pins only that the dispatch loop
-    // reaches the materialization step and surfaces a clean lookup
-    // error rather than a silent fallthrough.
+    // The plant below registers the standard bundle alongside core via
+    // `common::fast_fixture::register_standard_bundle` — the signed
+    // `.ai/node/bundles/standard.yaml` registration writer that closes the
+    // former blocker — so the engine walks both `bundles/core` (kinds) and
+    // `bundles/standard` (binaries). This case deliberately plants a
+    // *synthetic* runtime whose `binary_ref` names a binary absent from
+    // `bundles/standard/bin`, so it pins the clean-lookup-error path: the
+    // dispatch loop reaches the binary materialization step and surfaces a
+    // named lookup error rather than a silent fallthrough. Resolution
+    // through the standard bundle's *real* directive/graph runtimes,
+    // end-to-end, is covered by tests 5 / 5c / 5d below.
     let plant = |state: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         common::fast_fixture::register_standard_bundle(state, fixture)?;
         install_kind_schema(state, "e2e_kind", &fixture.publisher)?;
