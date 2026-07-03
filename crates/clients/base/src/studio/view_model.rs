@@ -2716,8 +2716,8 @@ mod tests {
                                           "merge": { "thread": "{record.thread_id}" },
                                           "open_view": "view:ryeos/chain/timeline" } },
                             { "id": "cancel", "label": "Cancel",
-                              "invoke": { "plane": "rye", "ref": "service:ui/studio/thread/cancel",
-                                          "args": { "thread_id": "{record.thread_id}" } } }
+                              "invoke": { "plane": "rye", "ref": "service:commands/submit",
+                                          "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" } } }
                         ]
                     }
                 }
