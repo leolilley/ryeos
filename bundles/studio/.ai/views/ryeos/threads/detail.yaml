@@ -44,6 +44,20 @@ sections:
       primary: value
       meta: label
 
+  # Execution: the thread's durable execution posture — capabilities minted,
+  # hard limits, effective trust class, model, runtime — one labeled metric per
+  # row, read from the signed thread.json audit record (plus the projection's
+  # executor identity). Empty when the thread carries no audit record.
+  - title: Execution
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: execution_meta
+    projection:
+      primary: value
+      meta: label
+
   # Outcome: the `result` sub-object (outcome code + error). Null until the
   # thread finishes → this section is simply empty.
   - title: Outcome

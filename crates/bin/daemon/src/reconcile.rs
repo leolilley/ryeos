@@ -587,15 +587,29 @@ pub enum FollowReconcileAction {
 pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> {
     use ryeos_app::runtime_db::follow_phase;
 
+    let now_ms = lillux::time::timestamp_millis();
     let mut actions: Vec<FollowReconcileAction> = Vec::new();
     for w in state.state_store.list_follow_waiters()? {
         let action = match w.phase.as_str() {
             follow_phase::READY | follow_phase::RESUMING => {
-                tracing::info!(
-                    follow_key = %w.follow_key,
-                    phase = %w.phase,
-                    "follow waiter carries a stored child result — collecting parent-resume"
-                );
+                // A `resuming` waiter re-drives its idempotent parent resume every
+                // pass; one that stays `resuming` across the staleness window is
+                // stuck, not in flight — escalate to a loud log while still
+                // re-driving (the resume is idempotent by design).
+                if w.phase == follow_phase::RESUMING && follow_waiter_is_stale(&w, now_ms) {
+                    tracing::warn!(
+                        follow_key = %w.follow_key,
+                        age_ms = now_ms.saturating_sub(w.updated_at_ms),
+                        "follow waiter stuck in 'resuming' past the staleness window — \
+                         re-driving parent resume (idempotent)"
+                    );
+                } else {
+                    tracing::info!(
+                        follow_key = %w.follow_key,
+                        phase = %w.phase,
+                        "follow waiter carries a stored child result — collecting parent-resume"
+                    );
+                }
                 Some(FollowReconcileAction::Resume {
                     follow_key: w.follow_key.clone(),
                 })
@@ -611,14 +625,44 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
                 None
             }
         };
-        if let Some(a) = action {
-            actions.push(a);
+        match action {
+            Some(a) => actions.push(a),
+            // Age-based escalation: a waiter that yields NO recovery action AND
+            // whose issuing parent row is gone is an orphan whose lineage can
+            // never be reconstructed. Clear it loudly once stale rather than
+            // warn-skipping it forever (the table must converge to empty on an
+            // idle daemon). A parent-present skip is left alone — it may still be
+            // recoverable on a later pass.
+            None => {
+                if follow_waiter_is_stale(&w, now_ms)
+                    && state.state_store.get_thread(&w.parent_thread_id)?.is_none()
+                {
+                    tracing::error!(
+                        follow_key = %w.follow_key,
+                        phase = %w.phase,
+                        age_ms = now_ms.saturating_sub(w.updated_at_ms),
+                        "stale follow waiter with a missing parent row and no recovery \
+                         action — clearing orphan"
+                    );
+                    state.state_store.clear_follow_waiter(&w.follow_key)?;
+                }
+            }
         }
     }
     if !actions.is_empty() {
         tracing::info!(count = actions.len(), "collected follow reconcile actions");
     }
     Ok(actions)
+}
+
+/// A follow waiter older than this since its last update is a candidate for
+/// age-based escalation. A live follow converges in seconds (child terminal →
+/// parent resume); a waiter untouched for this long across reconcile passes is
+/// stuck, not in flight.
+const FOLLOW_WAITER_STALE_MS: i64 = 15 * 60 * 1000; // 15 minutes
+
+fn follow_waiter_is_stale(w: &ryeos_app::runtime_db::FollowWaiter, now_ms: i64) -> bool {
+    now_ms.saturating_sub(w.updated_at_ms) >= FOLLOW_WAITER_STALE_MS
 }
 
 /// The recovery action for a `waiting` follow waiter, shared by the `waiting` arm and
@@ -991,5 +1035,44 @@ mod tests {
                 max: 2
             }
         );
+    }
+
+    fn stale_test_waiter(updated_at_ms: i64) -> ryeos_app::runtime_db::FollowWaiter {
+        ryeos_app::runtime_db::FollowWaiter {
+            follow_key: "P/gr/n/1".into(),
+            parent_thread_id: "P".into(),
+            parent_chain_root_id: "C".into(),
+            parent_successor_thread_id: None,
+            follow_node: "n".into(),
+            graph_run_id: "gr".into(),
+            step_count: 1,
+            frontier_id: None,
+            child_thread_id: None,
+            child_chain_root_id: None,
+            child_terminal_thread_id: None,
+            child_terminal_status: None,
+            terminal_envelope: None,
+            phase: ryeos_app::runtime_db::follow_phase::WAITING.into(),
+            created_at_ms: 0,
+            updated_at_ms,
+        }
+    }
+
+    #[test]
+    fn follow_waiter_staleness_is_age_based() {
+        let now = 100 * FOLLOW_WAITER_STALE_MS;
+        // Fresh (updated moments ago) is never stale.
+        assert!(!follow_waiter_is_stale(
+            &stale_test_waiter(now - 1),
+            now
+        ));
+        // Exactly at the window and beyond is stale.
+        assert!(follow_waiter_is_stale(
+            &stale_test_waiter(now - FOLLOW_WAITER_STALE_MS),
+            now
+        ));
+        assert!(follow_waiter_is_stale(&stale_test_waiter(0), now));
+        // A clock skew (future update) is not stale — saturating avoids underflow.
+        assert!(!follow_waiter_is_stale(&stale_test_waiter(now + 5_000), now));
     }
 }

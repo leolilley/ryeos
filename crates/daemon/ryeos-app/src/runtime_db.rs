@@ -1024,6 +1024,51 @@ impl RuntimeDb {
             .map_err(Into::into)
     }
 
+    /// The follow waiter for which `parent_thread_id` is the SUSPENDED PARENT —
+    /// the thread that issued the follow and settled `continued` awaiting its
+    /// child chain. A suspended parent carries at most one live waiter (the
+    /// parent re-drives the same `follow_key` idempotently, and it cannot issue
+    /// another follow until resumed as a fresh successor thread), so this reads a
+    /// single row. Used to decorate a `continued` thread with its follow lineage.
+    pub fn get_follow_waiter_by_parent_thread(
+        &self,
+        parent_thread_id: &str,
+    ) -> Result<Option<FollowWaiter>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
+                     WHERE parent_thread_id = ?1 ORDER BY created_at_ms DESC LIMIT 1"
+                ),
+                params![parent_thread_id],
+                read_follow_waiter_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// The follow waiter whose recorded resume successor is `successor_thread_id`
+    /// (the `parent_successor_thread_id` UNIQUE index). Used to decorate a
+    /// follow-resume successor with its live lineage while the waiter exists;
+    /// once the waiter is cleared the successor is recognized instead from the
+    /// projected `graph_follow_resume` continuation edge (CAS is truth).
+    pub fn get_follow_waiter_by_successor(
+        &self,
+        successor_thread_id: &str,
+    ) -> Result<Option<FollowWaiter>> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter \
+                     WHERE parent_successor_thread_id = ?1"
+                ),
+                params![successor_thread_id],
+                read_follow_waiter_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     /// All active follow waiters. The table holds only non-cleared rows, so
     /// every row here is recoverable by reconcile.
     pub fn list_follow_waiters(&self) -> Result<Vec<FollowWaiter>> {
@@ -1484,6 +1529,40 @@ mod tests {
         db.clear_follow_waiter("fk1").unwrap();
         assert!(db.get_follow_waiter_by_key("fk1").unwrap().is_none());
         assert!(db.list_follow_waiters().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lookup_by_parent_and_successor_thread() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_follow(&seed_follow("fk1")).unwrap();
+        db.set_follow_child("fk1", "child-1", "chain-child").unwrap();
+        db.set_follow_parent_successor("fk1", "succ-1").unwrap();
+        db.mark_follow_waiting("fk1").unwrap();
+
+        // Suspended-parent decoration: found by the issuing parent thread.
+        let by_parent = db
+            .get_follow_waiter_by_parent_thread("parent-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_parent.follow_key, "fk1");
+        assert_eq!(by_parent.phase, follow_phase::WAITING);
+
+        // Resume-successor decoration: found by the recorded successor thread.
+        let by_succ = db
+            .get_follow_waiter_by_successor("succ-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_succ.follow_key, "fk1");
+
+        // Unrelated ids miss.
+        assert!(db.get_follow_waiter_by_parent_thread("nope").unwrap().is_none());
+        assert!(db.get_follow_waiter_by_successor("nope").unwrap().is_none());
+
+        // Cleared waiter is invisible to both accessors (terminal history moves
+        // to the projection's continuation edge).
+        db.clear_follow_waiter("fk1").unwrap();
+        assert!(db.get_follow_waiter_by_parent_thread("parent-1").unwrap().is_none());
+        assert!(db.get_follow_waiter_by_successor("succ-1").unwrap().is_none());
     }
 
     #[test]

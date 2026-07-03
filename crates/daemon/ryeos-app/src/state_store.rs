@@ -1960,6 +1960,29 @@ impl StateStore {
             .get_follow_waiter_by_child_chain(child_chain_root_id)
     }
 
+    /// The live waiter for a SUSPENDED PARENT thread (the follow issuer), used to
+    /// decorate a `continued` thread with its follow lineage.
+    pub fn get_follow_waiter_by_parent_thread(
+        &self,
+        parent_thread_id: &str,
+    ) -> Result<Option<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .get_follow_waiter_by_parent_thread(parent_thread_id)
+    }
+
+    /// The live waiter whose recorded resume successor is `successor_thread_id`,
+    /// used to decorate a follow-resume successor with its live lineage before the
+    /// waiter is cleared.
+    pub fn get_follow_waiter_by_successor(
+        &self,
+        successor_thread_id: &str,
+    ) -> Result<Option<runtime_db::FollowWaiter>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .get_follow_waiter_by_successor(successor_thread_id)
+    }
+
     pub fn list_follow_waiters(&self) -> Result<Vec<runtime_db::FollowWaiter>> {
         let g = self.lock()?;
         g.runtime_db.list_follow_waiters()
