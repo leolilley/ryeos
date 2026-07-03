@@ -469,12 +469,13 @@ requires:
     declared:
       - ryeos.execute.tool.echo
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: [append]
-      runtime_vault:
-        - namespace: oauth
-          operations: [get]
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: [append]
+        runtime_vault:
+          - namespace: oauth
+            operations: [get]
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert_eq!(
@@ -506,9 +507,10 @@ config:
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: []
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: []
 "#;
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }
@@ -524,10 +526,11 @@ config:
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: [append]
-          extra: nope
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: [append]
+            extra: nope
 "#;
         assert!(GraphDefinition::from_yaml(yaml, Some("test.yaml")).is_err());
     }

@@ -136,9 +136,10 @@ Bundle manifests declare event kinds and allowed operations:
 
 ```yaml
 name: example-bundle
-bundle_events:
-  - event_kind: example_event
-    operations: [append, scan]
+runtime_authority:
+  bundle_events:
+    - event_kind: example_event
+      operations: [append, scan]
 ```
 
 When a verified bundle-qualified tool executes, Rye OS derives callback

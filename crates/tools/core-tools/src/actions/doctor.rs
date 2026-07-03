@@ -100,8 +100,7 @@ fn check_manifest(source: &Path) -> CheckResult {
         }
     };
     let declared_name = source_manifest.name.clone();
-    let declares_runtime_authority =
-        !source_manifest.bundle_events.is_empty() || !source_manifest.runtime_vault.is_empty();
+    let declares_runtime_authority = !source_manifest.runtime_authority.is_empty();
 
     let generated = ai_dir.join("manifest.yaml");
     if !generated.exists() {
@@ -278,8 +277,9 @@ fn collect_py(dir: &Path, tools_root: &Path, out: &mut Vec<String>) {
     }
 }
 
-/// Advisory: whether declared `bundle_events:` cover the kinds tools actually
-/// use is inherently best-effort, so report `unknown` — never a green pass.
+/// Advisory: whether declared `runtime_authority.bundle_events:` cover the kinds
+/// tools actually use is inherently best-effort, so report `unknown` — never a
+/// green pass.
 fn advisory_bundle_events(source: &Path) -> CheckResult {
     let declared = std::fs::read_to_string(
         source
@@ -289,7 +289,8 @@ fn advisory_bundle_events(source: &Path) -> CheckResult {
     .ok()
     .and_then(|raw| serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(&raw).ok())
     .map(|src| {
-        src.bundle_events
+        src.runtime_authority
+            .bundle_events
             .iter()
             .map(|e| e.event_kind.clone())
             .collect::<Vec<_>>()

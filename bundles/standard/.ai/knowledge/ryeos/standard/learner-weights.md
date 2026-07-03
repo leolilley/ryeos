@@ -92,13 +92,14 @@ The agent bundle declares access to the vault namespace and the event
 chain it will use:
 
 ```yaml
-runtime_vault:
-  - namespace: learner_weights
-    operations: [get, put, list]
+runtime_authority:
+  runtime_vault:
+    - namespace: learner_weights
+      operations: [get, put, list]
 
-bundle_events:
-  - event_kind: learner_weights
-    operations: [append, scan]
+  bundle_events:
+    - event_kind: learner_weights
+      operations: [append, scan]
 ```
 
 These map to derived capabilities the daemon enforces at the callback

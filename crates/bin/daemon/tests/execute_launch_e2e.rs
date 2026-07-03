@@ -299,9 +299,10 @@ config:
 requires:
   capabilities:
     manifest:
-      runtime_vault:
-        - namespace: "testns"
-          operations: ["get"]
+      runtime_authority:
+        runtime_vault:
+          - namespace: "testns"
+            operations: ["get"]
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);

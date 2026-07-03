@@ -661,13 +661,53 @@ fn string_array(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-// Canonical operation vocabularies live in
-// `ryeos_bundle::runtime_authority` (`BundleEventOperation` /
+// The manifest-backed runtime-authority vocabulary lives in
+// `ryeos_bundle::runtime_authority` (`RuntimeAuthorityDecls` /
+// `RuntimeAuthorityRequirements`, `BundleEventOperation` /
 // `RuntimeVaultOperation`). Mirrored here so the composer can fail loud at
 // compose time without a dependency on that crate; the launch-time parser is
 // still the authoritative gate.
 const BUNDLE_EVENT_OPS: &[&str] = &["append", "scan"];
 const RUNTIME_VAULT_OPS: &[&str] = &["put", "get", "delete", "list"];
+
+/// The only key permitted directly under `requires.capabilities.manifest`: the
+/// `runtime_authority` family set the daemon mints from the signed manifest.
+const MANIFEST_KEYS: &[&str] = &["runtime_authority"];
+
+/// One runtime-authority family and how it narrows. Operation-based families
+/// (`ops = Some`) compare `(id, operation)` pairs; the pattern-based
+/// item-authoring family (`ops = None`) compares `(kind, namespace)` with the
+/// parent namespace pattern covering the child. Adding a family here teaches
+/// both the shape check and the narrowing check at once, mirroring the closed
+/// family set in `ryeos_bundle::runtime_authority`.
+struct ManifestFamily {
+    key: &'static str,
+    id_key: &'static str,
+    ops: Option<&'static [&'static str]>,
+}
+
+const RUNTIME_AUTHORITY_FAMILIES: &[ManifestFamily] = &[
+    ManifestFamily {
+        key: "bundle_events",
+        id_key: "event_kind",
+        ops: Some(BUNDLE_EVENT_OPS),
+    },
+    ManifestFamily {
+        key: "runtime_vault",
+        id_key: "namespace",
+        ops: Some(RUNTIME_VAULT_OPS),
+    },
+    ManifestFamily {
+        key: "item_authoring",
+        id_key: "kind",
+        ops: None,
+    },
+];
+
+/// The `runtime_authority` sub-object of a `manifest` value, if present.
+fn runtime_authority_value(manifest: &Value) -> Option<&Value> {
+    manifest.get("runtime_authority").filter(|v| !v.is_null())
+}
 
 /// `requires.capabilities.manifest` value, if present and non-null.
 pub(crate) fn manifest_value(parsed: &Value) -> Option<&Value> {
@@ -678,10 +718,12 @@ pub(crate) fn manifest_value(parsed: &Value) -> Option<&Value> {
         .filter(|v| !v.is_null())
 }
 
-/// Strict shape check for the `manifest` sub-tree at compose time: only the
-/// `bundle_events` / `runtime_vault` resource lists, each entry a mapping with a
-/// non-empty id and a non-empty list of known operations. Fails loud rather than
-/// deferring malformed authoring to the launch parser.
+/// Strict shape check for the `manifest` sub-tree at compose time: the only key
+/// is `runtime_authority`, whose families are the operation-based
+/// `bundle_events` / `runtime_vault` resource lists (each entry a mapping with a
+/// non-empty id and a non-empty list of known operations) and the pattern-based
+/// `item_authoring` list (each entry a `{kind, namespace}` mapping). Fails loud
+/// rather than deferring malformed authoring to the launch parser.
 pub(crate) fn validate_manifest_shape(
     manifest: &Value,
 ) -> Result<(), (ResolutionStepNameWire, String)> {
@@ -690,25 +732,82 @@ pub(crate) fn validate_manifest_shape(
         .as_object()
         .ok_or_else(|| err("`requires.capabilities.manifest` must be a mapping".to_string()))?;
     for key in map.keys() {
-        if key != "bundle_events" && key != "runtime_vault" {
+        if !MANIFEST_KEYS.contains(&key.as_str()) {
             return Err(err(format!(
                 "unknown key `requires.capabilities.manifest.{key}` \
-                 (only `bundle_events` and `runtime_vault` are allowed)"
+                 (only `runtime_authority` is allowed)"
             )));
         }
     }
-    validate_manifest_resources(
-        map.get("bundle_events"),
-        "event_kind",
-        BUNDLE_EVENT_OPS,
-        "bundle_events",
-    )?;
-    validate_manifest_resources(
-        map.get("runtime_vault"),
-        "namespace",
-        RUNTIME_VAULT_OPS,
-        "runtime_vault",
-    )?;
+    let Some(runtime_authority) = runtime_authority_value(manifest) else {
+        return Ok(());
+    };
+    let ra_map = runtime_authority.as_object().ok_or_else(|| {
+        err("`requires.capabilities.manifest.runtime_authority` must be a mapping".to_string())
+    })?;
+    for key in ra_map.keys() {
+        if !RUNTIME_AUTHORITY_FAMILIES
+            .iter()
+            .any(|family| family.key == key)
+        {
+            return Err(err(format!(
+                "unknown key `requires.capabilities.manifest.runtime_authority.{key}` (allowed: {})",
+                RUNTIME_AUTHORITY_FAMILIES
+                    .iter()
+                    .map(|family| family.key)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    for family in RUNTIME_AUTHORITY_FAMILIES {
+        match family.ops {
+            Some(ops) => {
+                validate_manifest_resources(ra_map.get(family.key), family.id_key, ops, family.key)?
+            }
+            None => validate_item_authoring_entries(ra_map.get(family.key), family.key)?,
+        }
+    }
+    Ok(())
+}
+
+/// Shape check for a pattern-based `item_authoring` family: each entry is a
+/// mapping with exactly a non-empty string `kind` and a non-empty string
+/// `namespace`.
+fn validate_item_authoring_entries(
+    list: Option<&Value>,
+    tag: &str,
+) -> Result<(), (ResolutionStepNameWire, String)> {
+    let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
+    let Some(value) = list else {
+        return Ok(());
+    };
+    let arr = value.as_array().ok_or_else(|| {
+        err(format!(
+            "`requires.capabilities.manifest.runtime_authority.{tag}` must be a list"
+        ))
+    })?;
+    for entry in arr {
+        let obj = entry
+            .as_object()
+            .ok_or_else(|| err(format!("each `{tag}` entry must be a mapping")))?;
+        for k in obj.keys() {
+            if k != "kind" && k != "namespace" {
+                return Err(err(format!(
+                    "unknown key `{k}` in an `{tag}` entry (allowed: `kind`, `namespace`)"
+                )));
+            }
+        }
+        for req_key in ["kind", "namespace"] {
+            let value = obj
+                .get(req_key)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| err(format!("a `{tag}` entry is missing a string `{req_key}`")))?;
+            if value.trim().is_empty() {
+                return Err(err(format!("a `{tag}` entry has an empty `{req_key}`")));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -724,7 +823,7 @@ fn validate_manifest_resources(
     };
     let arr = value.as_array().ok_or_else(|| {
         err(format!(
-            "`requires.capabilities.manifest.{tag}` must be a list"
+            "`requires.capabilities.manifest.runtime_authority.{tag}` must be a list"
         ))
     })?;
     for entry in arr {
@@ -796,7 +895,7 @@ fn compose_manifest(
                 Err((
                     ResolutionStepNameWire::PipelineInit,
                     format!(
-                        "requires.capabilities.manifest widens parent requirement: {}",
+                        "requires.capabilities.manifest.runtime_authority widens parent requirement: {}",
                         missing.join(", ")
                     ),
                 ))
@@ -807,22 +906,99 @@ fn compose_manifest(
 
 fn manifest_missing(child: &Map<String, Value>, parent: &Map<String, Value>) -> Vec<String> {
     let mut missing = Vec::new();
-    collect_missing_resource_requirements(
-        child.get("bundle_events"),
-        parent.get("bundle_events"),
-        "event_kind",
-        "bundle_events",
-        &mut missing,
-    );
-    collect_missing_resource_requirements(
-        child.get("runtime_vault"),
-        parent.get("runtime_vault"),
-        "namespace",
-        "runtime_vault",
-        &mut missing,
-    );
+    let child_ra = child.get("runtime_authority");
+    let parent_ra = parent.get("runtime_authority");
+    for family in RUNTIME_AUTHORITY_FAMILIES {
+        let child_family = child_ra.and_then(|v| v.get(family.key));
+        let parent_family = parent_ra.and_then(|v| v.get(family.key));
+        match family.ops {
+            Some(_) => collect_missing_resource_requirements(
+                child_family,
+                parent_family,
+                family.id_key,
+                family.key,
+                &mut missing,
+            ),
+            None => collect_missing_authoring_requirements(
+                child_family,
+                parent_family,
+                family.key,
+                &mut missing,
+            ),
+        }
+    }
     missing.sort();
     missing
+}
+
+/// Collect child item-authoring `(kind, namespace)` entries the parent does not
+/// cover. A parent entry covers a child entry when the `kind` matches exactly
+/// and the parent `namespace` pattern covers the child namespace (so a child may
+/// narrow `runtime-authored/*` to `runtime-authored/foo`, but never widen).
+fn collect_missing_authoring_requirements(
+    child: Option<&Value>,
+    parent: Option<&Value>,
+    tag: &str,
+    missing: &mut Vec<String>,
+) {
+    let Some(child_arr) = child.and_then(|v| v.as_array()) else {
+        return;
+    };
+    let parent_arr = parent.and_then(|v| v.as_array());
+    for entry in child_arr {
+        let (Some(kind), Some(namespace)) = (
+            entry.get("kind").and_then(|v| v.as_str()),
+            entry.get("namespace").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let covered = parent_arr
+            .map(|arr| {
+                arr.iter().any(|parent_entry| {
+                    parent_entry.get("kind").and_then(|v| v.as_str()) == Some(kind)
+                        && parent_entry
+                            .get("namespace")
+                            .and_then(|v| v.as_str())
+                            .map(|parent_ns| authoring_namespace_covers(parent_ns, namespace))
+                            .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if !covered {
+            missing.push(format!("{tag}.{kind}.{namespace}"));
+        }
+    }
+}
+
+/// True when a parent item-authoring namespace pattern covers a child. Mirrors
+/// the mint-time rule in `ryeos_bundle::runtime_authority::manifest_backs_requested_cap`:
+/// a concrete child (no `*`/`?`) is covered when the parent glob matches it, but
+/// a child that itself carries a wildcard is covered ONLY by an identical parent
+/// pattern. Glob-vs-glob matching would widen authority (parent `foo?` would
+/// "match" child `foo*`, which authorizes names `foo?` never grants), so wildcard
+/// children fail closed. The signed-manifest check at mint time is authoritative;
+/// this is the compose-time narrowing gate that rejects a child widening its parent.
+fn authoring_namespace_covers(parent: &str, child: &str) -> bool {
+    if parent == child {
+        return true;
+    }
+    // A wildcard child is only ever covered by an identical parent (handled
+    // above) — never by glob-vs-glob matching.
+    if child.contains('*') || child.contains('?') {
+        return false;
+    }
+    let mut pattern = String::from("^");
+    for ch in parent.chars() {
+        match ch {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            other => pattern.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    pattern.push('$');
+    Regex::new(&pattern)
+        .map(|re| re.is_match(child))
+        .unwrap_or(false)
 }
 
 /// Collect child resource/operation pairs that are not covered by the parent.
@@ -1245,7 +1421,8 @@ mod tests {
             .composed
             .get("requires")
             .and_then(|r| r.get("capabilities"))
-            .and_then(|c| c.get("manifest"));
+            .and_then(|c| c.get("manifest"))
+            .and_then(|m| m.get("runtime_authority"));
         if let Some(cb) = cb {
             for (list, id_key, tag) in [
                 ("bundle_events", "event_kind", "be"),
@@ -1269,10 +1446,10 @@ mod tests {
 
     fn requires_block(bundle_events: Value, runtime_vault: Value) -> Value {
         json!({
-            "capabilities": { "manifest": {
+            "capabilities": { "manifest": { "runtime_authority": {
                 "bundle_events": bundle_events,
                 "runtime_vault": runtime_vault,
-            } }
+            } } }
         })
     }
 
@@ -1432,6 +1609,78 @@ mod tests {
         );
     }
 
+    /// A `requires` block carrying only an `item_authoring` family.
+    fn authoring_requires(item_authoring: Value) -> Value {
+        json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "item_authoring": item_authoring,
+            } } }
+        })
+    }
+
+    #[test]
+    fn requires_item_authoring_concrete_child_narrows_parent_wildcard() {
+        // Parent grants `runtime-authored/*`; child narrows to a concrete
+        // `runtime-authored/foo`, which the parent glob covers.
+        let parent = json!({
+            "requires": authoring_requires(json!([
+                { "kind": "knowledge", "namespace": "runtime-authored/*" }
+            ])),
+            "body": ""
+        });
+        let child = json!({
+            "extends": "parent",
+            "requires": authoring_requires(json!([
+                { "kind": "knowledge", "namespace": "runtime-authored/foo" }
+            ])),
+            "body": "b"
+        });
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            view.composed.pointer(
+                "/requires/capabilities/manifest/runtime_authority/item_authoring/0/namespace"
+            ).and_then(|v| v.as_str()),
+            Some("runtime-authored/foo"),
+        );
+    }
+
+    #[test]
+    fn requires_item_authoring_wildcard_child_widening_parent_fails() {
+        // Parent grants `runtime-authored/foo?`; child requests the wildcard
+        // `runtime-authored/foo*`. Glob-vs-glob would spuriously accept it, but a
+        // wildcard child is only covered by an identical parent — fail closed.
+        let parent = json!({
+            "requires": authoring_requires(json!([
+                { "kind": "knowledge", "namespace": "runtime-authored/foo?" }
+            ])),
+            "body": ""
+        });
+        let child = json!({
+            "extends": "parent",
+            "requires": authoring_requires(json!([
+                { "kind": "knowledge", "namespace": "runtime-authored/foo*" }
+            ])),
+            "body": "b"
+        });
+        let err = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap_err();
+        assert!(
+            err.1.contains("widens parent requirement")
+                && err.1.contains("item_authoring.knowledge.runtime-authored/foo*"),
+            "got: {}",
+            err.1
+        );
+    }
+
     #[test]
     fn requires_root_level_no_parent_kept_verbatim() {
         // A root directive (no ancestors) keeps its requires verbatim — the
@@ -1545,7 +1794,7 @@ mod tests {
         let parent = json!({
             "requires": json!({ "capabilities": {
                 "declared": ["ryeos.execute.tool.read"],
-                "manifest": { "bundle_events": [{ "event_kind": "e", "operations": ["append"] }] }
+                "manifest": { "runtime_authority": { "bundle_events": [{ "event_kind": "e", "operations": ["append"] }] } }
             } }),
             "body": ""
         });
@@ -1573,7 +1822,7 @@ mod tests {
         let parent = json!({
             "requires": json!({ "capabilities": {
                 "declared": ["ryeos.execute.tool.read"],
-                "manifest": { "bundle_events": [{ "event_kind": "e", "operations": ["append"] }] }
+                "manifest": { "runtime_authority": { "bundle_events": [{ "event_kind": "e", "operations": ["append"] }] } }
             } }),
             "body": ""
         });

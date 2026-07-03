@@ -1,0 +1,481 @@
+//! Daemon-mediated runtime callback for signed project item authoring.
+//!
+//! Runtimes may propose bytes for a project item, but they never receive an
+//! item-signing key. The daemon authenticates the live runtime callback,
+//! authorizes the target with `ryeos.author.<kind>.<bare_id>`, derives the path
+//! from the kind schema, injects signed provenance, signs with the daemon's
+//! trusted identity, and atomically writes the normal project-space item.
+
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{anyhow, bail, Context, Result};
+use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::kind_registry::validate_metadata_anchoring;
+use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::callback_token::{CallbackCapability, ThreadAuthState};
+use crate::execution_provenance::ProjectSourceKind;
+use crate::identity::NodeIdentity;
+
+const PROVENANCE_MARKER: &str = "ryeos:authored:";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorItemParams {
+    pub thread_id: String,
+    pub item_ref: String,
+    pub content: String,
+    #[serde(default)]
+    pub mode: AuthorMode,
+    #[serde(default)]
+    pub format_ext: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AuthorMode {
+    #[default]
+    Create,
+    Upsert,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeAuthorItemResponse {
+    pub item_ref: String,
+    pub path: String,
+    pub mode: AuthorMode,
+    pub signer_fingerprint: String,
+    pub content_digest: String,
+    pub required_capability: String,
+}
+
+pub struct RuntimeItemAuthorService;
+
+impl RuntimeItemAuthorService {
+    pub fn author(
+        identity: &NodeIdentity,
+        authorizer: &Authorizer,
+        cap: &CallbackCapability,
+        thread_auth: &ThreadAuthState,
+        params: RuntimeAuthorItemParams,
+    ) -> Result<RuntimeAuthorItemResponse> {
+        if cap.provenance.project_source() != ProjectSourceKind::LiveFs {
+            bail!("runtime item authoring only supports live filesystem project provenance in v1");
+        }
+        if params.content.contains(PROVENANCE_MARKER) {
+            bail!("runtime-authored item content must not contain `{PROVENANCE_MARKER}`");
+        }
+
+        let canonical = CanonicalRef::parse(&params.item_ref)
+            .with_context(|| format!("invalid item_ref `{}`", params.item_ref))?;
+        if canonical.suffix.is_some() {
+            bail!("runtime item authoring target must not include a ref suffix");
+        }
+        validate_bare_id_pattern("item author target bare_id", &canonical.bare_id)
+            .map_err(anyhow::Error::msg)?;
+
+        let required_cap = item_author_cap(&canonical.kind, &canonical.bare_id);
+        authorizer
+            .authorize(&cap.effective_caps, &AuthorizationPolicy::require(&required_cap))
+            .with_context(|| {
+                format!(
+                    "missing required capability: {required_cap} — item authoring is daemon-mediated runtime authority"
+                )
+            })?;
+
+        // Use the per-request engine captured on the callback capability. That
+        // engine includes the exact project/bundle overlays used to launch this
+        // runtime; the daemon's process-wide engine is not a safe fallback.
+        let engine = cap.provenance.request_engine();
+        let kind_schema = engine.kinds.get(&canonical.kind).ok_or_else(|| {
+            anyhow!(
+                "unknown kind `{}` — no kind schema registered for item authoring",
+                canonical.kind
+            )
+        })?;
+        let project_root = cap.provenance.effective_path();
+        let ai_root = project_root.join(ryeos_engine::AI_DIR);
+        let canonical_ai_root = ai_root
+            .canonicalize()
+            .with_context(|| format!("canonicalize ai root {}", ai_root.display()))?;
+        let canonical_kind_dir =
+            ensure_relative_dir_no_symlinks(&canonical_ai_root, Path::new(&kind_schema.directory))?;
+        let bare_path = Path::new(&canonical.bare_id);
+        let bare_parent = bare_path.parent().unwrap_or_else(|| Path::new(""));
+        let canonical_parent = ensure_relative_dir_no_symlinks(&canonical_kind_dir, bare_parent)?;
+        let stem_name = bare_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                anyhow!(
+                    "target filename is not valid unicode: {}",
+                    canonical.bare_id
+                )
+            })?;
+        let (ext, target) = resolve_author_target(
+            kind_schema,
+            &canonical,
+            &canonical_parent,
+            stem_name,
+            params.format_ext.as_deref(),
+            params.mode,
+        )?;
+        let source_format = kind_schema.resolved_format_for(&ext).ok_or_else(|| {
+            anyhow!(
+                "kind `{}` does not declare extension `{ext}`",
+                canonical.kind
+            )
+        })?;
+        if contains_signature_line(
+            &params.content,
+            &source_format.signature.prefix,
+            source_format.signature.suffix.as_deref(),
+        ) {
+            bail!(
+                "runtime-authored item content must be unsigned; signature lines are daemon-owned"
+            );
+        }
+
+        let parsed = engine
+            .parser_dispatcher
+            .dispatch(
+                &source_format.parser,
+                &params.content,
+                Some(&target),
+                &source_format.signature,
+            )
+            .with_context(|| format!("parse authored item body for `{}`", canonical))?;
+        validate_metadata_anchoring(
+            &parsed,
+            &kind_schema.extraction_rules,
+            &kind_schema.directory,
+            &canonical_ai_root,
+            &target,
+        )
+        .map_err(|e| {
+            anyhow!("path-anchoring validator refused authored item `{canonical}`: {e}")
+        })?;
+
+        let content_digest = lillux::cas::sha256_hex(params.content.as_bytes());
+        let provenance = json!({
+            "authored_by": "runtime",
+            "authored_at": lillux::time::iso8601_now(),
+            "thread_id": params.thread_id.clone(),
+            "invocation_id": cap.invocation_id.clone(),
+            "parent_item_ref": cap.item_ref.clone(),
+            "acting_principal": thread_auth.acting_principal.clone(),
+            "effective_bundle_id": cap.effective_bundle_id.clone(),
+            "target_ref": canonical.to_string(),
+            "format_ext": ext.clone(),
+            "path": target.display().to_string(),
+            "authoring_capability": required_cap.clone(),
+            "content_digest": content_digest.clone(),
+        });
+        let body = append_provenance_comment(
+            &params.content,
+            &source_format.signature.prefix,
+            source_format.signature.suffix.as_deref(),
+            &serde_json::to_string(&provenance)?,
+        );
+        let signed = lillux::signature::sign_content(
+            &body,
+            identity.signing_key(),
+            &source_format.signature.prefix,
+            source_format.signature.suffix.as_deref(),
+        );
+        let final_parsed = engine
+            .parser_dispatcher
+            .dispatch(
+                &source_format.parser,
+                &signed,
+                Some(&target),
+                &source_format.signature,
+            )
+            .with_context(|| format!("parse final signed authored item for `{}`", canonical))?;
+        validate_metadata_anchoring(
+            &final_parsed,
+            &kind_schema.extraction_rules,
+            &kind_schema.directory,
+            &canonical_ai_root,
+            &target,
+        )
+        .map_err(|e| {
+            anyhow!("path-anchoring validator refused final authored item `{canonical}`: {e}")
+        })?;
+
+        write_atomic(&target, &signed, params.mode)?;
+
+        Ok(RuntimeAuthorItemResponse {
+            item_ref: canonical.to_string(),
+            path: target.display().to_string(),
+            mode: params.mode,
+            signer_fingerprint: identity.fingerprint().to_string(),
+            content_digest,
+            required_capability: required_cap,
+        })
+    }
+}
+
+fn validate_extension(
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    ext: &str,
+) -> Result<()> {
+    if !ext.starts_with('.') {
+        bail!("format_ext must include leading dot");
+    }
+    if kind_schema.spec_for(ext).is_none() {
+        bail!(
+            "format_ext `{}` is not declared for kind (declared: {:?})",
+            ext,
+            kind_schema.extension_strs()
+        );
+    }
+    Ok(())
+}
+
+fn resolve_author_target(
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    canonical: &CanonicalRef,
+    canonical_parent: &Path,
+    stem_name: &str,
+    requested_ext: Option<&str>,
+    mode: AuthorMode,
+) -> Result<(String, PathBuf)> {
+    if let Some(ext) = requested_ext {
+        validate_extension(kind_schema, ext)?;
+    }
+
+    let existing = existing_canonical_item_files(kind_schema, canonical_parent, stem_name)?;
+    match mode {
+        AuthorMode::Create => {
+            if !existing.is_empty() {
+                bail!(
+                    "item already exists for canonical ref {}: {}",
+                    canonical,
+                    existing_paths(&existing)
+                );
+            }
+            let ext = requested_ext.ok_or_else(|| {
+                anyhow!(
+                    "format_ext is required when creating new item {}; declared extensions: {:?}",
+                    canonical,
+                    kind_schema.extension_strs()
+                )
+            })?;
+            Ok((
+                ext.to_string(),
+                canonical_parent.join(format!("{stem_name}{ext}")),
+            ))
+        }
+        AuthorMode::Upsert => match requested_ext {
+            Some(ext) => {
+                if let Some(other) = existing.iter().find(|item| item.ext != ext) {
+                    bail!(
+                        "refusing to create duplicate file for canonical ref {}: requested `{}` but existing item uses `{}` at {}",
+                        canonical,
+                        ext,
+                        other.ext,
+                        other.path.display()
+                    );
+                }
+                Ok((
+                    ext.to_string(),
+                    canonical_parent.join(format!("{stem_name}{ext}")),
+                ))
+            }
+            None => match existing.as_slice() {
+                [item] => Ok((item.ext.clone(), item.path.clone())),
+                [] => bail!(
+                    "format_ext is required when upserting new item {}; declared extensions: {:?}",
+                    canonical,
+                    kind_schema.extension_strs()
+                ),
+                _ => bail!(
+                    "ambiguous duplicate files for canonical ref {}: {}",
+                    canonical,
+                    existing_paths(&existing)
+                ),
+            },
+        },
+    }
+}
+
+#[derive(Debug)]
+struct ExistingItemFile {
+    ext: String,
+    path: PathBuf,
+}
+
+fn existing_canonical_item_files(
+    kind_schema: &ryeos_engine::kind_registry::KindSchema,
+    canonical_parent: &Path,
+    stem_name: &str,
+) -> Result<Vec<ExistingItemFile>> {
+    let mut existing = Vec::new();
+    for spec in &kind_schema.extensions {
+        let path = canonical_parent.join(format!("{}{}", stem_name, spec.ext));
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    bail!(
+                        "refusing to author item through symlink: {}",
+                        path.display()
+                    );
+                }
+                if !meta.is_file() {
+                    bail!(
+                        "refusing to author over non-file item path: {}",
+                        path.display()
+                    );
+                }
+                existing.push(ExistingItemFile {
+                    ext: spec.ext.clone(),
+                    path,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+        }
+    }
+    Ok(existing)
+}
+
+fn existing_paths(existing: &[ExistingItemFile]) -> String {
+    existing
+        .iter()
+        .map(|item| item.path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn ensure_relative_dir_no_symlinks(root: &Path, relative: &Path) -> Result<PathBuf> {
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            bail!(
+                "refusing non-relative authored item directory component in {}",
+                relative.display()
+            );
+        };
+        let next = current.join(segment);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    bail!(
+                        "refusing to create authored item directory through symlink: {}",
+                        next.display()
+                    );
+                }
+                if !meta.is_dir() {
+                    bail!(
+                        "refusing to create authored item directory over non-directory: {}",
+                        next.display()
+                    );
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&next)
+                    .with_context(|| format!("create dir {}", next.display()))?;
+                let meta = std::fs::symlink_metadata(&next)
+                    .with_context(|| format!("stat created dir {}", next.display()))?;
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    bail!(
+                        "created authored item path is not a plain directory: {}",
+                        next.display()
+                    );
+                }
+            }
+            Err(e) => return Err(e).with_context(|| format!("stat {}", next.display())),
+        }
+        current = next;
+    }
+    Ok(current)
+}
+
+fn append_provenance_comment(
+    content: &str,
+    prefix: &str,
+    suffix: Option<&str>,
+    json: &str,
+) -> String {
+    let mut body = content.trim_end().to_string();
+    body.push_str("\n\n");
+    match suffix {
+        Some(suffix) => body.push_str(&format!("{prefix} {PROVENANCE_MARKER} {json} {suffix}\n")),
+        None => body.push_str(&format!("{prefix} {PROVENANCE_MARKER} {json}\n")),
+    }
+    body
+}
+
+fn contains_signature_line(content: &str, prefix: &str, suffix: Option<&str>) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        let Some(after_prefix) = trimmed.strip_prefix(prefix).map(str::trim_start) else {
+            return false;
+        };
+        let payload_area = match suffix {
+            Some(s) => after_prefix
+                .trim_end()
+                .strip_suffix(s)
+                .map(str::trim_end)
+                .unwrap_or_else(|| after_prefix.trim_end()),
+            None => after_prefix.trim_end(),
+        };
+        payload_area.starts_with(lillux::signature::SIGNATURE_PREFIX)
+            || payload_area == "ryeos:signed"
+            || payload_area.starts_with("ryeos:signed ")
+    })
+}
+
+fn write_atomic(target: &Path, content: &str, mode: AuthorMode) -> Result<()> {
+    // The target was derived from a canonicalized kind-directory parent. This
+    // v1 live-filesystem path treats local runtimes as capability-restricted
+    // callers, not as concurrent filesystem adversaries that can swap checked
+    // parent directories between validation and commit. A fully adversarial
+    // filesystem boundary should replace this path-based commit with an
+    // openat/renameat style directory-fd implementation.
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow!("target path has no parent: {}", target.display()))?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("target filename is not valid unicode: {}", target.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp: PathBuf = parent.join(format!(
+        ".{file_name}.authoring.tmp.{}.{}",
+        std::process::id(),
+        nonce
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| {
+            use std::io::Write;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()
+        })
+        .with_context(|| format!("write tmp {}", tmp.display()))?;
+    let commit_result = match mode {
+        AuthorMode::Create => std::fs::hard_link(&tmp, target)
+            .with_context(|| format!("link {} -> {}", tmp.display(), target.display()))
+            .map(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            }),
+        AuthorMode::Upsert => std::fs::rename(&tmp, target)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), target.display())),
+    };
+    if let Err(err) = commit_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}

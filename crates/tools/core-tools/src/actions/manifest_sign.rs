@@ -6,8 +6,8 @@
 //! publish path's Phase 4 runs, so a manifest authored here is byte-identical
 //! to one produced by a full publish.
 //!
-//! Use when iterating on a manifest's declarations (e.g. `bundle_events:` /
-//! `runtime_vault:`) without re-signing every item in the tree.
+//! Use when iterating on a manifest's declarations (e.g. under
+//! `runtime_authority:`) without re-signing every item in the tree.
 
 use std::path::{Path, PathBuf};
 

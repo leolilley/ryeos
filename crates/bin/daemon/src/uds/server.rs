@@ -13,6 +13,7 @@ use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, Comm
 use ryeos_app::event_store_service::{
     EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
+use ryeos_app::runtime_item_author_service::{RuntimeAuthorItemParams, RuntimeItemAuthorService};
 use ryeos_app::runtime_vault_service::{
     RuntimeVaultListParams, RuntimeVaultPutParams, RuntimeVaultRefParams, RuntimeVaultService,
 };
@@ -132,6 +133,7 @@ pub async fn dispatch_runtime_method(
     //  - everything else (writes + lifecycle: append, finalize, mark_running,
     //    request_continuation, publish_artifact, vault/bundle writes) requires an
     //    exact-thread match. A chain read must never widen into a chain write.
+    let mut validated_thread_auth: Option<ryeos_app::callback_token::ThreadAuthState> = None;
     let callback_cap = if is_thread_auth_method(method) {
         // Per-request identity proof against the caller's own thread. Missing or
         // invalid = hard fail, no fallback. The handler re-validates the callback
@@ -146,21 +148,26 @@ pub async fn dispatch_runtime_method(
             .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
-    } else if method == "runtime.poll_input" {
+    } else if matches!(method, "runtime.poll_input" | "runtime.author_item") {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
         // runtime holds: the per-request thread_auth_token (like dispatch_action)
         // AND the exact-thread callback token (write tier — it appends durable
-        // events). Either alone is insufficient.
+        // events). runtime.author_item is also a durable signed project write,
+        // so it uses the same two-proof boundary. Either proof alone is
+        // insufficient.
         let tat = params
             .get("thread_auth_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("missing thread_auth_token on runtime.poll_input"))?;
+            .ok_or_else(|| anyhow!("missing thread_auth_token on {method}"))?;
         let thread_id = params
             .get("thread_id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
-        state.thread_auth.validate(tat, thread_id)?;
+        let thread_auth = state.thread_auth.validate(tat, thread_id)?;
+        if method == "runtime.author_item" {
+            validated_thread_auth = Some(thread_auth);
+        }
         let token = params
             .get("callback_token")
             .and_then(|v| v.as_str())
@@ -230,6 +237,12 @@ pub async fn dispatch_runtime_method(
         "runtime.vault_list" => {
             handle_runtime_vault_list(&clean_params, state, callback_cap.as_ref())
         }
+        "runtime.author_item" => handle_runtime_author_item(
+            &clean_params,
+            state,
+            callback_cap.as_ref(),
+            validated_thread_auth.as_ref(),
+        ),
         "runtime.finalize_thread" => {
             let result = handle_finalize(&clean_params, state)?;
             // A self-finalizing follow child (the normal path) flips its waiter to
@@ -732,6 +745,26 @@ fn handle_runtime_vault_list(
         params,
     )?)
     .context("failed to encode vault.list result")
+}
+
+fn handle_runtime_author_item(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    thread_auth: Option<&ryeos_app::callback_token::ThreadAuthState>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let thread_auth = thread_auth.ok_or_else(|| anyhow::anyhow!("missing thread auth state"))?;
+    let params: RuntimeAuthorItemParams =
+        serde_json::from_value(params.clone()).context("invalid runtime.author_item params")?;
+    serde_json::to_value(RuntimeItemAuthorService::author(
+        &state.identity,
+        &state.authorizer,
+        cap,
+        thread_auth,
+        params,
+    )?)
+    .context("failed to encode runtime.author_item result")
 }
 
 fn handle_submit_command(

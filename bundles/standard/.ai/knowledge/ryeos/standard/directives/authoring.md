@@ -29,7 +29,7 @@ Instructions for the runtime.
 
 - `extends`: parent directive ref. Children inherit through `extends-chain`.
 - `requires.capabilities.declared`: a flat list of self-asserted capability strings (the cap encodes its own verb, e.g. `ryeos.execute.tool.echo`). Children may narrow but not widen the parent's declared set.
-- `requires.capabilities.manifest`: runtime callback authority (bundle events / vault) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
+- `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
 - `context`: knowledge refs grouped by position (`system`, `before`, `after`).
 - `model`: optional explicit provider/model/context window; otherwise routing tiers apply.
 - `limits`: runtime limits such as turn/token/spend budgets.

@@ -503,6 +503,12 @@ pub fn verify_manifest_signature(
     let body = lillux::signature::strip_signature_lines(&raw);
     let manifest: BundleManifest = serde_yaml::from_str(&body)
         .with_context(|| format!("parse manifest body from {}", manifest_path.display()))?;
+    manifest.runtime_authority.validate().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid `runtime_authority` declaration in {}: {e}",
+            manifest_path.display()
+        )
+    })?;
 
     let dir_name = source_path
         .file_name()
@@ -1850,7 +1856,7 @@ description: "fixed parser handler for preflight tests"
         )
         .unwrap();
         layout.write_signed_manifest(
-            "name: test-bundle\nversion: '1.0'\ndescription: old\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nbundle_events: []\nruntime_vault: []\n",
+            "name: test-bundle\nversion: '1.0'\ndescription: old\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
         );
         let ts = layout.trust_store();
         let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
@@ -1870,10 +1876,29 @@ description: "fixed parser handler for preflight tests"
         )
         .unwrap();
         layout.write_signed_manifest(
-            "name: test-bundle\nversion: '1.0'\ndescription: same\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nbundle_events: []\nruntime_vault: []\n",
+            "name: test-bundle\nversion: '1.0'\ndescription: same\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
         );
         let ts = layout.trust_store();
         assert!(verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).is_ok());
+    }
+
+    #[test]
+    fn verify_manifest_rejects_invalid_runtime_authority_declaration() {
+        // A correctly signed manifest whose runtime-authority declaration is
+        // structurally invalid (wildcard `event_kind`) must be rejected by
+        // preflight — the same rule the runtime loader applies — not approved
+        // just because the signature verifies.
+        let layout = BundleLayout::new("test-bundle");
+        layout.write_signed_manifest(
+            "name: test-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nruntime_authority:\n  bundle_events:\n    - event_kind: ev_*\n      operations: [append]\n",
+        );
+        let ts = layout.trust_store();
+        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("runtime_authority") && msg.contains("wildcards"),
+            "should reject invalid runtime-authority declaration: {msg}"
+        );
     }
 
     #[cfg(unix)]
@@ -1900,7 +1925,7 @@ description: "fixed parser handler for preflight tests"
     fn verify_manifest_rejects_manifest_source_symlink() {
         let layout = BundleLayout::new("test-bundle");
         layout.write_signed_manifest(
-            "name: test-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\nbundle_events: []\nruntime_vault: []\n",
+            "name: test-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
         );
         std::os::unix::fs::symlink(
             layout.ai_dir.join("missing-manifest.source.yaml"),

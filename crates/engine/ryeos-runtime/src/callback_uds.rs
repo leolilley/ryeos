@@ -295,6 +295,24 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn author_item(
+        &self,
+        thread_id: &str,
+        mut request: Value,
+    ) -> Result<Value, CallbackError> {
+        let map = request.as_object_mut().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "runtime.author_item request must be a JSON object"
+            ))
+        })?;
+        map.insert("thread_id".to_string(), json!(thread_id));
+        self.inject_callback_token(&mut request);
+        self.rpc
+            .request("runtime.author_item", request)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError> {
         let mut params = json!({"thread_id": thread_id});
         self.inject_callback_token(&mut params);
