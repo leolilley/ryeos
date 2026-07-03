@@ -40,6 +40,26 @@ projections:
           size_cap_exceeded: warn
           result_guard: warn
         default: good
+    provider_retry:
+      primary: payload.error
+      meta: payload.attempt
+      role: boundary
+      tone:
+        field: event_type
+        missing: warn
+        map:
+          provider_retry: warn
+        default: warn
+    cost_untracked:
+      primary: payload.model
+      meta: payload.reason
+      role: boundary
+      tone:
+        field: event_type
+        missing: warn
+        map:
+          cost_untracked: warn
+        default: warn
   default:
     primary: event_type
     meta: ts

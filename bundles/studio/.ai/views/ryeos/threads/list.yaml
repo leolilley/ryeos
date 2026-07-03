@@ -71,6 +71,9 @@ affordances:
       ref: service:ui/studio/thread/cancel
       args:
         thread_id: "{record.thread_id}"
+      # Success copy lives in view data, not the reducer: rendered against the
+      # invocation outcome ({result.<field>}) when the cancel succeeds.
+      notice: "Cancelled {result.thread_id}."
 # Inline live filter: typing narrows the list (substring) as you type; the buffer
 # feeds ONE source param (empty buffer = unfiltered), and Tab cycles which field it
 # targets — status → kind → source (requested_by). No `submit:`, so this is a live
