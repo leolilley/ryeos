@@ -69,10 +69,10 @@ description: ARC agent
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events:
-  - event_kind: arc_pattern_event
-    operations: [append, scan]   # both — the tool does create-or-append
-runtime_vault: []
+runtime_authority:
+  bundle_events:
+    - event_kind: arc_pattern_event
+      operations: [append, scan]   # both — the tool does create-or-append
 ```
 
 From this signed manifest the daemon mints, for a tool whose ref resolves under
@@ -110,15 +110,16 @@ needs under `requires.capabilities.manifest`:
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: arc_pattern_event
-          operations: [append]
+      runtime_authority:
+        bundle_events:
+          - event_kind: arc_pattern_event
+            operations: [append]
 ```
 
 ## Runtime vault
 
 Runtime-vault capabilities (`ryeos.<verb>.vault.<bundle-id>/<namespace>`, verbs
-`put`/`get`/`delete`/`list`) follow the identical model: declared as
-`runtime_vault:` in the signed manifest, requested under
-`requires.capabilities.manifest`, minted by the daemon, never self-grantable
-under `requires.capabilities.declared`.
+`put`/`get`/`delete`/`list`) follow the identical model: declared under
+`runtime_authority.runtime_vault:` in the signed manifest, requested under
+`requires.capabilities.manifest.runtime_authority`, minted by the daemon, never
+self-grantable under `requires.capabilities.declared`.

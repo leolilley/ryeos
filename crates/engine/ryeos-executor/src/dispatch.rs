@@ -43,7 +43,7 @@
 //!   alternatives so an operator can fix the schema/cap/registry
 //!   without spelunking the source.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -2624,10 +2624,7 @@ pub(crate) fn mint_runtime_capability_caps(
     };
     let reqs = ryeos_bundle::runtime_authority::parse_runtime_requires(requires_value)
         .map_err(|err| format!("invalid `requires.capabilities`: {err}"))?;
-    if reqs.manifest.bundle_events.is_empty()
-        && reqs.manifest.runtime_vault.is_empty()
-        && reqs.manifest.item_authoring.is_empty()
-    {
+    if reqs.manifest.runtime_authority.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -2648,15 +2645,16 @@ pub(crate) fn mint_runtime_capability_caps(
     // shape (known keys, valid ops, non-empty arrays) was already enforced by
     // `parse_runtime_requires`; this checks the bundle-id segment grammar that
     // the cap-string scheme depends on.
-    for req in &reqs.manifest.bundle_events {
+    let requested_authority = &reqs.manifest.runtime_authority;
+    for req in &requested_authority.bundle_events {
         ryeos_state::objects::validate_bundle_identifier("event_kind", &req.event_kind)
             .map_err(|err| err.to_string())?;
     }
-    for req in &reqs.manifest.runtime_vault {
+    for req in &requested_authority.runtime_vault {
         ryeos_app::vault::validate_runtime_vault_segment("namespace", &req.namespace)
             .map_err(|err| err.to_string())?;
     }
-    for req in &reqs.manifest.item_authoring {
+    for req in &requested_authority.item_authoring {
         ryeos_bundle::runtime_authority::validate_item_author_pattern(&req.kind, &req.namespace)?;
     }
 
@@ -2679,33 +2677,27 @@ pub(crate) fn mint_runtime_capability_caps(
             manifest.name, effective_bundle_id
         ));
     }
-    for decl in &manifest.item_authoring {
-        ryeos_bundle::runtime_authority::validate_item_author_pattern(&decl.kind, &decl.namespace)?;
-    }
+    manifest.runtime_authority.validate()?;
 
     // Manifest-declared caps form the upper bound. Cap strings come from the
     // manifest declarations' own constructors (`runtime_authority`), so the
     // minter and the daemon callback services share one definition.
-    let mut manifest_caps = BTreeSet::new();
-    for decl in &manifest.bundle_events {
-        manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
-    }
-    for decl in &manifest.runtime_vault {
-        manifest_caps.extend(decl.runtime_authority_caps(&effective_bundle_id));
-    }
-    for decl in &manifest.item_authoring {
-        manifest_caps.extend(decl.runtime_authority_caps());
-    }
+    let manifest_caps = manifest
+        .runtime_authority
+        .declared_caps(&effective_bundle_id);
 
-    // (3) Subset check + mint exactly the requested subset.
+    // (3) Subset check + mint exactly the requested subset. A wildcard-carrying
+    // request must be backed by an identical manifest declaration, not merely
+    // glob-matched — see `manifest_backs_requested_cap`.
     let requested =
         ryeos_bundle::runtime_authority::requested_runtime_caps(&reqs, &effective_bundle_id);
     let missing: Vec<String> = requested
         .iter()
         .filter(|requested_cap| {
-            !manifest_caps.iter().any(|manifest_cap| {
-                ryeos_runtime::authorizer::cap_matches(manifest_cap, requested_cap)
-            })
+            !ryeos_bundle::runtime_authority::manifest_backs_requested_cap(
+                &manifest_caps,
+                requested_cap,
+            )
         })
         .cloned()
         .collect();
@@ -2749,7 +2741,8 @@ fn reject_tool_declared_capabilities(
             return Err(DispatchError::InvalidRef(
                 item_ref.to_string(),
                 "tool items cannot self-declare action authority under \
-                 `requires.capabilities.declared`; only `requires.capabilities.manifest` \
+                 `requires.capabilities.declared`; only \
+                 `requires.capabilities.manifest.runtime_authority` \
                  (manifest-backed runtime authority) is honored for tools"
                     .into(),
             ));
@@ -3658,15 +3651,16 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events:
-  - event_kind: example_event
-    operations: [append, scan]
-runtime_vault:
-  - namespace: oauth
-    operations: [put, get, delete, list]
-item_authoring:
-  - kind: knowledge
-    namespace: runtime-authored/*
+runtime_authority:
+  bundle_events:
+    - event_kind: example_event
+      operations: [append, scan]
+  runtime_vault:
+    - namespace: oauth
+      operations: [put, get, delete, list]
+  item_authoring:
+    - kind: knowledge
+      namespace: runtime-authored/*
 "#;
 
     #[test]
@@ -3680,14 +3674,14 @@ item_authoring:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ],
                     "runtime_vault": [
                         { "namespace": "oauth", "operations": ["get"] }
                     ]
-                } }
+                } } }
             })),
         );
 
@@ -3729,9 +3723,10 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events:
-  - event_kind: example_event
-    operations: [append]
+runtime_authority:
+  bundle_events:
+    - event_kind: example_event
+      operations: [append]
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
@@ -3740,11 +3735,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["scan"] }
                     ]
-                } }
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3765,11 +3760,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "runtime_vault": [
                         { "namespace": "oauth", "operations": ["get", "put"] }
                     ]
-                } }
+                } } }
             })),
         );
         let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3792,11 +3787,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "item_authoring": [
                         { "kind": "knowledge", "namespace": "runtime-authored/foo" }
                     ]
-                } }
+                } } }
             })),
         );
         let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3817,11 +3812,40 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "item_authoring": [
                         { "kind": "knowledge", "namespace": "other-namespace/*" }
                     ]
-                } }
+                } } }
+            })),
+        );
+        let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not declared in the signed manifest"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn item_authoring_wildcard_request_not_backed_by_wildcard_manifest_fails_launch() {
+        // The manifest declares `runtime-authored/*`. A request for the *wildcard*
+        // `runtime-authored/foo*` must NOT be admitted just because the manifest
+        // glob would match the literal string — `foo*` authorizes names the
+        // manifest never granted. Fail closed (see `manifest_backs_requested_cap`).
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/send",
+            requires_extra(json!({
+                "capabilities": { "manifest": { "runtime_authority": {
+                    "item_authoring": [
+                        { "kind": "knowledge", "namespace": "runtime-authored/foo*" }
+                    ]
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3841,11 +3865,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ]
-                } }
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3867,9 +3891,10 @@ description: test
 provides_kinds: []
 requires_kinds: []
 uses_kinds: []
-bundle_events:
-  - event_kind: example_event
-    operations: [append]
+runtime_authority:
+  bundle_events:
+    - event_kind: example_event
+      operations: [append]
 "#,
         );
         let ctx = test_execution_context(bundle.clone());
@@ -3877,11 +3902,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ]
-                } }
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3899,11 +3924,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "../bad", "operations": ["append"] }
                     ]
-                } }
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3914,11 +3939,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "runtime_vault": [
                         { "namespace": "../bad", "operations": ["get"] }
                     ]
-                } }
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3938,11 +3963,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": [] }
                     ]
-                } }
+                } } }
             })),
         );
         let err = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
@@ -3968,11 +3993,11 @@ bundle_events:
             &bundle,
             "tool:example-bundle/send",
             requires_extra(json!({
-                "capabilities": { "manifest": {
+                "capabilities": { "manifest": { "runtime_authority": {
                     "bundle_events": [
                         { "event_kind": "example_event", "operations": ["append"] }
                     ]
-                } }
+                } } }
             })),
         );
         // resolved_item.canonical_ref stays `example-bundle`; only the requested
@@ -4065,9 +4090,10 @@ category: example-bundle
 requires:
   capabilities:
     manifest:
-      bundle_events:
-        - event_kind: example_event
-          operations: [append]
+      runtime_authority:
+        bundle_events:
+          - event_kind: example_event
+            operations: [append]
 "#;
         let parsed: serde_json::Value = serde_yaml::from_str(item_yaml).unwrap();
 

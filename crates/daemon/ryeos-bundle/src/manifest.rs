@@ -43,6 +43,24 @@ pub struct ItemAuthorDecl {
     pub namespace: String,
 }
 
+/// The single manifest-declared runtime-authority surface: the closed set of
+/// daemon callback authority families a signed bundle manifest may grant its own
+/// running code. One field per family, each a typed declaration list that owns
+/// its own cap construction (see the impls in `runtime_authority`). Adding a
+/// family is one field here plus one arm in the family-set behavior — every
+/// generic caller (minting, doctor, publish, composition) folds over the set
+/// rather than naming each family, so ancillary paths cannot silently drift.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorityDecls {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundle_events: Vec<BundleEventDecl>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_vault: Vec<RuntimeVaultDecl>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_authoring: Vec<ItemAuthorDecl>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifestSource {
@@ -55,11 +73,7 @@ pub struct BundleManifestSource {
     #[serde(default)]
     pub uses_kinds: Vec<String>,
     #[serde(default)]
-    pub bundle_events: Vec<BundleEventDecl>,
-    #[serde(default)]
-    pub runtime_vault: Vec<RuntimeVaultDecl>,
-    #[serde(default)]
-    pub item_authoring: Vec<ItemAuthorDecl>,
+    pub runtime_authority: RuntimeAuthorityDecls,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,11 +89,7 @@ pub struct BundleManifest {
     #[serde(default)]
     pub uses_kinds: Vec<String>,
     #[serde(default)]
-    pub bundle_events: Vec<BundleEventDecl>,
-    #[serde(default)]
-    pub runtime_vault: Vec<RuntimeVaultDecl>,
-    #[serde(default)]
-    pub item_authoring: Vec<ItemAuthorDecl>,
+    pub runtime_authority: RuntimeAuthorityDecls,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -121,6 +131,10 @@ pub fn materialize_manifest(
             expected_name
         );
     }
+    source
+        .runtime_authority
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid `runtime_authority` declaration: {e}"))?;
     let provides_kinds = derive_provides_kinds(ai_dir)?;
     Ok(BundleManifest {
         name: source.name,
@@ -129,9 +143,7 @@ pub fn materialize_manifest(
         provides_kinds,
         requires_kinds: source.requires_kinds,
         uses_kinds: source.uses_kinds,
-        bundle_events: source.bundle_events,
-        runtime_vault: source.runtime_vault,
-        item_authoring: source.item_authoring,
+        runtime_authority: source.runtime_authority,
     })
 }
 
@@ -178,6 +190,12 @@ pub fn load_verified_manifest_yaml(
     let body = lillux::signature::strip_signature_lines(&raw);
     let manifest: BundleManifest = serde_yaml::from_str(&body)
         .with_context(|| format!("parse manifest body from {}", manifest_path.display()))?;
+    manifest.runtime_authority.validate().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid `runtime_authority` declaration in {}: {e}",
+            manifest_path.display()
+        )
+    })?;
     if let Some(expected_name) =
         expected_name.filter(|expected_name| manifest.name != *expected_name)
     {
@@ -208,6 +226,12 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<Option<Bundl
         let body = lillux::signature::strip_signature_lines(&raw);
         let manifest: BundleManifest = serde_yaml::from_str(&body)
             .with_context(|| format!("parse manifest {}", manifest_path.display()))?;
+        manifest.runtime_authority.validate().map_err(|e| {
+            anyhow::anyhow!(
+                "invalid `runtime_authority` declaration in {}: {e}",
+                manifest_path.display()
+            )
+        })?;
         if manifest.name != expected_name {
             bail!(
                 "manifest identity mismatch: manifest.yaml name is '{}' but expected '{}' — \
@@ -714,6 +738,29 @@ typo_field: oops
     }
 
     #[test]
+    fn manifest_rejects_old_flat_runtime_authority_fields() {
+        // Hard switch: the runtime-authority families live under
+        // `runtime_authority:` only. Old top-level siblings fail loudly rather
+        // than silently dropping authority — no back-compat.
+        for field in ["bundle_events", "runtime_vault", "item_authoring"] {
+            let yaml = format!(
+                "name: test\nversion: \"1.0\"\nprovides_kinds: []\nrequires_kinds: []\n{field}: []\n"
+            );
+            let manifest: Result<BundleManifest, _> = serde_yaml::from_str(&yaml);
+            assert!(
+                manifest.is_err(),
+                "top-level `{field}:` must be rejected on a BundleManifest"
+            );
+            let source_yaml = format!("name: test\nversion: \"1.0\"\n{field}: []\n");
+            let source: Result<BundleManifestSource, _> = serde_yaml::from_str(&source_yaml);
+            assert!(
+                source.is_err(),
+                "top-level `{field}:` must be rejected on a BundleManifestSource"
+            );
+        }
+    }
+
+    #[test]
     fn derive_provides_kinds_scans_core_schemas() {
         let ai_dir = workspace_root().join("bundles/core/.ai");
         let kinds = derive_provides_kinds(&ai_dir).expect("derive core provides_kinds");
@@ -782,13 +829,39 @@ typo_field: oops
             description: "test".to_string(),
             requires_kinds: vec![],
             uses_kinds: vec![],
-            bundle_events: vec![],
-            runtime_vault: vec![],
-            item_authoring: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
         assert_eq!(manifest.name, "test-bundle");
+    }
+
+    #[test]
+    fn materialize_manifest_rejects_invalid_runtime_authority_declaration() {
+        // Declaration validation is enforced on the materialize path, not only at
+        // launch/mint — a wildcard `event_kind` never reaches signing.
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("arc/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        let source = BundleManifestSource {
+            name: "arc".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls {
+                bundle_events: vec![BundleEventDecl {
+                    event_kind: "ev_*".to_string(),
+                    operations: vec![BundleEventOperation::Append],
+                }],
+                ..Default::default()
+            },
+        };
+        let err = materialize_manifest(source, &ai_dir, "arc").unwrap_err();
+        assert!(
+            err.to_string().contains("runtime_authority"),
+            "got: {err}"
+        );
     }
 
     #[test]

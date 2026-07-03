@@ -216,9 +216,9 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         {
             bail!(
                 "refusing to publish: {} item(s) have an effective bundle id that diverges \
-                 from '{}', but the manifest declares runtime authority (bundle_events / \
-                 runtime_vault). The daemon rejects runtime-cap minting for such items, so the \
-                 manifest would be unusable. Fix the item namespaces (or pass \
+                 from '{}', but the manifest declares runtime authority (a non-empty \
+                 `runtime_authority:` block). The daemon rejects runtime-cap minting for such \
+                 items, so the manifest would be unusable. Fix the item namespaces (or pass \
                  --allow-namespace-mismatch to override).",
                 sign_report.warnings.len(),
                 expected
@@ -526,14 +526,14 @@ fn lint_expected_bundle_id(ai_dir: &Path, name_override: Option<&str>) -> Result
         .with_context(|| format!("read manifest source {}", source_path.display()))?;
     let src: BundleManifestSource = serde_yaml::from_str(&raw)
         .with_context(|| format!("parse manifest source {}", source_path.display()))?;
-    if src.bundle_events.is_empty() && src.runtime_vault.is_empty() {
+    if src.runtime_authority.is_empty() {
         return Ok(None);
     }
     Ok(Some(src.name))
 }
 
-/// True when the bundle's manifest source declares any runtime authority
-/// (`bundle_events:` or `runtime_vault:`).
+/// True when the bundle's manifest source declares any runtime authority in any
+/// family under `runtime_authority:`.
 fn manifest_declares_runtime_authority(ai_dir: &Path) -> Result<bool> {
     let source_path = ai_dir.join("manifest.source.yaml");
     if !source_path.exists() {
@@ -543,7 +543,7 @@ fn manifest_declares_runtime_authority(ai_dir: &Path) -> Result<bool> {
         .with_context(|| format!("read manifest source {}", source_path.display()))?;
     let src: BundleManifestSource = serde_yaml::from_str(&raw)
         .with_context(|| format!("parse manifest source {}", source_path.display()))?;
-    Ok(!src.bundle_events.is_empty() || !src.runtime_vault.is_empty())
+    Ok(!src.runtime_authority.is_empty())
 }
 
 /// Effective bundle id of a signer-report ref `kind:bare_id` — the first
@@ -764,10 +764,10 @@ mod runtime_authority_publish_tests {
         )
         .unwrap();
         assert!(!manifest_declares_runtime_authority(&ai).unwrap());
-        // bundle_events declared → true.
+        // runtime authority declared → true.
         std::fs::write(
             ai.join("manifest.source.yaml"),
-            "name: arc\nversion: \"0.1.0\"\nbundle_events:\n  - event_kind: ev\n    operations: [append]\n",
+            "name: arc\nversion: \"0.1.0\"\nruntime_authority:\n  bundle_events:\n    - event_kind: ev\n      operations: [append]\n",
         )
         .unwrap();
         assert!(manifest_declares_runtime_authority(&ai).unwrap());

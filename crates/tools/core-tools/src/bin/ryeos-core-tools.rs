@@ -97,7 +97,7 @@ enum Cmd {
     ///
     /// Touches only the manifest — no CAS clean, no item signing, no trust
     /// doc. The signing key is auto-resolved from the user root. Use when
-    /// iterating on manifest declarations (`bundle_events:`, `runtime_vault:`).
+    /// iterating on manifest declarations (under `runtime_authority:`).
     ManifestSign {
         /// Bundle source root (directory containing `.ai/`).
         bundle_source: Option<PathBuf>,

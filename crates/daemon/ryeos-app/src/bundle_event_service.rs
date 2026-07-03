@@ -182,10 +182,11 @@ fn authorize_bundle_event(
         .with_context(|| {
             format!(
                 "missing required capability: {required} — bundle-event access is runtime \
-                 authority: declare `bundle_events:` for event kind '{event_kind}' in this \
-                 bundle's `.ai/manifest.source.yaml` and sign it (`ryeos bundle publish`), then \
-                 request it from the item under `requires.capabilities.manifest`. It cannot be \
-                 self-granted under `requires.capabilities.declared`."
+                 authority: declare `runtime_authority.bundle_events:` for event kind \
+                 '{event_kind}' in this bundle's `.ai/manifest.source.yaml` and sign it \
+                 (`ryeos bundle publish`), then request it from the item under \
+                 `requires.capabilities.manifest.runtime_authority`. It cannot be self-granted \
+                 under `requires.capabilities.declared`."
             )
         })
 }

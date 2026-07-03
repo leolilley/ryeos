@@ -8,8 +8,8 @@ runtime package.
 
 ## Current landing
 
-- `bundle_events:` in a signed bundle manifest declares event kinds and allowed
-  operations.
+- `runtime_authority.bundle_events:` in a signed bundle manifest declares event
+  kinds and allowed operations.
 - The executor derives `ryeos.append.bundle-events.<bundle>/<event_kind>` and
   `ryeos.scan.bundle-events.<bundle>/<event_kind>` capabilities from the
   verified bundle manifest.
