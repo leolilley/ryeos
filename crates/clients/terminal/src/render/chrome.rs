@@ -393,7 +393,7 @@ mod tests {
             0,
             &view,
             Some(&input),
-            Some(Border::Thin),
+            Some(Border::Sharp),
         );
         let row = |y: usize| (0..40).map(|x| surface.get(x, y).rune).collect::<String>();
         // Filter strip on the first interior row (inside the top border).
