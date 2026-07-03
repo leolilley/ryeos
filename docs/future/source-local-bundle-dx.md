@@ -35,17 +35,13 @@ ryeos execute tool:example/system/health \
 The selected source/project root and selected runtime state root must both be
 visible in execution diagnostics.
 
-### 2. Multi-item signing UX
+### 2. Multi-item signing UX — LANDED
 
-Bundle-author iteration still benefits from a command that signs a bounded set
-of changed bundle files without requiring one command per file.
-
-The implementation must preserve trust boundaries:
-
-- no signing through symlinks;
-- no signing outside the selected `.ai` root;
-- clear dry-run output;
-- deterministic file ordering.
+`ryeos sign` accepts a bounded set of changed bundle refs/paths in one
+invocation (`753d758e`), with the input hardened against escape (`c1751747`).
+The trust boundaries below hold in the shipped implementation: no signing
+through symlinks, none outside the selected `.ai` root, clear dry-run output,
+deterministic file ordering.
 
 ### 3. First-class bundle smoke command
 
