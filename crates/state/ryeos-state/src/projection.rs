@@ -2523,6 +2523,43 @@ impl ProjectionDb {
             .context("failed to count active sync jobs")?;
         u64::try_from(count).context("active sync job count was negative")
     }
+
+    /// Retention: delete terminal sync jobs (completed/failed/cancelled) whose
+    /// finish time is older than `cutoff_iso`, together with their attempt rows.
+    ///
+    /// `cutoff_iso` must be an ISO8601 UTC timestamp in the projection's stored
+    /// format (`YYYY-MM-DDTHH:MM:SSZ`) so the string comparison is chronological.
+    /// A job with no `finished_at` falls back to its `updated_at`. Active jobs
+    /// (`planned`/`running`/`retryable`) are never touched — they may still pin
+    /// staged CAS roots. Returns `(deleted_jobs, deleted_attempts)`.
+    pub fn delete_terminal_sync_jobs_before(
+        &self,
+        cutoff_iso: &str,
+    ) -> anyhow::Result<(usize, usize)> {
+        self.immediate_transaction("sync-job retention", || {
+            let attempts = self
+                .conn
+                .execute(
+                    "DELETE FROM sync_job_attempts WHERE job_id IN (
+                        SELECT job_id FROM sync_jobs
+                        WHERE state IN ('completed', 'failed', 'cancelled')
+                          AND COALESCE(finished_at, updated_at) < ?1
+                    )",
+                    rusqlite::params![cutoff_iso],
+                )
+                .context("failed to delete retired sync job attempts")?;
+            let jobs = self
+                .conn
+                .execute(
+                    "DELETE FROM sync_jobs
+                     WHERE state IN ('completed', 'failed', 'cancelled')
+                       AND COALESCE(finished_at, updated_at) < ?1",
+                    rusqlite::params![cutoff_iso],
+                )
+                .context("failed to delete retired sync jobs")?;
+            Ok((jobs, attempts))
+        })
+    }
 }
 
 fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
@@ -3083,6 +3120,58 @@ mod tests {
     use crate::objects::{ChainState, ChainThreadEntry, ThreadStatus};
     use ryeos_tracing::test as trace_test;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn retention_deletes_only_old_terminal_sync_jobs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        let insert_job = |job_id: &str, state: &str, ts: &str, finished_at: Option<&str>| {
+            db.conn
+                .execute(
+                    "INSERT INTO sync_jobs (job_id, operation_type, peer, state, phase,
+                        roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
+                        attempt_count, max_attempts, last_error, result_json,
+                        created_at, updated_at, finished_at)
+                     VALUES (?1,'remote_execute',NULL,?2,'done',
+                        x'5b5d',x'5b5d',x'5b5d',x'5b5d',
+                        1,1,NULL,NULL,?3,?3,?4)",
+                    rusqlite::params![job_id, state, ts, finished_at],
+                )
+                .unwrap();
+        };
+        let insert_attempt = |attempt_id: &str, job_id: &str, ts: &str| {
+            db.conn
+                .execute(
+                    "INSERT INTO sync_job_attempts (attempt_id, job_id, attempt_number,
+                        worker_id, state, phase, started_at, updated_at, finished_at, error, result_json)
+                     VALUES (?1,?2,1,'w','completed','done',?3,?3,?3,NULL,NULL)",
+                    rusqlite::params![attempt_id, job_id, ts],
+                )
+                .unwrap();
+        };
+
+        // Old terminal job (+ attempt), a recent terminal job, and an active job.
+        insert_job("old", "completed", "2026-01-01T00:00:00Z", Some("2026-01-01T00:00:00Z"));
+        insert_attempt("old-a", "old", "2026-01-01T00:00:00Z");
+        insert_job("recent", "failed", "2026-06-30T00:00:00Z", Some("2026-06-30T00:00:00Z"));
+        insert_job("active", "running", "2026-01-01T00:00:00Z", None);
+
+        let (jobs, attempts) = db
+            .delete_terminal_sync_jobs_before("2026-03-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(jobs, 1, "only the old terminal job is retired");
+        assert_eq!(attempts, 1, "the old job's attempt is cascaded");
+
+        assert!(db.get_sync_job("old").unwrap().is_none());
+        assert!(db.get_sync_job("recent").unwrap().is_some(), "recent kept");
+        assert!(
+            db.get_sync_job("active").unwrap().is_some(),
+            "active job never retired even though old"
+        );
+        assert!(db.list_sync_job_attempts("old").unwrap().is_empty());
+    }
 
     #[test]
     fn open_creates_projection_db() {

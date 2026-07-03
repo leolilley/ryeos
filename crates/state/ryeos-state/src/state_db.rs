@@ -478,6 +478,15 @@ impl StateDb {
     pub fn count_active_sync_jobs(&self) -> anyhow::Result<u64> {
         self.projection.count_active_sync_jobs()
     }
+
+    /// Retention: delete terminal sync jobs (and their attempts) finished before
+    /// `cutoff_iso`. Returns `(deleted_jobs, deleted_attempts)`.
+    pub fn delete_terminal_sync_jobs_before(
+        &self,
+        cutoff_iso: &str,
+    ) -> anyhow::Result<(usize, usize)> {
+        self.projection.delete_terminal_sync_jobs_before(cutoff_iso)
+    }
 }
 
 #[cfg(test)]
