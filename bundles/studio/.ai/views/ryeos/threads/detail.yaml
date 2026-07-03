@@ -33,29 +33,23 @@ sections:
         default: neutral
 
   # Follow: the graph `follow:` lineage, present only when this thread issued or
-  # resumed a follow. Sourced from `thread.follow` (the waiter-derived fact on the
-  # ThreadView) — absent for non-follow threads, so the section degrades to empty
-  # rather than dumping the thread record. `role` primary (always present, toned
-  # so a suspended parent reads distinctly from a resumed successor) + the
-  # followed child chain root as meta (optional — omitted, never dumped, when a
-  # durably-recognized successor no longer carries the child identity). The
-  # issuing follow node and child terminal status want a daemon-emitted labeled-
-  # rows `follow` collection to render safely as their own rows — see follow-up.
+  # resumed a follow. Sourced from the daemon-emitted labeled-rows `follow`
+  # collection (`{label, value}` — the same shape as Usage / Execution), so each
+  # lineage fact renders as its own row: `state` (suspended / resumed), phase,
+  # follow node, child chain, child thread, child status, resume successor.
+  # Absent rows (a still-running child, or a durably-recognized successor that no
+  # longer carries the child identity) are dropped by the daemon, and a non-follow
+  # thread yields an empty collection — so the section degrades to empty rather
+  # than dumping the thread record.
   - title: Follow
     source:
       ref: service:ui/studio/thread/inspect
       params:
         thread_id: "@facet:selection.thread"
-      collection: thread.follow
+      collection: follow
     projection:
-      primary: role
-      meta: child_chain_root_id
-      tone:
-        field: role
-        map:
-          suspended_parent: warn
-          resume_successor: accent
-        default: neutral
+      primary: value
+      meta: label
 
   # Usage: chain-wide execution totals (tokens, cost, turns, thread count), one
   # metric per row — the deep-watch summary of what this execution consumed.

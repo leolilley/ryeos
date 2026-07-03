@@ -159,6 +159,21 @@ pub mod follow_role {
     pub const RESUME_SUCCESSOR: &str = "resume_successor";
 }
 
+/// The computed, display-facing lineage state a view tones and labels off,
+/// serialized as `follow.display_state`. Coarser than [`follow_role`]: it drops
+/// the parent/successor mechanics into the operator-legible question "is this
+/// thread WAITING on a child, or RESUMING from one" — so a suspended follow
+/// parent reads distinctly from a stalled segment-cut `continued` thread (which
+/// carries no follow fact at all).
+pub mod follow_display_state {
+    /// A suspended parent awaiting its followed child chain
+    /// ([`follow_role::SUSPENDED_PARENT`]).
+    pub const SUSPENDED: &str = "suspended";
+    /// A resume successor consuming (or having consumed) the child's result
+    /// ([`follow_role::RESUME_SUCCESSOR`]).
+    pub const RESUMED: &str = "resumed";
+}
+
 /// Instance-derived follow-lineage fact decorated onto a thread projection when
 /// the thread participates in a graph `follow:` relationship. Distinct from
 /// [`ExecutionFacts`] (which are KIND-derived policy): this is per-thread INSTANCE
@@ -170,6 +185,11 @@ pub mod follow_role {
 pub struct FollowFact {
     /// `suspended_parent` | `resume_successor` (see [`follow_role`]).
     pub role: &'static str,
+    /// Computed display state (`suspended` | `resumed`, see
+    /// [`follow_display_state`]): the coarse, tone-friendly lineage state a view
+    /// labels/tones off so a suspended parent reads distinctly from a stalled
+    /// `continued` thread. Always present alongside `role`.
+    pub display_state: &'static str,
     /// Live waiter phase (`waiting` | `ready` | `resuming`); present for
     /// `suspended_parent` only.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -198,6 +218,7 @@ impl FollowFact {
     fn suspended_parent(w: &crate::runtime_db::FollowWaiter) -> Self {
         Self {
             role: follow_role::SUSPENDED_PARENT,
+            display_state: follow_display_state::SUSPENDED,
             phase: Some(w.phase.clone()),
             follow_node: Some(w.follow_node.clone()),
             child_thread_id: w.child_thread_id.clone(),
@@ -211,6 +232,7 @@ impl FollowFact {
     fn resume_successor_live(w: &crate::runtime_db::FollowWaiter) -> Self {
         Self {
             role: follow_role::RESUME_SUCCESSOR,
+            display_state: follow_display_state::RESUMED,
             phase: None,
             follow_node: Some(w.follow_node.clone()),
             child_thread_id: w.child_thread_id.clone(),
@@ -227,6 +249,7 @@ impl FollowFact {
     fn resume_successor_durable(successor_thread_id: &str) -> Self {
         Self {
             role: follow_role::RESUME_SUCCESSOR,
+            display_state: follow_display_state::RESUMED,
             phase: None,
             follow_node: None,
             child_thread_id: None,
@@ -2233,6 +2256,7 @@ mod tests {
         ));
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["role"], json!("suspended_parent"));
+        assert_eq!(v["display_state"], json!("suspended"));
         assert_eq!(v["phase"], json!("waiting"));
         assert_eq!(v["follow_node"], json!("n_follow"));
         assert_eq!(v["child_thread_id"], json!("child-1"));
@@ -2251,6 +2275,7 @@ mod tests {
         ));
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["role"], json!("resume_successor"));
+        assert_eq!(v["display_state"], json!("resumed"));
         // `phase` is a suspended_parent-only field.
         assert!(v.get("phase").is_none(), "resume_successor carries no phase");
         assert_eq!(v["child_terminal_status"], json!("completed"));
@@ -2262,6 +2287,7 @@ mod tests {
         let f = FollowFact::resume_successor_durable("succ-9");
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["role"], json!("resume_successor"));
+        assert_eq!(v["display_state"], json!("resumed"));
         assert!(v.get("phase").is_none());
         assert!(v.get("follow_node").is_none());
         assert!(v.get("child_thread_id").is_none());

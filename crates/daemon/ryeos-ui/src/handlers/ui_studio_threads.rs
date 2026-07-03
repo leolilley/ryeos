@@ -140,6 +140,13 @@ pub async fn handle_inspect(
     let thread_meta = read_thread_meta(&state, &req.thread_id);
     let execution = execution_meta_rows(thread_meta.as_ref(), &thread.thread.executor_ref);
 
+    // Graph `follow:` lineage as labeled `{label, value}` rows (same projectable
+    // shape as `usage` / `execution_meta`), so the detail lens's Follow section
+    // renders `follow_node` / `child_terminal_status` as their own rows instead
+    // of dumping the `thread.follow` object. Empty array when the thread carries
+    // no follow fact — the section then reads empty.
+    let follow = follow_rows(thread.follow.as_ref());
+
     let mut response = serde_json::json!({
         "schema_version": "studio.thread.inspect.v1",
         "thread": thread,
@@ -151,6 +158,7 @@ pub async fn handle_inspect(
         "usage": usage,
         "pending": pending,
         "execution_meta": execution,
+        "follow": follow,
     });
     if let Some(meta) = thread_meta {
         response
@@ -213,6 +221,35 @@ fn execution_meta_rows(thread_meta: Option<&Value>, executor_ref: &str) -> Value
     // audit file, so it shows even when thread.json is absent.
     rows.extend(row("runtime", executor_ref.to_string()));
 
+    Value::Array(rows)
+}
+
+/// Build the Follow section's labeled-metric rows (`{label, value}`, the shape
+/// the Usage / Execution sections project) from a thread's follow-lineage fact.
+/// `None` (a non-follow thread) yields an empty array, so the detail lens's
+/// Follow section reads empty rather than dumping the `thread.follow` object.
+/// Absent optional fields (e.g. `child_terminal_status` while the child still
+/// runs, or the child identities on a durably-recognized successor) drop their
+/// row rather than showing a blank.
+fn follow_rows(follow: Option<&ryeos_app::thread_lifecycle::FollowFact>) -> Value {
+    fn row(label: &str, value: Option<String>) -> Option<Value> {
+        value
+            .filter(|v| !v.is_empty())
+            .map(|value| serde_json::json!({ "label": label, "value": value }))
+    }
+
+    let mut rows: Vec<Value> = Vec::new();
+    if let Some(f) = follow {
+        // `state` (display_state) heads the section: the operator-legible
+        // "suspended" / "resumed" the row tones off, distinct from the raw role.
+        rows.extend(row("state", Some(f.display_state.to_string())));
+        rows.extend(row("phase", f.phase.clone()));
+        rows.extend(row("follow node", f.follow_node.clone()));
+        rows.extend(row("child chain", f.child_chain_root_id.clone()));
+        rows.extend(row("child thread", f.child_thread_id.clone()));
+        rows.extend(row("child status", f.child_terminal_status.clone()));
+        rows.extend(row("resume successor", f.parent_successor_thread_id.clone()));
+    }
     Value::Array(rows)
 }
 
@@ -348,5 +385,67 @@ mod tests {
     fn compact_limits_handles_non_object() {
         assert_eq!(compact_limits(&serde_json::json!("unbounded")), "\"unbounded\"");
         assert_eq!(compact_limits(&serde_json::json!({})), "{}");
+    }
+
+    use ryeos_app::thread_lifecycle::{follow_display_state, follow_role, FollowFact};
+
+    #[test]
+    fn follow_rows_none_is_empty() {
+        // A non-follow thread contributes no rows — the section reads empty.
+        assert!(follow_rows(None).as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn follow_rows_suspended_parent_labels_lineage() {
+        let f = FollowFact {
+            role: follow_role::SUSPENDED_PARENT,
+            display_state: follow_display_state::SUSPENDED,
+            phase: Some("waiting".to_string()),
+            follow_node: Some("n_follow".to_string()),
+            child_thread_id: Some("T-child".to_string()),
+            child_chain_root_id: Some("T-child".to_string()),
+            // Child still running → no terminal status → the row is dropped.
+            child_terminal_status: None,
+            parent_successor_thread_id: Some("T-succ".to_string()),
+        };
+        let rows = follow_rows(Some(&f));
+        let by_label: std::collections::HashMap<&str, &str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["label"].as_str().unwrap(), r["value"].as_str().unwrap()))
+            .collect();
+        assert_eq!(by_label["state"], "suspended");
+        assert_eq!(by_label["phase"], "waiting");
+        assert_eq!(by_label["follow node"], "n_follow");
+        assert_eq!(by_label["child chain"], "T-child");
+        assert_eq!(by_label["resume successor"], "T-succ");
+        // The still-running child contributes no terminal-status row.
+        assert!(!by_label.contains_key("child status"));
+    }
+
+    #[test]
+    fn follow_rows_durable_resume_successor_is_state_plus_successor() {
+        // The waiter-cleared durable form carries only role/state + successor id;
+        // every child-identity row drops rather than showing a blank.
+        let f = FollowFact {
+            role: follow_role::RESUME_SUCCESSOR,
+            display_state: follow_display_state::RESUMED,
+            phase: None,
+            follow_node: None,
+            child_thread_id: None,
+            child_chain_root_id: None,
+            child_terminal_status: None,
+            parent_successor_thread_id: Some("T-succ".to_string()),
+        };
+        let rows = follow_rows(Some(&f));
+        let arr = rows.as_array().unwrap();
+        let by_label: std::collections::HashMap<&str, &str> = arr
+            .iter()
+            .map(|r| (r["label"].as_str().unwrap(), r["value"].as_str().unwrap()))
+            .collect();
+        assert_eq!(by_label["state"], "resumed");
+        assert_eq!(by_label["resume successor"], "T-succ");
+        assert_eq!(arr.len(), 2, "only state + successor survive: {arr:?}");
     }
 }
