@@ -89,6 +89,9 @@ pub async fn run(
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    // A live-filter edit defers its list refetch to the tick (debounce), so
+    // typing a filter never blocks on a per-keystroke daemon round-trip.
+    let mut feed_dirty = false;
 
     loop {
         if dirty {
@@ -121,7 +124,17 @@ pub async fn run(
                         if should_quit(&core, &key) {
                             break;
                         }
+                        let before = core.focused_input_buffer().map(|b| b.text.clone());
                         let effects = handle_key(&mut core, key);
+                        // A live-filter edit applies instantly but returns no
+                        // effects — its list refetch is debounced to the tick so
+                        // typing never blocks on a daemon round-trip per key.
+                        if effects.is_empty()
+                            && core.key_context().input_is_live_filter
+                            && core.focused_input_buffer().map(|b| b.text.clone()) != before
+                        {
+                            feed_dirty = true;
+                        }
                         dispatch_effects(&mut core, &client, effects).await;
                         sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
                         dirty = true;
@@ -159,6 +172,12 @@ pub async fn run(
                 }
             }
             _ = tick.tick() => {
+                // Flush a debounced live-filter refetch once typing has settled.
+                if feed_dirty {
+                    feed_dirty = false;
+                    let effects = core.refresh_focused_feeds();
+                    dispatch_effects(&mut core, &client, effects).await;
+                }
                 let effects = core.dispatch(StudioEvent::Tick { now_ms: now_ms() });
                 dispatch_effects(&mut core, &client, effects).await;
                 sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;

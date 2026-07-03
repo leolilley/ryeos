@@ -152,11 +152,28 @@ fn main() {
                             collect_view_refs(&value, &mut view_refs);
                             view_refs.sort();
                             view_refs.dedup();
-                            for view_ref in view_refs {
-                                match client
-                                    .resolve_effective_item(&view_ref, "view", Some(&project_path))
-                                    .await
-                                {
+                            // Resolve all view refs CONCURRENTLY. A surface's
+                            // library holds ~20 views, and sequential daemon
+                            // round-trips here dominated TUI startup latency.
+                            let resolved = futures_util::future::join_all(
+                                view_refs.into_iter().map(|view_ref| {
+                                    let client = &client;
+                                    let project_path = project_path.as_str();
+                                    async move {
+                                        let result = client
+                                            .resolve_effective_item(
+                                                &view_ref,
+                                                "view",
+                                                Some(project_path),
+                                            )
+                                            .await;
+                                        (view_ref, result)
+                                    }
+                                }),
+                            )
+                            .await;
+                            for (view_ref, result) in resolved {
+                                match result {
                                     Ok(binding) => {
                                         // Unwrap the effective-item
                                         // envelope to the composed value.
