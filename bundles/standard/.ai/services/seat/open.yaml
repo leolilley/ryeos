@@ -5,3 +5,4 @@ version: "1.0.0"
 description: Mint a seat session thread - the seat is itself a thread, braided and replayable
 endpoint: seat.open
 availability: daemon_only
+required_caps: ["ryeos.execute.service.seat/open"]

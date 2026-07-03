@@ -103,13 +103,13 @@ fn install_kind_schema(root: &Path, kind: &str, signer: &SigningKey) -> anyhow::
     let body = format!(
         r##"category: "engine/kinds/{kind}"
 version: "1.0.0"
+resolution: []
 location:
   directory: {kind}_items
 execution:
   delegate:
     via: runtime_registry
   thread_profile: {kind}_run
-  resolution: []
 formats:
   - extensions: [".yaml"]
     parser: parser:ryeos/core/yaml/yaml
