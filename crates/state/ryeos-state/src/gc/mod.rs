@@ -79,9 +79,11 @@ pub struct GcParams {
     /// Truncate `.ai/state/trace-events.ndjson`.
     #[serde(default)]
     pub truncate_trace: bool,
-    /// Drop generic execution chain refs and per-thread runtime meta
-    /// (`.ai/state/threads/<id>/`, including its `checkpoints/`) before CAS
-    /// sweep, making local thread and chain runtime history collectible.
+    /// Drop generic execution chain refs before CAS sweep, making local chain
+    /// runtime history collectible. Does NOT touch per-thread state: daemon
+    /// replay checkpoints live under `<app_root>/threads/<id>` (not this runtime
+    /// dir), and `.ai/state/threads/<id>` holds audit metadata for live/resumable
+    /// threads with no liveness signal at this layer.
     #[serde(default)]
     pub prune_runtime_history: bool,
     /// Retention policy for compaction (uses default if None).
@@ -147,14 +149,18 @@ pub fn purge_runtime_state(
             params.dry_run,
             result,
         )?;
-        // Per-thread runtime meta and its `checkpoints/` subdir are execution
-        // history — collectible once chain refs are dropped. `.ai/state/threads/`
-        // holds `<id>/*.json` meta plus `<id>/checkpoints/`; both go here.
-        remove_path_contents(
-            &runtime_state_dir.join("threads"),
-            params.dry_run,
-            result,
-        )?;
+        // Per-thread state is deliberately NOT purged here. Daemon replay
+        // checkpoints live under `<app_root>/threads/<id>/checkpoints` (see
+        // `daemon_thread_state_dir`), NOT under this runtime state dir — a purge
+        // here never reclaimed them. And `.ai/state/threads/<id>` holds thread
+        // audit metadata for LIVE and resumable threads, with no liveness signal
+        // available at this layer. Blindly deleting per-thread dirs on the daily
+        // deep schedule would drop live-thread metadata (and, if retargeted at
+        // the real checkpoint tree without filtering, resumable checkpoints that
+        // follow/continuation resume hard-requires). A correct per-thread GC must
+        // target the real checkpoint tree AND exclude non-terminal / suspended /
+        // resumable thread ids — that needs daemon runtime state threaded in,
+        // tracked as a separate change.
     }
 
     if params.deep || params.purge_cache {
@@ -807,12 +813,12 @@ mod tests {
             "deep purge should truncate daemon trace output"
         );
         assert!(
-            !thread_meta.exists(),
-            "deep purge should drop per-thread runtime meta"
+            thread_meta.exists(),
+            "deep purge must NOT blindly drop per-thread audit metadata — there is no liveness guard at this layer"
         );
         assert!(
-            !thread_checkpoint.exists(),
-            "deep purge should drop per-thread checkpoints"
+            thread_checkpoint.exists(),
+            "deep purge must NOT drop per-thread state — real checkpoints live under <app_root>/threads and need a liveness-guarded GC"
         );
         assert!(
             project_ref.exists(),
