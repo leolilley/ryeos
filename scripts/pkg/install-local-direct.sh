@@ -103,6 +103,39 @@ ryeos_status_quick() {
     ryeos_user 10 node status 2>/dev/null || true
 }
 
+# Print periodic projection-rebuild progress while the daemon restarts.
+#
+# A projection schema-epoch bump makes the first restart rebuild
+# projection.sqlite3 from the event log before the daemon is ready — minutes of
+# silence on a large store that otherwise reads as a hang. Poll the projected
+# event count against the source event log and report forward motion until the
+# process is killed by the caller. Strictly best-effort: no `sqlite3`, no
+# projection yet, or no source log just means no progress lines — errexit and
+# pipefail are disabled here so a probe failure never touches the install.
+report_projection_rebuild() {
+    set +e
+    local state_dir="$1"
+    local db="$state_dir/projection.sqlite3"
+    local trace="$state_dir/trace-events.ndjson"
+    command -v sqlite3 >/dev/null 2>&1 || return 0
+    local total="" last="" n pct
+    [[ -f "$trace" ]] && total="$(wc -l <"$trace" 2>/dev/null)"
+    while :; do
+        sleep 20
+        n="$(sqlite3 -readonly "$db" 'SELECT count(*) FROM events;' 2>/dev/null)"
+        [[ -z "$n" ]] && continue
+        [[ "$n" == "$last" ]] && continue   # no forward motion — stay quiet
+        last="$n"
+        if [[ -n "$total" && "$total" -gt 0 ]]; then
+            pct=$(( n * 100 / total ))
+            [[ "$pct" -gt 100 ]] && pct=100
+            echo "[install-local-direct]   projection rebuild: $n/$total events (${pct}%)"
+        else
+            echo "[install-local-direct]   projection rebuild: $n events"
+        fi
+    done
+}
+
 bundle_payload_bins() {
     case "$1" in
         core)
@@ -631,11 +664,23 @@ fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "[install-local-direct] restarting daemon"
+    echo "[install-local-direct]   (a projection schema-epoch bump triggers a one-time" \
+         "rebuild from the event log — this can take several minutes)"
     # An incompatible projection schema epoch bump can make the first restart
-    # rebuild projection.sqlite3 from CAS/refs before readiness. Give that
-    # healthy one-time rebuild enough time to finish. Keep this slightly above
-    # ryeos start's internal wait so the CLI can print its own diagnostic.
-    ryeos_user 930 start >/dev/null || die "daemon did not restart cleanly"
+    # rebuild projection.sqlite3 from CAS/refs before readiness. Report its
+    # progress so the wait does not read as a hang, and give the healthy
+    # one-time rebuild enough time to finish. `ryeos start` output is kept (not
+    # sunk to /dev/null) so the CLI's own readiness diagnostic surfaces too. The
+    # 930s timeout stays slightly above ryeos start's internal wait.
+    state_dir="${init_app_root:-$(getent passwd "$invoking_user" | cut -d: -f6)/.local/share/ryeos}/.ai/state"
+    report_projection_rebuild "$state_dir" &
+    rebuild_reporter_pid=$!
+    if ! ryeos_user 930 start; then
+        kill "$rebuild_reporter_pid" 2>/dev/null || true
+        die "daemon did not restart cleanly"
+    fi
+    kill "$rebuild_reporter_pid" 2>/dev/null || true
+    wait "$rebuild_reporter_pid" 2>/dev/null || true
     ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 
