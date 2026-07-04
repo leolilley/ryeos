@@ -1319,7 +1319,9 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
 // Timeline entry building + the live cognition buffer render live in
 // `super::timeline`; re-exported crate-wide so the timeline arm above and the
 // tests below call them unqualified (via `use super::*`).
-pub(crate) use super::timeline::{append_live_delta, timeline_entries, timeline_entries_indented};
+pub(crate) use super::timeline::{append_live_delta, timeline_entries_indented};
+#[cfg(test)]
+pub(crate) use super::timeline::timeline_entries;
 
 pub(crate) fn tone_from_name(name: Option<&str>) -> StudioTone {
     match name {

@@ -21,6 +21,9 @@ struct FeedLine {
     /// Typeset inline markdown (`` `code` ``, `**bold**`) at draw time. Off for
     /// verbatim code lines and structural rows, where markers are literal.
     inline: bool,
+    /// Call-tree indent, in columns, applied as a draw-time x-offset (not baked
+    /// into `text`, so a per-keystroke re-render doesn't re-allocate the string).
+    indent: usize,
 }
 
 impl FeedLine {
@@ -31,6 +34,7 @@ impl FeedLine {
             style,
             entry,
             inline: true,
+            indent: 0,
         }
     }
 
@@ -41,6 +45,7 @@ impl FeedLine {
             style,
             entry,
             inline: false,
+            indent: 0,
         }
     }
 }
@@ -83,10 +88,14 @@ pub fn draw_timeline(
         } else {
             line.style
         };
+        // Call-tree indent as a draw-time x-offset; the highlight fill above
+        // still spans the full row.
+        let x0 = rect.x as usize + line.indent.min(width.saturating_sub(1));
+        let avail = width.saturating_sub(line.indent);
         if line.inline {
-            draw_inline(surface, rect.x as usize, y, width, &line.text, style);
+            draw_inline(surface, x0, y, avail, &line.text, style);
         } else {
-            surface.draw_text(rect.x as usize, y, &truncate(&line.text, width), style);
+            surface.draw_text(x0, y, &truncate(&line.text, avail), style);
         }
     }
 }
@@ -167,15 +176,14 @@ fn push_timeline_lines(
                 ));
             }
         }
-        // Prefix every line this entry emitted with its call-tree depth (two
-        // spaces per level). Panic-safe: a missing indent degrades to flat.
+        // Tag every line this entry emitted with its call-tree depth (two
+        // columns per level), applied as a draw-time x-offset rather than baked
+        // into the text — so a per-keystroke re-render never re-allocates the
+        // line strings. Panic-safe: a missing indent degrades to flat (depth 0).
         let depth = entry_indents.get(index).copied().unwrap_or(0) as usize;
         if depth > 0 {
-            let pad = "  ".repeat(depth);
             for line in &mut lines[first_line..] {
-                if !line.text.is_empty() {
-                    line.text = format!("{pad}{}", line.text);
-                }
+                line.indent = depth * 2;
             }
         }
     }

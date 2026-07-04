@@ -152,6 +152,10 @@ pub(crate) fn fold_timeline(
     }
 }
 
+/// Entries without the indent vector — a test convenience over
+/// [`timeline_entries_indented`]. Only the indent-aware form is used in the
+/// render path, so this is compiled for tests alone.
+#[cfg(test)]
 pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimelineEntryVm> {
     timeline_entries_indented(records).0
 }
