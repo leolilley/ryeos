@@ -52,14 +52,18 @@ pub fn cascade_descendants(
     let descendants = store.descendant_thread_ids(root_thread_id)?;
     let mut report = Vec::with_capacity(descendants.len());
     for child in descendants {
-        let info = store.get_runtime_info(&child)?;
-        let Some(pgid) = info.as_ref().and_then(|i| i.pgid) else {
+        let Some(thread) = store.get_thread(&child)? else {
+            report.push(json!({ "thread_id": child, "skipped": "no_thread_row" }));
+            continue;
+        };
+        let Some(pgid) = thread.runtime.pgid else {
             report.push(json!({ "thread_id": child, "skipped": "no_pgid" }));
             continue;
         };
-        let cancellation_mode = info
+        let cancellation_mode = thread
+            .runtime
+            .launch_metadata
             .as_ref()
-            .and_then(|i| i.launch_metadata.as_ref())
             .and_then(|lm| lm.cancellation_mode);
         let result = kill_by_action(pgid, shutdown_action_for(mode, cancellation_mode));
         report.push(json!({
