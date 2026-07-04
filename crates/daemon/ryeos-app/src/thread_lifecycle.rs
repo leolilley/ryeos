@@ -2441,6 +2441,8 @@ mod tests {
             },
             follow: None,
             pending: 0,
+            facets: std::collections::BTreeMap::new(),
+            current_node: None,
         };
         let v = serde_json::to_value(&view).unwrap();
         assert!(v.get("follow").is_none(), "absent follow omitted");
