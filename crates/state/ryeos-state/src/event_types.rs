@@ -54,3 +54,9 @@ pub const GRAPH_NODE_RETRY: &str = "graph_node_retry";
 pub const PROVIDER_RETRY: &str = "provider_retry";
 pub const COST_UNTRACKED: &str = "cost_untracked";
 pub const THREAD_USAGE: &str = "thread_usage";
+
+/// Generic domain-event channel: one engine event carrying a namespaced `kind`
+/// + free `payload`, emitted by the runtime on behalf of a tool/directive
+/// result. Content declares the kinds and styles them via view-yaml
+/// `projections.event_kinds`; the engine stays domain-agnostic.
+pub const MILESTONE: &str = "milestone";

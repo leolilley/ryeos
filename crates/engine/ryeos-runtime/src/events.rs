@@ -132,6 +132,12 @@ pub enum RuntimeEventType {
     ProviderRetry,
     CostUntracked,
 
+    // ── Domain events ───────────────────────────────────────────
+    /// Generic runtime-emitted domain event (namespaced `kind` + free
+    /// `payload`), styled by content view-yaml. The engine stays
+    /// domain-agnostic; arc/content declares the kinds.
+    Milestone,
+
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
 }
@@ -179,6 +185,7 @@ impl RuntimeEventType {
             Self::GraphNodeRetry => wire::GRAPH_NODE_RETRY,
             Self::ProviderRetry => wire::PROVIDER_RETRY,
             Self::CostUntracked => wire::COST_UNTRACKED,
+            Self::Milestone => wire::MILESTONE,
             Self::ThreadUsage => wire::THREAD_USAGE,
         }
     }
@@ -225,6 +232,7 @@ impl RuntimeEventType {
             wire::GRAPH_NODE_RETRY => Ok(Self::GraphNodeRetry),
             wire::PROVIDER_RETRY => Ok(Self::ProviderRetry),
             wire::COST_UNTRACKED => Ok(Self::CostUntracked),
+            wire::MILESTONE => Ok(Self::Milestone),
             wire::THREAD_USAGE => Ok(Self::ThreadUsage),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
@@ -295,6 +303,7 @@ impl RuntimeEventType {
             | Self::GraphNodeRetry
             | Self::ProviderRetry
             | Self::CostUntracked
+            | Self::Milestone
             | Self::ThreadUsage => StorageClass::Indexed,
         }
     }
@@ -349,6 +358,7 @@ mod tests {
             RuntimeEventType::GraphNodeRetry,
             RuntimeEventType::ProviderRetry,
             RuntimeEventType::CostUntracked,
+            RuntimeEventType::Milestone,
             RuntimeEventType::ThreadUsage,
         ];
         for v in variants {
