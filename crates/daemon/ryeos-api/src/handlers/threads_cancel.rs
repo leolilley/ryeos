@@ -17,6 +17,7 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::cascade::{cascade_descendants, CascadeMode};
 use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_app::state::AppState;
+use ryeos_app::state_store::is_terminal_status;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -42,7 +43,7 @@ pub async fn handle(
 
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
-    if is_terminal(current_status) {
+    if is_terminal_status(current_status) {
         return Err(HandlerError::BadRequest(format!(
             "thread {} is already {} — cannot cancel",
             req.thread_id, current_status
@@ -151,13 +152,6 @@ pub async fn handle(
     }))
 }
 
-fn is_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-    )
-}
-
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     service_ref: "service:threads/cancel",
     endpoint: "threads.cancel",
@@ -185,7 +179,11 @@ mod tests {
             "timed_out",
             "continued",
         ] {
-            assert!(is_terminal(status), "expected '{}' to be terminal", status);
+            assert!(
+                is_terminal_status(status),
+                "expected '{}' to be terminal",
+                status
+            );
         }
     }
 
@@ -193,7 +191,7 @@ mod tests {
     fn is_terminal_rejects_non_terminal() {
         for status in &["created", "running", "pending", "paused"] {
             assert!(
-                !is_terminal(status),
+                !is_terminal_status(status),
                 "expected '{}' to NOT be terminal",
                 status
             );
