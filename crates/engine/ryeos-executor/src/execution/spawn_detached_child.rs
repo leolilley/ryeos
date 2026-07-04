@@ -1,0 +1,262 @@
+//! `detached` dispatch — launch a lineage-linked, cohort-tagged child that the
+//! calling parent does NOT wait on.
+//!
+//! This is the native fanout primitive: a graph node with `detach: true` (a
+//! `foreach → launch` body) asks the daemon to spawn a real managed child that
+//! runs concurrently while the parent walks on. Unlike CLI `--async` (a fresh
+//! UNLINKED root) the child is LINEAGE-LINKED to its parent — the launcher's
+//! `parent_execution_context` records the `dispatch` child-link edge and emits
+//! `child_thread_spawned` — so `foreach → launch` produces a queryable tagged
+//! tree instead of orphaned roots. Optional `facets` stamp cohort identity
+//! (`fleet=<run id>`, `game=<id>`) on the child so `threads.list --facet` can
+//! query the cohort.
+//!
+//! It is [`spawn_follow_child`](super::spawn_follow_child) minus the suspend
+//! machinery: no waiter reservation, no parent successor, no `mark_waiting`, and
+//! no native-resume gate — the parent never suspends, so it needs neither a
+//! durable catch nor to be checkpoint-resumable. What it KEEPS is identical: the
+//! server-side trust derivation, managed-runtime resolution, the fresh-root
+//! child row + seeded launch identity, and the detached `launch_follow_child`
+//! spawn (which is waiter-agnostic — `kick_follow_resume_if_ready` is a no-op
+//! without a waiter).
+//!
+//! **Trust.** Every trust-bearing fact is server-side: the acting principal from
+//! the validated `thread_auth`, the parent chain root / launch identity from the
+//! parent thread row, the caps that bound the child from the parent's validated
+//! callback capability. The action only says WHICH child to run and WHAT cohort
+//! facets to stamp.
+
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+
+use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
+use ryeos_app::event_store_service::{EventAppendItem, EventAppendParams};
+use ryeos_app::execution_provenance::ExecutionProvenance;
+use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+use ryeos_app::state::AppState;
+use ryeos_app::thread_lifecycle::{new_thread_id, ThreadCreateParams};
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+use ryeos_runtime::events::RuntimeEventType;
+
+/// Admit and launch a detached, lineage-linked child under the calling parent.
+///
+/// `child_provenance` is the parent's already-borrowed child provenance (the
+/// same value the inline path hands to `dispatch`), moved into the detached
+/// launch so the child inherits the parent's pushed-head / effective workspace /
+/// request engine — not the root-live-fs fallback. Returns the minted child
+/// thread id; the child runs concurrently, its terminal outcome captured by the
+/// normal thread-terminal path (the parent does not consume it).
+pub async fn spawn_detached_child(
+    state: &AppState,
+    thread_auth: &ThreadAuthState,
+    cap: &CallbackCapability,
+    child_provenance: ExecutionProvenance,
+    child_item_ref: &str,
+    child_parameters: &Value,
+    facets: Option<&Value>,
+) -> Result<Value> {
+    let parent_thread_id = cap.thread_id.clone();
+
+    // Parent thread row → chain root + launch identity (launch_mode, site ids).
+    // Never trust the caller for these.
+    let parent = state
+        .threads
+        .get_thread(&parent_thread_id)?
+        .ok_or_else(|| anyhow::anyhow!("detach: parent thread not found: {parent_thread_id}"))?;
+
+    // The callback capability carries the chain root it was minted under; confirm
+    // it against authoritative state before minting a linked child.
+    cap.assert_chain_root(&parent.chain_root_id)?;
+
+    // Execute authority over the child was already enforced at the callback trust
+    // boundary (`enforce_callback_caps` in the dispatch handler) against this same
+    // item_id; no second check is needed here — the parent's `effective_caps`
+    // bound the child under `FollowChildHybrid` at launch exactly as for follow.
+    let child_ref = CanonicalRef::parse(child_item_ref)
+        .with_context(|| format!("detach: invalid child item ref '{child_item_ref}'"))?;
+
+    // Managed-runtime children only: a child kind served by a registered runtime
+    // resolves here; a leaf tool/service kind does not. The same lookup yields the
+    // child row's `native:<binary>` executor identity.
+    let child_runtime = state
+        .engine
+        .runtimes
+        .resolve_for_launch(None, &child_ref.kind)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "detach: child kind '{}' has no managed runtime — a detached child must be a \
+                 managed runtime execution: {e}",
+                child_ref.kind
+            )
+        })?;
+    let child_executor_ref = format!(
+        "native:{}",
+        crate::dispatch::strip_binary_ref_prefix(&child_runtime.yaml.binary_ref)
+            .map_err(|e| anyhow::anyhow!("detach: {e}"))?
+    );
+    let child_runtime_ref = child_runtime.canonical_ref.to_string();
+
+    // The thread ROW kind is the child kind's THREAD PROFILE (e.g. `graph` →
+    // `graph_run`), not the item kind: profile-driven continuation / resume /
+    // operator behavior keys off the profile name, so a fresh child row and its
+    // captured identity must carry the profile, exactly like a normal launch.
+    let child_thread_profile = state
+        .engine
+        .kinds
+        .get(&child_ref.kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|exec| exec.thread_profile.as_ref())
+        .map(|tp| tp.name.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "detach: child kind '{}' has no execution.thread_profile",
+                child_ref.kind
+            )
+        })?;
+
+    // ── Child root row (created, NOT launched) + seeded launch identity ─────
+    // A detached child is a FRESH ROOT: its own chain root, no upstream braid.
+    // Its lineage to the parent is the `dispatch` child-link edge the launcher
+    // records via `parent_execution_context`, not a shared chain root.
+    let requested_by = EffectivePrincipal::Local(Principal {
+        fingerprint: thread_auth.acting_principal.clone(),
+        scopes: thread_auth.caller_scopes.clone(),
+    });
+    let child_thread_id = new_thread_id();
+    state.threads.create_thread(&ThreadCreateParams {
+        thread_id: child_thread_id.clone(),
+        chain_root_id: child_thread_id.clone(),
+        kind: child_thread_profile.clone(),
+        item_ref: child_item_ref.to_string(),
+        executor_ref: child_executor_ref.clone(),
+        launch_mode: parent.launch_mode.clone(),
+        current_site_id: parent.current_site_id.clone(),
+        origin_site_id: parent.origin_site_id.clone(),
+        upstream_thread_id: None,
+        requested_by: Some(thread_auth.acting_principal.clone()),
+        usage_subject: None,
+        usage_subject_asserted_by: None,
+    })?;
+
+    // Seed a MINIMAL launch identity: the detached launcher re-resolves the item
+    // + envelope off the callback hot path. `effective_caps` carries the PARENT's
+    // caps — the bounding authority the launcher hands to
+    // `CapabilityPolicy::FollowChildHybrid`, overwritten with the child's own
+    // composed caps once policy resolution succeeds.
+    let meta = RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
+        kind: child_thread_profile.clone(),
+        item_ref: child_item_ref.to_string(),
+        launch_mode: parent.launch_mode.clone(),
+        parameters: child_parameters.clone(),
+        // Resume identity derives from validated server-side provenance, never
+        // the request body — same rule as follow.
+        project_context: ProjectContext::LocalPath {
+            path: cap.provenance.effective_path().to_path_buf(),
+        },
+        original_snapshot_hash: None,
+        // A detached child borrows the parent's workspace; it never owns snapshot
+        // lineage, so no pushed-head identity is seeded.
+        original_pushed_head_ref: None,
+        // The parent's state-root override carries to the child so its
+        // state/callback anchor stays isolated with the parent's.
+        state_root: cap.provenance.state_root_override().map(|p| p.to_path_buf()),
+        current_site_id: parent.current_site_id.clone(),
+        origin_site_id: parent.origin_site_id.clone(),
+        requested_by: requested_by.clone(),
+        execution_hints: ExecutionHints::default(),
+        effective_caps: cap.effective_caps.clone(),
+        executor_ref: Some(child_executor_ref.clone()),
+        runtime_ref: Some(child_runtime_ref.clone()),
+    });
+    state
+        .state_store
+        .seed_launch_metadata(&child_thread_id, &meta)?;
+
+    // ── Cohort facets ───────────────────────────────────────────────────────
+    // Stamp `(key, value)` tags BEFORE launch so a `threads.list --facet` query
+    // sees the cohort the instant the child appears. Event-backed (survives a
+    // projection rebuild), exactly like `threads.set_facet`.
+    if let Some(Value::Object(map)) = facets {
+        for (key, value) in map {
+            if key.trim().is_empty() {
+                continue;
+            }
+            let value_str = match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            state
+                .events
+                .append(&EventAppendParams {
+                    thread_id: child_thread_id.clone(),
+                    event: EventAppendItem {
+                        event_type: RuntimeEventType::ThreadFacetSet.as_str().to_string(),
+                        storage_class: RuntimeEventType::ThreadFacetSet
+                            .storage_class()
+                            .as_str()
+                            .to_string(),
+                        payload: json!({ "key": key, "value": value_str }),
+                    },
+                })
+                .with_context(|| format!("detach: stamping facet '{key}' on {child_thread_id}"))?;
+        }
+    }
+
+    // ── Launch detached ─────────────────────────────────────────────────────
+    // Fire-and-forget: `launch_follow_child` is claim-guarded, so a lost spawn is
+    // safe for the reconcile sweep to re-drive. The launch uses the parent's
+    // BORROWED-CHILD provenance (moved in) — pushed-head / effective workspace /
+    // request engine preserved. Parent execution ceiling from the VALIDATED cap
+    // (never `child_parameters`): the child launches clamped to the parent's hard
+    // limits at parent depth + 1, recording the `dispatch` child-link edge.
+    let launch_state = state.clone();
+    let launch_child_id = child_thread_id.clone();
+    let launch_parent_context = crate::dispatch::ParentExecutionContext {
+        parent_thread_id: cap.thread_id.clone(),
+        hard_limits: cap.hard_limits.clone(),
+        depth: cap.depth,
+    };
+    tokio::spawn(async move {
+        if let Err(e) = crate::execution::launch::launch_follow_child(
+            launch_state,
+            &launch_child_id,
+            Some(child_provenance),
+            Some(launch_parent_context),
+        )
+        .await
+        {
+            tracing::error!(
+                child_thread_id = %launch_child_id,
+                error = %e,
+                "detached child launch failed",
+            );
+        }
+    });
+
+    tracing::info!(
+        parent_thread_id = %parent_thread_id,
+        child_thread_id = %child_thread_id,
+        child_item_ref = %child_item_ref,
+        server_principal = %thread_auth.acting_principal,
+        "detached child spawned; parent continues",
+    );
+
+    // Conform to the `CallbackDispatchResponse { thread, result }` envelope the
+    // graph-side client deserializes (deny_unknown_fields — no bare extra keys).
+    // `thread` is the running-child snapshot the walker reads `thread_id` from to
+    // emit `child_thread_spawned` + record the dispatch edge; `result` is the bare
+    // value a `foreach → launch` body sees (`${result.child_thread_id}`) — there
+    // is no leaf terminal result, the parent does not consume the child.
+    Ok(json!({
+        "thread": {
+            "thread_id": child_thread_id,
+            "status": "running",
+            "detached": true,
+        },
+        "result": {
+            "detached": true,
+            "child_thread_id": child_thread_id,
+        },
+    }))
+}

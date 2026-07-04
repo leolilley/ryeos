@@ -117,6 +117,22 @@ enum Cmd {
         name: Option<String>,
     },
 
+    /// Report the runtime-authority delta between two bundle manifests.
+    ///
+    /// Parses both manifests and prints ONLY the granted-authority change (event
+    /// kinds, vault namespaces/verbs, item-authoring patterns, provides/requires/
+    /// uses kinds), ordered by risk — a new wildcard authoring pattern first,
+    /// removed grants last — so a re-sign campaign reviews as authority deltas
+    /// rather than YAML diffs. Each path may be a generated `manifest.yaml` or a
+    /// `manifest.source.yaml`.
+    ManifestAudit {
+        /// Old (baseline) manifest file.
+        old: PathBuf,
+
+        /// New (proposed) manifest file.
+        new: PathBuf,
+    },
+
     /// Tail the local node's trace events and startup stderr from the app root.
     ///
     /// Reads files directly, so it works offline — when the daemon failed to
@@ -565,6 +581,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             bundle_source,
             name,
         } => run_manifest_sign(bundle_source, name, cli.stdin_json),
+        Cmd::ManifestAudit { old, new } => run_manifest_audit(old, new),
         Cmd::Logs { app_root, lines } => run_logs(app_root, lines, cli.stdin_json),
         Cmd::Doctor {
             source,
@@ -1039,6 +1056,12 @@ struct BundleManifestSignParams {
     source: PathBuf,
     #[serde(default)]
     name: Option<String>,
+}
+
+fn run_manifest_audit(old: PathBuf, new: PathBuf) -> anyhow::Result<()> {
+    let audit = ryeos_core_tools::actions::manifest_audit::run_manifest_audit(&old, &new)?;
+    print!("{}", audit.render());
+    Ok(())
 }
 
 fn run_logs(app_root: Option<PathBuf>, lines: usize, stdin_json: bool) -> anyhow::Result<()> {

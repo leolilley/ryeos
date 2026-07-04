@@ -1159,6 +1159,7 @@ impl Runner {
                                                 // `tool:` refs at their default
                                                 // method; no method selector.
                                                 call: None,
+                                                facets: None,
                                             },
                                         },
                                     )

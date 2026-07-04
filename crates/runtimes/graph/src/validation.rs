@@ -185,6 +185,49 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         }
     }
 
+    // A `detach: true` node launches a lineage-linked, cohort-tagged child that
+    // runs concurrently — the native fanout primitive (`foreach → launch`). Like
+    // follow it dispatches (needs an action) and has no result at launch time (so
+    // it cannot cache), but unlike follow the parent never suspends — so it is
+    // valid on a foreach's per-item dispatch, not only a single action. `detach`
+    // and `follow` are mutually exclusive: a node either suspends for its child
+    // (follow) or walks on past it (detach), never both.
+    if node.detach {
+        if !matches!(node.node_type, NodeType::Action | NodeType::Foreach) {
+            result.errors.push(format!(
+                "node '{name}' sets 'detach' but is a {:?} node — only action and foreach nodes \
+                 can launch a detached child",
+                node.node_type
+            ));
+        }
+        if node.follow {
+            result
+                .errors
+                .push(format!("node '{name}' cannot be both 'detach' and 'follow'"));
+        }
+        if node.is_cacheable() {
+            result.errors.push(format!(
+                "node '{name}' cannot be both 'detach' and cacheable — a detached launch has no \
+                 result at dispatch time"
+            ));
+        }
+        if node.action.is_none() {
+            result
+                .errors
+                .push(format!("detach node '{name}' has no 'action' to launch"));
+        }
+    }
+
+    // Cohort `facets:` are stamped by the daemon only on a detached child launch;
+    // on any other node they are silently inert, so reject them as a loud
+    // authoring error rather than let a mistagged cohort pass unnoticed.
+    if node.facets.is_some() && !node.detach {
+        result.errors.push(format!(
+            "node '{name}' declares 'facets' without 'detach' — cohort facets are only stamped \
+             on a detached child launch"
+        ));
+    }
+
     // Per-step retry is only meaningful for a dispatching node (a single
     // action or a foreach's per-item dispatch). It is a loud error to combine
     // it with `follow` in v1: retrying a follow means minting a fresh

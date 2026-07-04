@@ -116,6 +116,12 @@ pub struct ActionPayload {
     /// that declare no methods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call: Option<MethodCall>,
+    /// Cohort/fleet facets to stamp on the spawned child at spawn — a
+    /// `{key: value}` map, only meaningful for a `thread: "detached"` dispatch
+    /// (the daemon appends a `thread_facet_set` event per entry before launch).
+    /// Absent for inline dispatches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
 }
 
 /// Runtime-owned control keys carried in dispatch/launch params — parent budget,
@@ -301,6 +307,7 @@ mod tests {
             params: json!({}),
             thread: "inline".to_string(),
             call: None,
+            facets: None,
         };
         let v = serde_json::to_value(&payload).unwrap();
         assert!(

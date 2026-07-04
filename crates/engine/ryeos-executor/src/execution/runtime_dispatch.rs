@@ -120,14 +120,31 @@ async fn handle_execute(
     // `CallbackDispatchResponse { thread, result }`. The subprocess
     // detached path (`dispatch::dispatch` → `run_detached`) instead
     // returns `{ thread, detached: true }`, which the runtime's
-    // `serde(deny_unknown_fields)` deserializer would reject. Rather
-    // than invent a second envelope, fail closed at the boundary:
-    // callbacks are unary, inline only.
+    // `serde(deny_unknown_fields)` deserializer would reject.
+    //
+    // `detached` is the ONE non-inline mode a callback may request: the
+    // native fanout primitive. It does not return a leaf result — it mints
+    // a lineage-linked, cohort-tagged child that runs concurrently while the
+    // calling parent walks on — so it routes to `spawn_detached_child` (which
+    // returns `{ thread: "detached", detached: true, child_thread_id }`), not
+    // the inline leaf dispatch below. Any other non-inline mode fails closed:
+    // callback leaf results are unary and inline only.
+    if params.action.thread == "detached" {
+        return crate::execution::spawn_detached_child::spawn_detached_child(
+            state,
+            thread_auth,
+            cap,
+            child_provenance,
+            &params.action.item_id,
+            &params.action.params,
+            params.action.facets.as_ref(),
+        )
+        .await;
+    }
     if params.action.thread != "inline" {
         anyhow::bail!(
-            "callback dispatch only supports inline results; \
-             got thread={:?} (detached/forked launches must go through /execute, \
-             not the runtime callback)",
+            "callback dispatch only supports inline results or a `detached` \
+             fanout launch; got thread={:?}",
             params.action.thread
         );
     }

@@ -100,6 +100,11 @@ pub enum RuntimeEventType {
 
     // ── Audit / artifact ────────────────────────────────────────
     ArtifactPublished,
+    /// Slim launch-time resolution digest (extends-chain refs + content
+    /// digests, composed policy facts, effective trust class) persisted at
+    /// launch so the explain view can render what a thread launched with
+    /// rather than a fresh re-resolve.
+    AsLaunchedResolution,
     /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
@@ -165,6 +170,7 @@ impl RuntimeEventType {
             Self::StreamSnapshot => wire::STREAM_SNAPSHOT,
             Self::StreamClosed => wire::STREAM_CLOSED,
             Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
+            Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::ThreadReconciled => wire::THREAD_RECONCILED,
             Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
@@ -212,6 +218,7 @@ impl RuntimeEventType {
             wire::STREAM_SNAPSHOT => Ok(Self::StreamSnapshot),
             wire::STREAM_CLOSED => Ok(Self::StreamClosed),
             wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
+            wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
             wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
@@ -251,6 +258,26 @@ impl RuntimeEventType {
         )
     }
 
+    /// Whether this event ASSERTS the thread reached a terminal state — the
+    /// thread-lifecycle terminals plus a graph's self-completion signal. A
+    /// terminal event arriving for an already-terminal thread is a contradiction
+    /// the braid must never silently carry as ordinary content, so the daemon
+    /// append guard (`EventStoreService::append_batch`) rejects it; this is the
+    /// shared SSOT classifier, so the emitter vocabulary and that guard cannot
+    /// drift on what counts as terminal.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::ThreadCompleted
+                | Self::ThreadFailed
+                | Self::ThreadCancelled
+                | Self::ThreadKilled
+                | Self::ThreadTimedOut
+                | Self::ThreadContinued
+                | Self::GraphCompleted
+        )
+    }
+
     /// Canonical storage class for this event type.
     ///
     /// High-frequency progressive events (token deltas, reasoning
@@ -285,6 +312,7 @@ impl RuntimeEventType {
             | Self::StreamOpened
             | Self::StreamClosed
             | Self::ArtifactPublished
+            | Self::AsLaunchedResolution
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
@@ -338,6 +366,7 @@ mod tests {
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::StreamClosed,
             RuntimeEventType::ArtifactPublished,
+            RuntimeEventType::AsLaunchedResolution,
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::ThreadReconciled,
             RuntimeEventType::OrphanProcessKilled,
@@ -366,6 +395,53 @@ mod tests {
             let parsed =
                 RuntimeEventType::parse(s).unwrap_or_else(|_| panic!("round-trip failed for {s}"));
             assert_eq!(v, parsed, "round-trip mismatch for {s}");
+        }
+    }
+
+    #[test]
+    fn terminal_events_are_exactly_the_lifecycle_terminals_plus_graph_completed() {
+        // The daemon append guard rejects any of these onto an already-terminal
+        // thread; a drift here silently reopens that gap. Thread-lifecycle
+        // terminals plus the graph's self-completion signal are terminal.
+        let terminal: Vec<&'static str> = [
+            RuntimeEventType::ThreadCompleted,
+            RuntimeEventType::ThreadFailed,
+            RuntimeEventType::ThreadCancelled,
+            RuntimeEventType::ThreadKilled,
+            RuntimeEventType::ThreadTimedOut,
+            RuntimeEventType::ThreadContinued,
+            RuntimeEventType::GraphCompleted,
+        ]
+        .iter()
+        .copied()
+        .filter(|v| v.is_terminal())
+        .map(RuntimeEventType::as_str)
+        .collect();
+        assert_eq!(
+            terminal,
+            vec![
+                "thread_completed",
+                "thread_failed",
+                "thread_cancelled",
+                "thread_killed",
+                "thread_timed_out",
+                "thread_continued",
+                "graph_completed",
+            ]
+        );
+
+        // Non-terminal events an already-terminal thread may still legitimately
+        // carry (facet tags) or that mid-run precede terminal are not flagged.
+        for v in [
+            RuntimeEventType::ThreadCreated,
+            RuntimeEventType::ThreadStarted,
+            RuntimeEventType::GraphStarted,
+            RuntimeEventType::GraphStepCompleted,
+            RuntimeEventType::ThreadFacetSet,
+            RuntimeEventType::CognitionOut,
+            RuntimeEventType::Milestone,
+        ] {
+            assert!(!v.is_terminal(), "{} must not be terminal", v.as_str());
         }
     }
 
