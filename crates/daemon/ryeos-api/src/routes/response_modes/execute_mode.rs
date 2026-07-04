@@ -324,6 +324,25 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": format!("state_root '{raw}' could not be created: {e}") })),
                     ).into_response());
                 }
+                // The override's whole purpose is keeping runtime state OUT
+                // of the executed source tree; a state root inside (or equal
+                // to) the project recreates the pollution with extra
+                // indirection. Compare canonicalized paths — both exist at
+                // this point — so symlinked spellings can't sneak one in.
+                let canonical_state = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                let canonical_project = std::fs::canonicalize(&project_path)
+                    .unwrap_or_else(|_| project_path.clone());
+                if canonical_state.starts_with(&canonical_project) {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": format!(
+                            "state_root '{raw}' is inside the project source tree \
+                             '{}'; the override exists to keep runtime state out of \
+                             the executed source — pick a path outside the project",
+                            project_path.display()
+                        ) })),
+                    ).into_response());
+                }
                 Some(path)
             }
         };
