@@ -773,8 +773,37 @@ fn handle_submit_command(
 ) -> Result<serde_json::Value> {
     let params: CommandSubmitParams =
         serde_json::from_value(params.clone()).context("invalid commands.submit params")?;
-    serde_json::to_value(state.commands.submit(&params)?)
-        .context("failed to encode commands.submit result")
+    let thread_id = params.thread_id.clone();
+    let command_type = params.command_type.clone();
+    let record = state.commands.submit(&params)?;
+
+    // Same daemon-side enforcement as the API `commands.submit`: a cancel/kill
+    // submitted over the runtime callback signals the target and cascades to its
+    // live descendants, so both entry points behave identically. Logged, not
+    // raised — the command is already enqueued.
+    let stop_mode = match command_type.as_str() {
+        "kill" => Some(ryeos_app::cascade::CascadeMode::Hard),
+        "cancel" => Some(ryeos_app::cascade::CascadeMode::Graceful),
+        _ => None,
+    };
+    if let Some(mode) = stop_mode {
+        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode) {
+            Ok(report) => tracing::info!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                report = %report,
+                "cancel/kill signalled target and descendants"
+            ),
+            Err(e) => tracing::warn!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                error = %e,
+                "cancel/kill stop failed on runtime submit_command"
+            ),
+        }
+    }
+
+    serde_json::to_value(record).context("failed to encode commands.submit result")
 }
 
 fn handle_claim_commands(

@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::cascade::{cascade_descendants, CascadeMode};
+use ryeos_app::cascade::{stop_thread_and_descendants, CascadeMode};
 use ryeos_app::command_service::CommandSubmitParams;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -68,30 +68,31 @@ pub async fn handle(
         })
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
-    // Daemon-side immediate propagation: a cancel/kill for this thread reaches
-    // its live descendants right now, regardless of whether the target itself
-    // cooperatively handles its own command (a graph blocked on an inline child
-    // cannot claim between nodes). kill hard-stops each descendant; cancel is
-    // graceful. A cascade failure is logged, not raised — the command is already
-    // enqueued and the target's own handling is unaffected.
-    let cascade_mode = match command_type.as_str() {
+    // Daemon-side immediate enforcement: a cancel/kill signals the target AND
+    // cascades to its live descendants right now, regardless of whether the
+    // target cooperatively handles its own command (a directive has no drain; a
+    // graph blocked on an inline child cannot claim between nodes). kill hard-
+    // SIGKILLs; cancel sends a graceful SIGTERM, which both runtimes now honour
+    // as a cooperative cancel. A failure here is logged, not raised — the command
+    // is already durably enqueued.
+    let stop_mode = match command_type.as_str() {
         "kill" => Some(CascadeMode::Hard),
         "cancel" => Some(CascadeMode::Graceful),
         _ => None,
     };
-    if let Some(mode) = cascade_mode {
-        match cascade_descendants(&state.state_store, &thread_id, mode) {
+    if let Some(mode) = stop_mode {
+        match stop_thread_and_descendants(&state.state_store, &thread_id, mode) {
             Ok(report) => tracing::info!(
                 thread_id = %thread_id,
                 command_type = %command_type,
-                signalled = report.len(),
-                "cancel/kill cascade signalled descendants"
+                report = %report,
+                "cancel/kill signalled target and descendants"
             ),
             Err(e) => tracing::warn!(
                 thread_id = %thread_id,
                 command_type = %command_type,
                 error = %e,
-                "descendant cascade failed on command submit"
+                "cancel/kill stop failed on command submit"
             ),
         }
     }

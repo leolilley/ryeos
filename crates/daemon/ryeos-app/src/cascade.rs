@@ -41,73 +41,75 @@ fn shutdown_action_for(
 
 /// Signal every live descendant of `root_thread_id` per `mode`, resolving each
 /// child's current pgid at signal time. Returns a per-child report for the
-/// caller's response/log. A store error on the descendant walk or a runtime-info
-/// read propagates; a single child's missing pgid or failed signal is recorded
-/// in the report, not raised — one unreachable child must not abort the cascade.
+/// caller's response/log. A store error on the descendant walk propagates; a
+/// single child's missing pgid or failed signal is recorded in the report, not
+/// raised — one unreachable child must not abort the cascade.
 pub fn cascade_descendants(
     store: &StateStore,
     root_thread_id: &str,
     mode: CascadeMode,
 ) -> anyhow::Result<Vec<Value>> {
     let descendants = store.descendant_thread_ids(root_thread_id)?;
-    let mut report = Vec::with_capacity(descendants.len());
-    for child in descendants {
-        // One child's read failure must not abort the cascade for the rest.
-        let thread = match store.get_thread(&child) {
-            Ok(Some(thread)) => thread,
-            Ok(None) => {
-                report.push(json!({ "thread_id": child, "skipped": "no_thread_row" }));
-                continue;
-            }
-            Err(e) => {
-                report.push(json!({
-                    "thread_id": child,
-                    "skipped": "read_error",
-                    "error": e.to_string(),
-                }));
-                continue;
-            }
-        };
-        // A terminal descendant is already stopping/stopped, and its `pgid` is
-        // never cleared on finalize — signalling it would target a possibly
-        // OS-recycled group (an unrelated process). Only live threads are
-        // signalled, matching the primary guard in `threads.cancel`.
-        if crate::state_store::is_terminal_status(&thread.status) {
-            report.push(json!({
-                "thread_id": child,
-                "skipped": "terminal",
-                "status": thread.status,
-            }));
-            continue;
+    Ok(descendants
+        .iter()
+        .map(|child| signal_thread(store, child, mode))
+        .collect())
+}
+
+/// Signal one thread's process group per `mode`, resolving its CURRENT pgid at
+/// signal time. Returns a report value and NEVER errors: a missing/unreadable
+/// row, a terminal thread, or an absent/non-positive pgid each yields a skip
+/// marker, so one unreachable thread never aborts a wider cascade.
+///
+/// A terminal thread is skipped because its `pgid` is never cleared on finalize —
+/// signalling it would target a possibly OS-recycled group (an unrelated
+/// process). A non-positive pgid is skipped because `kill(-0, …)` would hit the
+/// daemon's own group and a negative value an arbitrary PID (`kill_by_action`
+/// guards only the daemon pgid, not `<= 0`).
+pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> Value {
+    let thread = match store.get_thread(thread_id) {
+        Ok(Some(thread)) => thread,
+        Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
+        Err(e) => {
+            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() })
         }
-        // A non-positive pgid is unusable: `kill(-0, …)` would hit the daemon's
-        // own group and a negative value an arbitrary PID (kill_by_action only
-        // guards the daemon pgid, not `<= 0`).
-        let pgid = match thread.runtime.pgid {
-            Some(pgid) if pgid > 0 => pgid,
-            Some(_) => {
-                report.push(json!({ "thread_id": child, "skipped": "invalid_pgid" }));
-                continue;
-            }
-            None => {
-                report.push(json!({ "thread_id": child, "skipped": "no_pgid" }));
-                continue;
-            }
-        };
-        let cancellation_mode = thread
-            .runtime
-            .launch_metadata
-            .as_ref()
-            .and_then(|lm| lm.cancellation_mode);
-        let result = kill_by_action(pgid, shutdown_action_for(mode, cancellation_mode));
-        report.push(json!({
-            "thread_id": child,
-            "pgid": pgid,
-            "method": result.method,
-            "success": result.success,
-        }));
+    };
+    if crate::state_store::is_terminal_status(&thread.status) {
+        return json!({ "thread_id": thread_id, "skipped": "terminal", "status": thread.status });
     }
-    Ok(report)
+    let pgid = match thread.runtime.pgid {
+        Some(pgid) if pgid > 0 => pgid,
+        Some(_) => return json!({ "thread_id": thread_id, "skipped": "invalid_pgid" }),
+        None => return json!({ "thread_id": thread_id, "skipped": "no_pgid" }),
+    };
+    let cancellation_mode = thread
+        .runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|lm| lm.cancellation_mode);
+    let result = kill_by_action(pgid, shutdown_action_for(mode, cancellation_mode));
+    json!({
+        "thread_id": thread_id,
+        "pgid": pgid,
+        "method": result.method,
+        "success": result.success,
+    })
+}
+
+/// Stop a thread and its live descendants: signal the target per `mode`, then
+/// cascade to every live descendant. `cancel` → graceful (SIGTERM, which both
+/// runtimes now honour cooperatively); `kill` → hard SIGKILL. The single shared
+/// entry point for `commands.submit` and `runtime.submit_command`, so both the
+/// operator and runtime control paths stop the target itself — not only its
+/// children.
+pub fn stop_thread_and_descendants(
+    store: &StateStore,
+    thread_id: &str,
+    mode: CascadeMode,
+) -> anyhow::Result<Value> {
+    let target = signal_thread(store, thread_id, mode);
+    let descendants = cascade_descendants(store, thread_id, mode)?;
+    Ok(json!({ "target": target, "descendants": descendants }))
 }
 
 #[cfg(test)]

@@ -57,8 +57,10 @@ pub async fn handle(
         )));
     }
 
-    // If the thread has a PGID, kill the process group.
-    let kill_info = if let Some(pgid) = thread.runtime.pgid {
+    // If the thread has a usable PGID, kill the process group. A non-positive
+    // pgid is unusable — `kill(-0, …)` would hit the daemon's own group — so it
+    // is treated as "no process to kill", not signalled.
+    let kill_info = if let Some(pgid) = thread.runtime.pgid.filter(|&p| p > 0) {
         let action = resolve_shutdown_action(
             thread
                 .runtime
