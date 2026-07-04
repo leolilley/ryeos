@@ -1,0 +1,64 @@
+name: run-fleet
+version: "1.0.0"
+description: >-
+  The whole-run landing. Every thread carrying a `fleet` cohort tag (any run of
+  any project), newest first — one row per cohort thread, Enter steps into that
+  thread's braid (which in turn shows its own children as drill-ins). The
+  generic execution-trace entry for a fleet run, in place of the flat thread
+  list. Nothing here is project-specific: the cohort is `fleet`-tagged threads,
+  labelled by what they run.
+
+widget: table
+source:
+  ref: service:ui/studio/threads/list
+  params:
+    # A facet KEY with no value is cohort PRESENCE: keep every fleet-tagged
+    # thread (across runs), newest first, so the current run sits at the top. No
+    # fleet id is named here — the landing knows only that fleet-tagged threads
+    # are the cohort.
+    facet_key: fleet
+    sort: newest
+    limit: 60
+  collection: threads
+projections:
+  columns:
+    - label: fleet
+      field: facets.fleet
+    - label: item
+      field: item_ref
+    - label: stage
+      field: current_node.node
+    - label: status
+      field: status
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      failed: danger
+      cancelled: warn
+      killed: danger
+      timed_out: warn
+      completed: good
+      continued: good
+    default: neutral
+# Enter steps into the thread's braid: aim the route at the thread (both thread +
+# chain_root so the braid resolves — a fanout child is its own root, so the two
+# are equal) and swap the single center lens to its timeline.
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/chain/timeline
+      # Step INTO the braid (returnable via Backspace), pushing the run onto the
+      # drill stack so the operator can walk back up to the whole-run view.
+      drill: true
+refresh:
+  on_hint: thread
