@@ -607,8 +607,13 @@ function tableRow(item, ncols, index, dispatchUi) {
   row.disabled = !item.action;
   row.append(textEl("span", rowGlyph(item), "studio-table-glyph"));
   const cells = item.cells || [];
+  // Per-cell tone overrides (parallel to cells; absent for tables whose
+  // columns declare no tone) — a toned cell renders distinctly from the
+  // muted secondary default, mirroring the terminal table widget.
+  const cellTones = item.cell_tones || [];
   for (let i = 0; i < ncols; i += 1) {
-    row.append(textEl("span", cells[i] || "", `studio-table-cell${i === 0 ? " lead" : ""}`));
+    const tone = cellTones[i] ? ` tone-${cellTones[i]}` : "";
+    row.append(textEl("span", cells[i] || "", `studio-table-cell${i === 0 ? " lead" : ""}${tone}`));
   }
   if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
   return row;

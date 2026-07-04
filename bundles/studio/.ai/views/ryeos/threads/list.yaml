@@ -29,9 +29,16 @@ projections:
     # child chain) or `resume_successor` (consumes the child result). Blank for
     # non-follow rows (the `follow` fact is absent). The full child chain + child
     # terminal status live in the thread detail lens; this column is the at-a-
-    # glance "waiting on child" marker the watch console reads.
+    # glance "waiting on child" marker the watch console reads. The per-column
+    # tone keys off the coarse display state so a waiting parent reads warm
+    # while the ROW keeps its status tone.
     - label: follow
       field: follow.role
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resumed: good
     - label: created
       field: created_at
   tone:

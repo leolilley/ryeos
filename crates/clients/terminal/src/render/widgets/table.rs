@@ -75,8 +75,14 @@ pub fn draw_table(surface: &mut TextSurface, rect: Rect, columns: &[String], row
 
         for (i, cell) in row.cells.iter().enumerate().take(ncols) {
             // First column is the identifier (foreground); later columns are
-            // secondary detail (muted) — unless the whole row is selected.
-            let cell_style = if row.selected || i == 0 {
+            // secondary detail (muted) — unless the whole row is selected or
+            // the column projected its own tone for this cell.
+            let cell_tone = row.cell_tones.get(i).copied().flatten();
+            let cell_style = if row.selected {
+                style
+            } else if let Some(tone) = cell_tone {
+                tone_style(tone)
+            } else if i == 0 {
                 style
             } else {
                 style_muted()
@@ -96,6 +102,7 @@ mod tests {
         StudioTableRowVm {
             id: cells.first().copied().unwrap_or_default().to_string(),
             cells: cells.iter().map(|c| c.to_string()).collect(),
+            cell_tones: Vec::new(),
             tone,
             action: None,
             selected: false,
@@ -240,6 +247,33 @@ mod tests {
         let body: String = (1..5).map(|y| row_text(&s, 40, y)).collect::<Vec<_>>().join("\n");
         assert!(body.contains("T-10"), "selected row visible after scroll: {body:?}");
         assert!(!body.contains("T-0"), "early rows scrolled off: {body:?}");
+    }
+
+    #[test]
+    fn cell_tone_overrides_the_muted_secondary_style() {
+        let (mut s, rect) = surface(60, 4);
+        let mut toned = trow(StudioTone::Neutral, &["T-ab", "suspended", "running"]);
+        toned.cell_tones = vec![None, Some(StudioTone::Warn), None];
+        draw_table(&mut s, rect, &columns(), &[toned]);
+
+        let (mut plain_s, plain_rect) = surface(60, 4);
+        draw_table(
+            &mut plain_s,
+            plain_rect,
+            &columns(),
+            &[trow(StudioTone::Neutral, &["T-ab", "suspended", "running"])],
+        );
+
+        let col_w = (60 - GUTTER) / 3;
+        let toned_cell = s.get(GUTTER + col_w, 1);
+        let plain_cell = plain_s.get(GUTTER + col_w, 1);
+        assert_eq!(toned_cell.rune, plain_cell.rune, "same cell text");
+        assert_ne!(
+            toned_cell.fg, plain_cell.fg,
+            "a column-toned cell renders distinctly from the muted default"
+        );
+        // Untouched columns keep the default styling.
+        assert_eq!(s.get(GUTTER, 1).fg, plain_s.get(GUTTER, 1).fg);
     }
 
     #[test]

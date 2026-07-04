@@ -503,11 +503,17 @@ pub fn project_tone(record: &Value, projection: &Value) -> Option<String> {
 pub struct TableColumn {
     pub label: String,
     pub field: String,
+    /// Optional per-column tone block — the same `{field, map, default,
+    /// missing}` vocabulary as the row-level `projections.tone`, toning this
+    /// column's cell independently of the row (e.g. a lineage column toned by
+    /// `follow.display_state` while the row stays status-toned).
+    pub tone: Option<Value>,
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field}` (label defaults to the field path). A column missing a
-/// field is skipped; absent `columns` → empty (the table renders headerless).
+/// `{label, field, tone?}` (label defaults to the field path). A column
+/// missing a field is skipped; absent `columns` → empty (the table renders
+/// headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
     binding
         .projections
@@ -521,6 +527,7 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                     Some(TableColumn {
                         label: label.to_string(),
                         field: field.to_string(),
+                        tone: col.get("tone").cloned(),
                     })
                 })
                 .collect()
@@ -528,18 +535,23 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
         .unwrap_or_default()
 }
 
-/// One projected table row: a cell per column (in column order), the row tone,
-/// and the raw record kept for affordance interpolation.
+/// One projected table row: a cell per column (in column order), the per-cell
+/// tones (parallel to `cells`; `None` where the column declares no tone or
+/// the record misses its field), the row tone, and the raw record kept for
+/// affordance interpolation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedTableRow {
     pub cells: Vec<String>,
+    pub cell_tones: Vec<Option<String>>,
     pub tone: Option<String>,
     pub raw: Value,
 }
 
 /// Project a table source response: pull the collection (same shape as
 /// `project_records`), then one cell per declared column. Row tone reuses the
-/// shared `projections.tone` block. Missing cells degrade to empty strings.
+/// shared `projections.tone` block; a column's own `tone` block tones its
+/// cell through the same `project_tone` rules. Missing cells degrade to
+/// empty strings.
 pub fn project_table(
     binding: &ViewBinding,
     response: &Value,
@@ -559,6 +571,13 @@ pub fn project_table(
             cells: columns
                 .iter()
                 .map(|col| field_text(record, &col.field).unwrap_or_default())
+                .collect(),
+            cell_tones: columns
+                .iter()
+                .map(|col| {
+                    let tone = col.tone.as_ref()?;
+                    project_tone(record, &serde_json::json!({ "tone": tone }))
+                })
                 .collect(),
             tone: project_tone(record, &binding.projections),
             raw: record.clone(),
@@ -1087,6 +1106,40 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn project_table_per_column_tone_is_independent_of_row_tone() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:ui/studio/threads/list", "collection": "threads" },
+            "projections": {
+                "columns": [
+                    { "label": "thread", "field": "thread_id" },
+                    { "label": "follow", "field": "follow.role",
+                      "tone": { "field": "follow.display_state",
+                                "map": { "suspended": "warn", "resumed": "good" } } }
+                ],
+                "tone": { "field": "status", "map": { "failed": "danger" }, "default": "neutral" }
+            }
+        }))
+        .unwrap();
+        let response = json!({ "threads": [
+            { "thread_id": "T-ab", "status": "running",
+              "follow": { "role": "suspended_parent", "display_state": "suspended" } },
+            { "thread_id": "T-cd", "status": "failed" }
+        ]});
+        let columns = table_columns(&binding);
+        let rows = project_table(&binding, &response, &columns);
+
+        // Follow row: row tone from status (neutral default), follow CELL warn.
+        assert_eq!(rows[0].tone.as_deref(), Some("neutral"));
+        assert_eq!(rows[0].cell_tones, vec![None, Some("warn".to_string())]);
+
+        // Non-follow row: no follow fact and no `missing:` declared → the
+        // cell stays untoned; the row tone still comes from status.
+        assert_eq!(rows[1].tone.as_deref(), Some("danger"));
+        assert_eq!(rows[1].cell_tones, vec![None, None]);
     }
 
     #[test]

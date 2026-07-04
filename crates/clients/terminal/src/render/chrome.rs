@@ -367,6 +367,7 @@ mod tests {
             rows: vec![StudioTableRowVm {
                 id: "T-ab".into(),
                 cells: vec!["T-ab".into()],
+                cell_tones: Vec::new(),
                 tone: StudioTone::Neutral,
                 action: None,
                 selected: false,
