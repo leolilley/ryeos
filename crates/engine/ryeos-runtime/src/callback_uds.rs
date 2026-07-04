@@ -325,12 +325,14 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
     async fn complete_command(
         &self,
         thread_id: &str,
-        command_id: &str,
+        command_id: i64,
+        status: &str,
         result: Value,
     ) -> Result<Value, CallbackError> {
         let mut params = json!({
             "thread_id": thread_id,
             "command_id": command_id,
+            "status": status,
             "result": result,
         });
         self.inject_callback_token(&mut params);

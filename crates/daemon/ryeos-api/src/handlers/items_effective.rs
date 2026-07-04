@@ -2,7 +2,9 @@
 //!
 //! Works for any item kind (executable or not). The engine owns the
 //! resolution/trust/composition semantics; this handler is intentionally
-//! only a typed service wrapper.
+//! only a typed service wrapper — plus, for surfaces, the server-side
+//! view embedding (`crate::surface_views`) so clients receive surfaces
+//! with their bound views already resolved.
 //!
 //! ## Error codes
 //!
@@ -42,19 +44,23 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::engine::EffectiveItemRequest;
+use ryeos_engine::engine::{EffectiveItem, EffectiveItemDiagnostic, EffectiveItemRequest};
 use ryeos_engine::error::EngineError;
+use ryeos_engine::resolution::{AsLaunchedResolutionDigest, ResolutionDigestNode};
 use ryeos_executor::executor::ServiceAvailability;
+use ryeos_runtime::events::RuntimeEventType;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +76,15 @@ pub struct Request {
     /// Optional guardrail for clients that know which kind they expect.
     #[serde(default)]
     pub expected_kind: Option<String>,
+
+    /// Thread-scoped mode. When set, the response carries an `as_launched`
+    /// block: the digest this thread persisted at launch (extends chain as
+    /// composed, policy facts, effective trust class), rendered as truth, with
+    /// each ancestor flagged `changed` where its content digest differs from
+    /// the fresh (now) resolution above — the drift the caveat used to only
+    /// warn about.
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -80,16 +95,143 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
         ))
     })?;
 
-    let effective = state
+    let project_root = req.project_path.map(std::path::PathBuf::from);
+
+    let mut effective = state
         .engine
         .effective_item(EffectiveItemRequest {
             item_ref,
             expected_kind: req.expected_kind,
-            project_root: req.project_path.map(std::path::PathBuf::from),
+            project_root: project_root.clone(),
         })
         .map_err(map_engine_error)?;
 
-    serde_json::to_value(effective).map_err(Into::into)
+    // A surface binds views by ref and never defines them. Embed each
+    // bound view's composed value server-side so renderers receive one
+    // complete payload — no per-view follow-up round-trips. A view that
+    // fails to resolve embeds a degraded entry (the pane renders the
+    // reason) and additionally surfaces as a warn diagnostic; per-view
+    // failures never fail the whole surface.
+    if effective.kind == "surface" {
+        let failures = crate::surface_views::embed_surface_views(
+            &state.engine,
+            project_root.as_deref(),
+            &mut effective.composed_value,
+        );
+        for (view_ref, reason) in failures {
+            effective.diagnostics.push(EffectiveItemDiagnostic {
+                level: "warn".to_string(),
+                message: format!("view {view_ref} unavailable: {reason}"),
+            });
+        }
+    }
+
+    // Thread-scoped mode: attach the launch-time digest (truth) alongside the
+    // fresh resolution (now), with per-ancestor drift flags.
+    let as_launched = req
+        .thread_id
+        .as_deref()
+        .map(|thread_id| as_launched_block(&state, thread_id, &effective));
+
+    let mut body = serde_json::to_value(effective)?;
+    if let (Value::Object(map), Some(as_launched)) = (&mut body, as_launched) {
+        map.insert("as_launched".to_string(), as_launched);
+    }
+    Ok(body)
+}
+
+/// Build the `as_launched` block for a thread: the persisted launch digest
+/// rendered as truth, each node flagged `changed` where its content digest
+/// differs from the freshly-resolved `effective` (the drift comparison). When
+/// no digest event was recorded (or it cannot be read) the block is
+/// `{ present: false, reason }` so the view degrades honestly rather than
+/// silently showing the fresh resolution as if it were the launched one.
+fn as_launched_block(state: &AppState, thread_id: &str, effective: &EffectiveItem) -> Value {
+    let digest = match read_launch_digest(state, thread_id) {
+        Ok(Some(digest)) => digest,
+        Ok(None) => {
+            return json!({
+                "present": false,
+                "reason": "no as-launched resolution digest recorded for this thread",
+            });
+        }
+        Err(e) => return json!({ "present": false, "reason": e.to_string() }),
+    };
+
+    // Current (freshly-resolved) content digests by resolved ref, to localize
+    // drift against the launched chain.
+    let mut current: HashMap<&str, &str> = HashMap::new();
+    current.insert(
+        effective.provenance.root.resolved_ref.as_str(),
+        effective.provenance.root.raw_content_digest.as_str(),
+    );
+    for anc in &effective.provenance.ancestors {
+        current.insert(
+            anc.resolved_ref.as_str(),
+            anc.raw_content_digest.as_str(),
+        );
+    }
+
+    let (root_json, root_changed) = digest_node_json(&digest.root, &current);
+    let mut drift = root_changed;
+    let ancestors: Vec<Value> = digest
+        .ancestors
+        .iter()
+        .map(|node| {
+            let (node_json, changed) = digest_node_json(node, &current);
+            drift |= changed;
+            node_json
+        })
+        .collect();
+
+    json!({
+        "present": true,
+        "root": root_json,
+        "ancestors": ancestors,
+        "effective_trust_class": digest.effective_trust_class,
+        "policy_facts": digest.policy_facts,
+        "drift": drift,
+    })
+}
+
+/// A launched digest node as a render row plus whether it drifted: `changed`
+/// is true when the fresh resolution no longer carries this ref at the launched
+/// content digest (edited, republished, or dropped from the chain).
+fn digest_node_json(node: &ResolutionDigestNode, current: &HashMap<&str, &str>) -> (Value, bool) {
+    let changed =
+        current.get(node.resolved_ref.as_str()).copied() != Some(node.raw_content_digest.as_str());
+    (
+        json!({
+            "requested_id": node.requested_id,
+            "resolved_ref": node.resolved_ref,
+            "trust_class": node.trust_class,
+            "raw_content_digest": node.raw_content_digest,
+            "changed": changed,
+        }),
+        changed,
+    )
+}
+
+/// Read the thread's persisted `as_launched_resolution` digest from the braid.
+/// The digest is emitted once, at launch, so it sits near the head of the
+/// thread's events; the first page is enough to find it.
+fn read_launch_digest(
+    state: &AppState,
+    thread_id: &str,
+) -> Result<Option<AsLaunchedResolutionDigest>> {
+    let replay = state.events.replay(&EventReplayParams {
+        chain_root_id: None,
+        thread_id: Some(thread_id.to_string()),
+        after_chain_seq: None,
+        limit: 500,
+    })?;
+    let launch_type = RuntimeEventType::AsLaunchedResolution.as_str();
+    for record in replay.events {
+        if record.event_type == launch_type {
+            return Ok(Some(serde_json::from_value(record.payload)?));
+        }
+    }
+    Ok(None)
 }
 
 /// Map typed engine errors to HTTP-appropriate handler errors with
@@ -182,7 +324,40 @@ mod tests {
     };
     use ryeos_engine::error::EngineError;
 
-    use super::map_engine_error;
+    use ryeos_engine::resolution::{ResolutionDigestNode, TrustClass};
+
+    use super::{digest_node_json, map_engine_error};
+    use std::collections::HashMap;
+
+    fn node(resolved_ref: &str, digest: &str) -> ResolutionDigestNode {
+        ResolutionDigestNode {
+            requested_id: resolved_ref.to_string(),
+            resolved_ref: resolved_ref.to_string(),
+            trust_class: TrustClass::TrustedBundle,
+            raw_content_digest: digest.to_string(),
+        }
+    }
+
+    #[test]
+    fn digest_node_drift_flags_edited_and_dropped_ancestors() {
+        let mut current: HashMap<&str, &str> = HashMap::new();
+        current.insert("directive:base", "same");
+        current.insert("directive:mid", "edited-now");
+
+        // Unchanged: fresh digest matches the launched one.
+        let (row, changed) = digest_node_json(&node("directive:base", "same"), &current);
+        assert!(!changed);
+        assert_eq!(row["changed"], false);
+        assert_eq!(row["raw_content_digest"], "same");
+
+        // Edited/republished: fresh digest differs.
+        let (_, changed) = digest_node_json(&node("directive:mid", "old"), &current);
+        assert!(changed);
+
+        // Dropped from the chain entirely: absent from the fresh resolution.
+        let (_, changed) = digest_node_json(&node("directive:gone", "old"), &current);
+        assert!(changed);
+    }
 
     fn violation(
         path: &str,

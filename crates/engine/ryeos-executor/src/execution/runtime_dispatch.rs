@@ -120,14 +120,31 @@ async fn handle_execute(
     // `CallbackDispatchResponse { thread, result }`. The subprocess
     // detached path (`dispatch::dispatch` → `run_detached`) instead
     // returns `{ thread, detached: true }`, which the runtime's
-    // `serde(deny_unknown_fields)` deserializer would reject. Rather
-    // than invent a second envelope, fail closed at the boundary:
-    // callbacks are unary, inline only.
+    // `serde(deny_unknown_fields)` deserializer would reject.
+    //
+    // `detached` is the ONE non-inline mode a callback may request: the
+    // native fanout primitive. It does not return a leaf result — it mints
+    // a lineage-linked, cohort-tagged child that runs concurrently while the
+    // calling parent walks on — so it routes to `spawn_detached_child` (which
+    // returns `{ thread: "detached", detached: true, child_thread_id }`), not
+    // the inline leaf dispatch below. Any other non-inline mode fails closed:
+    // callback leaf results are unary and inline only.
+    if params.action.thread == "detached" {
+        return crate::execution::spawn_detached_child::spawn_detached_child(
+            state,
+            thread_auth,
+            cap,
+            child_provenance,
+            &params.action.item_id,
+            &params.action.params,
+            params.action.facets.as_ref(),
+        )
+        .await;
+    }
     if params.action.thread != "inline" {
         anyhow::bail!(
-            "callback dispatch only supports inline results; \
-             got thread={:?} (detached/forked launches must go through /execute, \
-             not the runtime callback)",
+            "callback dispatch only supports inline results or a `detached` \
+             fanout launch; got thread={:?}",
             params.action.thread
         );
     }
@@ -174,6 +191,11 @@ async fn handle_execute(
     };
 
     let project_path = child_provenance.effective_path().to_path_buf();
+    // C0 diagnostic: snapshot the run's resolution source before `provenance` is
+    // moved into the dispatch request, so a content-hash mismatch can be pinned
+    // to its origin below.
+    let diag_source = child_provenance.project_source();
+    let diag_effective_path = child_provenance.effective_path().to_path_buf();
     let dispatch_req = crate::dispatch::DispatchRequest {
         launch_mode: params.action.thread.as_str(),
         target_site_id: None,
@@ -195,9 +217,25 @@ async fn handle_execute(
     // we await `dispatch::dispatch` directly. The previous
     // `Handle::current().block_on(...)` was a panic/deadlock risk on
     // the P3b hot path (a runtime-thread blocking on its own runtime).
-    crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    let result =
+        crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state).await;
+    if let Err(err) = &result {
+        // C0: attribute a content-hash mismatch to its resolution source. A
+        // `LiveFs` run means the dispatched item's bytes were re-signed on disk
+        // mid-run; a `PushedHead` run means dispatch read a stale materialized
+        // checkout (`effective_path`). This is the signal the re-sign/pin
+        // investigation needs before any pin policy is designed.
+        if err.to_string().contains("content hash mismatch") {
+            tracing::warn!(
+                item_id = %params.action.item_id,
+                project_source = ?diag_source,
+                effective_path = %diag_effective_path.display(),
+                error = %err,
+                "C0: content-hash mismatch during callback dispatch",
+            );
+        }
+    }
+    result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn parent_execution_context_from_capability(

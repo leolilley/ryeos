@@ -21,6 +21,9 @@ struct FeedLine {
     /// Typeset inline markdown (`` `code` ``, `**bold**`) at draw time. Off for
     /// verbatim code lines and structural rows, where markers are literal.
     inline: bool,
+    /// Call-tree indent, in columns, applied as a draw-time x-offset (not baked
+    /// into `text`, so a per-keystroke re-render doesn't re-allocate the string).
+    indent: usize,
 }
 
 impl FeedLine {
@@ -31,6 +34,7 @@ impl FeedLine {
             style,
             entry,
             inline: true,
+            indent: 0,
         }
     }
 
@@ -41,6 +45,7 @@ impl FeedLine {
             style,
             entry,
             inline: false,
+            indent: 0,
         }
     }
 }
@@ -49,6 +54,7 @@ pub fn draw_timeline(
     surface: &mut TextSurface,
     rect: Rect,
     entries: &[StudioTimelineEntryVm],
+    entry_indents: &[u8],
     selected: Option<usize>,
 ) {
     let width = rect.w as usize;
@@ -57,7 +63,7 @@ pub fn draw_timeline(
         return;
     }
     let mut lines = Vec::new();
-    push_timeline_lines(&mut lines, entries, width);
+    push_timeline_lines(&mut lines, entries, entry_indents, width);
 
     let visible = lines.len().min(height);
     // Default bottom-anchored (the tail). If the point sits above the
@@ -82,15 +88,24 @@ pub fn draw_timeline(
         } else {
             line.style
         };
+        // Call-tree indent as a draw-time x-offset; the highlight fill above
+        // still spans the full row.
+        let x0 = rect.x as usize + line.indent.min(width.saturating_sub(1));
+        let avail = width.saturating_sub(line.indent);
         if line.inline {
-            draw_inline(surface, rect.x as usize, y, width, &line.text, style);
+            draw_inline(surface, x0, y, avail, &line.text, style);
         } else {
-            surface.draw_text(rect.x as usize, y, &truncate(&line.text, width), style);
+            surface.draw_text(x0, y, &truncate(&line.text, avail), style);
         }
     }
 }
 
-fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntryVm], width: usize) {
+fn push_timeline_lines(
+    lines: &mut Vec<FeedLine>,
+    entries: &[StudioTimelineEntryVm],
+    entry_indents: &[u8],
+    width: usize,
+) {
     if entries.is_empty() {
         lines.push(FeedLine::plain(
             "no timeline events loaded".to_string(),
@@ -100,6 +115,11 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
         return;
     }
     for (index, entry) in entries.iter().enumerate() {
+        // Call-tree indent: a graph node's tool calls and its directive fork
+        // nest one level under the node. Prefix every line this entry emits with
+        // two spaces per level, so the braid reads as a call tree. Panic-safe: a
+        // missing/short indent vector degrades to depth 0 (flat).
+        let first_line = lines.len();
         match entry {
             StudioTimelineEntryVm::Block { text, tone } => {
                 // The braid stores the raw cognition prose; the lens typesets
@@ -154,6 +174,16 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
                     style_muted(),
                     Some(index),
                 ));
+            }
+        }
+        // Tag every line this entry emitted with its call-tree depth (two
+        // columns per level), applied as a draw-time x-offset rather than baked
+        // into the text — so a per-keystroke re-render never re-allocates the
+        // line strings. Panic-safe: a missing indent degrades to flat (depth 0).
+        let depth = entry_indents.get(index).copied().unwrap_or(0) as usize;
+        if depth > 0 {
+            for line in &mut lines[first_line..] {
+                line.indent = depth * 2;
             }
         }
     }
@@ -363,6 +393,7 @@ mod tests {
             meta: None,
             tone: StudioTone::Neutral,
             action: None,
+            secondary_action: None,
         }
     }
 
@@ -442,7 +473,7 @@ mod tests {
             w: 20,
             h: 4,
         };
-        draw_timeline(&mut surface, rect, &entries, None);
+        draw_timeline(&mut surface, rect, &entries, &[], None);
         // The bottom row shows the newest entry — the feed tails.
         assert!(
             row_text(&surface, 20, 3).contains("entry 9"),
@@ -462,7 +493,7 @@ mod tests {
             h: 4,
         };
         // Point on the oldest entry — far above the tail; the feed scrolls up.
-        draw_timeline(&mut surface, rect, &entries, Some(0));
+        draw_timeline(&mut surface, rect, &entries, &[], Some(0));
         assert!(
             row_text(&surface, 20, 0).contains("entry 0"),
             "scrolled to reveal the selected oldest entry: {:?}",

@@ -66,6 +66,12 @@ pub struct PublishOptions {
     /// such a mismatch is fatal, because the daemon hard-fails runtime-cap
     /// minting for it — a published-but-unusable manifest. Default `false`.
     pub allow_namespace_mismatch: bool,
+    /// If `true`, do not fail when a populated `.ai/<dir>` is covered by no
+    /// registered kind. Set this ONLY for a deliberately partial intermediate
+    /// publish (e.g. signing core before the bundle defining its `knowledge`
+    /// kind is available), which a later republish then completes. Default
+    /// `false`: an uncovered item directory hard-fails the publish.
+    pub allow_uncovered_item_dirs: bool,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
     /// operators to pin via `ryeos trust pin`. Default `true`.
@@ -156,6 +162,7 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         &opts.registry_roots,
         &opts.signing_key,
         opts.base_trust_store.as_ref(),
+        opts.allow_uncovered_item_dirs,
     )
     .context("sign-items phase failed")?;
     let mut partial = false;
@@ -197,31 +204,49 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         }
     }
 
-    // ── Effective-bundle-id lint ──
+    // ── Effective-bundle-id + config-shadow lint ──
     // Only meaningful when the bundle asserts an effective id the runtime
     // enforces (an explicit `--name`, or a manifest that declares runtime
-    // authority). Free-form item namespacing (e.g. core's `ryeos/...`) is left
-    // unlinted so it does not produce noise.
-    if let Some(expected) = lint_expected_bundle_id(&ai_dir, opts.name.as_deref())? {
-        sign_report.warnings = lint_item_namespaces(&sign_report, &expected);
-        for w in &sign_report.warnings {
+    // authority) or declares config `shadows:` to verify. Free-form item
+    // namespacing (e.g. core's `ryeos/...`) is left unlinted so it does not
+    // produce noise.
+    if let Some(ctx) = lint_context(&ai_dir, opts.name.as_deref())? {
+        let lint = lint_item_namespaces(&sign_report, &ctx.expected, &ctx.shadows);
+        for w in lint.warnings.iter().chain(&lint.shadow_warnings) {
             tracing::warn!(item = %w.item_ref, "{}", w.message);
         }
-        // For a bundle that declares runtime authority, a namespace mismatch is
-        // fatal: the daemon hard-fails cap minting at runtime, so the manifest
-        // would publish but never work. Refuse unless explicitly overridden.
-        if !sign_report.warnings.is_empty()
+        for n in &lint.notes {
+            tracing::info!(item = %n.item_ref, "{}", n.message);
+        }
+        // Only cap-minting divergence can escalate to a fatal publish error;
+        // shadow-declaration mismatches are advisory. Count them before folding
+        // the advisory warnings into the reported set.
+        let cap_count = lint.warnings.len();
+        sign_report.warnings = lint
+            .warnings
+            .into_iter()
+            .chain(lint.shadow_warnings)
+            .collect();
+        sign_report.notes = lint.notes;
+        // A cap-minting item under a divergent namespace is fatal for a bundle
+        // that declares runtime authority: the daemon hard-fails cap minting at
+        // runtime, so the manifest would publish but never work. Inert
+        // cross-namespace items are notes, not warnings, and never trip this.
+        if cap_count > 0
             && !opts.allow_namespace_mismatch
             && manifest_declares_runtime_authority(&ai_dir)?
         {
             bail!(
-                "refusing to publish: {} item(s) have an effective bundle id that diverges \
-                 from '{}', but the manifest declares runtime authority (a non-empty \
-                 `runtime_authority:` block). The daemon rejects runtime-cap minting for such \
-                 items, so the manifest would be unusable. Fix the item namespaces (or pass \
-                 --allow-namespace-mismatch to override).",
-                sign_report.warnings.len(),
-                expected
+                "refusing to publish: {} cap-minting item(s) have an effective bundle id that \
+                 diverges from '{}'. The daemon mints their runtime-authority caps under the \
+                 wrong namespace and rejects them at dispatch, so the manifest would publish but \
+                 never work. Namespace these items under '{}/…' (or set the bundle --name to \
+                 match). Inert cross-namespace items (config shadows, knowledge) are reported as \
+                 notes, not errors, and need no change. As a last resort, \
+                 --allow-namespace-mismatch bypasses this check.",
+                cap_count,
+                ctx.expected,
+                ctx.expected
             );
         }
     }
@@ -507,29 +532,44 @@ fn clean_bin_sidecars(bin_root: &Path) -> Result<()> {
 /// Returns `(Some((path, changed)))` where `changed` reflects whether
 /// the file was actually written. Returns `None` if no `manifest.source.yaml`
 /// exists (manifests are optional for third-party bundles).
-/// The effective bundle id to lint item namespaces against, or `None` when the
-/// bundle should not be linted.
+/// Inputs the namespace lint needs from the manifest source: the effective
+/// bundle id items are checked against, and the declared config shadows their
+/// observed foreign-namespace items are verified against.
+struct LintContext {
+    expected: String,
+    shadows: Vec<String>,
+}
+
+/// Resolve the namespace-lint context, or `None` when the bundle should not be
+/// linted.
 ///
 /// Returns `Some` when `name_override` is set (the author explicitly asserts
-/// the bundle id) or when the manifest declares runtime authority (where the
-/// effective bundle id is enforced when minting callback caps). Otherwise
-/// `None` — item namespacing is free-form and must not be flagged.
-fn lint_expected_bundle_id(ai_dir: &Path, name_override: Option<&str>) -> Result<Option<String>> {
-    if let Some(name) = name_override {
-        return Ok(Some(name.to_string()));
-    }
+/// the bundle id), when the manifest declares runtime authority (where the
+/// effective bundle id is enforced when minting callback caps), or when it
+/// declares config `shadows:` (whose declared-vs-observed check must run).
+/// Otherwise `None` — item namespacing is free-form and must not be flagged.
+fn lint_context(ai_dir: &Path, name_override: Option<&str>) -> Result<Option<LintContext>> {
     let source_path = ai_dir.join("manifest.source.yaml");
-    if !source_path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&source_path)
-        .with_context(|| format!("read manifest source {}", source_path.display()))?;
-    let src: BundleManifestSource = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
-    if src.runtime_authority.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(src.name))
+    let src = if source_path.exists() {
+        let raw = fs::read_to_string(&source_path)
+            .with_context(|| format!("read manifest source {}", source_path.display()))?;
+        Some(
+            serde_yaml::from_str::<BundleManifestSource>(&raw)
+                .with_context(|| format!("parse manifest source {}", source_path.display()))?,
+        )
+    } else {
+        None
+    };
+    let shadows = src.as_ref().map(|s| s.shadows.clone()).unwrap_or_default();
+
+    let expected = match name_override {
+        Some(name) => name.to_string(),
+        None => match &src {
+            Some(s) if !s.runtime_authority.is_empty() || !s.shadows.is_empty() => s.name.clone(),
+            _ => return Ok(None),
+        },
+    };
+    Ok(Some(LintContext { expected, shadows }))
 }
 
 /// True when the bundle's manifest source declares any runtime authority in any
@@ -554,32 +594,134 @@ fn item_effective_bundle_id(item_ref: &str) -> Option<&str> {
     bare.split('/').next().filter(|s| !s.is_empty())
 }
 
-/// Warn for every signed/validated/failed item whose effective bundle id
-/// diverges from `expected`. Such an item's runtime-authority caps would be
-/// minted under the wrong namespace and never match at dispatch.
+/// Result of the effective-bundle-id lint, split by precision:
+/// - `warnings` — cap-minting items (declaring manifest-backed runtime
+///   authority) whose effective bundle id diverges. These are actionable: the
+///   daemon would mint their caps under the wrong namespace and reject them at
+///   dispatch. Only these can escalate to a fatal publish error.
+/// - `shadow_warnings` — declared-vs-observed config-shadow mismatches: an
+///   observed foreign-namespace config item with no matching `shadows:`
+///   declaration (undeclared override), or a `shadows:` declaration with no
+///   shipped item (stale intent). Advisory: surfaced as warnings, never fatal.
+/// - `notes` — verified declared shadows and inert cross-namespace items
+///   (e.g. knowledge) that declare no runtime authority and cannot mint caps.
+///   Surfaced for visibility, never error-escalated.
+struct NamespaceLint {
+    warnings: Vec<sign_bundle::ItemWarning>,
+    shadow_warnings: Vec<sign_bundle::ItemWarning>,
+    notes: Vec<sign_bundle::ItemWarning>,
+}
+
+/// True when `item_ref` is a `config:` item — the kind project-first resolution
+/// shadows, so a foreign-namespace config item is an override candidate.
+fn is_config_ref(item_ref: &str) -> bool {
+    item_ref
+        .split_once(':')
+        .is_some_and(|(kind, _)| kind == "config")
+}
+
+/// Classify every signed/validated/failed item whose effective bundle id
+/// diverges from `expected`, and verify declared config shadows both ways.
+///
+/// The split is capability-based, not namespace-based: a foreign namespace only
+/// matters for cap minting (`declares_runtime_authority`). A project-first
+/// config shadow keeps its foreign namespace on purpose (that is how it shadows
+/// by exact ref) and never reaches the mint path — but it is verified against
+/// the bundle's signed `shadows:` intent: an observed shadow with no declaration
+/// warns (undeclared override), and a declaration with no shipped item warns
+/// (stale intent).
 fn lint_item_namespaces(
     report: &SignBundleReport,
     expected: &str,
-) -> Vec<sign_bundle::ItemWarning> {
-    let mut warnings: Vec<sign_bundle::ItemWarning> = report
+    shadows: &[String],
+) -> NamespaceLint {
+    let mut warnings: Vec<sign_bundle::ItemWarning> = Vec::new();
+    let mut shadow_warnings: Vec<sign_bundle::ItemWarning> = Vec::new();
+    let mut notes: Vec<sign_bundle::ItemWarning> = Vec::new();
+
+    let declared: std::collections::BTreeSet<&str> =
+        shadows.iter().map(String::as_str).collect();
+    let mut matched: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+
+    for outcome in report
         .validated
         .iter()
         .chain(&report.signed)
         .chain(&report.failed)
-        .filter_map(|outcome| {
-            let eff = item_effective_bundle_id(&outcome.item_ref)?;
-            (eff != expected).then(|| sign_bundle::ItemWarning {
+    {
+        let Some(eff) = item_effective_bundle_id(&outcome.item_ref) else {
+            continue;
+        };
+        if eff == expected {
+            continue;
+        }
+        if outcome.declares_runtime_authority {
+            warnings.push(sign_bundle::ItemWarning {
                 item_ref: outcome.item_ref.clone(),
                 message: format!(
-                    "effective bundle id '{eff}' diverges from the bundle's '{expected}' — \
-                     runtime-authority caps for this item would be minted under '{eff}' and \
-                     never match; namespace the item under '{expected}/…' or set --name"
+                    "effective bundle id '{eff}' diverges from the bundle's '{expected}', and \
+                     this item requests manifest-backed runtime authority — its caps would be \
+                     minted under '{eff}' and never match at dispatch. Namespace the item under \
+                     '{expected}/…' or set --name."
                 ),
-            })
-        })
-        .collect();
+            });
+            continue;
+        }
+        // Inert cross-namespace item: verify against declared config shadows.
+        if declared.contains(outcome.item_ref.as_str()) {
+            matched.insert(outcome.item_ref.as_str());
+            notes.push(sign_bundle::ItemWarning {
+                item_ref: outcome.item_ref.clone(),
+                message: format!(
+                    "declared config shadow verified: ships '{}' under foreign namespace \
+                     '{eff}' to override it via project-first resolution, as signed `shadows:` \
+                     intent. No action needed.",
+                    outcome.item_ref
+                ),
+            });
+        } else if is_config_ref(&outcome.item_ref) {
+            shadow_warnings.push(sign_bundle::ItemWarning {
+                item_ref: outcome.item_ref.clone(),
+                message: format!(
+                    "undeclared override: ships config '{}' under foreign namespace '{eff}' with \
+                     no matching `shadows:` declaration — declare it in manifest.source.yaml \
+                     `shadows:` or rename it into '{expected}/…'.",
+                    outcome.item_ref
+                ),
+            });
+        } else {
+            notes.push(sign_bundle::ItemWarning {
+                item_ref: outcome.item_ref.clone(),
+                message: format!(
+                    "effective bundle id '{eff}' diverges from the bundle's '{expected}', but \
+                     this item declares no manifest-backed runtime authority, so it cannot mint \
+                     caps — an inert cross-namespace item. No action needed."
+                ),
+            });
+        }
+    }
+
+    // Stale intent: declared shadows that no shipped item matched.
+    for decl in shadows {
+        if !matched.contains(decl.as_str()) {
+            shadow_warnings.push(sign_bundle::ItemWarning {
+                item_ref: decl.clone(),
+                message: format!(
+                    "stale `shadows:` declaration '{decl}' — no shipped item matches it; remove \
+                     the declaration or ship the overriding item."
+                ),
+            });
+        }
+    }
+
     warnings.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
-    warnings
+    shadow_warnings.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    notes.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
+    NamespaceLint {
+        warnings,
+        shadow_warnings,
+        notes,
+    }
 }
 
 /// Generate and sign `.ai/manifest.yaml` from `.ai/manifest.source.yaml`.
@@ -700,18 +842,22 @@ mod tests {
     use super::*;
     use crate::actions::sign_bundle::ItemOutcome;
 
-    fn validated_report(refs: &[&str]) -> SignBundleReport {
+    /// Build a validated-only report from `(item_ref, declares_runtime_authority)`
+    /// pairs.
+    fn report_from(items: &[(&str, bool)]) -> SignBundleReport {
         SignBundleReport {
-            validated: refs
+            validated: items
                 .iter()
-                .map(|r| ItemOutcome {
+                .map(|(r, ra)| ItemOutcome {
                     item_ref: (*r).to_string(),
                     error: None,
+                    declares_runtime_authority: *ra,
                 })
                 .collect(),
             signed: Vec::new(),
             failed: Vec::new(),
             warnings: Vec::new(),
+            notes: Vec::new(),
         }
     }
 
@@ -730,19 +876,95 @@ mod tests {
     }
 
     #[test]
-    fn lint_flags_only_divergent_items() {
-        let report = validated_report(&["tool:arc/play", "tool:arc/solve", "graph:other/x"]);
-        let warnings = lint_item_namespaces(&report, "arc");
-        assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert_eq!(warnings[0].item_ref, "graph:other/x");
-        assert!(warnings[0].message.contains("'other'"));
-        assert!(warnings[0].message.contains("'arc'"));
+    fn lint_warns_only_cap_minting_divergent_items() {
+        // A divergent item that requests manifest-backed runtime authority is
+        // an actionable warning; a matching-namespace cap item is clean.
+        let report = report_from(&[
+            ("tool:arc/play", true),
+            ("tool:arc/solve", true),
+            ("service:other/callback", true),
+        ]);
+        let lint = lint_item_namespaces(&report, "arc", &[]);
+        assert_eq!(lint.warnings.len(), 1, "got {:?}", lint.warnings);
+        assert_eq!(lint.warnings[0].item_ref, "service:other/callback");
+        assert!(lint.warnings[0].message.contains("'other'"));
+        assert!(lint.warnings[0].message.contains("'arc'"));
+        assert!(lint.shadow_warnings.is_empty());
+        assert!(lint.notes.is_empty());
+    }
+
+    #[test]
+    fn lint_undeclared_config_shadow_warns() {
+        // Foreign-namespace config items with no `shadows:` declaration are
+        // undeclared overrides — advisory warnings, never cap-minting warnings.
+        // A non-config inert item (knowledge) stays a plain note.
+        let report = report_from(&[
+            ("config:ryeos-runtime/execution", false),
+            ("config:ryeos-runtime/limits", false),
+            ("knowledge:other/notes", false),
+        ]);
+        let lint = lint_item_namespaces(&report, "downstream", &[]);
+        assert!(
+            lint.warnings.is_empty(),
+            "undeclared shadows must not escalate: {:?}",
+            lint.warnings
+        );
+        assert_eq!(lint.shadow_warnings.len(), 2, "got {:?}", lint.shadow_warnings);
+        assert!(lint.shadow_warnings[0].message.contains("undeclared override"));
+        assert_eq!(lint.notes.len(), 1, "got {:?}", lint.notes);
+        assert_eq!(lint.notes[0].item_ref, "knowledge:other/notes");
+    }
+
+    #[test]
+    fn lint_declared_config_shadow_verifies_as_note() {
+        // A declared shadow that is actually shipped is verified: a note, not a
+        // warning of any kind.
+        let report = report_from(&[
+            ("config:ryeos-runtime/execution", false),
+            ("config:ryeos-runtime/limits", false),
+        ]);
+        let shadows = vec![
+            "config:ryeos-runtime/execution".to_string(),
+            "config:ryeos-runtime/limits".to_string(),
+        ];
+        let lint = lint_item_namespaces(&report, "downstream", &shadows);
+        assert!(lint.warnings.is_empty());
+        assert!(
+            lint.shadow_warnings.is_empty(),
+            "verified shadows must not warn: {:?}",
+            lint.shadow_warnings
+        );
+        assert_eq!(lint.notes.len(), 2, "got {:?}", lint.notes);
+        assert!(lint.notes[0].message.contains("declared config shadow verified"));
+    }
+
+    #[test]
+    fn lint_stale_shadow_declaration_warns() {
+        // A `shadows:` declaration with no shipped item is stale intent.
+        let report = report_from(&[("config:ryeos-runtime/execution", false)]);
+        let shadows = vec![
+            "config:ryeos-runtime/execution".to_string(),
+            "config:ryeos-runtime/limits".to_string(),
+        ];
+        let lint = lint_item_namespaces(&report, "downstream", &shadows);
+        assert!(lint.warnings.is_empty());
+        assert_eq!(lint.shadow_warnings.len(), 1, "got {:?}", lint.shadow_warnings);
+        assert_eq!(
+            lint.shadow_warnings[0].item_ref,
+            "config:ryeos-runtime/limits"
+        );
+        assert!(lint.shadow_warnings[0].message.contains("stale"));
+        // The shipped-and-declared shadow is verified as a note.
+        assert_eq!(lint.notes.len(), 1);
     }
 
     #[test]
     fn lint_clean_when_all_items_match() {
-        let report = validated_report(&["tool:arc/play", "graph:arc/agent"]);
-        assert!(lint_item_namespaces(&report, "arc").is_empty());
+        let report = report_from(&[("tool:arc/play", true), ("graph:arc/agent", false)]);
+        let lint = lint_item_namespaces(&report, "arc", &[]);
+        assert!(lint.warnings.is_empty());
+        assert!(lint.shadow_warnings.is_empty());
+        assert!(lint.notes.is_empty());
     }
 }
 

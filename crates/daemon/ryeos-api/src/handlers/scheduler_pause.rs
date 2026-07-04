@@ -1,6 +1,8 @@
 //! `scheduler.pause` — disable a schedule without removing it.
 //!
-//! Ownership check: callers can only pause their own schedules.
+//! Ownership check: callers pause their own schedules; node-owned
+//! schedules (daemon maintenance registrations) accept any verified
+//! local operator.
 
 use std::sync::Arc;
 
@@ -34,7 +36,16 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(&spec.requester_fingerprint))?;
+    // Callers control their own schedules. NODE-owned schedules (the
+    // daemon's maintenance registrations, requester = the node identity)
+    // are controllable by any verified local operator: the operator can
+    // invoke the scheduled service directly, so gating its cadence tighter
+    // than the action itself would be incoherent.
+    if spec.requester_fingerprint == state.identity.fingerprint() {
+        ctx.require_verified()?;
+    } else {
+        ctx.require_owner(Some(&spec.requester_fingerprint))?;
+    }
 
     if !spec.enabled {
         return Ok(serde_json::json!({

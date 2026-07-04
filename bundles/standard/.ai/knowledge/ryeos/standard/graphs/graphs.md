@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-11T21:03:05Z:15cd647f99ce4ee48513a104dafad1db8d0e707443233c9381e808b6d78b9ae9:QxG3HIXeHLj+VUfc48wOSdCWcGxakICxe3RuijYhe6W+zTIxhX2fM0KZChfb6KLpUQ7lkfPziACptat/3xA6Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-03T09:54:31Z:6b69ff6bbe3b5e8c2b39416fc90c4170d7f2471ad5df21e0bf717b67d651590e:NBbtMKEBW8g3h/j+3gNj7dF2NxEX+MDGuC+hfMf/eBGvD704gpO46om6hnhQ8QqC4P1WYeZX8hge6jYgAyJUBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -106,6 +106,30 @@ edges:
 Supported operators: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`,
 `contains`, `regex`, `exists`.
 
+#### Same-node conditions: read `result.*`, not `state.*`
+
+A node's `assign` merges into state **after** its edges are evaluated, so a
+`when` on `state.<key>` where the *same node* assigns `<key>` compares against
+the value from before this node ran — unset on the first visit, one iteration
+stale inside a loop. Branch on the node's own outcome with `result.<key>`
+(the fresh result is placed in the condition context):
+
+```yaml
+recall:
+  action: { item_id: "tool:recall" }
+  assign: { found: "${result.found}" }
+  next:
+    type: conditional
+    branches:
+      - when: { path: "result.found", op: eq, value: "yes" }   # this node's outcome
+        to: warm
+      - to: study                                              # default
+```
+
+`state.<key>` is still correct for reading a value a **prior** node committed.
+Graph validation warns at signing time when a node assigns `K` and a same-node
+branch condition reads `state.K`.
+
 ## Foreach
 
 Iterate over lists with parallel or sequential execution:
@@ -127,20 +151,27 @@ nodes:
 
 ## Hooks
 
-Hooks intercept graph events for conditional logic:
+Declare `config.hooks` to observe graph lifecycle events with the same typed
+definition the directive runtime uses (`id`, `event`, optional `condition`,
+`action`) — one hook grammar across runtimes.
 
 ```yaml
-hooks:
-  - event: node_complete
-    condition:
-      path: "node.result.error"
-      op: exists
-    actions:
-      - type: retry
-        max_retries: 3
-      - type: goto
-        target: error_handler
+config:
+  hooks:
+    - id: announce_done
+      event: graph_completed
+      condition: { path: status, op: eq, value: completed }
+      action: { item_id: tool:ops/notify, params: { text: "graph ${graph_id} done" } }
 ```
+
+Fire points are `graph_started`, `graph_step_completed` (after every node,
+including a failed node before its `on_error` routing), and `graph_completed`.
+Hooks are **observers**: a hook action is a real dispatch (its `effective_caps`
+are enforced, its cost accrues to the run, it shows in the braid) but it cannot
+redirect the walk — routing stays the walker's job, and a failing hook is
+recorded as a warning, never a graph failure. Node-level resilience is the node
+`retry:` block, not a hook action. See `retry-and-hooks.md` for the full
+contract.
 
 ## State Persistence
 

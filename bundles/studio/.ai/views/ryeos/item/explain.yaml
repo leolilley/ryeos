@@ -1,0 +1,146 @@
+# ryeos:signed:2026-07-04T07:42:53Z:5a435acd20683e43b9e89a3d0688ad4e763a6b36e83a90209b70227b2401ee3e:JwAI6e5TTgpz8oXvkZt2NbJv4DWzaBfW1RBVP6ccbIOBvME7GYGX/cXWbQLSwHTF5/NnRU3uCHTTwIdujPaaDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: item-explain
+version: "1.0.0"
+description: >-
+  Item explain lens: the "why" read for one resolved item. Sections project
+  service:items/effective — the daemon's resolve/verify/compose output — so the
+  story behind a ref (what it resolved to, its inheritance chain and each link's
+  trust, the composed policy facts, and any diagnostics) reads at a glance
+  instead of hiding behind the opaque composed value. Each section reads a
+  sub-value of the one effective-item response, so a ref with no ancestors /
+  no policy facts / no diagnostics degrades to empty sections rather than a
+  raw-JSON dump.
+
+widget: sections
+title: Explain
+
+sections:
+  # Resolution: the whole effective-item response as one detail row. Primary is
+  # the resolved canonical ref, meta is the on-disk source path it was read and
+  # verified from, toned by the effective (weakest-link) trust class. The
+  # requested ref equals the canonical ref except under alias expansion — that
+  # drift shows in the Extends chain rows' alias hops.
+  - title: Resolution
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+    projection:
+      primary: canonical_ref
+      meta: source.path
+      tone:
+        field: trust_class
+        map:
+          trusted_bundle: good
+          trusted_project: good
+          untrusted_project: danger
+          unsigned: warn
+        default: neutral
+
+  # Extends chain: one row per inheritance ancestor (deepest first), each toned
+  # by its own trust class so a weak link in an otherwise-trusted chain reads
+  # immediately. Primary is the ancestor's resolved ref; meta is its
+  # content digest (the pinned bytes the daemon verified). Empty when the item
+  # has no extends chain.
+  - title: Extends chain
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+      collection: provenance.ancestors
+    projection:
+      primary: resolved_ref
+      meta: raw_content_digest
+      tone:
+        field: trust_class
+        map:
+          trusted_bundle: good
+          trusted_project: good
+          untrusted_project: danger
+          unsigned: warn
+        default: neutral
+
+  # Policy facts: the daemon-composed policy values (e.g. effective_caps) the
+  # launcher reads by name. A map keyed by fact name — projected as one detail
+  # row carrying the composed facts. Empty ({}) for kinds that declare none.
+  - title: Policy facts
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+      collection: policy_facts
+    projection: {}
+
+  # Diagnostics: resolution notes (extends-chain summary, shadowing) the daemon
+  # emitted while composing this item. One row each; empty when clean.
+  - title: Diagnostics
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+      collection: diagnostics
+    projection:
+      primary: message
+      meta: level
+      tone:
+        field: level
+        map:
+          info: neutral
+          warning: warn
+          error: danger
+        default: neutral
+
+  # ── Thread-scoped (as-launched) sections ────────────────────────────────
+  # When a thread is selected (selection.thread), the handler attaches an
+  # `as_launched` block: the digest the thread persisted AT LAUNCH, rendered as
+  # truth. The sections above are the fresh "resolved now" — reading both side
+  # by side IS the re-resolve comparison. Empty when no thread is selected (the
+  # as_launched block is absent) or none was recorded (present: false).
+
+  # As launched: the launch-time root ref + effective trust class, toned by the
+  # weakest-link trust the thread actually launched under.
+  - title: As launched
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+        thread_id: "@facet:selection.thread"
+      collection: as_launched.root
+    projection:
+      primary: resolved_ref
+      meta: raw_content_digest
+      tone:
+        field: trust_class
+        map:
+          trusted_bundle: good
+          trusted_project: good
+          untrusted_project: danger
+          unsigned: warn
+        default: neutral
+
+  # As-launched extends chain: one row per ancestor as composed at launch,
+  # toned by `changed` so an ancestor whose content digest drifted since launch
+  # (edited, republished, or dropped from the chain) reads immediately. Meta is
+  # the pinned launch digest; the full bytes are reconstructable from CAS by it.
+  - title: As launched — extends chain
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+        thread_id: "@facet:selection.thread"
+      collection: as_launched.ancestors
+    projection:
+      primary: resolved_ref
+      meta: raw_content_digest
+      tone:
+        field: changed
+        map:
+          "true": danger
+          "false": good
+        default: neutral
+
+# Re-fetch whenever the selected item or thread changes (the explain affordance
+# writes selection.item before opening this lens; thread-scoped entry also
+# writes selection.thread).
+refresh:
+  on_facet: selection

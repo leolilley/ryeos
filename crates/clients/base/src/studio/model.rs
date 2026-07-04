@@ -372,10 +372,6 @@ pub struct StudioDataState {
     /// shared `file_space` (ambient / scopeless tiles).
     pub tile_file_space: HashMap<String, StudioFileSpaceDto>,
     pub file_read: Option<StudioFileReadDto>,
-    /// Command records from `service:commands/list` (completion data;
-    /// open JSON — projected, never typed per-command).
-    #[serde(default)]
-    pub commands: Option<serde_json::Value>,
     /// Bound-view source responses, keyed by tile id (the generic data
     /// system: open JSON, projected through view bindings).
     #[serde(default)]
@@ -580,7 +576,6 @@ impl StudioCore {
         let mut effects = vec![
             self.emit(StudioEffectKind::FetchDimension),
             self.emit(StudioEffectKind::FetchProjects),
-            self.emit(StudioEffectKind::FetchCommands),
         ];
         for (tile_id, view_ref) in bound_tiles {
             effects.extend(self.emit_fetch_source(tile_id, &view_ref));
@@ -604,6 +599,28 @@ impl StudioCore {
             })
             .collect();
         for (key, source_ref) in mention_fetches {
+            effects.push(self.emit(StudioEffectKind::FetchSource {
+                tile_id: key,
+                source_ref,
+                params: serde_json::json!({}),
+            }));
+        }
+        // `completion` sources (the line-start `/` grammar): fetched through the
+        // same generic keyed FetchSource as mentions, read back by the
+        // slash-completion projectors. No bespoke commands effect.
+        let completion_fetches: Vec<(String, String)> = self
+            .views
+            .iter()
+            .filter_map(|(view_ref, binding)| {
+                let input = binding.input.as_ref()?;
+                let completion = input.completion.as_ref()?;
+                Some((
+                    super::content::completion_source_key(view_ref, &input.id),
+                    completion.item_ref.clone(),
+                ))
+            })
+            .collect();
+        for (key, source_ref) in completion_fetches {
             effects.push(self.emit(StudioEffectKind::FetchSource {
                 tile_id: key,
                 source_ref,
@@ -962,19 +979,23 @@ impl StudioCore {
         // result (cursor at end, leading single `/`, a matching record) —
         // the same predicate `CompleteInput` acts on, so Tab never dispatches
         // a no-op completion when it could cycle the target instead.
-        let slash_can_accept = input
-            .and_then(|i| i.completion.as_ref())
-            .filter(|c| c.item_ref == "service:commands/list")
-            .and_then(|_| {
-                self.data
-                    .commands
-                    .as_ref()
-                    .and_then(|d| d.get("commands"))
-                    .and_then(serde_json::Value::as_array)
+        let slash_can_accept = focused
+            .as_ref()
+            .and_then(|(key, view_ref)| {
+                let completion = self
+                    .views
+                    .get(view_ref)?
+                    .input
+                    .as_ref()?
+                    .completion
+                    .as_ref()?;
+                let response = self.data.sources.get(
+                    &super::content::completion_source_key(view_ref, &key.input_id),
+                )?;
+                let records = super::content::completion_records(completion, response);
+                super::tokenize::accept_slash_completion(records, &text, cursor).map(|_| ())
             })
-            .is_some_and(|records| {
-                super::tokenize::accept_slash_completion(records, &text, cursor).is_some()
-            });
+            .is_some();
 
         // A mention can accept now iff the cursor sits in an `@`-token and the
         // declared mentions source has a matching ref — the same predicate

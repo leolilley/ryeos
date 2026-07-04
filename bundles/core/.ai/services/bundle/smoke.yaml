@@ -1,0 +1,12 @@
+# ryeos:signed:2026-07-04T03:59:52Z:ce385cb57f0145f3338930058770638f51be78573e10468fe5be23329a56bbfc:/bUgcFsOvi5LddK3nr3JZdd3YPmkJ/6+l7NSzEzKMowr08/DYzvfWWLXCb6zE49NDvo7RO0Hkf2+HyZyhCbNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: bundle.smoke
+# Cap enforcement reads the VERIFIED YAML, not the Rust descriptor — this
+# service dispatches arbitrary manifest-declared items, so it must be gated
+# here.
+required_caps:
+  - ryeos.execute.service.bundle/smoke
+schema:
+  source: string
+  keep_state: boolean?
+description: "Execute the bundle's declared smoke list (manifest.source.yaml `smoke:`) against its source tree. Runs bundle preflight first, then dispatches each entry as a normal inline thread with runtime state isolated under a temporary state root; the report carries per-entry status, thread ids, and the state root (kept on failure or with keep_state)."

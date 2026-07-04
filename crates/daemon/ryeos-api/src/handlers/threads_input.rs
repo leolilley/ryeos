@@ -78,6 +78,13 @@ fn is_continuable(status: &str) -> bool {
     )
 }
 
+/// The operator-facing notice for an accepted live steer, reporting the current
+/// staged depth (the input queued behind any not-yet-folded ones). `pending` is
+/// the queue depth AFTER this input was enqueued, so it is always ≥ 1.
+fn staged_notice(pending: usize) -> String {
+    format!("Input queued ({pending} staged).")
+}
+
 /// Where a follow-up to an existing thread lands, decided purely from status.
 #[derive(Debug, PartialEq, Eq)]
 enum FollowUpDecision {
@@ -196,8 +203,8 @@ pub async fn handle(
                 FollowUpDecision::Live => {
                     let input =
                         LiveInput::new(req.input.clone(), req.intent);
-                    match state.live_input.enqueue(&detail.thread_id, input) {
-                        EnqueueOutcome::Accepted { .. } => {}
+                    let pending = match state.live_input.enqueue(&detail.thread_id, input) {
+                        EnqueueOutcome::Accepted { pending } => pending,
                         EnqueueOutcome::Full { pending } => {
                             return Ok(json!({
                                 "thread_id": Value::Null,
@@ -225,12 +232,16 @@ pub async fn handle(
                                 "execution": exec_facts(&detail.kind),
                             }));
                         }
-                    }
+                    };
 
+                    // Default notice reports the staged depth so the operator can
+                    // see input piling up before the runtime folds it. An
+                    // interrupt that failed to signal overrides it with the
+                    // degrade message below.
+                    let mut notice = json!(staged_notice(pending));
                     // Interrupt: cut the in-flight cognition. The input is
                     // already enqueued, so on any signal failure we degrade to a
                     // cooperative steer (it still folds at the next boundary).
-                    let mut notice = Value::Null;
                     if req.intent.is_interrupt() {
                         let outcome = match detail.runtime.pgid {
                             Some(pgid) => {
@@ -256,6 +267,7 @@ pub async fn handle(
                         "thread_id": detail.thread_id,
                         "delivery": "submitted",
                         "notice": notice,
+                        "pending": pending,
                         "execution": exec_facts(&detail.kind),
                     }));
                 }
@@ -366,6 +378,9 @@ pub async fn handle(
             path: project_path.as_path().to_path_buf(),
         },
         original_snapshot_hash: None,
+        // Operator follow-up launches against the live project tree.
+        original_pushed_head_ref: None,
+            state_root: None,
         current_site_id: previous.current_site_id.clone(),
         origin_site_id: previous.origin_site_id.clone(),
         requested_by: EffectivePrincipal::Local(Principal {
@@ -471,6 +486,12 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_notice_reports_depth() {
+        assert_eq!(staged_notice(1), "Input queued (1 staged).");
+        assert_eq!(staged_notice(2), "Input queued (2 staged).");
+    }
 
     #[test]
     fn settled_statuses_match_state_store_vocabulary() {

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-29T04:03:42Z:f5ae9ed65f41170127d079a49a0f9a797e1ca6166fba2fd7e1bc519d89e16cd7:DlFjsvdQlExoynDjl71q4CFxKetfObkCnECSfCY6iILY7OhvqXNKwasxpRNPzb6f/Zl7C2esV5gS8svK1saZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-04T08:15:07Z:ca6ad265531d83aef525ea476648ef7e40bba624b8ed4dde7872893b0a408fbf:AzuL89qklFmntACCuSAHp7bdBFu7iPgy7rGirifGIjK7YJBJz9/SjK9FSyS6149gAW+oT5OwEdhlWtEwChsKAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: chain-timeline
 version: "1.0.0"
 description: Event braid timeline for the input route's conversation chain
@@ -40,6 +40,51 @@ projections:
           size_cap_exceeded: warn
           result_guard: warn
         default: good
+    provider_retry:
+      primary: payload.error
+      meta: payload.attempt
+      role: boundary
+      tone:
+        field: event_type
+        missing: warn
+        map:
+          provider_retry: warn
+        default: warn
+    cost_untracked:
+      primary: payload.model
+      meta: payload.reason
+      role: boundary
+      tone:
+        field: event_type
+        missing: warn
+        map:
+          cost_untracked: warn
+        default: warn
+    # A graph `follow:` node suspended the run (`continued`) to await its child
+    # chain. The event names only the local follow node — the child chain is
+    # dispatched after the checkpoint, so the payload carries no child ref. The
+    # timeline widget refines this into an accent milestone (see
+    # `execution_entry` in base `studio::timeline`); the boundary projection here
+    # is the declarative record for other consumers.
+    graph_follow_suspended:
+      primary: payload.node
+      meta: payload.item_id
+      role: boundary
+    # Generic domain milestone — the runtime-on-behalf-of-tool channel. Surface
+    # the namespaced `kind` (e.g. arc's level_up / cases_emitted / board) with
+    # the graph node that produced it, accent-toned so the meaningful moments
+    # stand out. This is the legible default so a milestone never renders as a
+    # bare event line; an arc-tuned view can refine per-kind (e.g. render a
+    # board) on top of it.
+    milestone:
+      primary: payload.kind
+      meta: payload.node
+      role: line
+      tone:
+        field: event_type
+        map:
+          milestone: accent
+        default: accent
   default:
     primary: event_type
     meta: ts

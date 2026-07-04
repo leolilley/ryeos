@@ -203,8 +203,8 @@ fn stage_real_core_binaries(bundle: &Path) {
 fn run_publish_once(
     bundle_dir: &Path,
     key: &SigningKey,
-) -> ryeos_tools::actions::publish::PublishReport {
-    let opts = ryeos_tools::actions::publish::PublishOptions {
+) -> ryeos_core_tools::actions::publish::PublishReport {
+    let opts = ryeos_core_tools::actions::publish::PublishOptions {
         bundle_source: bundle_dir.to_path_buf(),
         registry_roots: vec![bundle_dir.to_path_buf()], // core is its own registry
         signing_key: key.clone(),
@@ -213,9 +213,13 @@ fn run_publish_once(
         name: None,
         skip_unsignable: false,
         allow_namespace_mismatch: false,
+        // Core alone carries `knowledge/` items whose kind is defined by
+        // standard; publishing core as its own registry is a deliberately
+        // partial publish, so the uncovered-dir check is opted out here.
+        allow_uncovered_item_dirs: true,
         emit_trust_doc: false,
     };
-    ryeos_tools::actions::publish::run_publish(&opts)
+    ryeos_core_tools::actions::publish::run_publish(&opts)
         .unwrap_or_else(|e| panic!("publish failed: {e:#}"))
 }
 

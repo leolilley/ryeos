@@ -8,7 +8,7 @@ pub fn write_knowledge_transcript(
     graph_run_id: &str,
     result_json: &str,
 ) -> Result<()> {
-    let base = Path::new(project_path).join(".ai/knowledge/state/graphs");
+    let base = Path::new(project_path).join(".ai/state/graphs");
     let dir = base.join(safe_relative_subpath(graph_id)?);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{graph_run_id}.md"));
@@ -27,7 +27,7 @@ pub fn write_knowledge_transcript(
 /// `Normal` components only. Rejects absolute paths, drive prefixes,
 /// `..` traversal, and Windows verbatim/UNC roots so an attacker (or
 /// a buggy upstream that accepts a malformed `category`) cannot
-/// escape the `.ai/knowledge/state/graphs/` base on `Path::join`.
+/// escape the `.ai/state/graphs/` base on `Path::join`.
 ///
 /// Empty input or input that contains no `Normal` components yields
 /// an error rather than silently writing to the base directory.
@@ -41,7 +41,7 @@ fn safe_relative_subpath(graph_id: &str) -> Result<PathBuf> {
             // rebuilding only from Normal components keeps the result
             // strictly relative and inside the base on `join`.
             Component::ParentDir => bail!(
-                "graph_id contains '..' traversal which would escape the knowledge base: {graph_id:?}"
+                "graph_id contains '..' traversal which would escape the transcript base: {graph_id:?}"
             ),
             Component::RootDir | Component::Prefix(_) => continue,
             Component::CurDir => continue,
@@ -63,11 +63,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         write_knowledge_transcript(&path, "test/graph", "gr-abc", r#"{"success": true}"#).unwrap();
-        let written = std::fs::read_to_string(
-            dir.path()
-                .join(".ai/knowledge/state/graphs/test/graph/gr-abc.md"),
-        )
-        .unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join(".ai/state/graphs/test/graph/gr-abc.md"))
+                .unwrap();
         assert!(written.contains("gr-abc"));
         assert!(written.contains("test/graph"));
         assert!(written.contains(r#"{"success": true}"#));
@@ -82,9 +80,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         write_knowledge_transcript(&path, "/flow", "gr-1", r#"{"ok": 1}"#).unwrap();
-        let written =
-            std::fs::read_to_string(dir.path().join(".ai/knowledge/state/graphs/flow/gr-1.md"))
-                .unwrap();
+        let written = std::fs::read_to_string(dir.path().join(".ai/state/graphs/flow/gr-1.md"))
+            .unwrap();
         assert!(written.contains("gr-1"));
     }
 

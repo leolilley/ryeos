@@ -4,9 +4,10 @@ use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
 
 use crate::context::ExecutionContext;
-use crate::model::{ErrorRecord, GraphNode, WalkContext};
+use crate::model::{ErrorRecord, GraphNode, RetryConfig, WalkContext};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::RuntimeCost;
+use ryeos_runtime::events::RuntimeEventType;
 
 /// Fold one iteration's reported cost into the foreach node's running
 /// aggregate. The first cost-bearing iteration seeds the total so a
@@ -53,6 +54,94 @@ pub struct ForeachContext<'a> {
     pub exec_ctx: Option<&'a ExecutionContext>,
     pub step: u32,
     pub current_node: &'a str,
+    pub graph_run_id: &'a str,
+    pub definition_ref: &'a str,
+    pub definition_hash: &'a str,
+}
+
+/// Immutable event context for a foreach node's braid-visible per-item retry
+/// events. Cloned into each parallel task so a spawned iteration can emit its
+/// own retry milestones.
+#[derive(Clone)]
+struct RetryEventCtx {
+    graph_run_id: String,
+    definition_ref: String,
+    definition_hash: String,
+    node: String,
+    step: u32,
+}
+
+/// Dispatch one foreach item, retrying on a dispatch-level failure (transport
+/// error or a classified leaf `Failure`) per the node's `retry` policy. Unlike
+/// the single-action path, a foreach's per-item retries run inside this one
+/// walker step (they do NOT consume walker steps and are not individually
+/// checkpointed); each item keeps its own attempt count. Every re-attempt
+/// emits a braid-visible `graph_node_retry` event, then sleeps the backoff.
+async fn dispatch_item_with_retry(
+    client: &CallbackClient,
+    action: &Value,
+    thread_id: &str,
+    project_path: &str,
+    exec_ctx: Option<&ExecutionContext>,
+    retry: Option<&RetryConfig>,
+    ev: &RetryEventCtx,
+    item_id: &str,
+) -> anyhow::Result<crate::dispatch::ActionOutcome> {
+    let total = retry.map(|r| r.attempts).unwrap_or(1);
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let outcome =
+            crate::dispatch::dispatch_action(client, action, thread_id, project_path, exec_ctx)
+                .await;
+        let failed = matches!(&outcome, Err(_))
+            || matches!(&outcome, Ok(crate::dispatch::ActionOutcome::Failure(_)));
+        if !failed || attempt >= total {
+            return outcome;
+        }
+        let rc = retry.expect("retry policy present when total attempts > 1");
+        let diagnostic = match &outcome {
+            Err(e) => format!("{e:#}"),
+            Ok(crate::dispatch::ActionOutcome::Failure(f)) => f.diagnostic.clone(),
+            _ => String::new(),
+        };
+        let delay = rc.delay_ms(attempt);
+        // Fire-and-forget observability: a failed callback here must not abort
+        // the item's own retry loop.
+        let _ = client
+            .append_runtime_event(
+                RuntimeEventType::GraphNodeRetry,
+                Value::Object(
+                    [
+                        ("graph_run_id".to_string(), Value::String(ev.graph_run_id.clone())),
+                        (
+                            "definition_ref".to_string(),
+                            Value::String(ev.definition_ref.clone()),
+                        ),
+                        (
+                            "definition_hash".to_string(),
+                            Value::String(ev.definition_hash.clone()),
+                        ),
+                        ("node".to_string(), Value::String(ev.node.clone())),
+                        (
+                            "node_ref".to_string(),
+                            Value::String(format!("{}#node:{}", ev.definition_ref, ev.node)),
+                        ),
+                        ("step".to_string(), Value::from(ev.step)),
+                        ("item_id".to_string(), Value::String(item_id.to_string())),
+                        ("attempt".to_string(), Value::from(attempt)),
+                        ("attempts".to_string(), Value::from(total)),
+                        ("delay_ms".to_string(), Value::from(delay)),
+                        ("error".to_string(), Value::String(diagnostic)),
+                        ("foreach".to_string(), Value::Bool(true)),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
 }
 
 pub async fn run_foreach_sequential(
@@ -70,7 +159,17 @@ pub async fn run_foreach_sequential(
         exec_ctx,
         step,
         current_node,
+        graph_run_id,
+        definition_ref,
+        definition_hash,
     } = ctx;
+    let retry_ev = RetryEventCtx {
+        graph_run_id: graph_run_id.to_string(),
+        definition_ref: definition_ref.to_string(),
+        definition_hash: definition_hash.to_string(),
+        node: current_node.to_string(),
+        step,
+    };
     let mut results = Vec::new();
     let mut errors = Vec::new();
     let mut total_cost: Option<RuntimeCost> = None;
@@ -111,12 +210,26 @@ pub async fn run_foreach_sequential(
             }
         };
         let stripped = strip_none_values(&interpolated);
+        let item_dispatch_id = stripped
+            .get("item_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
-        match crate::dispatch::dispatch_action(client, &stripped, thread_id, project_path, exec_ctx)
-            .await
+        match dispatch_item_with_retry(
+            client,
+            &stripped,
+            thread_id,
+            project_path,
+            exec_ctx,
+            node.retry.as_ref(),
+            &retry_ev,
+            &item_dispatch_id,
+        )
+        .await
         {
             Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                let crate::dispatch::ActionSuccess { result: val, cost } = success;
+                let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
                 add_cost(&mut total_cost, cost);
                 // Interpolate assign BEFORE committing the result, so an
                 // assign failure makes this item a Null/error — matching
@@ -200,7 +313,18 @@ pub async fn run_foreach_parallel(
         exec_ctx: _exec_ctx_ref,
         step,
         current_node,
+        graph_run_id,
+        definition_ref,
+        definition_hash,
     } = ctx;
+    let retry_ev = RetryEventCtx {
+        graph_run_id: graph_run_id.to_string(),
+        definition_ref: definition_ref.to_string(),
+        definition_hash: definition_hash.to_string(),
+        node: current_node.to_string(),
+        step,
+    };
+    let retry_cfg = node.retry.clone();
     let max_conc = node.max_concurrency.unwrap_or(8);
     let sem = Arc::new(Semaphore::new(max_conc));
     let mut handles = Vec::new();
@@ -245,6 +369,8 @@ pub async fn run_foreach_parallel(
         let project_path = project_path.to_string();
         let exec_ctx = exec_ctx.clone();
         let assign = node.assign.clone();
+        let retry_cfg = retry_cfg.clone();
+        let retry_ev = retry_ev.clone();
         // Full item context (state + inputs + item var) so assign resolves
         // the same way the sequential path does.
         let assign_ctx_base = item_ctx_val.clone();
@@ -252,17 +378,25 @@ pub async fn run_foreach_parallel(
         let handle = tokio::spawn(async move {
             let _permit = permit;
             let stripped = strip_none_values(&interpolated);
-            match crate::dispatch::dispatch_action(
+            let item_dispatch_id = stripped
+                .get("item_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            match dispatch_item_with_retry(
                 &client,
                 &stripped,
                 &thread_id,
                 &project_path,
                 Some(&exec_ctx),
+                retry_cfg.as_ref(),
+                &retry_ev,
+                &item_dispatch_id,
             )
             .await
             {
                 Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                    let crate::dispatch::ActionSuccess { result: val, cost } = success;
+                    let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
                     let assign_val = if let Some(ref assign_expr) = assign {
                         let mut assign_ctx_map =
                             assign_ctx_base.as_object().cloned().unwrap_or_default();

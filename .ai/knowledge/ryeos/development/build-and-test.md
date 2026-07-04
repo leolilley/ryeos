@@ -55,7 +55,7 @@ call it directly:
 
 `--all` is required — populate refuses to rebuild the whole bundle set
 implicitly (exits 2 otherwise). Use `--crates "<crate ...>"` to rebuild only
-what changed (e.g. `--crates ryeos-tools`), and `--jobs N` to cap parallelism if
+what changed (e.g. `--crates ryeos-core-tools`), and `--jobs N` to cap parallelism if
 a full release build runs the machine out of memory.
 
 It does all of this as one atomic authoring refresh:

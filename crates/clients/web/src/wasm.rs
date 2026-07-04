@@ -4,11 +4,12 @@
 //! semantic view model, and scene model; browser JavaScript owns adapters
 //! for fetch/EventSource/DOM/Three.js and returns events/effect results.
 
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use ryeos_client_base::studio::{
-    BrowserSession as StudioBrowserSession, BrowserViewport, StudioCore, StudioEffectResult,
-    StudioEvent,
+    studio_key_command, BrowserSession as StudioBrowserSession, BrowserViewport, StudioCore,
+    StudioEffectResult, StudioEnvelope, StudioEvent, StudioKeyCommand, StudioKeyEvent,
 };
 use ryeos_client_base::studio::{SeatEvent, SeatEventKind};
 
@@ -87,6 +88,52 @@ pub fn studio_apply_effect_result(result_json: JsValue) -> Result<JsValue, JsVal
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         let effects = core.dispatch(StudioEvent::EffectResult { result });
         studio_envelope(core, effects)
+    })
+}
+
+/// The resolved outcome of a key press: whether the shared keymap consumed the
+/// key (so the browser suppresses its native default) plus the updated
+/// envelope to commit.
+#[derive(Serialize)]
+struct StudioKeyOutcome {
+    handled: bool,
+    envelope: StudioEnvelope,
+}
+
+/// Route a browser key press through the SHARED studio keymap.
+///
+/// JavaScript translates a DOM `KeyboardEvent` into a neutral `StudioKeyEvent`
+/// (`{ key, modifiers }`) and calls this. The binding table lives in
+/// `ryeos_client_base::studio::studio_key_command` — the exact function the
+/// terminal uses — so the two renderers never diverge on what a key does. The
+/// focus-context capabilities are resolved by the shared `key_context()`.
+/// Genuinely-web key handling (native text-input editing, launcher search,
+/// pointer, focus capture) stays in JavaScript and never reaches here.
+#[wasm_bindgen]
+pub fn studio_key(event_json: JsValue) -> Result<JsValue, JsValue> {
+    let event: StudioKeyEvent = serde_wasm_bindgen::from_value(event_json)
+        .map_err(|e| JsValue::from_str(&format!("invalid RyeOS key event: {e}")))?;
+
+    STUDIO.with(|state| {
+        let mut state = state.borrow_mut();
+        let core = state
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
+        let command = studio_key_command(event, core.key_context());
+        // Quit is a terminal affordance (Ctrl+C); the browser has nothing to
+        // quit and leaves the key native. Ignore is an unbound key — also
+        // native, so browser chords (Ctrl+R, F5, copy) still work.
+        let handled = !matches!(command, StudioKeyCommand::Quit | StudioKeyCommand::Ignore);
+        // Interpretation is shared: `StudioCore::apply_key_command` owns the
+        // row-cursor walk, focus fallback, and launcher edits for BOTH
+        // renderers.
+        let effects = core.apply_key_command(command);
+        let outcome = StudioKeyOutcome {
+            handled,
+            envelope: core.envelope(effects),
+        };
+        serde_wasm_bindgen::to_value(&outcome)
+            .map_err(|e| JsValue::from_str(&format!("serialize RyeOS key outcome: {e}")))
     })
 }
 

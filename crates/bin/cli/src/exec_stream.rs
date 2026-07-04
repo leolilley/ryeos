@@ -78,7 +78,17 @@ pub fn render_event(ev: &SseEvent) -> StreamOutcome {
                 print!("{text}");
                 let _ = std::io::stdout().flush();
             } else {
-                println!("· {}", ev.event);
+                // The event already carries a rich payload; surface it instead
+                // of dropping it. `payload_summary` reflects whatever fields are
+                // there generically — it names no event's fields, so a new event
+                // kind needs no change here (the vocabulary stays in the events,
+                // not this binary).
+                let summary = payload_summary(inner);
+                if summary.is_empty() {
+                    println!("· {}", ev.event);
+                } else {
+                    println!("· {}  {summary}", ev.event);
+                }
             }
             StreamOutcome::Continue
         }
@@ -113,6 +123,76 @@ fn human_text(payload: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// Max rendered length of a single field value before it is elided.
+const FIELD_VALUE_MAX: usize = 32;
+/// Soft cap on total summary width so a fat payload can't blow the line.
+const SUMMARY_WIDTH_CAP: usize = 120;
+
+/// A generic one-line summary of a payload's scalar fields: `key=value` pairs,
+/// with one level of nesting flattened dotted (`cost.tokens=…`), each value
+/// truncated and the whole line width-capped.
+///
+/// This carries NO per-event knowledge — it reflects whatever fields the
+/// payload happens to hold, in the payload's own key order — so a new event
+/// kind surfaces its detail with no change here. Arrays and deeper nesting are
+/// skipped to keep the line honest and tight; the full event is always on the
+/// wire for anything richer.
+fn payload_summary(payload: &Value) -> String {
+    let Some(obj) = payload.as_object() else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut width = 0usize;
+    for (key, value) in obj {
+        match value {
+            Value::String(_) | Value::Number(_) | Value::Bool(_) => {
+                push_field(&mut parts, &mut width, key, value);
+            }
+            // One level of descent: flatten a nested object's own scalars dotted.
+            Value::Object(sub) => {
+                for (subkey, subval) in sub {
+                    if matches!(
+                        subval,
+                        Value::String(_) | Value::Number(_) | Value::Bool(_)
+                    ) {
+                        push_field(&mut parts, &mut width, &format!("{key}.{subkey}"), subval);
+                        if width >= SUMMARY_WIDTH_CAP {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Arrays, null, deeper nesting: skipped (kept off the one-liner).
+            _ => {}
+        }
+        if width >= SUMMARY_WIDTH_CAP {
+            break;
+        }
+    }
+    parts.join(" ")
+}
+
+/// Format one `key=value` field (value truncated) and account its width.
+fn push_field(parts: &mut Vec<String>, width: &mut usize, key: &str, value: &Value) {
+    let raw = match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let field = format!("{key}={}", truncate_value(&raw, FIELD_VALUE_MAX));
+    *width += field.chars().count() + 1;
+    parts.push(field);
+}
+
+/// Truncate a value on a char boundary, marking elision with a single ellipsis.
+fn truncate_value(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
@@ -179,6 +259,50 @@ mod tests {
         );
         assert_eq!(human_text(&serde_json::json!({"delta": ""})), None);
         assert_eq!(human_text(&serde_json::json!({"other": 1})), None);
+    }
+
+    #[test]
+    fn payload_summary_renders_scalars_and_one_level_nesting() {
+        // Scalars become key=value in payload order; a nested object flattens
+        // dotted; a long value is elided; arrays/deeper nesting are skipped.
+        let p = serde_json::json!({
+            "call_id": "gr-eb7d9e3da2bc:30:aim",
+            "step": 30,
+            "ok": true,
+            "cost": { "tokens": 812 },
+            "items": [1, 2, 3],
+            "definition_hash": "1154fd1bf7f56dfe623e3ec8c0a6b5f12c561fad7a4398a4c40a328fcec67ac8"
+        });
+        let s = payload_summary(&p);
+        assert!(s.contains("call_id=gr-eb7d9e3da2bc:30:aim"));
+        assert!(s.contains("step=30"));
+        assert!(s.contains("ok=true"));
+        assert!(s.contains("cost.tokens=812"), "one level of nesting, dotted");
+        assert!(!s.contains("items="), "arrays are skipped");
+        // The long hash is present but truncated with an ellipsis.
+        assert!(s.contains("definition_hash=1154"));
+        assert!(s.contains('…'), "long values are elided");
+        assert!(!s.contains("c40a328fcec67ac8"), "no untruncated tail");
+    }
+
+    #[test]
+    fn payload_summary_empty_for_non_object() {
+        assert_eq!(payload_summary(&serde_json::json!("scalar")), "");
+        assert_eq!(payload_summary(&serde_json::json!([1, 2])), "");
+        assert_eq!(payload_summary(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn structured_event_renders_summary_not_bare_name() {
+        // A tool_call_start with no human_text field surfaces its payload
+        // fields generically instead of the bare `· event` line.
+        assert!(matches!(
+            render_event(&ev(
+                "tool_call_start",
+                "{\"payload\":{\"call_id\":\"abc\",\"tool\":\"bash\"}}"
+            )),
+            StreamOutcome::Continue
+        ));
     }
 
     #[test]

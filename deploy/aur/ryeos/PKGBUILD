@@ -51,13 +51,11 @@ package() {
     # ── Bundle YAML data ────────────────────────────────────
     # Ship each bundle under /usr/share/ryeos/<name>/.ai/.
     # Plain `ryeos init` uses /usr/share/ryeos as its default source and
-    # discovers immediate children
-    # containing .ai/ — so the layout must be:
-    #   /usr/share/ryeos/core/.ai/...
-    #   /usr/share/ryeos/standard/.ai/...
-    #   /usr/share/ryeos/web/.ai/...
-    #   /usr/share/ryeos/studio/.ai/...
-    #   /usr/share/ryeos/hosted-node/.ai/...
+    # discovers immediate children containing .ai/. The loop below ships every
+    # bundle directory present under bundles/ — currently core, central-auth,
+    # standard, web, browser, studio, hosted-node — so it never drifts from the
+    # tree. (The shell installers enumerate sets from scripts/pkg/bundle-sets.sh;
+    # this package build simply ships all of them.)
     mkdir -p "$pkgdir/usr/share/ryeos"
     cp -ra bundles/.ai "$pkgdir/usr/share/ryeos/.ai"
     for bundle_dir in bundles/*/; do

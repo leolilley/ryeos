@@ -359,13 +359,16 @@ pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<Threa
 ///
 /// When `filter_principal` is `Some(fp)`, only threads with
 /// `requested_by = fp` are returned. `None` returns all threads.
-/// Row ordering for a thread listing. `Default` is the historical
-/// oldest-first order (public `threads.list`, CLI); `Watch` is the operator
-/// watch-console order: active threads (non-terminal status) first, then newest.
+/// Row ordering for a thread listing. `Default` is the oldest-first order
+/// (public `threads.list`, CLI); `Newest` is newest-first — the "what just
+/// ran" order, which matters because the limit truncates (oldest-first +
+/// limit returns the OLDEST rows); `Watch` is the operator watch-console
+/// order: active threads (non-terminal status) first, then newest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadSort {
     #[default]
     Default,
+    Newest,
     Watch,
 }
 
@@ -389,6 +392,10 @@ pub struct ThreadListFilter {
     pub status: Option<String>,
     pub kind: Option<String>,
     pub requested_by: Option<String>,
+    /// Cohort/fleet membership: keep only threads carrying facet `key == value`
+    /// (e.g. `("fleet", "<run id>")`). Exact match — a cohort id is not a
+    /// substring search.
+    pub facet: Option<(String, String)>,
 }
 
 pub fn list_threads_sorted(
@@ -425,6 +432,7 @@ pub fn list_threads_query(
     // vocabulary, not user input), so `active` = status NOT terminal.
     let order = match sort {
         ThreadSort::Default => "ORDER BY created_at".to_string(),
+        ThreadSort::Newest => "ORDER BY created_at DESC".to_string(),
         ThreadSort::Watch => {
             let terminal_in = TERMINAL_STATUSES
                 .iter()
@@ -443,6 +451,11 @@ pub fn list_threads_query(
     // type-to-filter box narrows as the operator types.
     let mut conditions: Vec<&str> = Vec::new();
     let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+    // `thread_facets.value` is a BLOB, so bind the facet value as bytes to match
+    // (a TEXT param would compare unequal to the stored BLOB). Precomputed here so
+    // the owned Vec outlives the borrowed params slice.
+    let facet_value_bytes: Option<Vec<u8>> =
+        filter.facet.as_ref().map(|(_, v)| v.as_bytes().to_vec());
     if let Some(principal) = &filter.principal {
         conditions.push("requested_by = ?");
         params.push(principal);
@@ -458,6 +471,13 @@ pub fn list_threads_query(
     if let Some(requested_by) = &filter.requested_by {
         conditions.push("requested_by LIKE '%' || ? || '%'");
         params.push(requested_by);
+    }
+    if let (Some((key, _)), Some(value_bytes)) = (&filter.facet, &facet_value_bytes) {
+        conditions.push(
+            "thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)",
+        );
+        params.push(key);
+        params.push(value_bytes);
     }
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -690,6 +710,38 @@ pub fn continuation_fingerprint(
         .map(|s| s.to_string()))
 }
 
+/// # Follow lineage: the two projected edge kinds (and the one that is NOT)
+///
+/// A graph `follow:` relationship spans two distinct lineage links. Only the
+/// first is recorded in the projection today; the second is NOT, by current
+/// design:
+///
+/// 1. **Parent → resume-successor (within-chain, projected).** When a followed
+///    child terminates, the suspended parent is resumed by minting a successor
+///    in the SAME chain (`upstream_thread_id = parent`, same `chain_root_id`).
+///    `project_thread_snapshot` derives a `thread_edges` row for it
+///    (`spawn_reason = 'spawned'`), and the `thread_continued` payload carries
+///    [`ContinuationReasonMarker::GraphFollowResume`] as its `reason` — that
+///    marker (read via [`continuation_edge`]) is the discriminator that tells a
+///    follow-resume successor from an ordinary segment-cut continuation.
+///
+/// 2. **Parent → followed child chain root (cross-chain, NOT projected).** The
+///    followed child is spawned as a FRESH ROOT — its own `chain_root_id`, no
+///    `upstream_thread_id` — so `project_thread_snapshot` derives no edge, and
+///    the parent↔child link lives ONLY in the operational `follow_waiter` table
+///    (runtime_db), never in CAS-derived projection data. Once the waiter is
+///    cleared, that historical "this thread followed into child chain X" fact is
+///    gone from durable state.
+///
+/// Recording kind (2) durably would require emitting a new cross-chain spawn
+/// event from the follow-spawn path (executor side) through the event/projection
+/// pipeline AND extending the chain-scoped `thread_edges` model to hold a
+/// cross-chain edge — a deliberate change deferred to the wave that owns the
+/// follow spawn/event path (it pairs with nested child-braid rendering). Until
+/// then, a client reads live follow lineage from the waiter-sourced `follow`
+/// fact on a thread projection, and terminal-history resume lineage from kind (1)
+/// above; the cross-chain child link is not queryable from the projection.
+///
 /// Daemon-owned markers stored as the `reason` on a `thread_continued` edge.
 /// Centralizes the wire value so it is not a scattered string literal a runtime
 /// could typo or spoof. Machine continuations carry a free-form *log* reason
@@ -860,6 +912,45 @@ pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<Face
         .query_map([thread_id], FacetRow::from_row)
         .context("query get_facets")?;
     Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// A graph thread's current node: the `(node, step)` of its latest
+/// `graph_step_started` event. A cheap per-thread "where is it right now" for a
+/// live fleet overview — a single indexed row read, not a full-trace replay.
+/// `None` for a thread that has emitted no graph step (non-graph, or not yet
+/// started).
+pub fn current_graph_node(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<(String, u32)>> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM events
+             WHERE thread_id = ?1 AND event_type = ?2
+             ORDER BY thread_seq DESC LIMIT 1",
+        )
+        .context("prepare current_graph_node")?;
+    let mut rows = stmt
+        .query_map(
+            rusqlite::params![thread_id, crate::event_types::GRAPH_STEP_STARTED],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .context("query current_graph_node")?;
+    let Some(row) = rows.next() else {
+        return Ok(None);
+    };
+    let payload: serde_json::Value = serde_json::from_slice(&row.context("read step payload")?)
+        .context("decode graph_step_started payload")?;
+    let node = payload
+        .get("node")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let step = payload
+        .get("step")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    Ok(node.map(|n| (n, step)))
 }
 
 const THREAD_USAGE_LATEST_COLUMNS: &str = r#"

@@ -255,6 +255,66 @@ impl ResolutionOutput {
                 .collect(),
         }
     }
+
+    /// Slim launch-time snapshot of this resolution for durable
+    /// persistence as a braid event. See [`AsLaunchedResolutionDigest`].
+    pub fn as_launched_digest(&self) -> AsLaunchedResolutionDigest {
+        AsLaunchedResolutionDigest {
+            root: ResolutionDigestNode::from(&self.root),
+            ancestors: self
+                .ancestors
+                .iter()
+                .map(ResolutionDigestNode::from)
+                .collect(),
+            effective_trust_class: self.effective_trust_class,
+            policy_facts: self.composed.policy_facts.clone(),
+        }
+    }
+}
+
+/// One node (root or extends ancestor) in an as-launched digest: the
+/// resolved ref plus the content digest that pins the exact bytes the
+/// launcher composed. Trust class travels with it so a weak link reads
+/// without re-resolving. Deliberately excludes `raw_content` — the full
+/// bytes are reconstructable from CAS by digest when a read needs them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolutionDigestNode {
+    pub requested_id: String,
+    pub resolved_ref: String,
+    pub trust_class: TrustClass,
+    pub raw_content_digest: String,
+}
+
+impl From<&ResolvedAncestor> for ResolutionDigestNode {
+    fn from(item: &ResolvedAncestor) -> Self {
+        Self {
+            requested_id: item.requested_id.clone(),
+            resolved_ref: item.resolved_ref.clone(),
+            trust_class: item.trust_class,
+            raw_content_digest: item.raw_content_digest.clone(),
+        }
+    }
+}
+
+/// Slim, launch-time snapshot of an item resolution — the extends chain
+/// as composed (refs + content digests), the composed `policy_facts`, and
+/// the effective trust class. Persisted as a braid event at launch so the
+/// explain view can render what a thread actually launched with rather
+/// than a fresh re-resolve. Digests only: the full composed value is
+/// reconstructable from CAS by digest when a read needs it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsLaunchedResolutionDigest {
+    /// Resolved root item ref + content digest.
+    pub root: ResolutionDigestNode,
+    /// Extends-chain ancestors (deepest first), refs + content digests.
+    pub ancestors: Vec<ResolutionDigestNode>,
+    /// Daemon-folded weakest-link trust class at launch.
+    pub effective_trust_class: TrustClass,
+    /// Composed daemon-policy facts (e.g. `effective_caps`) the launcher read.
+    #[serde(default)]
+    pub policy_facts: HashMap<String, serde_json::Value>,
 }
 
 /// Payload-free provenance for a resolved effective item.
@@ -546,6 +606,51 @@ mod tests {
             effective_trust(TrustClass::Unsigned, &chain),
             TrustClass::Unsigned
         );
+    }
+
+    #[test]
+    fn as_launched_digest_captures_refs_digests_trust_and_policy_facts() {
+        let mut root = ancestor(TrustClass::TrustedBundle);
+        root.resolved_ref = "directive:root".to_string();
+        root.raw_content = "root body".to_string();
+        root.raw_content_digest = "rootdigest".to_string();
+        let mut anc = ancestor(TrustClass::Unsigned);
+        anc.resolved_ref = "directive:base".to_string();
+        anc.raw_content_digest = "basedigest".to_string();
+
+        let mut policy_facts = HashMap::new();
+        policy_facts.insert("effective_caps".to_string(), serde_json::json!(["a"]));
+
+        let output = ResolutionOutput {
+            root,
+            ancestors: vec![anc],
+            references_edges: vec![],
+            referenced_items: vec![],
+            step_outputs: HashMap::new(),
+            effective_trust_class: TrustClass::Unsigned,
+            composed: KindComposedView {
+                composed: serde_json::Value::Null,
+                derived: HashMap::new(),
+                policy_facts,
+            },
+        };
+
+        let digest = output.as_launched_digest();
+        assert_eq!(digest.root.resolved_ref, "directive:root");
+        assert_eq!(digest.root.raw_content_digest, "rootdigest");
+        assert_eq!(digest.ancestors.len(), 1);
+        assert_eq!(digest.ancestors[0].resolved_ref, "directive:base");
+        assert_eq!(digest.ancestors[0].raw_content_digest, "basedigest");
+        assert_eq!(digest.ancestors[0].trust_class, TrustClass::Unsigned);
+        assert_eq!(digest.effective_trust_class, TrustClass::Unsigned);
+        assert_eq!(digest.policy_facts["effective_caps"], serde_json::json!(["a"]));
+
+        // Round-trips through the braid-event payload wire form, and carries no
+        // `raw_content` (slim: digests only).
+        let wire = serde_json::to_value(&digest).unwrap();
+        assert!(wire["root"].get("raw_content").is_none());
+        let back: AsLaunchedResolutionDigest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, digest);
     }
 
     #[test]

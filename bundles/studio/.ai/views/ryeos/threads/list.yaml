@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-02T04:57:51Z:715be6e10dea0d961934bd2ed31a3e032b04698751e495651c5296cef8a80990:cFKpAcu3jnZF9rwBgCzPybQvuUK0gN/Ap4oR4vA2A5rLJd52rmjXicTDiljiLKeOpuiFJiCaOuH/Y48muCGYBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-04T08:15:07Z:f7a668e5c012425441f63d654c266e79ac90bce628738c06ada011c86022fe1f:9caphGHFnmwBgx26sX/aSYOqpJvBYmWp/g/tFU4y/rpXGonWv02ZV4QECXQz6hKqnEHwcWp/pt7aTx8RnHMhDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
@@ -25,6 +25,20 @@ projections:
       field: status
     - label: source
       field: requested_by
+    # Graph `follow:` lineage: `suspended_parent` (issued a follow, awaiting its
+    # child chain) or `resume_successor` (consumes the child result). Blank for
+    # non-follow rows (the `follow` fact is absent). The full child chain + child
+    # terminal status live in the thread detail lens; this column is the at-a-
+    # glance "waiting on child" marker the watch console reads. The per-column
+    # tone keys off the coarse display state so a waiting parent reads warm
+    # while the ROW keeps its status tone.
+    - label: follow
+      field: follow.role
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resumed: good
     - label: created
       field: created_at
   tone:
@@ -50,6 +64,28 @@ affordances:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/chain/timeline
+      # Step INTO the braid (returnable via Backspace) rather than a flat swap:
+      # the list + its context are pushed onto the drill stack so the operator
+      # can walk back up the execution tree.
+      drill: true
+  # Watch the followed CHILD chain of a suspended parent — same shape as `watch`
+  # but aims the route at the child chain root the daemon recorded on the follow
+  # fact (`follow.child_chain_root_id`, head thread `follow.child_thread_id`), so
+  # activating it on a suspended parent opens the child's braid. Meaningful only
+  # on a suspended-parent row; on a non-follow row both merge fields resolve to
+  # null (per-row affordance gating does not exist yet — see follow-up).
+  - id: watch-child
+    label: Watch child
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.follow.child_thread_id}"
+        chain_root: "{record.follow.child_chain_root_id}"
+      open_view: view:ryeos/chain/timeline
+      # Step into the child chain — a return frame lets Backspace walk back to
+      # the parent.
+      drill: true
   # Inspect swaps the center lens to the thread's detail sections. Write the
   # selected thread FIRST (the detail sources read @facet:selection.thread),
   # then open the lens — the P1 open_view ordering guarantees the facet is set
@@ -62,15 +98,23 @@ affordances:
       value:
         thread: "{record.thread_id}"
       open_view: view:ryeos/threads/detail
-  # Row-specific cancel through the operator-scoped studio service (args reach
-  # the daemon as parameters via /execute — the token path would drop them).
+  # Row-specific cancel through the ONE studio cancel path: the audited command
+  # channel `service:commands/submit` with `command_type: cancel`. It carries
+  # the per-thread ownership check and writes a command record, unlike the raw
+  # cancel services. Args reach the daemon as /execute parameters (the token
+  # path would drop them), so `{record.thread_id}` targets THIS row rather than
+  # the route head. See docs/decisions/steering-graph-interrupt-and-cancel-path.md.
   - id: cancel
     label: Cancel
     invoke:
       plane: rye
-      ref: service:ui/studio/thread/cancel
+      ref: service:commands/submit
       args:
         thread_id: "{record.thread_id}"
+        command_type: cancel
+      # Success copy lives in view data, not the reducer: rendered against the
+      # command record ({result.<field>}) when the submit succeeds.
+      notice: "Cancelled {result.thread_id}."
 # Inline live filter: typing narrows the list (substring) as you type; the buffer
 # feeds ONE source param (empty buffer = unfiltered), and Tab cycles which field it
 # targets — status → kind → source (requested_by). No `submit:`, so this is a live

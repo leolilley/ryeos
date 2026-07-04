@@ -216,6 +216,20 @@ pub struct StudioWorkspaceVm {
     pub tile_count: usize,
     #[serde(default)]
     pub docks: StudioDockPlaneVm,
+    /// Labels of the levels on the step-in return stack, root-first (the
+    /// deepest drill last). Empty at the top of the tree. Renderers draw it as
+    /// a breadcrumb — `threads ▸ ar25 ▸ …` — so the operator sees how deep the
+    /// execution drill is and that Backspace returns. Each is the level's own
+    /// label (the cognition/thread it showed) when known, else the view title.
+    /// The current (focused) level is NOT included; it is `lens_label` (or the
+    /// focused view's title) as the tail beyond this trail.
+    #[serde(default)]
+    pub lens_trail: Vec<String>,
+    /// Label of the CURRENT focused level (the cognition stepped into, e.g.
+    /// `study`), the breadcrumb tail. `None` at the top of the tree, where the
+    /// focused view's own title stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -313,6 +327,12 @@ pub enum StudioViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<StudioTimelineEntryVm>,
+        /// Call-tree indent depth per entry (parallel to `entries`): a graph
+        /// node's tool calls and its directive/sub-graph fork nest one level
+        /// under the node. Empty or shorter than `entries` renders flat (depth
+        /// 0) — the renderer never trusts the index.
+        #[serde(default)]
+        entry_indents: Vec<u8>,
         /// The entry under the point (absolute index into `entries`), for
         /// highlight + scroll. Derived from the tile cursor, which the feed
         /// reads as distance-from-bottom (0 = newest), so the point sits at
@@ -371,6 +391,11 @@ pub enum StudioViewVm {
 pub struct StudioTableRowVm {
     pub id: String,
     pub cells: Vec<String>,
+    /// Per-cell tone overrides, parallel to `cells` (`None` = inherit the row
+    /// tone). Present only when at least one column declares a `tone` block,
+    /// so tables without per-column tones pay nothing on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_tones: Vec<Option<StudioTone>>,
     pub tone: StudioTone,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<StudioAction>,
@@ -839,6 +864,18 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
         backdrop: center_is_empty.then(|| backdrop_scene(core)).flatten(),
         tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
+        lens_trail: core
+            .workspace
+            .lens_stack
+            .iter()
+            .map(|frame| {
+                frame
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| tile_title(core, &frame.view))
+            })
+            .collect(),
+        lens_label: core.workspace.lens_label.clone(),
     }
 }
 
@@ -1061,7 +1098,17 @@ fn bound_view_vm_keyed(
         }
         _ => {}
     }
-    let response = core.data.sources.get(source_key);
+    // A view may render a seat facet directly (no service fetch) — e.g. the
+    // inspector showing `selection.summary`, an inline event detail written by
+    // an inspect action. The facet wins when it resolves; otherwise the view
+    // falls back to its fetched `source` response.
+    let facet_response = binding
+        .facet
+        .as_deref()
+        .and_then(|facet| facet_backed_response(core, facet));
+    let response = facet_response
+        .as_ref()
+        .or_else(|| core.data.sources.get(source_key));
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
     match (binding.widget.as_str(), response) {
         // A feed with no chain root is empty, not loading — it would spin
@@ -1117,18 +1164,24 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let mut full = timeline_entries(super::content::project_records(binding, response));
+            let (mut full, mut full_indents) =
+                timeline_entries_indented(super::content::project_records(binding, response));
             // Deep-watch header: a chain execution summary line at the top of the
             // braid, from the source's `summary` (chain_replay). Absent for any
             // timeline whose source carries no `summary`, so it never intrudes.
+            // Header + live tail sit at the root (depth 0); keep `full_indents`
+            // parallel to `full` across both mutations.
             if let Some(summary) = timeline_summary_entry(response) {
                 full.insert(0, summary);
+                full_indents.insert(0, 0);
             }
             append_live_delta(core, &mut full);
+            full_indents.resize(full.len(), 0);
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
-            let folded = super::timeline::fold_timeline(full, collapsed.unwrap_or(&empty));
+            let folded =
+                super::timeline::fold_timeline(full, full_indents, collapsed.unwrap_or(&empty));
             // The feed reads the tile cursor as distance-from-bottom: 0 keeps
             // the point on the newest entry (so it follows the live tail),
             // larger values walk back into history. Empty feed → no point.
@@ -1146,6 +1199,7 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                entry_indents: folded.indents,
                 selected,
                 fold_section,
             }
@@ -1164,6 +1218,15 @@ fn bound_view_vm_keyed(
                 .map(|(index, record)| StudioTableRowVm {
                     id: format!("{view_ref}#{index}"),
                     cells: record.cells,
+                    cell_tones: if record.cell_tones.iter().all(Option::is_none) {
+                        Vec::new()
+                    } else {
+                        record
+                            .cell_tones
+                            .iter()
+                            .map(|tone| tone.as_deref().map(|t| tone_from_name(Some(t))))
+                            .collect()
+                    },
                     tone: tone_from_name(record.tone.as_deref()),
                     action: activate_affordance.as_ref().map(|affordance_id| {
                         StudioAction::InvokeAffordance {
@@ -1256,7 +1319,9 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
 // Timeline entry building + the live cognition buffer render live in
 // `super::timeline`; re-exported crate-wide so the timeline arm above and the
 // tests below call them unqualified (via `use super::*`).
-pub(crate) use super::timeline::{append_live_delta, timeline_entries};
+pub(crate) use super::timeline::{append_live_delta, timeline_entries_indented};
+#[cfg(test)]
+pub(crate) use super::timeline::timeline_entries;
 
 pub(crate) fn tone_from_name(name: Option<&str>) -> StudioTone {
     match name {
@@ -1346,7 +1411,21 @@ fn timeline_summary_entry(response: &serde_json::Value) -> Option<StudioTimeline
         meta: None,
         tone: status_tone(status),
         action: None,
+        secondary_action: None,
     })
+}
+
+/// The response a facet-backed view renders: the seat-fold value at `facet`,
+/// resolved through the shared `@facet:` grammar (so a dotted path like
+/// `selection.summary` reads the field within the `selection` facet). `None`
+/// when the facet is unset — the view then falls back to its `source` fetch.
+fn facet_backed_response(core: &StudioCore, facet: &str) -> Option<serde_json::Value> {
+    let fold = core.seat.fold();
+    let resolved = super::content::resolve_params(
+        &serde_json::Value::String(format!("@facet:{facet}")),
+        |key| fold.get(key).cloned(),
+    );
+    (!resolved.is_null()).then_some(resolved)
 }
 
 /// Map a thread/chain status to a tone (the same status→tone vocabulary the
@@ -1470,19 +1549,16 @@ fn input_completion(
     let Some(completion) = input.completion.as_ref() else {
         return Vec::new();
     };
-    // The command grammar is fetched into `core.data.commands`.
-    if completion.item_ref != "service:commands/list" {
-        return Vec::new();
-    }
-    let Some(records) = core
+    // The completion grammar is fetched through the generic keyed source path
+    // (identical to mentions), keyed per (view_ref, input.id).
+    let Some(response) = core
         .data
-        .commands
-        .as_ref()
-        .and_then(|data| data.get("commands"))
-        .and_then(serde_json::Value::as_array)
+        .sources
+        .get(&super::content::completion_source_key(view_ref, &input.id))
     else {
         return Vec::new();
     };
+    let records = super::content::completion_records(completion, response);
     super::tokenize::slash_completion_hint(records, text)
         .into_iter()
         .collect()
@@ -1731,10 +1807,32 @@ fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> 
 fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = Vec::new();
 
+    // A recoverable failed terminal offers retry: re-submit its own stimulus as
+    // a continuation, retargeted at the selected failed thread, pre-filled for
+    // review (not one-click). Surfaced two ways so it works everywhere — as the
+    // Inspect item's Shift+Enter secondary, AND as a distinct plain-Enter item
+    // (clients that can't send Shift+Enter still reach it).
+    let retry = retry_action_for_focused_row(core);
+
     if let Some(action) = inspect_action_for_focused_row(core) {
+        let hint = if retry.is_some() {
+            "Enter inspect · Shift+Enter retry".to_string()
+        } else {
+            focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string())
+        };
         items.push(StudioLauncherItemVm {
             label: "Inspect selection".to_string(),
-            hint: focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string()),
+            hint,
+            action,
+            secondary_action: retry.clone(),
+            enabled: true,
+        });
+    }
+
+    if let Some(action) = retry {
+        items.push(StudioLauncherItemVm {
+            label: "Retry failed turn".to_string(),
+            hint: "re-submit this failed turn (review, then Enter)".to_string(),
             action,
             secondary_action: None,
             enabled: true,
@@ -1890,26 +1988,48 @@ fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
 }
 
 pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
-    let tile_id = core.workspace.focused_tile;
-    let view = core.workspace.focused_view()?;
     // Feed lens: activation acts on the entry under the point (e.g. enter a
-    // forked subthread), not a row.
-    if let StudioViewVm::Timeline {
-        entries, selected, ..
-    } = bound_view_vm(core, tile_id, &view.view_ref)
-    {
-        return selected
-            .and_then(|i| entries.into_iter().nth(i))
-            .and_then(|entry| match entry {
-                StudioTimelineEntryVm::Line { action, .. } => action,
-                _ => None,
-            });
+    // forked subthread, inspect an error terminal), not a row.
+    if let Some(entry) = focused_timeline_entry(core) {
+        return match entry {
+            StudioTimelineEntryVm::Line { action, .. } => action,
+            _ => None,
+        };
     }
     if let Some(action) = focused_selected_row(core).and_then(|row| row.action) {
         return Some(action);
     }
     // Table lens: rows carry the same activation affordance, on a distinct VM.
     focused_selected_table_row(core).and_then(|row| row.action)
+}
+
+/// The timeline entry under the point in the focused feed lens, if the focused
+/// view is a timeline with a point on an entry. The single home for reading the
+/// focused feed entry — both the Enter action and the launcher-surfaced
+/// secondary (retry) derive from it.
+fn focused_timeline_entry(core: &StudioCore) -> Option<StudioTimelineEntryVm> {
+    let tile_id = core.workspace.focused_tile;
+    let view = core.workspace.focused_view()?;
+    if let StudioViewVm::Timeline {
+        entries, selected, ..
+    } = bound_view_vm(core, tile_id, &view.view_ref)
+    {
+        return selected.and_then(|i| entries.into_iter().nth(i));
+    }
+    None
+}
+
+/// The focused feed entry's secondary affordance — the retry a recoverable
+/// failed terminal carries. Surfaced through the launcher (its Shift+Enter
+/// secondary and a distinct "Retry failed turn" item), never a direct feed key,
+/// so Enter stays inspect.
+fn retry_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
+    match focused_timeline_entry(core)? {
+        StudioTimelineEntryVm::Line {
+            secondary_action, ..
+        } => secondary_action,
+        _ => None,
+    }
 }
 
 /// The row under the point in the focused tile, if the point is on a row. The
@@ -2020,6 +2140,7 @@ fn tile_id_text(id: TileId) -> String {
 mod tests {
     use super::*;
     use crate::studio::content::{ProjectedRecord, TimelineRole};
+    use crate::studio::{StudioEvent, StudioUiEvent};
     use serde_json::json;
 
     fn record(
@@ -2222,6 +2343,7 @@ mod tests {
                     meta: None,
                     tone: StudioTone::Neutral,
                     action: None,
+                    secondary_action: None,
                 },
             ]
         );
@@ -2244,6 +2366,7 @@ mod tests {
                 meta: Some("done".to_string()),
                 tone: StudioTone::Good,
                 action: None,
+                secondary_action: None,
             }]
         );
     }
@@ -2307,6 +2430,7 @@ mod tests {
                 meta: None,
                 tone: StudioTone::Neutral,
                 action: None,
+                secondary_action: None,
             }]
         );
     }
@@ -2648,8 +2772,8 @@ mod tests {
                                           "merge": { "thread": "{record.thread_id}" },
                                           "open_view": "view:ryeos/chain/timeline" } },
                             { "id": "cancel", "label": "Cancel",
-                              "invoke": { "plane": "rye", "ref": "service:ui/studio/thread/cancel",
-                                          "args": { "thread_id": "{record.thread_id}" } } }
+                              "invoke": { "plane": "rye", "ref": "service:commands/submit",
+                                          "args": { "thread_id": "{record.thread_id}", "command_type": "cancel" } } }
                         ]
                     }
                 }
@@ -2686,6 +2810,97 @@ mod tests {
             !items.iter().any(|i| i.label == "Watch"),
             "activate affordance should not be surfaced as a context item"
         );
+    }
+
+    /// Build a single focused timeline tile over a chain_replay response, with
+    /// the feed point (distance-from-bottom 0) on the newest entry.
+    fn feed_core(events: serde_json::Value) -> StudioCore {
+        use crate::studio::model::{BrowserSession, BrowserViewport};
+        let session = BrowserSession {
+            effective_surface: Some(json!({
+                "name": "t",
+                "tiles": ["view:ryeos/chain/timeline"],
+                "views": {
+                    "view:ryeos/chain/timeline": {
+                        "widget": "timeline",
+                        "source": { "ref": "service:events/chain_replay", "collection": "events" }
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let key = core.workspace.focused_tile.0.to_string();
+        core.data.sources.insert(key.clone(), json!({ "events": events }));
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor { tile_id: key, index: 0 },
+        });
+        core
+    }
+
+    #[test]
+    fn launcher_offers_inspect_and_retry_on_a_focused_failed_feed_entry() {
+        let core = feed_core(json!([
+            { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
+            { "event_type": "thread_failed", "thread_id": "T-1", "chain_root_id": "R-1",
+              "payload": { "error": { "message": "boom" } } }
+        ]));
+
+        let items = launcher_items_for(&core);
+        // Enter=inspect, carrying the visible line as title and the raw event.
+        let inspect = items
+            .iter()
+            .find(|i| i.label == "Inspect selection")
+            .expect("inspect item on a failed entry");
+        assert!(
+            matches!(&inspect.action, StudioAction::InspectSummary { title, .. } if title == "failed — boom")
+        );
+        // Retry is the inspect item's Shift+Enter secondary …
+        assert!(
+            matches!(&inspect.secondary_action,
+                Some(StudioAction::PrefillRetryTurn { thread_id, chain_root_id, input })
+                    if thread_id == "T-1" && chain_root_id == "R-1" && input == "do it"),
+            "retry is offered as the inspect item's secondary; got {:?}",
+            inspect.secondary_action
+        );
+        // … AND a distinct plain-Enter item (for clients that can't send Shift+Enter).
+        let retry = items
+            .iter()
+            .find(|i| i.label == "Retry failed turn")
+            .expect("distinct retry item");
+        assert!(matches!(
+            &retry.action,
+            StudioAction::PrefillRetryTurn { thread_id, .. } if thread_id == "T-1"
+        ));
+    }
+
+    #[test]
+    fn launcher_offers_neither_inspect_nor_retry_on_a_cancelled_terminal() {
+        // Cancelled is operator-initiated, not an error — it is neither
+        // inspectable nor retryable.
+        let core = feed_core(json!([
+            { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
+            { "event_type": "thread_cancelled", "thread_id": "T-1", "chain_root_id": "R-1",
+              "payload": {} }
+        ]));
+        let items = launcher_items_for(&core);
+        assert!(!items.iter().any(|i| i.label == "Retry failed turn"));
+        assert!(!items.iter().any(|i| i.label == "Inspect selection"));
+    }
+
+    #[test]
+    fn launcher_offers_inspect_but_not_retry_on_a_timed_out_terminal() {
+        // timed_out is inspectable but not retryable in v1 (the daemon refuses
+        // continuation for that status).
+        let core = feed_core(json!([
+            { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
+            { "event_type": "thread_timed_out", "thread_id": "T-1", "chain_root_id": "R-1",
+              "payload": {} }
+        ]));
+        let items = launcher_items_for(&core);
+        assert!(items.iter().any(|i| i.label == "Inspect selection"));
+        assert!(!items.iter().any(|i| i.label == "Retry failed turn"));
     }
 
     #[test]
@@ -2859,12 +3074,15 @@ mod tests {
                 "completion": { "ref": "service:commands/list", "collection": "commands" }
             }
         }));
-        core.data.commands = Some(json!({
-            "commands": [
-                { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
-                { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread" }
-            ]
-        }));
+        core.data.sources.insert(
+            crate::studio::content::completion_source_key("view:ryeos/input", "line"),
+            json!({
+                "commands": [
+                    { "invocable": true, "tokens": ["thread", "list"], "description": "List threads" },
+                    { "invocable": true, "tokens": ["thread", "get"], "description": "Get thread" }
+                ]
+            }),
+        );
         core.ui.input_buffers.insert(
             crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
                 .storage_key(),
@@ -2892,9 +3110,12 @@ mod tests {
             "widget": "text",
             "input": { "id": "line", "submit": "route" }
         }));
-        core.data.commands = Some(json!({ "commands": [
-            { "invocable": true, "tokens": ["thread", "list"] }
-        ] }));
+        core.data.sources.insert(
+            crate::studio::content::completion_source_key("view:ryeos/input", "line"),
+            json!({ "commands": [
+                { "invocable": true, "tokens": ["thread", "list"] }
+            ] }),
+        );
         core.ui.input_buffers.insert(
             crate::studio::model::InputBufferKey::new("dock:bottom", "view:ryeos/input", "line")
                 .storage_key(),

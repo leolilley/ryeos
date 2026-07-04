@@ -3256,12 +3256,6 @@ pub enum PlanNode {
         #[serde(default)]
         executor_chain: Vec<String>,
     },
-    SpawnChild {
-        id: PlanNodeId,
-        child_ref: String,
-        thread_kind: String,
-        edge_type: String,
-    },
     Complete {
         id: PlanNodeId,
     },
@@ -3270,9 +3264,7 @@ pub enum PlanNode {
 impl PlanNode {
     pub fn id(&self) -> &PlanNodeId {
         match self {
-            Self::DispatchSubprocess { id, .. }
-            | Self::SpawnChild { id, .. }
-            | Self::Complete { id, .. } => id,
+            Self::DispatchSubprocess { id, .. } | Self::Complete { id, .. } => id,
         }
     }
 }
@@ -3314,6 +3306,20 @@ pub enum ThreadTerminalStatus {
     Cancelled,
     Continued,
     Killed,
+}
+
+impl ThreadTerminalStatus {
+    /// The canonical persisted/wire string for this terminal status — the single
+    /// source of truth, so call sites never spell the literal themselves.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Continued => "continued",
+            Self::Killed => "killed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

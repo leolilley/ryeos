@@ -16,6 +16,10 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+// Wire strings live in `ryeos-state` (the lower shared layer the projection also
+// reads), so the enum and the projection reference one source of truth.
+use ryeos_state::event_types as wire;
+
 /// Storage strategy for a persisted event.
 ///
 /// Wire form is `snake_case` so daemon-side serialization stays
@@ -96,6 +100,15 @@ pub enum RuntimeEventType {
 
     // ── Audit / artifact ────────────────────────────────────────
     ArtifactPublished,
+    /// Slim launch-time resolution digest (extends-chain refs + content
+    /// digests, composed policy facts, effective trust class) persisted at
+    /// launch so the explain view can render what a thread launched with
+    /// rather than a fresh re-resolve.
+    AsLaunchedResolution,
+    /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
+    /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
+    /// rebuild, unlike a bare facet-table write.
+    ThreadFacetSet,
     ThreadReconciled,
     OrphanProcessKilled,
 
@@ -118,6 +131,17 @@ pub enum RuntimeEventType {
     GraphBranchTaken,
     GraphForeachIteration,
     GraphFollowSuspended,
+    GraphNodeRetry,
+
+    // ── Directive resilience / accounting ───────────────────────
+    ProviderRetry,
+    CostUntracked,
+
+    // ── Domain events ───────────────────────────────────────────
+    /// Generic runtime-emitted domain event (namespaced `kind` + free
+    /// `payload`), styled by content view-yaml. The engine stays
+    /// domain-agnostic; arc/content declares the kinds.
+    Milestone,
 
     // ── Usage settlement (O3) ───────────────────────────────────
     ThreadUsage,
@@ -126,85 +150,97 @@ pub enum RuntimeEventType {
 impl RuntimeEventType {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::ThreadCreated => "thread_created",
-            Self::ThreadStarted => "thread_started",
-            Self::ThreadCompleted => "thread_completed",
-            Self::ThreadFailed => "thread_failed",
-            Self::ThreadCancelled => "thread_cancelled",
-            Self::ThreadKilled => "thread_killed",
-            Self::ThreadTimedOut => "thread_timed_out",
-            Self::ThreadContinued => "thread_continued",
-            Self::EdgeRecorded => "edge_recorded",
-            Self::ChildThreadSpawned => "child_thread_spawned",
-            Self::ContinuationRequested => "continuation_requested",
-            Self::ContinuationAccepted => "continuation_accepted",
-            Self::CommandSubmitted => "command_submitted",
-            Self::CommandClaimed => "command_claimed",
-            Self::CommandCompleted => "command_completed",
-            Self::StreamOpened => "stream_opened",
-            Self::TokenDelta => "token_delta",
-            Self::StreamSnapshot => "stream_snapshot",
-            Self::StreamClosed => "stream_closed",
-            Self::ArtifactPublished => "artifact_published",
-            Self::ThreadReconciled => "thread_reconciled",
-            Self::OrphanProcessKilled => "orphan_process_killed",
-            Self::SystemPrompt => "system_prompt",
-            Self::ContextInjected => "context_injected",
-            Self::CognitionIn => "cognition_in",
-            Self::CognitionOut => "cognition_out",
-            Self::CognitionReasoning => "cognition_reasoning",
-            Self::ToolCallStart => "tool_call_start",
-            Self::ToolCallResult => "tool_call_result",
-            Self::GraphStarted => "graph_started",
-            Self::GraphCompleted => "graph_completed",
-            Self::GraphStepStarted => "graph_step_started",
-            Self::GraphStepCompleted => "graph_step_completed",
-            Self::GraphBranchTaken => "graph_branch_taken",
-            Self::GraphForeachIteration => "graph_foreach_iteration",
-            Self::GraphFollowSuspended => "graph_follow_suspended",
-            Self::ThreadUsage => "thread_usage",
+            Self::ThreadCreated => wire::THREAD_CREATED,
+            Self::ThreadStarted => wire::THREAD_STARTED,
+            Self::ThreadCompleted => wire::THREAD_COMPLETED,
+            Self::ThreadFailed => wire::THREAD_FAILED,
+            Self::ThreadCancelled => wire::THREAD_CANCELLED,
+            Self::ThreadKilled => wire::THREAD_KILLED,
+            Self::ThreadTimedOut => wire::THREAD_TIMED_OUT,
+            Self::ThreadContinued => wire::THREAD_CONTINUED,
+            Self::EdgeRecorded => wire::EDGE_RECORDED,
+            Self::ChildThreadSpawned => wire::CHILD_THREAD_SPAWNED,
+            Self::ContinuationRequested => wire::CONTINUATION_REQUESTED,
+            Self::ContinuationAccepted => wire::CONTINUATION_ACCEPTED,
+            Self::CommandSubmitted => wire::COMMAND_SUBMITTED,
+            Self::CommandClaimed => wire::COMMAND_CLAIMED,
+            Self::CommandCompleted => wire::COMMAND_COMPLETED,
+            Self::StreamOpened => wire::STREAM_OPENED,
+            Self::TokenDelta => wire::TOKEN_DELTA,
+            Self::StreamSnapshot => wire::STREAM_SNAPSHOT,
+            Self::StreamClosed => wire::STREAM_CLOSED,
+            Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
+            Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
+            Self::ThreadFacetSet => wire::THREAD_FACET_SET,
+            Self::ThreadReconciled => wire::THREAD_RECONCILED,
+            Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
+            Self::SystemPrompt => wire::SYSTEM_PROMPT,
+            Self::ContextInjected => wire::CONTEXT_INJECTED,
+            Self::CognitionIn => wire::COGNITION_IN,
+            Self::CognitionOut => wire::COGNITION_OUT,
+            Self::CognitionReasoning => wire::COGNITION_REASONING,
+            Self::ToolCallStart => wire::TOOL_CALL_START,
+            Self::ToolCallResult => wire::TOOL_CALL_RESULT,
+            Self::GraphStarted => wire::GRAPH_STARTED,
+            Self::GraphCompleted => wire::GRAPH_COMPLETED,
+            Self::GraphStepStarted => wire::GRAPH_STEP_STARTED,
+            Self::GraphStepCompleted => wire::GRAPH_STEP_COMPLETED,
+            Self::GraphBranchTaken => wire::GRAPH_BRANCH_TAKEN,
+            Self::GraphForeachIteration => wire::GRAPH_FOREACH_ITERATION,
+            Self::GraphFollowSuspended => wire::GRAPH_FOLLOW_SUSPENDED,
+            Self::GraphNodeRetry => wire::GRAPH_NODE_RETRY,
+            Self::ProviderRetry => wire::PROVIDER_RETRY,
+            Self::CostUntracked => wire::COST_UNTRACKED,
+            Self::Milestone => wire::MILESTONE,
+            Self::ThreadUsage => wire::THREAD_USAGE,
         }
     }
 
     pub fn parse(s: &str) -> Result<Self> {
         match s {
-            "thread_created" => Ok(Self::ThreadCreated),
-            "thread_started" => Ok(Self::ThreadStarted),
-            "thread_completed" => Ok(Self::ThreadCompleted),
-            "thread_failed" => Ok(Self::ThreadFailed),
-            "thread_cancelled" => Ok(Self::ThreadCancelled),
-            "thread_killed" => Ok(Self::ThreadKilled),
-            "thread_timed_out" => Ok(Self::ThreadTimedOut),
-            "thread_continued" => Ok(Self::ThreadContinued),
-            "edge_recorded" => Ok(Self::EdgeRecorded),
-            "child_thread_spawned" => Ok(Self::ChildThreadSpawned),
-            "continuation_requested" => Ok(Self::ContinuationRequested),
-            "continuation_accepted" => Ok(Self::ContinuationAccepted),
-            "command_submitted" => Ok(Self::CommandSubmitted),
-            "command_claimed" => Ok(Self::CommandClaimed),
-            "command_completed" => Ok(Self::CommandCompleted),
-            "stream_opened" => Ok(Self::StreamOpened),
-            "token_delta" => Ok(Self::TokenDelta),
-            "stream_snapshot" => Ok(Self::StreamSnapshot),
-            "stream_closed" => Ok(Self::StreamClosed),
-            "artifact_published" => Ok(Self::ArtifactPublished),
-            "thread_reconciled" => Ok(Self::ThreadReconciled),
-            "orphan_process_killed" => Ok(Self::OrphanProcessKilled),
-            "system_prompt" => Ok(Self::SystemPrompt),
-            "context_injected" => Ok(Self::ContextInjected),
-            "cognition_in" => Ok(Self::CognitionIn),
-            "cognition_out" => Ok(Self::CognitionOut),
-            "cognition_reasoning" => Ok(Self::CognitionReasoning),
-            "tool_call_start" => Ok(Self::ToolCallStart),
-            "tool_call_result" => Ok(Self::ToolCallResult),
-            "graph_started" => Ok(Self::GraphStarted),
-            "graph_completed" => Ok(Self::GraphCompleted),
-            "graph_step_started" => Ok(Self::GraphStepStarted),
-            "graph_step_completed" => Ok(Self::GraphStepCompleted),
-            "graph_branch_taken" => Ok(Self::GraphBranchTaken),
-            "graph_foreach_iteration" => Ok(Self::GraphForeachIteration),
-            "graph_follow_suspended" => Ok(Self::GraphFollowSuspended),
-            "thread_usage" => Ok(Self::ThreadUsage),
+            wire::THREAD_CREATED => Ok(Self::ThreadCreated),
+            wire::THREAD_STARTED => Ok(Self::ThreadStarted),
+            wire::THREAD_COMPLETED => Ok(Self::ThreadCompleted),
+            wire::THREAD_FAILED => Ok(Self::ThreadFailed),
+            wire::THREAD_CANCELLED => Ok(Self::ThreadCancelled),
+            wire::THREAD_KILLED => Ok(Self::ThreadKilled),
+            wire::THREAD_TIMED_OUT => Ok(Self::ThreadTimedOut),
+            wire::THREAD_CONTINUED => Ok(Self::ThreadContinued),
+            wire::EDGE_RECORDED => Ok(Self::EdgeRecorded),
+            wire::CHILD_THREAD_SPAWNED => Ok(Self::ChildThreadSpawned),
+            wire::CONTINUATION_REQUESTED => Ok(Self::ContinuationRequested),
+            wire::CONTINUATION_ACCEPTED => Ok(Self::ContinuationAccepted),
+            wire::COMMAND_SUBMITTED => Ok(Self::CommandSubmitted),
+            wire::COMMAND_CLAIMED => Ok(Self::CommandClaimed),
+            wire::COMMAND_COMPLETED => Ok(Self::CommandCompleted),
+            wire::STREAM_OPENED => Ok(Self::StreamOpened),
+            wire::TOKEN_DELTA => Ok(Self::TokenDelta),
+            wire::STREAM_SNAPSHOT => Ok(Self::StreamSnapshot),
+            wire::STREAM_CLOSED => Ok(Self::StreamClosed),
+            wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
+            wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
+            wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
+            wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
+            wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
+            wire::SYSTEM_PROMPT => Ok(Self::SystemPrompt),
+            wire::CONTEXT_INJECTED => Ok(Self::ContextInjected),
+            wire::COGNITION_IN => Ok(Self::CognitionIn),
+            wire::COGNITION_OUT => Ok(Self::CognitionOut),
+            wire::COGNITION_REASONING => Ok(Self::CognitionReasoning),
+            wire::TOOL_CALL_START => Ok(Self::ToolCallStart),
+            wire::TOOL_CALL_RESULT => Ok(Self::ToolCallResult),
+            wire::GRAPH_STARTED => Ok(Self::GraphStarted),
+            wire::GRAPH_COMPLETED => Ok(Self::GraphCompleted),
+            wire::GRAPH_STEP_STARTED => Ok(Self::GraphStepStarted),
+            wire::GRAPH_STEP_COMPLETED => Ok(Self::GraphStepCompleted),
+            wire::GRAPH_BRANCH_TAKEN => Ok(Self::GraphBranchTaken),
+            wire::GRAPH_FOREACH_ITERATION => Ok(Self::GraphForeachIteration),
+            wire::GRAPH_FOLLOW_SUSPENDED => Ok(Self::GraphFollowSuspended),
+            wire::GRAPH_NODE_RETRY => Ok(Self::GraphNodeRetry),
+            wire::PROVIDER_RETRY => Ok(Self::ProviderRetry),
+            wire::COST_UNTRACKED => Ok(Self::CostUntracked),
+            wire::MILESTONE => Ok(Self::Milestone),
+            wire::THREAD_USAGE => Ok(Self::ThreadUsage),
             other if other.trim().is_empty() => bail!("event_type must not be empty"),
             other => bail!("invalid event_type: {other}"),
         }
@@ -219,6 +255,26 @@ impl RuntimeEventType {
         matches!(
             self,
             Self::CognitionIn | Self::CognitionOut | Self::ToolCallStart | Self::ToolCallResult
+        )
+    }
+
+    /// Whether this event ASSERTS the thread reached a terminal state — the
+    /// thread-lifecycle terminals plus a graph's self-completion signal. A
+    /// terminal event arriving for an already-terminal thread is a contradiction
+    /// the braid must never silently carry as ordinary content, so the daemon
+    /// append guard (`EventStoreService::append_batch`) rejects it; this is the
+    /// shared SSOT classifier, so the emitter vocabulary and that guard cannot
+    /// drift on what counts as terminal.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::ThreadCompleted
+                | Self::ThreadFailed
+                | Self::ThreadCancelled
+                | Self::ThreadKilled
+                | Self::ThreadTimedOut
+                | Self::ThreadContinued
+                | Self::GraphCompleted
         )
     }
 
@@ -256,6 +312,8 @@ impl RuntimeEventType {
             | Self::StreamOpened
             | Self::StreamClosed
             | Self::ArtifactPublished
+            | Self::AsLaunchedResolution
+            | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
             | Self::SystemPrompt
@@ -270,6 +328,10 @@ impl RuntimeEventType {
             | Self::GraphStepCompleted
             | Self::GraphBranchTaken
             | Self::GraphFollowSuspended
+            | Self::GraphNodeRetry
+            | Self::ProviderRetry
+            | Self::CostUntracked
+            | Self::Milestone
             | Self::ThreadUsage => StorageClass::Indexed,
         }
     }
@@ -304,6 +366,8 @@ mod tests {
             RuntimeEventType::StreamSnapshot,
             RuntimeEventType::StreamClosed,
             RuntimeEventType::ArtifactPublished,
+            RuntimeEventType::AsLaunchedResolution,
+            RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::ThreadReconciled,
             RuntimeEventType::OrphanProcessKilled,
             RuntimeEventType::SystemPrompt,
@@ -320,6 +384,10 @@ mod tests {
             RuntimeEventType::GraphBranchTaken,
             RuntimeEventType::GraphForeachIteration,
             RuntimeEventType::GraphFollowSuspended,
+            RuntimeEventType::GraphNodeRetry,
+            RuntimeEventType::ProviderRetry,
+            RuntimeEventType::CostUntracked,
+            RuntimeEventType::Milestone,
             RuntimeEventType::ThreadUsage,
         ];
         for v in variants {
@@ -327,6 +395,53 @@ mod tests {
             let parsed =
                 RuntimeEventType::parse(s).unwrap_or_else(|_| panic!("round-trip failed for {s}"));
             assert_eq!(v, parsed, "round-trip mismatch for {s}");
+        }
+    }
+
+    #[test]
+    fn terminal_events_are_exactly_the_lifecycle_terminals_plus_graph_completed() {
+        // The daemon append guard rejects any of these onto an already-terminal
+        // thread; a drift here silently reopens that gap. Thread-lifecycle
+        // terminals plus the graph's self-completion signal are terminal.
+        let terminal: Vec<&'static str> = [
+            RuntimeEventType::ThreadCompleted,
+            RuntimeEventType::ThreadFailed,
+            RuntimeEventType::ThreadCancelled,
+            RuntimeEventType::ThreadKilled,
+            RuntimeEventType::ThreadTimedOut,
+            RuntimeEventType::ThreadContinued,
+            RuntimeEventType::GraphCompleted,
+        ]
+        .iter()
+        .copied()
+        .filter(|v| v.is_terminal())
+        .map(RuntimeEventType::as_str)
+        .collect();
+        assert_eq!(
+            terminal,
+            vec![
+                "thread_completed",
+                "thread_failed",
+                "thread_cancelled",
+                "thread_killed",
+                "thread_timed_out",
+                "thread_continued",
+                "graph_completed",
+            ]
+        );
+
+        // Non-terminal events an already-terminal thread may still legitimately
+        // carry (facet tags) or that mid-run precede terminal are not flagged.
+        for v in [
+            RuntimeEventType::ThreadCreated,
+            RuntimeEventType::ThreadStarted,
+            RuntimeEventType::GraphStarted,
+            RuntimeEventType::GraphStepCompleted,
+            RuntimeEventType::ThreadFacetSet,
+            RuntimeEventType::CognitionOut,
+            RuntimeEventType::Milestone,
+        ] {
+            assert!(!v.is_terminal(), "{} must not be terminal", v.as_str());
         }
     }
 

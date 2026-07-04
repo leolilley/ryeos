@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-23T02:34:31Z:82debf6b2c73d3b40ac303a4a52a5d04908bc2eaefb34474fc9a8d49fb7974e0:r7p/T069FpW0q1l8ij4NCGL5mgaWOR6Bcz7Z8K0hzErOMSQ83wKaOk1FKbKmSps+GINke7H+CAGvU2rGRDwYCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-04T03:34:00Z:eb841493fa294efc46d23684a10fd9e0f8e170f8c1cd42275fd87c58e10085c1:mIv49NLKn3hjzsduvH16gFsIhsS6Q4QVa+Ei1PXr89PruqHU7kR+1KZ58Oc5aL7OGa5eXHTrWDfz085c1/PTDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - execute
 description: "Execute an item (tool, directive, service, graph). On a terminal, streams the live execution log then prints the final result; --no-stream/--json print only the buffered JSON result (also the default when piped), and --stream forces streaming even when piped."
@@ -41,3 +41,6 @@ control_flags:
 - flag: args
   help: "Method args as a JSON object; sets call.args"
   binding: call_args
+- flag: state-root
+  help: "Place runtime state (thread state, transcripts) under this path instead of the project; resolution still runs against the project source"
+  binding: state_root

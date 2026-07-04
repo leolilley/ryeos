@@ -152,7 +152,13 @@ pub fn run_sign(
     let ai_root = source_ai_root(source, project_path)?;
 
     let targets = if is_glob(&target.bare_id) {
+        // Glob expansion silently skips runtime-owned paths (node runtime
+        // state, signing secrets): a broad glob must never sweep daemon-written
+        // files into a sign batch. A direct ref into one (below) still errors.
         glob_match_items(&kind_dir, kind_schema, &target.bare_id)?
+            .into_iter()
+            .filter(|f| !crate::actions::runtime_owned::is_runtime_owned_file(f, &ai_root))
+            .collect()
     } else {
         // Single-item: the bare_id resolves to exactly one file (or
         // nothing). Mirror Python: try each declared extension in
@@ -166,7 +172,19 @@ pub fn run_sign(
             }
         }
         match found {
-            Some(p) => vec![p],
+            Some(p) => {
+                // A direct ref/path into a runtime-owned path is an explicit
+                // mistake — fail loudly rather than silently sign daemon state.
+                if crate::actions::runtime_owned::is_runtime_owned_file(&p, &ai_root) {
+                    bail!(
+                        "runtime-owned path is not signable source: {} — node \
+                         runtime state and signing secrets are written by the \
+                         daemon, never authored",
+                        p.display()
+                    );
+                }
+                vec![p]
+            }
             None => bail!(
                 "item `{}:{}` not found in {} (searched {} with extensions {:?})",
                 target.kind,

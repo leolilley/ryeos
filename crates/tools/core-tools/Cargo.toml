@@ -1,10 +1,10 @@
 [package]
-name = "ryeos-tools"
-version = "0.5.24"
+name = "ryeos-core-tools"
+version = "0.5.25"
 edition = "2021"
 
 [lib]
-name = "ryeos_tools"
+name = "ryeos_core_tools"
 path = "src/lib.rs"
 
 [dependencies]
@@ -47,7 +47,7 @@ tempfile = { workspace = true }
 [features]
 default = []
 
-# Exposes `ryeos_tools::test_support` for downstream test crates that
+# Exposes `ryeos_core_tools::test_support` for downstream test crates that
 # need a manifest-stable copy of the `core` bundle (eliminates the
 # dev-tree manifest concurrency race documented in
 # `docs/operations/dev-tree-caveats.md`).

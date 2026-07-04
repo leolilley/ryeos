@@ -100,7 +100,7 @@ fn prepare_core_registry(root: &Path, key: &SigningKey) -> PathBuf {
     let registry = root.join("core");
     copy_dir_recursive(&core_bundle(), &registry);
     stage_core_handler_binaries(&registry);
-    ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&registry, key)
+    ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&registry, key)
         .unwrap_or_else(|e| panic!("prepare core registry failed: {e:#}"));
     registry
 }
@@ -109,7 +109,7 @@ fn run_publish_once(
     bundle_dir: &Path,
     registry_root: &Path,
     key: &SigningKey,
-) -> ryeos_tools::actions::publish::PublishReport {
+) -> ryeos_core_tools::actions::publish::PublishReport {
     run_publish_once_with_trust(bundle_dir, registry_root, key, None)
 }
 
@@ -118,8 +118,8 @@ fn run_publish_once_with_trust(
     registry_root: &Path,
     key: &SigningKey,
     base_trust_store: Option<TrustStore>,
-) -> ryeos_tools::actions::publish::PublishReport {
-    let opts = ryeos_tools::actions::publish::PublishOptions {
+) -> ryeos_core_tools::actions::publish::PublishReport {
+    let opts = ryeos_core_tools::actions::publish::PublishOptions {
         bundle_source: bundle_dir.to_path_buf(),
         registry_roots: vec![registry_root.to_path_buf()],
         signing_key: key.clone(),
@@ -128,9 +128,10 @@ fn run_publish_once_with_trust(
         name: None,
         skip_unsignable: false,
         allow_namespace_mismatch: false,
+        allow_uncovered_item_dirs: false,
         emit_trust_doc: false,
     };
-    ryeos_tools::actions::publish::run_publish(&opts)
+    ryeos_core_tools::actions::publish::run_publish(&opts)
         .unwrap_or_else(|e| panic!("publish failed: {e:#}"))
 }
 
@@ -192,8 +193,8 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
     let bundle = create_declarative_bundle(tmp.path());
     let registry = prepare_core_registry(tmp.path(), &registry_key);
 
-    let err = ryeos_tools::actions::publish::run_publish(
-        &ryeos_tools::actions::publish::PublishOptions {
+    let err = ryeos_core_tools::actions::publish::run_publish(
+        &ryeos_core_tools::actions::publish::PublishOptions {
             bundle_source: bundle.to_path_buf(),
             registry_roots: vec![registry.to_path_buf()],
             signing_key: author_key.clone(),
@@ -202,6 +203,7 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
             name: None,
             skip_unsignable: false,
             allow_namespace_mismatch: false,
+            allow_uncovered_item_dirs: false,
             emit_trust_doc: false,
         },
     )
@@ -231,13 +233,123 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
     );
 }
 
+/// A publish must never sweep node runtime state into the sign report. The
+/// `node` kind's directory is `.ai/node`, which also holds `.ai/node/schedules`
+/// and `.ai/node/routes` — runtime-owned prefixes a running daemon writes. The
+/// runtime-owned floor excludes them before extension checks, so they never
+/// become items and never raise namespace warnings.
+#[test]
+fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
+    if !core_bundle().join(ryeos_engine::AI_DIR).is_dir() {
+        eprintln!("skipping: bundles/core not found");
+        return;
+    }
+    let key = load_dev_signing_key();
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = create_declarative_bundle(tmp.path());
+    let registry = prepare_core_registry(tmp.path(), &key);
+
+    // Seed node runtime state that the `node` kind walk would otherwise sweep.
+    let ai = bundle.join(ryeos_engine::AI_DIR);
+    for (rel, body) in [
+        ("node/schedules/nightly.yaml", "version: \"1\"\n"),
+        ("node/routes/inbound.yaml", "version: \"1\"\n"),
+        ("node/bundles/core.yaml", "version: \"1\"\n"),
+    ] {
+        let path = ai.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+    }
+
+    let report = run_publish_once(&bundle, &registry, &key);
+
+    let mut refs: Vec<&str> = Vec::new();
+    for outcome in report
+        .sign_report
+        .validated
+        .iter()
+        .chain(report.sign_report.signed.iter())
+        .chain(report.sign_report.failed.iter())
+    {
+        refs.push(outcome.item_ref.as_str());
+    }
+    for r in &refs {
+        assert!(
+            !r.contains("schedules") && !r.contains("routes") && !r.contains("bundles"),
+            "runtime-owned node path leaked into sign report as `{r}`"
+        );
+    }
+    assert!(
+        report.sign_report.warnings.is_empty(),
+        "runtime-owned exclusion should leave the namespace lint clean, got: {:?}",
+        report.sign_report.warnings
+    );
+    // The runtime YAMLs must remain unsigned on disk — a bundle publish must
+    // not author node runtime state.
+    let scheduled = std::fs::read_to_string(ai.join("node/schedules/nightly.yaml")).unwrap();
+    assert!(
+        lillux::signature::parse_signature_line(scheduled.lines().next().unwrap_or_default(), "#", None)
+            .is_none(),
+        "node runtime state must not be signed by publish"
+    );
+}
+
+/// A populated item directory whose kind is not in the loaded registry roots
+/// must hard-fail the publish instead of silently skipping those items. The
+/// `knowledge` kind lives in standard, so a bundle with `.ai/knowledge/` items
+/// published against the core registry alone is exactly this case. Opting into
+/// `allow_uncovered_item_dirs` lets a deliberately partial publish proceed.
+#[test]
+fn publish_hard_fails_on_uncovered_item_dir() {
+    if !core_bundle().join(ryeos_engine::AI_DIR).is_dir() {
+        eprintln!("skipping: bundles/core not found");
+        return;
+    }
+    let key = load_dev_signing_key();
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = create_declarative_bundle(tmp.path());
+    let registry = prepare_core_registry(tmp.path(), &key);
+
+    let kdir = bundle
+        .join(ryeos_engine::AI_DIR)
+        .join("knowledge")
+        .join("app");
+    std::fs::create_dir_all(&kdir).unwrap();
+    std::fs::write(kdir.join("notes.md"), "# notes\n").unwrap();
+
+    let base_opts = |allow_uncovered: bool| ryeos_core_tools::actions::publish::PublishOptions {
+        bundle_source: bundle.to_path_buf(),
+        registry_roots: vec![registry.to_path_buf()],
+        signing_key: key.clone(),
+        base_trust_store: None,
+        owner: "test".to_string(),
+        name: None,
+        skip_unsignable: false,
+        allow_namespace_mismatch: false,
+        allow_uncovered_item_dirs: allow_uncovered,
+        emit_trust_doc: false,
+    };
+
+    let err = ryeos_core_tools::actions::publish::run_publish(&base_opts(false))
+        .expect_err("uncovered knowledge/ dir must hard-fail the publish");
+    let err = format!("{err:#}");
+    assert!(
+        err.contains("knowledge/") && err.contains("no registered kind"),
+        "unexpected error: {err}"
+    );
+
+    // Opting out proceeds — the knowledge items are skipped, no error.
+    ryeos_core_tools::actions::publish::run_publish(&base_opts(true))
+        .expect("allow_uncovered_item_dirs should let a partial publish proceed");
+}
+
 #[test]
 fn direct_binary_rebuild_remains_strict_without_bin_directory() {
     let key = load_dev_signing_key();
     let tmp = tempfile::tempdir().unwrap();
     let bundle = create_declarative_bundle(tmp.path());
 
-    let err = ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&bundle, &key)
+    let err = ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&bundle, &key)
         .expect_err("direct binary CAS rebuild should require .ai/bin");
 
     assert!(

@@ -137,6 +137,10 @@ CREATE TABLE IF NOT EXISTS thread_facets (
 
 CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 
+-- Reverse lookup for cohort/fleet queries: "the threads where key=value"
+-- (e.g. fleet=<run id>). Without this a fleet filter scans every facet row.
+CREATE INDEX IF NOT EXISTS idx_facets_key_value ON thread_facets(key, value);
+
 -- Latest cumulative usage per thread. Raw thread_usage events are cumulative,
 -- so summary queries must read this latest-per-thread projection instead of
 -- summing the events table directly.
@@ -272,10 +276,73 @@ use crate::sqlite_schema;
 /// RYPJ = 0x5259504a ("RY" + "PJ" for "projection").
 const PROJECTION_APP_ID: i32 = 0x5259_504a;
 
-/// Current projection schema epoch. This is stored in SQLite's
-/// `PRAGMA user_version` slot, but RyeOS treats it as the projection
-/// schema epoch. Bump this for incompatible projection schema changes.
-const PROJECTION_SCHEMA_EPOCH: i32 = 3;
+/// Manual projection DERIVATION version. Bump this ONLY when the derivation
+/// logic changes — when `project_event` / `project_thread_snapshot` produce
+/// DIFFERENT rows for the SAME CAS input (e.g. changing how an already-emitted
+/// event type projects), so previously-derived rows are stale and must be
+/// rebuilt.
+///
+/// You do NOT bump this for a schema change (a new table/column/index) — those
+/// are detected automatically by the spec fingerprint in
+/// [`projection_schema_epoch`]. Adding derivation for a brand-new event type
+/// also needs no bump (there are no past events of that type to re-derive).
+const PROJECTION_DERIVATION_VERSION: u64 = 1;
+
+/// The projection schema epoch, stored in SQLite's `PRAGMA user_version`.
+///
+/// DERIVED, not hand-maintained: a fingerprint of the schema spec folded with
+/// the manual derivation version. Any schema change (add/drop/rename a
+/// table/column/index) changes the fingerprint and auto-triggers the
+/// reset-and-rebuild-from-CAS on the next open — a schema change can never be
+/// silently forgotten (the old failure mode was: the spec expects an index the
+/// DB lacks, `assert_owned` fails, the daemon won't start). `assert_owned` stays
+/// the hard backstop on a freshly-built DB.
+fn projection_schema_epoch() -> i32 {
+    let fingerprint = schema_spec_fingerprint(&projection_schema_spec());
+    let combined = fingerprint ^ PROJECTION_DERIVATION_VERSION.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    // Fold the 64-bit value into the i32 `user_version` slot.
+    (combined ^ (combined >> 32)) as i32
+}
+
+/// Deterministic, order-independent fingerprint of a schema spec — its tables
+/// (with columns) and indexes. Canonicalized (sorted) so cosmetic reordering in
+/// the spec does not churn the epoch. FNV-1a keeps it dependency-free and stable
+/// across builds (a std hasher is not).
+fn schema_spec_fingerprint(spec: &sqlite_schema::SchemaSpec) -> u64 {
+    let mut parts: Vec<String> = vec![format!("app={}", spec.application_id)];
+    let mut tables: Vec<String> = spec
+        .tables
+        .iter()
+        .map(|t| {
+            let mut cols: Vec<String> = t
+                .columns
+                .iter()
+                .map(|c| format!("{}:{}:{}:{}", c.name, c.col_type, c.pk, c.not_null))
+                .collect();
+            cols.sort();
+            format!("T:{}[{}]", t.name, cols.join(","))
+        })
+        .collect();
+    tables.sort();
+    let mut indexes: Vec<String> = spec
+        .indexes
+        .iter()
+        .map(|i| format!("I:{}:{}:{}:{}", i.name, i.table, i.columns.join(","), i.unique))
+        .collect();
+    indexes.sort();
+    parts.extend(tables);
+    parts.extend(indexes);
+    fnv1a_64(parts.join(";").as_bytes())
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 /// Schema spec for projection.db — the single source of truth for
 /// what tables/columns/indexes this database must contain.
@@ -1178,6 +1245,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_facets_key_value",
+                table: "thread_facets",
+                columns: &["key", "value"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_thread_usage_latest_chain",
                 table: "thread_usage_latest",
                 columns: &["chain_root_id"],
@@ -1355,14 +1428,12 @@ fn stored_projection_schema_epoch(conn: &Connection) -> anyhow::Result<i32> {
 }
 
 fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(&format!("PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};"))
+    let epoch = projection_schema_epoch();
+    conn.execute_batch(&format!("PRAGMA user_version = {epoch};"))
         .context("failed to stamp projection schema epoch")?;
     let stored = stored_projection_schema_epoch(conn)?;
-    if stored != PROJECTION_SCHEMA_EPOCH {
-        bail!(
-            "failed to verify projection schema epoch stamp: stored={stored}, expected={}",
-            PROJECTION_SCHEMA_EPOCH
-        );
+    if stored != epoch {
+        bail!("failed to verify projection schema epoch stamp: stored={stored}, expected={epoch}");
     }
     Ok(())
 }
@@ -1766,15 +1837,16 @@ impl ProjectionDb {
         }
 
         let stored_epoch = stored_projection_schema_epoch(&conn)?;
-        if stored_epoch != PROJECTION_SCHEMA_EPOCH {
+        let current_epoch = projection_schema_epoch();
+        if stored_epoch != current_epoch {
             tracing::warn!(
                 path = %path.display(),
                 stored_epoch,
-                current_epoch = PROJECTION_SCHEMA_EPOCH,
+                current_epoch,
                 "owned projection schema epoch mismatch; resetting projection database"
             );
             close_connection(conn)?;
-            reset_projection_files(path, stored_epoch, PROJECTION_SCHEMA_EPOCH)?;
+            reset_projection_files(path, stored_epoch, current_epoch)?;
 
             let conn = Connection::open(path).context("failed to reopen projection database")?;
             init_current_projection_schema(&conn, &spec, path)?;
@@ -2523,6 +2595,43 @@ impl ProjectionDb {
             .context("failed to count active sync jobs")?;
         u64::try_from(count).context("active sync job count was negative")
     }
+
+    /// Retention: delete terminal sync jobs (completed/failed/cancelled) whose
+    /// finish time is older than `cutoff_iso`, together with their attempt rows.
+    ///
+    /// `cutoff_iso` must be an ISO8601 UTC timestamp in the projection's stored
+    /// format (`YYYY-MM-DDTHH:MM:SSZ`) so the string comparison is chronological.
+    /// A job with no `finished_at` falls back to its `updated_at`. Active jobs
+    /// (`planned`/`running`/`retryable`) are never touched — they may still pin
+    /// staged CAS roots. Returns `(deleted_jobs, deleted_attempts)`.
+    pub fn delete_terminal_sync_jobs_before(
+        &self,
+        cutoff_iso: &str,
+    ) -> anyhow::Result<(usize, usize)> {
+        self.immediate_transaction("sync-job retention", || {
+            let attempts = self
+                .conn
+                .execute(
+                    "DELETE FROM sync_job_attempts WHERE job_id IN (
+                        SELECT job_id FROM sync_jobs
+                        WHERE state IN ('completed', 'failed', 'cancelled')
+                          AND COALESCE(finished_at, updated_at) < ?1
+                    )",
+                    rusqlite::params![cutoff_iso],
+                )
+                .context("failed to delete retired sync job attempts")?;
+            let jobs = self
+                .conn
+                .execute(
+                    "DELETE FROM sync_jobs
+                     WHERE state IN ('completed', 'failed', 'cancelled')
+                       AND COALESCE(finished_at, updated_at) < ?1",
+                    rusqlite::params![cutoff_iso],
+                )
+                .context("failed to delete retired sync jobs")?;
+            Ok((jobs, attempts))
+        })
+    }
 }
 
 fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
@@ -2862,7 +2971,7 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         .context("failed to project event")?;
 
     // Derive artifact row from artifact_published events (CAS-truth derived)
-    if event.event_type == "artifact_published" {
+    if event.event_type == crate::event_types::ARTIFACT_PUBLISHED {
         if let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str()) {
             let metadata = event.payload.get("metadata").cloned();
             let metadata_blob = metadata
@@ -2886,12 +2995,72 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         }
     }
 
-    if event.event_type == "thread_usage" {
+    if event.event_type == crate::event_types::THREAD_USAGE {
         project_thread_usage_latest(db, event)?;
     }
 
-    if event.event_type == "thread_created" {
+    if event.event_type == crate::event_types::THREAD_CREATED {
         project_thread_usage_subject(db, event)?;
+    }
+
+    // Derive a dispatch thread-edge from a child_thread_spawned event. An
+    // inline-dispatched directive/sub-graph child is a FRESH ROOT with no
+    // upstream_thread_id, so the snapshot-derived edge above never links it; this
+    // event carries the only portable parent→child lineage. Rebuild-safe (the
+    // edge re-derives from the event on projection rebuild); INSERT OR IGNORE
+    // keeps re-projection idempotent. The emitting thread is the parent.
+    if event.event_type == crate::event_types::CHILD_THREAD_SPAWNED {
+        if let Some(child_id) = event
+            .payload
+            .get("child_thread_id")
+            .and_then(|v| v.as_str())
+        {
+            let spawn_reason = event
+                .payload
+                .get("spawn_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("dispatch");
+            db.connection()
+                .execute(
+                    "INSERT OR IGNORE INTO thread_edges (
+                        chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason, created_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?)",
+                    rusqlite::params![
+                        &event.chain_root_id,
+                        &event.thread_id,
+                        child_id,
+                        spawn_reason,
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project dispatch thread edge")?;
+        }
+    }
+
+    // Derive a facet row from a thread_facet_set event. Facets MUST originate in
+    // an event (not a bare table write) to survive a projection rebuild, which
+    // clears thread_facets and re-derives it from the event log. Upsert on
+    // (thread_id, key): the latest set wins.
+    if event.event_type == crate::event_types::THREAD_FACET_SET {
+        if let (Some(key), Some(value)) = (
+            event.payload.get("key").and_then(|v| v.as_str()),
+            event.payload.get("value").and_then(|v| v.as_str()),
+        ) {
+            db.connection()
+                .execute(
+                    "INSERT INTO thread_facets (thread_id, key, value, updated_at)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(thread_id, key)
+                     DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    rusqlite::params![
+                        &event.thread_id,
+                        key,
+                        value.as_bytes(),
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project thread facet")?;
+        }
     }
 
     Ok(())
@@ -3085,6 +3254,58 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn retention_deletes_only_old_terminal_sync_jobs() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let path = tempdir.path().join("projection.db");
+        let db = ProjectionDb::open(&path).unwrap();
+
+        let insert_job = |job_id: &str, state: &str, ts: &str, finished_at: Option<&str>| {
+            db.conn
+                .execute(
+                    "INSERT INTO sync_jobs (job_id, operation_type, peer, state, phase,
+                        roots_json, heads_json, uploaded_hashes_json, fetched_hashes_json,
+                        attempt_count, max_attempts, last_error, result_json,
+                        created_at, updated_at, finished_at)
+                     VALUES (?1,'remote_execute',NULL,?2,'done',
+                        x'5b5d',x'5b5d',x'5b5d',x'5b5d',
+                        1,1,NULL,NULL,?3,?3,?4)",
+                    rusqlite::params![job_id, state, ts, finished_at],
+                )
+                .unwrap();
+        };
+        let insert_attempt = |attempt_id: &str, job_id: &str, ts: &str| {
+            db.conn
+                .execute(
+                    "INSERT INTO sync_job_attempts (attempt_id, job_id, attempt_number,
+                        worker_id, state, phase, started_at, updated_at, finished_at, error, result_json)
+                     VALUES (?1,?2,1,'w','completed','done',?3,?3,?3,NULL,NULL)",
+                    rusqlite::params![attempt_id, job_id, ts],
+                )
+                .unwrap();
+        };
+
+        // Old terminal job (+ attempt), a recent terminal job, and an active job.
+        insert_job("old", "completed", "2026-01-01T00:00:00Z", Some("2026-01-01T00:00:00Z"));
+        insert_attempt("old-a", "old", "2026-01-01T00:00:00Z");
+        insert_job("recent", "failed", "2026-06-30T00:00:00Z", Some("2026-06-30T00:00:00Z"));
+        insert_job("active", "running", "2026-01-01T00:00:00Z", None);
+
+        let (jobs, attempts) = db
+            .delete_terminal_sync_jobs_before("2026-03-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(jobs, 1, "only the old terminal job is retired");
+        assert_eq!(attempts, 1, "the old job's attempt is cascaded");
+
+        assert!(db.get_sync_job("old").unwrap().is_none());
+        assert!(db.get_sync_job("recent").unwrap().is_some(), "recent kept");
+        assert!(
+            db.get_sync_job("active").unwrap().is_some(),
+            "active job never retired even though old"
+        );
+        assert!(db.list_sync_job_attempts("old").unwrap().is_empty());
+    }
+
+    #[test]
     fn open_creates_projection_db() {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
@@ -3108,7 +3329,43 @@ mod tests {
 
         assert_eq!(
             stored_projection_schema_epoch(db.connection()).unwrap(),
-            PROJECTION_SCHEMA_EPOCH
+            projection_schema_epoch()
+        );
+    }
+
+    #[test]
+    fn epoch_is_deterministic_and_schema_change_sensitive() {
+        // Deterministic across calls — the stored/computed comparison is stable.
+        assert_eq!(projection_schema_epoch(), projection_schema_epoch());
+        // Adding an index changes the fingerprint — the property that makes any
+        // schema change auto-trigger the reset+rebuild, so a bump can't be
+        // forgotten (the old failure mode).
+        let base = sqlite_schema::SchemaSpec {
+            application_id: 7,
+            tables: &[sqlite_schema::TableSpec {
+                name: "t",
+                columns: &[sqlite_schema::ColumnSpec {
+                    name: "a",
+                    col_type: "TEXT",
+                    pk: true,
+                    not_null: true,
+                }],
+            }],
+            indexes: &[],
+        };
+        let with_index = sqlite_schema::SchemaSpec {
+            application_id: 7,
+            tables: base.tables,
+            indexes: &[sqlite_schema::IndexSpec {
+                name: "ix",
+                table: "t",
+                columns: &["a"],
+                unique: false,
+            }],
+        };
+        assert_ne!(
+            schema_spec_fingerprint(&base),
+            schema_spec_fingerprint(&with_index)
         );
     }
 
@@ -3122,7 +3379,7 @@ mod tests {
         assert!(!opened.reset);
         assert_eq!(
             stored_projection_schema_epoch(opened.db.connection()).unwrap(),
-            PROJECTION_SCHEMA_EPOCH
+            projection_schema_epoch()
         );
         assert!(reset_backups(&path).is_empty());
     }
@@ -3144,7 +3401,7 @@ mod tests {
         assert!(opened.reset);
         assert_eq!(
             stored_projection_schema_epoch(opened.db.connection()).unwrap(),
-            PROJECTION_SCHEMA_EPOCH
+            projection_schema_epoch()
         );
         assert!(table_exists(
             opened.db.connection(),
@@ -3166,7 +3423,7 @@ mod tests {
         std::fs::write(&shm, b"shm").unwrap();
         std::fs::write(&journal, b"journal").unwrap();
 
-        reset_projection_files(&path, 0, PROJECTION_SCHEMA_EPOCH).unwrap();
+        reset_projection_files(&path, 0, projection_schema_epoch()).unwrap();
 
         let backups = reset_backups(&path);
         assert_eq!(backups.len(), 4);
@@ -3186,9 +3443,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
         let conn = Connection::open(&path).unwrap();
+        let epoch = projection_schema_epoch();
         conn.execute_batch(&format!(
             "PRAGMA application_id = {PROJECTION_APP_ID};
-             PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};
+             PRAGMA user_version = {epoch};
              CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
         ))
         .unwrap();

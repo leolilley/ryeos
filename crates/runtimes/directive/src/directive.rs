@@ -89,14 +89,22 @@ pub struct LimitsSpec {
 
 /// What a directive does at the context-window continuation boundary.
 ///
-/// `false` or absent → **stop** (finalize): take one final turn to emit declared
-/// outputs, then finalize; never spawn a successor. This is the default — a
-/// directive that does not opt in stops at its budget.
+/// `false` or absent → **stop**: finalize immediately with the current state
+/// (the last assistant content). The runtime grants no extra turn and enforces
+/// no declared outputs at the boundary — emitting outputs before the wall (via
+/// `directive_return`) is the directive's own job. This is the default: a
+/// directive that does not opt in stops when its live context reaches the
+/// threshold. (This resolves the limits-design §9.2/§9.3 open questions in the
+/// landed shape: there is no auto-granted final turn, so neither "final-turn
+/// overrun reserve" nor "final turn without `directive_return`" can arise — the
+/// context-threshold ratio is itself the pre-wall reserve.)
 ///
 /// An object → **self-continue**: the same directive resumes across segments
 /// carrying `carry_turns` recent turns. Opt-in. (`true` = enabled with
-/// defaults.) Untagged so `continuation: false` and `continuation: {…}` both
-/// parse from the header.
+/// defaults.) The successor fork fires at the live-context threshold — a
+/// per-segment reserve below the hard context limit — never at the wall.
+/// Untagged so `continuation: false` and `continuation: {…}` both parse from
+/// the header.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum ContinuationConfig {
@@ -227,13 +235,13 @@ pub struct ExecutionConfig {
     /// the runtime.
     #[serde(default)]
     pub category: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_retries")]
     pub retries: u32,
-    #[serde(default)]
+    #[serde(default = "default_retry_status_codes")]
     pub retry_status_codes: Vec<u16>,
     #[serde(default)]
     pub never_retry: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_backoff_base_ms")]
     pub backoff_base_ms: u64,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
@@ -241,6 +249,18 @@ pub struct ExecutionConfig {
     pub tool_preload: bool,
     #[serde(default)]
     pub retry_on_timeout: bool,
+}
+
+fn default_retries() -> u32 {
+    2
+}
+
+fn default_retry_status_codes() -> Vec<u16> {
+    vec![429, 500, 502, 503]
+}
+
+fn default_backoff_base_ms() -> u64 {
+    1000
 }
 
 fn default_timeout() -> u64 {
@@ -251,10 +271,10 @@ impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
             category: None,
-            retries: 2,
-            retry_status_codes: vec![429, 500, 502, 503],
+            retries: default_retries(),
+            retry_status_codes: default_retry_status_codes(),
             never_retry: vec![],
-            backoff_base_ms: 1000,
+            backoff_base_ms: default_backoff_base_ms(),
             timeout_seconds: default_timeout(),
             tool_preload: false,
             retry_on_timeout: false,
@@ -323,6 +343,12 @@ pub enum StreamEvent {
         id: Option<String>,
         name: String,
         arguments: Value,
+        /// Set when the streamed argument JSON failed to parse and was
+        /// recovered as `{}` (see [`MalformedArgs`]). `None` on a clean parse.
+        /// Carried so the runner can attach the corruption fact to the
+        /// `tool_use` braid event instead of surfacing a silent empty
+        /// invocation the operator cannot connect to the upstream fault.
+        malformed_args: Option<MalformedArgs>,
     },
     /// Partial tool call argument JSON streamed mid-flight.
     ///
@@ -359,6 +385,18 @@ pub enum StreamEvent {
         reason: FinishReason,
         raw: Option<String>,
     },
+}
+
+/// Diagnostic fact recorded when a streamed tool-call's argument JSON could
+/// not be parsed and was recovered as an empty object. Attached to the
+/// `tool_use` braid event so an operator sees "args corrupted upstream" and can
+/// correlate the empty invocation with the raw bytes by hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedArgs {
+    /// SHA-256 (hex) of the raw, unparseable argument bytes.
+    pub sha256: String,
+    /// Byte length of the raw arguments before recovery.
+    pub raw_len: usize,
 }
 
 /// Normalized finish reason across all provider families.
@@ -399,5 +437,40 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
             FinishReason::ContentFilter
         }
         _ => FinishReason::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A config that omits the retry knobs must inherit the same sane values
+    // as a fully-absent config — never 0 retries, an empty retryable-status
+    // set, or 0ms backoff (a hot loop). The serde field defaults resolve
+    // through the same fns as `impl Default`, so parse-path and Default agree.
+    #[test]
+    fn partial_config_inherits_retry_defaults_not_zero() {
+        let cfg: ExecutionConfig =
+            serde_yaml::from_str("category: \"ryeos-runtime\"\nretries: 5\n").unwrap();
+        assert_eq!(cfg.retries, 5, "explicit value is honored");
+        assert_eq!(
+            cfg.retry_status_codes,
+            vec![429, 500, 502, 503],
+            "omitted status codes default to the retryable set, not empty"
+        );
+        assert_eq!(
+            cfg.backoff_base_ms, 1000,
+            "omitted backoff defaults to 1s, not a 0ms hot loop"
+        );
+    }
+
+    #[test]
+    fn empty_config_matches_struct_default() {
+        let parsed: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        let default = ExecutionConfig::default();
+        assert_eq!(parsed.retries, default.retries);
+        assert_eq!(parsed.retry_status_codes, default.retry_status_codes);
+        assert_eq!(parsed.backoff_base_ms, default.backoff_base_ms);
+        assert_eq!(parsed.retries, 2);
     }
 }

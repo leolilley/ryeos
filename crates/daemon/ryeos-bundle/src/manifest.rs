@@ -61,7 +61,78 @@ pub struct RuntimeAuthorityDecls {
     pub item_authoring: Vec<ItemAuthorDecl>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One declared smoke execution: an item the bundle's author nominates as a
+/// liveness probe for `ryeos bundle smoke`. Each entry is executed as a normal
+/// thread against the bundle source with a temporary runtime state root.
+///
+/// `inputs` is intentionally open (`serde_json::Value`) — it is passed verbatim
+/// as the execution's `parameters`, so its shape is the target item's input
+/// schema, not the manifest's.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SmokeDecl {
+    /// Canonical ref of the item to execute (e.g. `tool:example/system/health`).
+    #[serde(rename = "ref")]
+    pub item_ref: String,
+    /// Optional label used in the smoke report; defaults to `item_ref`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Execution parameters passed verbatim; defaults to no inputs.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub inputs: serde_json::Value,
+    /// Per-run client-side timeout. `None` defers to daemon-side limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl SmokeDecl {
+    /// Label to report this smoke run under.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.item_ref)
+    }
+}
+
+/// Validate a `smoke:` declaration list: every ref must look like a canonical
+/// `<kind>:<bare-id>` ref and labels must be unique so report rows are
+/// unambiguous.
+pub fn validate_smoke_decls(decls: &[SmokeDecl]) -> Result<()> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for decl in decls {
+        match decl.item_ref.split_once(':') {
+            Some((kind, bare)) if !kind.trim().is_empty() && !bare.trim().is_empty() => {}
+            _ => bail!(
+                "invalid smoke ref '{}': expected a canonical `<kind>:<bare-id>` ref",
+                decl.item_ref
+            ),
+        }
+        if !seen.insert(decl.label()) {
+            bail!("duplicate smoke entry label '{}'", decl.label());
+        }
+    }
+    Ok(())
+}
+
+/// Validate a `shadows:` declaration list: every entry must be a canonical
+/// `<kind>:<bare-id>` ref (so it can match a shipped item by exact ref) and
+/// entries must be unique.
+pub fn validate_shadow_decls(shadows: &[String]) -> Result<()> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for shadow in shadows {
+        match shadow.split_once(':') {
+            Some((kind, bare)) if !kind.trim().is_empty() && !bare.trim().is_empty() => {}
+            _ => bail!(
+                "invalid shadow ref '{}': expected a canonical `<kind>:<bare-id>` ref",
+                shadow
+            ),
+        }
+        if !seen.insert(shadow.as_str()) {
+            bail!("duplicate shadow declaration '{}'", shadow);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifestSource {
     pub name: String,
@@ -74,9 +145,22 @@ pub struct BundleManifestSource {
     pub uses_kinds: Vec<String>,
     #[serde(default, skip_serializing_if = "RuntimeAuthorityDecls::is_empty")]
     pub runtime_authority: RuntimeAuthorityDecls,
+    /// Declared smoke executions for `ryeos bundle smoke`. Absent in most
+    /// manifests; `skip_serializing_if` keeps re-serialized manifests that
+    /// never declared it byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub smoke: Vec<SmokeDecl>,
+    /// Declared config shadows: canonical refs this bundle deliberately ships
+    /// under a foreign namespace to override another bundle's config via
+    /// project-first resolution. Signed intent the namespace lint verifies
+    /// against what the bundle actually ships, so a deliberate override is
+    /// distinguishable from an accidental foreign-namespace item. Absent in
+    /// most manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifest {
     pub name: String,
@@ -90,6 +174,14 @@ pub struct BundleManifest {
     pub uses_kinds: Vec<String>,
     #[serde(default, skip_serializing_if = "RuntimeAuthorityDecls::is_empty")]
     pub runtime_authority: RuntimeAuthorityDecls,
+    /// Declared smoke executions, carried verbatim from the source manifest
+    /// so the generated (signed) manifest states them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub smoke: Vec<SmokeDecl>,
+    /// Declared config shadows, carried verbatim from the source manifest so
+    /// the generated (signed) manifest states the override intent too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -135,6 +227,10 @@ pub fn materialize_manifest(
         .runtime_authority
         .validate()
         .map_err(|e| anyhow::anyhow!("invalid `runtime_authority` declaration: {e}"))?;
+    validate_smoke_decls(&source.smoke)
+        .map_err(|e| anyhow::anyhow!("invalid `smoke` declaration: {e}"))?;
+    validate_shadow_decls(&source.shadows)
+        .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
     let provides_kinds = derive_provides_kinds(ai_dir)?;
     Ok(BundleManifest {
         name: source.name,
@@ -144,6 +240,8 @@ pub fn materialize_manifest(
         requires_kinds: source.requires_kinds,
         uses_kinds: source.uses_kinds,
         runtime_authority: source.runtime_authority,
+        smoke: source.smoke,
+        shadows: source.shadows,
     })
 }
 
@@ -830,6 +928,8 @@ typo_field: oops
             requires_kinds: vec![],
             uses_kinds: vec![],
             runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![],
+            shadows: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
@@ -856,6 +956,8 @@ typo_field: oops
                 }],
                 ..Default::default()
             },
+            smoke: vec![],
+            shadows: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "arc").unwrap_err();
         assert!(
@@ -911,6 +1013,192 @@ typo_field: oops
             .expect("should find manifest");
         assert_eq!(mf.version, "2.0", "should read generated, not source");
         assert_eq!(mf.provides_kinds, vec!["published-kind"]);
+    }
+
+    #[test]
+    fn smoke_absent_parses_empty_and_reserializes_without_field() {
+        let yaml = "name: test\nversion: \"1.0\"\n";
+        let source: BundleManifestSource = serde_yaml::from_str(yaml).unwrap();
+        assert!(source.smoke.is_empty());
+        // `skip_serializing_if` keeps re-serialized manifests that never
+        // declared `smoke:` free of the field.
+        let out = serde_yaml::to_string(&source).unwrap();
+        assert!(!out.contains("smoke"), "unexpected smoke key: {out}");
+    }
+
+    #[test]
+    fn smoke_present_parses_refs_inputs_and_defaults() {
+        let yaml = r#"
+name: test
+version: "1.0"
+smoke:
+  - ref: tool:example/system/health
+  - ref: directive:example/probe
+    name: probe
+    inputs:
+      url: "http://localhost"
+      retries: 3
+    timeout_secs: 120
+"#;
+        let source: BundleManifestSource = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(source.smoke.len(), 2);
+
+        let first = &source.smoke[0];
+        assert_eq!(first.item_ref, "tool:example/system/health");
+        assert_eq!(first.label(), "tool:example/system/health");
+        assert!(first.inputs.is_null());
+        assert_eq!(first.timeout_secs, None);
+
+        let second = &source.smoke[1];
+        assert_eq!(second.label(), "probe");
+        assert_eq!(second.inputs["retries"], 3);
+        assert_eq!(second.timeout_secs, Some(120));
+
+        assert!(validate_smoke_decls(&source.smoke).is_ok());
+    }
+
+    #[test]
+    fn smoke_rejects_unknown_entry_fields() {
+        let yaml = r#"
+name: test
+version: "1.0"
+smoke:
+  - ref: tool:example/health
+    bogus: true
+"#;
+        let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "unknown smoke entry field must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("bogus"), "error should name the field: {msg}");
+    }
+
+    #[test]
+    fn smoke_rejects_entry_without_ref() {
+        let yaml = "name: test\nversion: \"1.0\"\nsmoke:\n  - name: no-ref\n";
+        let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err(), "smoke entry without `ref:` must be rejected");
+    }
+
+    #[test]
+    fn smoke_validation_rejects_malformed_ref_and_duplicate_labels() {
+        let decl = |item_ref: &str, name: Option<&str>| SmokeDecl {
+            item_ref: item_ref.to_string(),
+            name: name.map(str::to_string),
+            inputs: serde_json::Value::Null,
+            timeout_secs: None,
+        };
+
+        let err = validate_smoke_decls(&[decl("not-a-ref", None)]).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+
+        let err = validate_smoke_decls(&[decl(":missing-kind", None)]).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+
+        let err = validate_smoke_decls(&[
+            decl("tool:a/b", Some("dup")),
+            decl("tool:c/d", Some("dup")),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn materialize_manifest_carries_and_validates_smoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("probe/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+
+        let mut source = BundleManifestSource {
+            name: "probe".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![SmokeDecl {
+                item_ref: "tool:probe/health".to_string(),
+                name: None,
+                inputs: serde_json::Value::Null,
+                timeout_secs: None,
+            }],
+            shadows: vec![],
+        };
+        let manifest = materialize_manifest(source.clone(), &ai_dir, "probe").unwrap();
+        assert_eq!(manifest.smoke, source.smoke);
+
+        source.smoke[0].item_ref = "no-colon".to_string();
+        let err = materialize_manifest(source, &ai_dir, "probe").unwrap_err();
+        assert!(err.to_string().contains("smoke"), "{err}");
+    }
+
+    #[test]
+    fn shadows_absent_parses_empty_and_reserializes_without_field() {
+        let yaml = "name: test\nversion: \"1.0\"\n";
+        let source: BundleManifestSource = serde_yaml::from_str(yaml).unwrap();
+        assert!(source.shadows.is_empty());
+        let out = serde_yaml::to_string(&source).unwrap();
+        assert!(!out.contains("shadows"), "unexpected shadows key: {out}");
+    }
+
+    #[test]
+    fn shadows_present_parses_and_materialize_carries_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("downstream/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+
+        let yaml = r#"
+name: downstream
+version: "1.0"
+shadows:
+  - config:ryeos-runtime/execution
+  - config:ryeos-runtime/limits
+"#;
+        let source: BundleManifestSource = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            source.shadows,
+            vec![
+                "config:ryeos-runtime/execution".to_string(),
+                "config:ryeos-runtime/limits".to_string(),
+            ]
+        );
+
+        let manifest = materialize_manifest(source.clone(), &ai_dir, "downstream").unwrap();
+        assert_eq!(manifest.shadows, source.shadows);
+    }
+
+    #[test]
+    fn shadows_validation_rejects_malformed_and_duplicate_refs() {
+        let err = validate_shadow_decls(&["not-a-ref".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+
+        let err = validate_shadow_decls(&[":missing-kind".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+
+        let err = validate_shadow_decls(&[
+            "config:a/b".to_string(),
+            "config:a/b".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn materialize_rejects_malformed_shadow_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("downstream/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        let source = BundleManifestSource {
+            name: "downstream".to_string(),
+            version: "1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![],
+            shadows: vec!["no-colon".to_string()],
+        };
+        let err = materialize_manifest(source, &ai_dir, "downstream").unwrap_err();
+        assert!(err.to_string().contains("shadows"), "{err}");
     }
 
     #[test]

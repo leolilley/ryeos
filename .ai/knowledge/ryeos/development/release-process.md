@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-15T05:35:51Z:ba71436da4b872fc0f02101a6a5f5a22f526a5884ff75828a6a2e6455c8f6d22:WaCfa2Bu+rjoW3K/ViVtIWct61tkcWSgiuBPk0ZUoyZ5FV8p7dXyzxACaIoCmMwTb8g34rCz5vcWokrqkRJ4AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-04T08:48:16Z:14bbf2e57c05819a1614191599ec53c75b4340c23c03d66cf8141180cecb6b9e:l0vX/danV2O4V/QJl/MxpWJnNfawXMSudEO5OrMRMEOimh+WH2kpqZzSxzr1w81UFdxp+Kd605mm5YEn1zp9Bg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
@@ -185,11 +185,8 @@ cargo test -p ryeos-state
 bash -n scripts/pkg/install-local-direct.sh
 ```
 
-If release time allows, also run the broader gate:
-
-```bash
-./scripts/gate.sh
-```
+Do not run the broader local gate during the release cut. Leave the full gate to
+GitHub Actions after pushing the release branches/tag.
 
 For bundle-aware changes, ensure bundles are freshly populated/signed:
 
@@ -202,7 +199,7 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 
 `--all` is REQUIRED: `populate-bundles.sh` refuses to rebuild the whole bundle
 set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
-`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-tools`
+`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-core-tools`
 for core-tools). `--jobs N` caps cargo parallelism if a full release build
 exhausts memory. The release Dockerfiles already pass `--all`.
 

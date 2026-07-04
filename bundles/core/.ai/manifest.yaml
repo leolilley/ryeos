@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T01:05:59Z:df8ac4e77b0412797d5fbf422ba4a4100d6f36b115212d676489bf7ffaa11b56:z75VpUTcmV/317xpqTbHj+YoUGDQqV8IFCCrlz5jcaVV+axojboz8Gc434pOCLKt1cpKdZ1B7JfckRldwFjDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T09:54:30Z:16ece2e010445e11f441592a20dcf2e11bc0a3bc236e3e6784661e840dd6a941:6MGBdEqIVnuxz3dJnzjEWMmrBhcfq2O7J52knxlLXkyJT0jsK8bEVzDYVWKp/2VXRrv/x0eRFk3L8ZblxmeTCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: core
 version: 0.5.0
 description: 'Engine foundation: kind schemas, handlers, parsers, services, tools'
@@ -14,4 +14,3 @@ provides_kinds:
 - tool
 requires_kinds: []
 uses_kinds: []
-runtime_authority: {}

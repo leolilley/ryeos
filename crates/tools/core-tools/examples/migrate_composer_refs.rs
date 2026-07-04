@@ -8,7 +8,7 @@
 //! with the platform-author key.
 //!
 //! Run with:
-//!   cargo run -p ryeos-tools --example migrate_composer_refs
+//!   cargo run -p ryeos-core-tools --example migrate_composer_refs
 
 use std::fs;
 use std::path::PathBuf;

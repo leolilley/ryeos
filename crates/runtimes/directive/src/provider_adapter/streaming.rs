@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::directive::{
-    normalize_finish_reason, ExecutionConfig, FinishReason, ProtocolFamily, ProviderConfig,
-    ProviderMessage, SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema,
-    UsageUpdate,
+    normalize_finish_reason, ExecutionConfig, FinishReason, MalformedArgs, ProtocolFamily,
+    ProviderConfig, ProviderMessage, SamplingConfig, StreamEvent, SystemMessageMode, ToolCall,
+    ToolSchema, UsageUpdate,
 };
 use crate::provider_adapter::http::{AdapterResponse, TokenUsage};
 use ryeos_runtime::callback_client::CallbackClient;
@@ -20,6 +20,60 @@ fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     format!("{:x}", h.finalize())
+}
+
+/// Parse a streamed tool-call's accumulated argument JSON, recovering
+/// unparseable input as an empty object. On corruption, returns the recovery
+/// object plus a [`MalformedArgs`] fact (flag + SHA-256 of the raw bytes) so the
+/// runner can surface "args corrupted upstream" on the `tool_use` braid event
+/// instead of a silent empty invocation. A clean parse returns `None`.
+fn parse_tool_arguments(name: &str, arguments: &str) -> (Value, Option<MalformedArgs>) {
+    match serde_json::from_str::<Value>(arguments) {
+        Ok(value) => (value, None),
+        Err(_) => {
+            let sha256 = sha256_hex(arguments.as_bytes());
+            tracing::warn!(
+                tool_name = %name,
+                args_len = arguments.len(),
+                args_sha256 = %sha256,
+                "malformed tool arguments — defaulting to empty object \
+                 (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
+            );
+            (
+                json!({}),
+                Some(MalformedArgs {
+                    sha256,
+                    raw_len: arguments.len(),
+                }),
+            )
+        }
+    }
+}
+
+/// Build the `tool_use` object embedded in a `cognition_out` braid event.
+/// When the streamed arguments were corrupted upstream, the recovered `{}` is
+/// carried alongside a `malformed_args` fact (flag + SHA-256 + raw length) so
+/// the braid entry reads as an upstream fault rather than a mysterious empty
+/// call.
+fn tool_use_payload(
+    id: &Option<String>,
+    name: &str,
+    arguments: &Value,
+    malformed_args: &Option<MalformedArgs>,
+) -> Value {
+    let mut payload = json!({
+        "id": id,
+        "name": name,
+        "arguments": arguments,
+    });
+    if let Some(m) = malformed_args {
+        payload["malformed_args"] = json!({
+            "corrupted": true,
+            "sha256": m.sha256,
+            "raw_len": m.raw_len,
+        });
+    }
+    payload
 }
 
 /// Redact provider error bodies by default. Returns a safe preview
@@ -37,6 +91,43 @@ fn safe_error_body(body: &str) -> String {
         truncated
     }
 }
+
+/// A provider-call failure classified for the runner's retry loop. Every
+/// variant describes a failure that occurs STRICTLY BEFORE any SSE byte is
+/// consumed — the status check, the send timeout, and a `.send()` transport
+/// failure all precede stream consumption — so retrying them cannot duplicate
+/// an already-persisted `cognition_out`. Any failure that surfaces after the
+/// stream opens is returned as a plain `anyhow` error and is never retried.
+///
+/// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
+/// typed detail while the runner `downcast_ref`s to read the retry
+/// classification.
+#[derive(Debug, Clone)]
+pub enum ProviderStreamError {
+    /// The provider returned a non-success HTTP status before streaming began.
+    Status { code: u16, detail: String },
+    /// The request timed out before any response arrived.
+    Timeout { detail: String },
+    /// A pre-stream transport failure at `.send().await` — DNS resolution, TCP
+    /// connect, TLS handshake, or a connection reset before any response byte.
+    /// No SSE byte has arrived, so retrying is safe. Common under burst fanout
+    /// (many concurrent directive streams opening connections at once), where a
+    /// transient connect-phase failure would otherwise be fatal. `connect` marks
+    /// a reqwest connect-phase error (vs a body/read transport error).
+    Send { connect: bool, detail: String },
+}
+
+impl std::fmt::Display for ProviderStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderStreamError::Status { detail, .. }
+            | ProviderStreamError::Timeout { detail }
+            | ProviderStreamError::Send { detail, .. } => f.write_str(detail),
+        }
+    }
+}
+
+impl std::error::Error for ProviderStreamError {}
 
 /// How the stream loop terminated. Replaces overloading `Ok(AdapterResponse)`
 /// for partial termination: a cancelled or interrupted stream did NOT complete a
@@ -279,21 +370,13 @@ fn parse_event_typed(
                 .get("current_tool_args")
                 .cloned()
                 .unwrap_or_else(|| "{}".to_string());
-            let arguments_value: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| {
-                tracing::warn!(
-                    tool_name = %name,
-                    args_len = arguments.len(),
-                    args_sha256 = %sha256_hex(arguments.as_bytes()),
-                    "malformed tool arguments — defaulting to empty object \
-                     (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
-                );
-                json!({})
-            });
+            let (arguments_value, malformed_args) = parse_tool_arguments(&name, &arguments);
             let id_opt = if id.is_empty() { None } else { Some(id) };
             events.push(StreamEvent::ToolUse {
                 id: id_opt,
                 name,
                 arguments: arguments_value,
+                malformed_args,
             });
             tool_call_state.remove("current_tool_id");
             tool_call_state.remove("current_tool_name");
@@ -453,21 +536,13 @@ fn parse_delta_merge(
                         .get(&format!("tool_args_{}", idx))
                         .cloned()
                         .unwrap_or_else(|| "{}".to_string());
-                    let args_value: Value = serde_json::from_str(&arguments).unwrap_or_else(|_| {
-                        tracing::warn!(
-                            tool_name = %name,
-                            args_len = arguments.len(),
-                            args_sha256 = %sha256_hex(arguments.as_bytes()),
-                            "malformed tool arguments — defaulting to empty object \
-                             (set RYEOS_LOG_TOOL_ARGS=1 to log raw)"
-                        );
-                        json!({})
-                    });
+                    let (args_value, malformed_args) = parse_tool_arguments(&name, &arguments);
                     let id_opt = if id.is_empty() { None } else { Some(id) };
                     events.push(StreamEvent::ToolUse {
                         id: id_opt,
                         name,
                         arguments: args_value,
+                        malformed_args,
                     });
                 }
                 for idx in indices.iter() {
@@ -588,7 +663,11 @@ fn parse_complete_chunks(
                     events.push(StreamEvent::ToolUse {
                         id: Some(id),
                         name,
+                        // Gemini arguments arrive as a parsed JSON value, not a
+                        // streamed string, so there is no upstream-corruption
+                        // recovery path to flag here.
                         arguments: args,
+                        malformed_args: None,
                     });
                     continue;
                 }
@@ -806,18 +885,46 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         .timeout(Duration::from_secs(execution.timeout_seconds))
         .send()
         .await
-        .map_err(|e| anyhow!("streaming request failed: {e}"))?;
+        .map_err(|e| {
+            // Every `.send().await` failure is a pre-stream failure (no SSE byte
+            // has arrived yet), so every one is safe to classify as retryable —
+            // a retry cannot duplicate a persisted cognition_out. Capture the
+            // reqwest classifiers before wrapping, then let anyhow's alternate
+            // Display walk the source chain; reqwest 0.12's Display alone drops
+            // the underlying DNS / TCP / TLS / reset cause.
+            let is_timeout = e.is_timeout();
+            let connect = e.is_connect();
+            let chain = format!("{:#}", anyhow::Error::new(e));
+            if is_timeout {
+                anyhow::Error::new(ProviderStreamError::Timeout {
+                    detail: format!(
+                        "streaming request timed out after {}s: {chain}",
+                        execution.timeout_seconds
+                    ),
+                })
+            } else {
+                anyhow::Error::new(ProviderStreamError::Send {
+                    connect,
+                    detail: format!("streaming request failed: {chain}"),
+                })
+            }
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_else(|e| {
-            tracing::warn!("failed to read error response body: {e}");
+            tracing::warn!(
+                "failed to read error response body: {:#}",
+                anyhow::Error::new(e)
+            );
             String::new()
         });
         // Lead with the provider's own error body — it's the actionable part
         // (e.g. "Insufficient balance"). The diagnostic context trails it so a
         // truncated surface (the TUI feed line) keeps the message, not the IDs.
-        bail!(
+        // Carry the status code as a typed `ProviderStreamError` so the runner's
+        // retry loop can key off it; Display still renders this full message.
+        let detail = format!(
             "provider returned {status} (streaming): {safe_body} \
              [provider={provider_id} profile={matched_profile:?} \
              config_hash={config_hash} request_body_sha256={request_body_sha256}]",
@@ -828,6 +935,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             config_hash = config_hash,
             request_body_sha256 = request_body_sha256,
         );
+        return Err(anyhow::Error::new(ProviderStreamError::Status {
+            code: status,
+            detail,
+        }));
     }
 
     let stream_mode = provider
@@ -919,7 +1030,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             }
         };
 
-        let chunk: Bytes = chunk_res.map_err(|e| anyhow!("stream chunk error: {e}"))?;
+        let chunk: Bytes = chunk_res.map_err(|e| anyhow::Error::new(e).context("stream chunk error"))?;
         // Prepend any partial UTF-8 sequence carried from the previous
         // chunk and decode the longest complete-UTF-8 prefix. The
         // incomplete tail (if any) is stashed back in `utf8_carry`
@@ -1002,6 +1113,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                         id,
                         name,
                         arguments,
+                        malformed_args,
                     } => {
                         accumulated_tools.push(ToolCall {
                             id: id.clone(),
@@ -1013,11 +1125,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                                 "cognition_out",
                                 json!({
                                     "turn": turn,
-                                    "tool_use": {
-                                        "id": id,
-                                        "name": name,
-                                        "arguments": arguments,
-                                    },
+                                    "tool_use": tool_use_payload(id, name, arguments, malformed_args),
                                 }),
                             )
                             .await
@@ -1099,6 +1207,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                     id,
                     name,
                     arguments,
+                    malformed_args,
                 } => {
                     accumulated_tools.push(ToolCall {
                         id: id.clone(),
@@ -1110,11 +1219,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                             "cognition_out",
                             json!({
                                 "turn": turn,
-                                "tool_use": {
-                                    "id": id,
-                                    "name": name,
-                                    "arguments": arguments,
-                                },
+                                "tool_use": tool_use_payload(id, name, arguments, malformed_args),
                             }),
                         )
                         .await
@@ -1539,6 +1644,7 @@ data: {"type":"message_stop"}
             id,
             name,
             arguments,
+            ..
         } = &tool_uses[0]
         {
             assert_eq!(id, &Some("toolu_1".to_string()));
@@ -1632,6 +1738,7 @@ data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
             id,
             name,
             arguments,
+            ..
         } = &tool_uses[0]
         {
             assert_eq!(id, &Some("call_1".to_string()));
@@ -1663,6 +1770,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             id,
             name,
             arguments,
+            ..
         } = &tool_uses[0]
         {
             assert_eq!(id, &Some("call_abc".to_string()));

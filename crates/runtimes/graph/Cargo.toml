@@ -22,7 +22,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "process", "io-util"] }
+signal-hook = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "time"] }
 tracing = { workspace = true }
 ryeos-tracing = { workspace = true }
 

@@ -1,13 +1,13 @@
-<!-- ryeos:signed:2026-06-23T03:27:18Z:f4afe993efecde5800ea6f110205fffe779b83d60be2fa93992b6c13df417d0c:TIqsapZ9xHvn8VY6+mTWREG7nYr4e8wCUFeEoXJA5pmZt6g+FpShhlrO+8G22f+7nB4xLyY3YqrdZaSv+ao2DQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-04T08:14:11Z:12ce2af5440ad54fa4c131acab254b9e81609140b4cfa9be8657abb2ae2a10ca:nnYVN7K3GAc3PTAVSxDwDgAI99u0aFspIU64jq+gzyjHNot7/wLIoXRAeOkRCKg5J+fBLmpjjK6P3LNs5VzhBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 tags: [white-paper, portable-execution, cryptographic-identity, architecture]
-version: "0.1.0"
+version: "0.2.0"
 description: >
-  Working notes for the RyeOS white paper thesis: portable execution through
-  cryptographic identity. This is reference material, not a draft.
+  Working notes for the RyeOS white paper thesis: portable verified execution
+  through cryptographic identity. This is reference material, not a draft.
 ---
 
-# RyeOS white paper notes: portable execution through cryptographic identity
+# RyeOS white paper notes: portable verified execution
 
 These notes capture the core thesis and surrounding ideas from the white paper
 discussion. This is intentionally not a polished white paper draft. It is a
@@ -17,19 +17,27 @@ reference document for later analysis, positioning, and writing.
 
 Short version:
 
-> RyeOS makes execution portable by giving it cryptographic identity.
+> RyeOS is portable verified execution: cryptographic identity gives execution
+> both properties in one act.
+
+Portable and verified are one fused property, not a goal and a mechanism. A
+signed, content-addressed object is verified (it proves what it is and who
+stands behind it) and portable (a hash means the same thing on every machine,
+so trust travels with the bits) by the same act. Execution inherits both
+because execution is represented as data end to end.
 
 Expanded version:
 
-> RyeOS is a signed, content-addressed substrate for portable execution. It gives
-> cryptographic identity to executable capability and runtime history, allowing
-> tools, commands, runtimes, workflows, services, authority, events, snapshots,
-> and refs to be inspected, verified, moved, resumed, replayed, and owned
-> independently of any single process, machine, session, or vendor runtime.
+> RyeOS is a signed, content-addressed substrate for portable verified
+> execution. It gives cryptographic identity to executable capability and
+> runtime history, allowing tools, commands, runtimes, workflows, services,
+> authority, events, snapshots, and refs to be inspected, verified, moved,
+> resumed, replayed, and owned independently of any single process, machine,
+> session, or vendor runtime.
 
 Possible title:
 
-> RyeOS: Portable Execution Through Cryptographic Identity
+> RyeOS: Portable Verified Execution
 
 Possible subtitle:
 
@@ -42,7 +50,9 @@ Do not say merely:
 
 > RyeOS makes computation into data.
 
-That is a consequence, not the root idea.
+That is the mechanism, not the headline. Everything-is-data is how
+cryptographic identity reaches execution at all; the property to lead with is
+portable verified execution.
 
 Do not center the paper on AI agents. Agents are an important application and
 stress test, but they are not the thesis.
@@ -236,6 +246,12 @@ Define the model:
 - bundle: transport unit for related executable objects;
 - thread/event/snapshot: durable execution history and resumable state.
 
+The actor primitive is the signing key. An operator, a node, an agent: each is
+a key, and anything that acts, acts by signing. Trust is always a decision
+about a key, never about a machine. This is not agent framing — it is what
+remains when every component of execution is data: the only thing that can act
+on data with checkable consequence is a key.
+
 ### 5. RyeOS object model
 
 Explain objects such as signed items, kind schemas, tools, commands, services,
@@ -247,6 +263,10 @@ Key sentence:
 > A RyeOS execution is not one object. It is a graph: what was invoked, by whom,
 > under what authority, using which runtime, with which inputs, producing which
 > outputs, emitting which events, and resulting in which snapshots.
+
+Concretely, every thread event carries two hash links — the previous event in
+the chain and the previous event in the thread — so the execution trace is a
+woven structure in CAS, not a flat log a client braids after the fact.
 
 ### 6. Execution lifecycle
 
@@ -269,16 +289,41 @@ Walk through:
 Clarify that immutable content identity does not itself authorize execution.
 Identity is global-ish; execution depends on local/organizational trust policy.
 
+This split is implemented as the attestation object: a signed claim about a
+CAS object (issuer key, subject hash, claim, policy, evidence). An attestation
+proves only that a key made a claim under a policy; local policy decides
+whether a verified attestation is authoritative. Verification is objective;
+trust is a local decision applied to the same evidence everywhere — which is
+what lets the evidence move between parties at all.
+
 Discuss integrity, signer identity, provenance, capability grants, inspection
 before execution, auditability, delegation, and revocation limits.
 
 ### 8. Replay, resume, and ownership
 
-Make this strong but careful:
+The strong claim, grounded in implementation:
 
-> RyeOS does not require every execution to be perfectly deterministic. Instead,
-> it records enough typed, signed execution history to make work inspectable,
-> portable, resumable, and, where runtimes permit, replayable.
+> The record is the execution. A running process is only a rebuildable
+> projection of the execution object (process : execution :: SQLite
+> projection : CAS). Completed steps are consumed as data and never
+> re-crossed; nondeterminism exists only at the frontier — the
+> not-yet-executed edge where the run touches the world.
+
+Consequences:
+
+- Resume after process death, replay of history, continuation across a
+  segment cut, and (future) cross-node resume are all the same operation:
+  reading the execution back in from its own record.
+- "Record-complete" and "reproducible" are one property, not a trade-off.
+  Once execution is data, re-instantiating it is reading the data back; the
+  dichotomy only exists if execution means process.
+- Deterministic re-execution of the world remains out of scope (see
+  limitations); replay never meant re-running the world.
+
+Implemented today: checkpoint plus event-log resume, project snapshot pinned
+at spawn, reconciliation re-spawning resumable work under the same thread
+identity after a daemon restart, and completed child results spliced into a
+successor's resume state instead of re-dispatched.
 
 ### 9. Applications
 
@@ -327,15 +372,20 @@ Possible future work:
 
 ## Suggested demonstrations/evaluation criteria
 
-A rigorous paper could demonstrate:
+A rigorous paper could demonstrate (most of these exist today and should be
+presented as demonstrations, not aspirations):
 
 - moving a signed tool bundle from one project/machine to another and verifying
-  identity;
-- executing the same command through a resolved runtime;
-- inspecting provenance and authority attached to a tool;
-- resuming a workflow from a snapshot;
-- replaying or auditing an execution thread;
-- forking an execution history and continuing from a prior state;
+  identity (implemented: bundle publish/install/verify, remote sync);
+- executing the same command through a resolved runtime (implemented);
+- inspecting provenance and authority attached to a tool (implemented);
+- resuming a workflow from a snapshot (implemented: checkpoint + event-log
+  resume, snapshot pinned at spawn, reconciliation after daemon restart);
+- replaying or auditing an execution thread (implemented: events replay,
+  thread tail/chain/children);
+- continuing an execution history from a prior state (implemented for
+  continuation chains across segment cuts and lineage-linked child threads;
+  arbitrary-point forking remains future work);
 - replacing a runtime or client while preserving executable identity/history
   where compatible.
 
@@ -657,8 +707,9 @@ microkernel.
 - Do not say cryptographic identity alone means safe execution.
 - Do not overstate deterministic replay.
 - Do not reduce RyeOS to a package manager, tool registry, or plugin system.
-- Do not describe the thesis as merely "computation as data" or "everything is
-  data"; those are downstream consequences.
+- Do not present "computation as data" / "everything is data" as the thesis
+  itself: it is the mechanism — how cryptographic identity reaches execution
+  at all — not the headline property.
 - Always distinguish identity, trust, authorization, sandboxing, and execution.
 - Emphasize the layer distinction: source, packages, containers, and data are
   adjacent portability layers; RyeOS targets executable capability and runtime
@@ -666,12 +717,18 @@ microkernel.
 
 ## Best current formulation
 
-> RyeOS is a signed, content-addressed substrate for portable execution. It gives
-> cryptographic identity to executable capability and runtime history, allowing
-> tools, commands, runtimes, workflows, services, authority, events, snapshots,
-> and refs to be inspected, verified, moved, resumed, replayed, and owned
-> independently of any single process, machine, session, or vendor runtime.
+> RyeOS is a signed, content-addressed substrate for portable verified
+> execution. It gives cryptographic identity to executable capability and
+> runtime history, allowing tools, commands, runtimes, workflows, services,
+> authority, events, snapshots, and refs to be inspected, verified, moved,
+> resumed, replayed, and owned independently of any single process, machine,
+> session, or vendor runtime.
 
 Short public version:
 
-> RyeOS makes execution portable by giving it cryptographic identity.
+> RyeOS is portable verified execution.
+
+Longer public version:
+
+> Execution you can hand to another machine, another runtime, or your future
+> self, without losing the proof of what it is and what it did.

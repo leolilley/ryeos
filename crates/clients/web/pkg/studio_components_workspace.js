@@ -202,6 +202,12 @@ function view(viewVm, dispatchUi) {
     case "rows":
       body.append(listHeader(viewVm.title, (viewVm.columns || []).join(" · ")), rows(viewVm.rows || [], "rows", dispatchUi));
       break;
+    case "table":
+      body.append(tableView(viewVm, dispatchUi));
+      break;
+    case "sections":
+      body.append(sectionsView(viewVm, dispatchUi));
+      break;
     case "timeline":
       body.append(timeline(viewVm));
       break;
@@ -560,4 +566,90 @@ function rowGlyph(item) {
     case "accent": return "›";
     default: return "•";
   }
+}
+
+// The table widget: aligned cells under column headers, a leading tone-glyph
+// gutter, full-width selection — the typed list surface for non-chat lenses
+// (threads/bundles/schedules). Reference semantics live in the terminal's
+// widgets/table.rs: the header row and every body row share column origins,
+// the first cell is the identifier (foreground) and later cells are secondary
+// detail (muted) unless the whole row is selected. Column count prefers the
+// declared headers, else the widest row so cells still align when headers are
+// absent.
+function tableView(viewVm, dispatchUi) {
+  const wrap = el("section", "studio-table lf");
+  wrap.append(listHeader(viewVm.title || "table", ""));
+  const columns = viewVm.columns || [];
+  const items = viewVm.rows || [];
+  const ncols = Math.max(
+    1,
+    columns.length,
+    items.reduce((widest, row) => Math.max(widest, (row.cells || []).length), 0),
+  );
+  const grid = el("div", "studio-table-grid");
+  grid.style.setProperty("--table-cols", String(ncols));
+  if (columns.length) {
+    const head = el("div", "studio-table-head");
+    head.append(el("span", "studio-table-glyph"));
+    for (const column of columns) head.append(textEl("span", column, "studio-table-col"));
+    grid.append(head);
+  }
+  items.forEach((item, index) => grid.append(tableRow(item, ncols, index, dispatchUi)));
+  if (!items.length) grid.append(textEl("p", "No rows loaded.", "studio-table-empty"));
+  wrap.append(grid);
+  return wrap;
+}
+
+function tableRow(item, ncols, index, dispatchUi) {
+  const row = el("button", `studio-table-row ${item.tone || "neutral"}${item.selected ? " selected" : ""}`);
+  row.type = "button";
+  row.dataset.rowIndex = String(index);
+  row.disabled = !item.action;
+  row.append(textEl("span", rowGlyph(item), "studio-table-glyph"));
+  const cells = item.cells || [];
+  // Per-cell tone overrides (parallel to cells; absent for tables whose
+  // columns declare no tone) — a toned cell renders distinctly from the
+  // muted secondary default, mirroring the terminal table widget. Neutral
+  // means "no override" on both renderers, never a color.
+  const cellTones = item.cell_tones || [];
+  for (let i = 0; i < ncols; i += 1) {
+    const tone = cellTones[i] && cellTones[i] !== "neutral" ? ` tone-${cellTones[i]}` : "";
+    row.append(textEl("span", cells[i] || "", `studio-table-cell${i === 0 ? " lead" : ""}${tone}`));
+  }
+  if (item.action) row.addEventListener("click", () => dispatchUi({ type: "activate", action: item.action }));
+  return row;
+}
+
+// The sections widget: a foldable multi-section list (the magit-style status
+// surface). Each section is a `▾/▸ Title (count)` header followed by its rows,
+// indented; a collapsed section shows only its header, and its `count` still
+// reflects the hidden rows. Reference semantics live in the terminal's
+// widgets/sections.rs. Rows reuse the rows-widget renderer (StudioRowVm), so
+// tone glyph, primary/secondary/meta, and per-row actions come for free.
+function sectionsView(viewVm, dispatchUi) {
+  const wrap = el("section", "studio-sections");
+  wrap.append(listHeader(viewVm.title || "sections", ""));
+  const body = el("div", "studio-sections-body");
+  const sections = viewVm.sections || [];
+  for (const section of sections) body.append(sectionGroup(section, dispatchUi));
+  if (!sections.length) body.append(textEl("p", "No sections loaded.", "studio-sections-empty"));
+  wrap.append(body);
+  return wrap;
+}
+
+function sectionGroup(section, dispatchUi) {
+  const collapsed = !!section.collapsed;
+  const group = el("div", `studio-section${collapsed ? " collapsed" : ""}`);
+  // The header is the point that re-expands a collapsed section; when it
+  // carries the cursor, highlight the full line like a selected row.
+  const header = el("div", `studio-section-header${section.header_selected ? " selected" : ""}`);
+  const count = section.count ?? (section.rows || []).length;
+  header.append(
+    textEl("span", collapsed ? "▸" : "▾", "studio-section-fold"),
+    textEl("strong", section.title || "section"),
+    textEl("span", `(${count})`, "studio-section-count"),
+  );
+  group.append(header);
+  if (!collapsed) group.append(rows(section.rows || [], "section", dispatchUi));
+  return group;
 }

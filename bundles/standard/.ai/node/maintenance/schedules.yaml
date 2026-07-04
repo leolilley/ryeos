@@ -1,0 +1,33 @@
+# ryeos:signed:2026-07-04T04:48:38Z:36b32f2f02554de7e94bfbdd95a27c1dbdf097385ce5b42b1a095d33279a241e:q4BXOnO5INXzUXsXPh4GYnWgf7Dg3xRvBlUN9kxpNXCR+jKzmRb2+EslWfAkBcG6mv5Z/RFIysaij4ovZEr1CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# Bundle-authored maintenance schedule declaration (standard bundle).
+#
+# The daemon reconciles this into a signed node schedule spec at init
+# (crates/bin/daemon/src/maintenance_schedule.rs), filling in its own identity
+# as the acting principal and signing with the node key. The scheduler reconcile
+# then projects and fires it like any other schedule, so `ryeos thread list`
+# shows maintenance fires and `scheduler pause maintenance-gc` pauses them.
+#
+# This is the ONLY source of maintenance cadence/params: no declaration, no
+# scheduled GC — the daemon schedules nothing implicitly. Edit here to change
+# the cadence; delete the entry (or the file) to leave GC unscheduled.
+#
+# Runs the deep GC profile daily (see GcParams profile docs): CAS sweep plus
+# cache purge, trace truncation, runtime-history pruning, and the retention
+# sweeps. overlap_policy `skip` never stacks a second GC over a running one.
+spec_version: 1
+schedules:
+  - schedule_id: maintenance-gc
+    item_ref: "service:maintenance/gc"
+    schedule_type: cron
+    expression: "0 0 4 * * *"   # 04:00:00 UTC daily
+    timezone: UTC
+    misfire_policy: skip
+    overlap_policy: skip
+    # Disabled 2026-07-04 while the deep-GC profile settles post-deploy;
+    # flip back to re-enable. Kept declared-but-disabled (rather than
+    # deleted) so the schedule stays visible in data.
+    enabled: false
+    params:
+      deep: true
+    capabilities:
+      - "ryeos.execute.service.maintenance/gc"

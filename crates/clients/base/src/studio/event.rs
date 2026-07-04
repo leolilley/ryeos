@@ -92,9 +92,6 @@ pub enum StudioAction {
         item_ref: String,
         parameters: serde_json::Value,
     },
-    CancelThread {
-        thread_id: String,
-    },
     /// Steer the route's head thread via `service:commands/submit`
     /// (`cancel` / `interrupt` / `continue` / `kill`). The reducer reads the
     /// head thread at dispatch time. This is the same authority the CLI's
@@ -107,6 +104,34 @@ pub enum StudioAction {
     /// Activating a forked-subthread feed entry "enters" that subthread.
     AimThread {
         thread_id: String,
+    },
+    /// Step INTO a child execution from a feed entry — the debugger step-in
+    /// across the dispatch edge. Unlike `AimThread` (a bare route retarget),
+    /// this pushes a return frame so Backspace walks back to the parent braid,
+    /// and sets BOTH route coordinates: a spawned child is a fresh root, so its
+    /// `chain_root_id` equals its own thread id. The lens stays the braid
+    /// timeline and re-projects onto the child via the route facet — no view
+    /// ref named in code.
+    DrillThread {
+        thread_id: String,
+        chain_root_id: String,
+        /// Human label for the level stepped into (the graph node, e.g.
+        /// `study`), for the breadcrumb tail. `None` falls back to the child
+        /// thread id.
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// Pre-fill the routed foot input to retry a failed turn: retarget the
+    /// route at the SELECTED failed thread and stage that turn's original
+    /// stimulus for the operator to review and resubmit. The resubmit is a
+    /// continuation (a fresh successor), NOT a re-run of the terminal thread.
+    /// Deliberately not one-click — the submit goes through the normal
+    /// `threads/input` path, where the daemon enforces ownership and
+    /// continuation eligibility.
+    PrefillRetryTurn {
+        thread_id: String,
+        chain_root_id: String,
+        input: String,
     },
 }
 
@@ -192,7 +217,8 @@ pub enum StudioUiEvent {
         forward: bool,
     },
     /// Cancel the running head thread (esc while it works) — terminates it
-    /// through the thread-control channel. No-op when the head isn't running.
+    /// through `service:commands/submit { command_type: cancel }`, the single
+    /// studio cancel path. No-op when the head isn't running.
     /// (Named `InterruptHead` for the esc-terminate control; the text-bearing
     /// "interrupt" is `SubmitInputInterrupt`, a redirect, not a kill.)
     InterruptHead,
@@ -220,6 +246,10 @@ pub enum StudioUiEvent {
         collapsed: bool,
     },
     ActivateFocused,
+    /// Step back up the execution-drill stack: restore the view a step-in left
+    /// and the facet context it read. The "return" half of the debugger drill;
+    /// no-op at the top of the tree.
+    PopLens,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

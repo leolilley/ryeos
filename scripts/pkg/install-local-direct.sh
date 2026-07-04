@@ -4,10 +4,10 @@
 # This intentionally skips yay/makepkg but installs the same runtime layout
 # as deploy/aur/ryeos/PKGBUILD:
 #   - binaries -> /usr/bin
-#   - bundle sources -> /usr/share/ryeos/{core,standard,studio,web,hosted-node}
-#     or, with --bundle-set standard, /usr/share/ryeos/{core,standard};
-#     or, with --bundle-set hosted-node, /usr/share/ryeos/{core,hosted-node};
-#     with --bundle-set hosted-workflow, /usr/share/ryeos/{core,standard,hosted-node}
+#   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
+#     The set membership is the single source of truth in
+#     scripts/pkg/bundle-sets.sh (full = core, central-auth, standard, web,
+#     browser, studio, hosted-node; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -21,8 +21,10 @@ Usage: scripts/pkg/install-local-direct.sh [options]
 
 Fast-install the current checkout using the packaged RyeOS layout:
   /usr/bin/ryeos
-  /usr/share/ryeos/{core,standard,studio,web,hosted-node}/.ai
-  ~/.local/share/ryeos/.ai/bundles/{core,standard,studio,web,hosted-node}  (after init)
+  /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
+  ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
+Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
+central-auth, standard, web, browser, studio, hosted-node).
 
 Options:
   --populate            Run scripts/populate-bundles.sh first (expensive; rebuilds
@@ -41,7 +43,7 @@ Options:
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
   --crates "A B C"      With --populate, rebuild only these crates (e.g.
-                        --crates ryeos-tools to refresh just core-tools). Other
+                        --crates ryeos-core-tools to refresh just core-tools). Other
                         bundle binaries must already exist in target/release.
   --all                 With --populate, rebuild the whole bundle set. Required to
                         do a full rebuild — --populate refuses to build everything
@@ -101,6 +103,39 @@ ryeos_status_quick() {
     ryeos_user 10 node status 2>/dev/null || true
 }
 
+# Print periodic projection-rebuild progress while the daemon restarts.
+#
+# A projection schema-epoch bump makes the first restart rebuild
+# projection.sqlite3 from the event log before the daemon is ready — minutes of
+# silence on a large store that otherwise reads as a hang. Poll the projected
+# event count against the source event log and report forward motion until the
+# process is killed by the caller. Strictly best-effort: no `sqlite3`, no
+# projection yet, or no source log just means no progress lines — errexit and
+# pipefail are disabled here so a probe failure never touches the install.
+report_projection_rebuild() {
+    set +e
+    local state_dir="$1"
+    local db="$state_dir/projection.sqlite3"
+    local trace="$state_dir/trace-events.ndjson"
+    command -v sqlite3 >/dev/null 2>&1 || return 0
+    local total="" last="" n pct
+    [[ -f "$trace" ]] && total="$(wc -l <"$trace" 2>/dev/null)"
+    while :; do
+        sleep 20
+        n="$(sqlite3 -readonly "$db" 'SELECT count(*) FROM events;' 2>/dev/null)"
+        [[ -z "$n" ]] && continue
+        [[ "$n" == "$last" ]] && continue   # no forward motion — stay quiet
+        last="$n"
+        if [[ -n "$total" && "$total" -gt 0 ]]; then
+            pct=$(( n * 100 / total ))
+            [[ "$pct" -gt 100 ]] && pct=100
+            echo "[install-local-direct]   projection rebuild: $n/$total events (${pct}%)"
+        else
+            echo "[install-local-direct]   projection rebuild: $n events"
+        fi
+    done
+}
+
 bundle_payload_bins() {
     case "$1" in
         core)
@@ -124,6 +159,9 @@ bundle_payload_bins() {
             ;;
         web)
             printf '%s\n' ryeos-web-tools
+            ;;
+        browser)
+            printf '%s\n' ryeos-browser-tools
             ;;
     esac
 }
@@ -204,6 +242,12 @@ refresh_installed_bundle_payload() {
                 --registry-root "$share_dir/core" \
                 --owner "$owner" >/dev/null
             ;;
+        browser)
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+                "$target_dir/ryeos-core-tools" build "$dest" \
+                --registry-root "$share_dir/core" \
+                --owner "$owner" >/dev/null
+            ;;
     esac
 }
 
@@ -245,6 +289,10 @@ stop_daemon_for_install() {
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+
+# Shared bundle-set definition (one source of truth with populate-bundles.sh).
+# shellcheck source=scripts/pkg/bundle-sets.sh
+source "$script_dir/bundle-sets.sh"
 
 run_populate=0
 run_init=1
@@ -316,23 +364,13 @@ done
 
 cd "$repo_root"
 
-case "$bundle_set" in
-    full)
-        bundle_names=(core standard studio web hosted-node)
-        ;;
-    standard)
-        bundle_names=(core standard)
-        ;;
-    hosted-node)
-        bundle_names=(core hosted-node)
-        ;;
-    hosted-workflow)
-        bundle_names=(core standard hosted-node)
-        ;;
-    *)
-        die "--bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
-        ;;
-esac
+bundle_names=()
+while IFS= read -r _bundle_name; do
+    bundle_names+=("$_bundle_name")
+done < <(ryeos_bundle_set_names "$bundle_set") || true
+if [[ ${#bundle_names[@]} -eq 0 ]]; then
+    die "--bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
+fi
 bundle_names_csv=$(IFS=,; echo "${bundle_names[*]}")
 
 if [[ "$bundle_set" != "full" && $run_init -eq 0 ]]; then
@@ -363,7 +401,7 @@ if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     # Be explicit about scope — never trigger a full workspace rebuild implicitly.
     if [[ -z "$crates" && $populate_all -eq 0 ]]; then
-        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-tools), or --all to rebuild the whole '$bundle_set' set"
+        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools), or --all to rebuild the whole '$bundle_set' set"
     fi
     echo "[install-local-direct] populating bundles"
     populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")
@@ -577,7 +615,7 @@ if [[ $run_init -eq 1 ]]; then
             die "initialized $name bundle missing from $state_root"
     done
     if [[ "$bundle_set" == "hosted-node" ]]; then
-        for name in standard studio web; do
+        for name in standard studio web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized hosted-node state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -585,7 +623,7 @@ if [[ $run_init -eq 1 ]]; then
         done
     fi
     if [[ "$bundle_set" == "standard" ]]; then
-        for name in hosted-node studio web; do
+        for name in hosted-node studio web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized standard state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -597,15 +635,52 @@ if [[ $run_init -eq 1 ]]; then
             "$state_root/.ai/bundles/studio/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"
     fi
+
+    # ── Verify installed bundle signatures (offline doctor --strict) ──
+    # Closes the "edited YAML, forgot to re-sign, discover at runtime" loop:
+    # run the same preflight verification `ryeos doctor` wraps against every
+    # installed bundle and fail the install on any red check. Offline, no daemon.
+    core_tools_bin="$share_dir/core/.ai/bin/x86_64-unknown-linux-gnu/ryeos-core-tools"
+    if [[ -x "$core_tools_bin" ]]; then
+        echo "[install-local-direct] verifying installed bundle signatures (doctor --strict)"
+        verify_failed=0
+        for name in "${bundle_names[@]}"; do
+            if [[ "$init_user" != "$(id -un)" ]]; then
+                sudo -H -u "$init_user" env RYEOS_APP_ROOT="$state_root" \
+                    "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
+                    || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
+            else
+                RYEOS_APP_ROOT="$state_root" \
+                    "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
+                    || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
+            fi
+        done
+        [[ $verify_failed -eq 0 ]] || \
+            die "installed bundle verification failed — re-run with --populate to re-sign, or investigate the stale signature above"
+    else
+        echo "[install-local-direct] skipping bundle verification: core-tools binary not found at $core_tools_bin" >&2
+    fi
 fi
 
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "[install-local-direct] restarting daemon"
+    echo "[install-local-direct]   (a projection schema-epoch bump triggers a one-time" \
+         "rebuild from the event log — this can take several minutes)"
     # An incompatible projection schema epoch bump can make the first restart
-    # rebuild projection.sqlite3 from CAS/refs before readiness. Give that
-    # healthy one-time rebuild enough time to finish. Keep this slightly above
-    # ryeos start's internal wait so the CLI can print its own diagnostic.
-    ryeos_user 930 start >/dev/null || die "daemon did not restart cleanly"
+    # rebuild projection.sqlite3 from CAS/refs before readiness. Report its
+    # progress so the wait does not read as a hang, and give the healthy
+    # one-time rebuild enough time to finish. `ryeos start` output is kept (not
+    # sunk to /dev/null) so the CLI's own readiness diagnostic surfaces too. The
+    # 930s timeout stays slightly above ryeos start's internal wait.
+    state_dir="${init_app_root:-$(getent passwd "$invoking_user" | cut -d: -f6)/.local/share/ryeos}/.ai/state"
+    report_projection_rebuild "$state_dir" &
+    rebuild_reporter_pid=$!
+    if ! ryeos_user 930 start; then
+        kill "$rebuild_reporter_pid" 2>/dev/null || true
+        die "daemon did not restart cleanly"
+    fi
+    kill "$rebuild_reporter_pid" 2>/dev/null || true
+    wait "$rebuild_reporter_pid" 2>/dev/null || true
     ryeos_status_quick | grep -qx "running" || die "daemon did not restart cleanly"
 fi
 

@@ -71,7 +71,7 @@ Do not implement this just to remove small duplication. The validator sits at a 
 
 ## Proposed module shape
 
-Prefer extracting a small low-level module into `ryeos-bundle`, since both `ryeos-tools` and `ryeos-api` already depend on it, and `ryeos-app` can depend on `ryeos-bundle` only if that does not create a cycle.
+Prefer extracting a small low-level module into `ryeos-bundle`, since both `ryeos-core-tools` and `ryeos-api` already depend on it, and `ryeos-app` can depend on `ryeos-bundle` only if that does not create a cycle.
 
 First check the crate graph:
 
@@ -371,7 +371,7 @@ Run focused tests first:
 ```bash
 cargo test -p ryeos-bundle installed registration plan
 cargo test -p ryeos-app node_config
-cargo test -p ryeos-tools -- init
+cargo test -p ryeos-core-tools -- init
 cargo test -p ryeos-api bundle
 ```
 

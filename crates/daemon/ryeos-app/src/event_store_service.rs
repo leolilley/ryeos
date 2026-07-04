@@ -94,6 +94,37 @@ impl EventStoreService {
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
 
+        // Defense-in-depth behind the status state machine. The transition guard
+        // (`StateStore::finalize_thread`) refuses a contradictory terminal STATUS
+        // change; this closes the parallel gap where a terminal EVENT still
+        // appends onto an already-terminal thread as ordinary braid content (the
+        // observed shape: a mid-braid `thread_failed` beside a later
+        // `graph_completed`). Reject the whole batch LOUDLY — naming both the
+        // settled status and the incoming terminal event — so the next unknown
+        // producer of this shape is impossible to miss rather than silently
+        // braided in. The terminal-event vocabulary is the `RuntimeEventType`
+        // SSOT, not a local literal list.
+        if crate::state_store::is_terminal_status(&thread.status) {
+            if let Some(conflicting) = params.events.iter().find(|event| {
+                ryeos_runtime::RuntimeEventType::parse(&event.event_type)
+                    .is_ok_and(ryeos_runtime::RuntimeEventType::is_terminal)
+            }) {
+                tracing::error!(
+                    thread_id = %thread.thread_id,
+                    existing_terminal_status = %thread.status,
+                    incoming_terminal_event = %conflicting.event_type,
+                    "refused a terminal event on an already-terminal thread; the braid \
+                     would otherwise carry two contradictory terminal events"
+                );
+                bail!(
+                    "terminal event '{}' refused: thread '{}' is already terminal ('{}')",
+                    conflicting.event_type,
+                    thread.thread_id,
+                    thread.status,
+                );
+            }
+        }
+
         let events = params
             .events
             .iter()

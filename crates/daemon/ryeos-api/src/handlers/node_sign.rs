@@ -5,7 +5,7 @@
 //! writes (bundle registrations, route entries, etc.).
 //!
 //! For operator edits in project space, use `ryeos-core-tools` (invokes
-//! `ryeos_tools::actions::sign::run_sign` with the operator key).
+//! `ryeos_core_tools::actions::sign::run_sign` with the operator key).
 //! For bundle authoring, use `ryeos publish sign-items` (uses the
 //! author key explicitly).
 

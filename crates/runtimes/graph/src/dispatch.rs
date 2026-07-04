@@ -61,6 +61,12 @@ pub struct ActionSuccess {
     /// sub-graph) in the envelope's `cost` field. `None` for subprocess
     /// leaves, cache hits, and bare values — cost is never invented.
     pub cost: Option<RuntimeCost>,
+    /// The spawned child thread's id, when this dispatch launched a native
+    /// child thread (a directive or sub-graph). `None` for subprocess/tool
+    /// leaves, bare values, and cache hits — nothing new was spawned. The
+    /// walker emits a `child_thread_spawned` event from this so the dispatch
+    /// edge lands in the parent's portable braid.
+    pub child_thread_id: Option<String>,
 }
 
 impl ActionSuccess {
@@ -69,7 +75,11 @@ impl ActionSuccess {
     /// and must NOT re-bill cost, so the walker rebuilds the outcome with
     /// this constructor.
     pub fn bare(result: Value) -> Self {
-        Self { result, cost: None }
+        Self {
+            result,
+            cost: None,
+            child_thread_id: None,
+        }
     }
 }
 
@@ -113,6 +123,10 @@ pub async fn dispatch_action(
         ),
     };
 
+    // Cohort/fleet facets ride the action Value (the walker sets them from the
+    // node's interpolated `facets:`); the daemon stamps them on a detached child.
+    let facets = action.get("facets").cloned();
+
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
@@ -121,6 +135,7 @@ pub async fn dispatch_action(
             params,
             thread: thread.to_string(),
             call,
+            facets,
         },
     };
 
@@ -136,9 +151,22 @@ pub async fn dispatch_action(
     // failure rather than a silent `null`. Only success peels to the bare
     // leaf value; a leaf that still requests inline continuation
     // (`continuation_id` at its top level) is then rejected loudly.
+    // The `thread` snapshot is the spawned child (a native directive/sub-graph
+    // child); capture its id BEFORE classifying `result` so the walker can emit a
+    // `child_thread_spawned` event. Empty/absent for subprocess/tool/bare leaves,
+    // which spawn no child thread.
+    let child_thread_id = response
+        .thread
+        .get("thread_id")
+        .or_else(|| response.thread.get("id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     match classify_envelope(response.result) {
         ActionOutcome::Failure(failure) => Ok(ActionOutcome::Failure(failure)),
-        ActionOutcome::Success(success) => {
+        ActionOutcome::Success(mut success) => {
+            success.child_thread_id = child_thread_id;
             // Inline continuation-chasing is retired. A dispatched child that
             // requests continuation must be launched from a `follow: true` node
             // (daemon-managed suspend/resume) — never chased synchronously here, which
@@ -207,6 +235,7 @@ pub(crate) fn classify_envelope(value: Value) -> ActionOutcome {
             ActionOutcome::Success(ActionSuccess {
                 result: native_success_value(obj),
                 cost: parse_native_cost(obj),
+                child_thread_id: None,
             })
         } else {
             // A failed native child (e.g. a directive that burned tokens
@@ -491,6 +520,7 @@ mod tests {
         async fn complete_command(
             &self,
             _: &str,
+            _: i64,
             _: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {
@@ -584,6 +614,7 @@ mod tests {
         async fn complete_command(
             &self,
             _: &str,
+            _: i64,
             _: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {

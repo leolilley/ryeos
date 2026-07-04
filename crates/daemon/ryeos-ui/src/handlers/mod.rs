@@ -28,7 +28,6 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_studio_items::ITEM_INSPECT_DESCRIPTOR,
     ui_studio_threads::DESCRIPTOR,
     ui_studio_threads::INSPECT_DESCRIPTOR,
-    ui_studio_threads::CANCEL_DESCRIPTOR,
     ui_studio_schedules::DESCRIPTOR,
     ui_studio_gc::DESCRIPTOR,
     ui_studio_seat::OPEN_DESCRIPTOR,

@@ -14,6 +14,7 @@ pub mod limits;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;
+pub mod spawn_detached_child;
 pub mod spawn_follow_child;
 pub mod thread_meta;
 

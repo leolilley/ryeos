@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:2b06a2315977a5e8eadf7242d3994e3110b9afeedaa921919dcad24ff24d0d61:Oz5onYNdGJplEN+LgUqdWB0932M4IqURaTPkNj/0+lnc/Hqe9rzO6mi2Yu8fUBADwyfZV0Ej5l+nUQGbcoXjCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T09:54:30Z:f8344999a1311dc7c79a23258303efe16a51962ab345f83f6cfba456520891e4:80FL+NCFSSCX3zI6f8q22LIpdtFrsT0wJJrj5Xzwh0+YwA/1SvSzAozuWCARH0Cw1AnK+TV0Sr2KJMI/5qXGDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: central-auth
 version: 0.1.0
 description: 'Central web-app auth primitives: principals, sessions, invites, roles and capabilities'
@@ -7,4 +7,3 @@ requires_kinds:
 - tool
 - config
 uses_kinds: []
-runtime_authority: {}

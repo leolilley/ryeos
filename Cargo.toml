@@ -48,7 +48,7 @@ ryeos-node = { path = "crates/daemon/ryeos-node" }
 ryeos-runtime = { path = "crates/engine/ryeos-runtime" }
 ryeos-scheduler = { path = "crates/state/ryeos-scheduler" }
 ryeos-state = { path = "crates/state/ryeos-state" }
-ryeos-tools = { path = "crates/tools/core-tools" }
+ryeos-core-tools = { path = "crates/tools/core-tools" }
 ryeos-tracing = { path = "crates/support/ryeos-tracing" }
 ryeos-ui = { path = "crates/daemon/ryeos-ui" }
 ryeos-vault = { path = "crates/state/ryeos-vault" }

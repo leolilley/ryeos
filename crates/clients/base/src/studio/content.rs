@@ -65,6 +65,15 @@ pub struct ViewBinding {
     /// Open JSON — projected by renderers, never typed per-view.
     #[serde(default)]
     pub body: Value,
+    /// A seat-fold facet path this view renders directly as its data, in
+    /// place of a service fetch — e.g. an inspector showing `selection.summary`
+    /// (an inline event detail written by an inspect action) without a round
+    /// trip. Reuses the `@facet:` grammar: when the facet resolves to a value
+    /// it becomes the view's response; when it is absent the view falls back
+    /// to its `source` fetch. Mechanism, not a view ref — the engine names no
+    /// view, only a fold path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet: Option<String>,
     #[serde(default)]
     pub projections: Value,
     /// Row-activation binding intrinsic to the `rows` widget:
@@ -263,6 +272,27 @@ pub struct InputMentions {
 /// `FetchSource` path carries mentions with no bespoke effect.
 pub fn mention_source_key(view_ref: &str, input_id: &str) -> String {
     format!("mentions\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// The data-store key a view's `completion` source response lands under —
+/// derived identically by the fetch emitter and the slash-completion readers,
+/// so the line-start `/` grammar rides the generic `FetchSource` path with no
+/// bespoke effect (the same shape mentions use).
+pub fn completion_source_key(view_ref: &str, input_id: &str) -> String {
+    format!("completion\u{1f}{view_ref}\u{1f}{input_id}")
+}
+
+/// The record array a `completion` source response projects to, pulled through
+/// the input's declared `collection`. Absent/mismatched collection → no
+/// records (fails closed), like mentions.
+pub fn completion_records<'v>(completion: &InputCompletion, response: &'v Value) -> &'v [Value] {
+    completion
+        .collection
+        .as_deref()
+        .and_then(|path| field_path(response, path))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 /// Project a mentions source response into normalized `{ref,label}` records the
@@ -473,11 +503,17 @@ pub fn project_tone(record: &Value, projection: &Value) -> Option<String> {
 pub struct TableColumn {
     pub label: String,
     pub field: String,
+    /// Optional per-column tone block — the same `{field, map, default,
+    /// missing}` vocabulary as the row-level `projections.tone`, toning this
+    /// column's cell independently of the row (e.g. a lineage column toned by
+    /// `follow.display_state` while the row stays status-toned).
+    pub tone: Option<Value>,
 }
 
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field}` (label defaults to the field path). A column missing a
-/// field is skipped; absent `columns` → empty (the table renders headerless).
+/// `{label, field, tone?}` (label defaults to the field path). A column
+/// missing a field is skipped; absent `columns` → empty (the table renders
+/// headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
     binding
         .projections
@@ -491,6 +527,7 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                     Some(TableColumn {
                         label: label.to_string(),
                         field: field.to_string(),
+                        tone: col.get("tone").cloned(),
                     })
                 })
                 .collect()
@@ -498,18 +535,23 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
         .unwrap_or_default()
 }
 
-/// One projected table row: a cell per column (in column order), the row tone,
-/// and the raw record kept for affordance interpolation.
+/// One projected table row: a cell per column (in column order), the per-cell
+/// tones (parallel to `cells`; `None` where the column declares no tone or
+/// the record misses its field), the row tone, and the raw record kept for
+/// affordance interpolation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectedTableRow {
     pub cells: Vec<String>,
+    pub cell_tones: Vec<Option<String>>,
     pub tone: Option<String>,
     pub raw: Value,
 }
 
 /// Project a table source response: pull the collection (same shape as
 /// `project_records`), then one cell per declared column. Row tone reuses the
-/// shared `projections.tone` block. Missing cells degrade to empty strings.
+/// shared `projections.tone` block; a column's own `tone` block tones its
+/// cell through the same `project_tone` rules. Missing cells degrade to
+/// empty strings.
 pub fn project_table(
     binding: &ViewBinding,
     response: &Value,
@@ -529,6 +571,13 @@ pub fn project_table(
             cells: columns
                 .iter()
                 .map(|col| field_text(record, &col.field).unwrap_or_default())
+                .collect(),
+            cell_tones: columns
+                .iter()
+                .map(|col| {
+                    let tone = col.tone.as_ref()?;
+                    project_tone(record, &serde_json::json!({ "tone": tone }))
+                })
                 .collect(),
             tone: project_tone(record, &binding.projections),
             raw: record.clone(),
@@ -867,6 +916,32 @@ pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
     None
 }
 
+/// The closed set of `refresh:` rule keys a view may declare. A view refetches
+/// on a facet write (`on_facet`) or a hint (`on_hint`).
+pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
+
+/// Returns a degradation reason when a `refresh:` rule names a key outside the
+/// known set — a typo (e.g. `on_face`) that would otherwise silently never
+/// refresh. Surfaced as the same class of binding error the parser produces, so
+/// the tile shows the mistake instead of quietly not updating.
+pub fn refresh_keys_error(binding: &ViewBinding) -> Option<String> {
+    let unknown: Vec<&str> = binding
+        .refresh
+        .as_object()?
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !REFRESH_KEYS.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "invalid view binding: unknown refresh key(s) {}; expected one of: {}",
+        unknown.join(", "),
+        REFRESH_KEYS.join(", ")
+    ))
+}
+
 /// A parsed affordance invocation — the closed grammar bound producers can
 /// trigger. `Ui` writes a seat facet (value replaces, merge folds into
 /// the existing facet value); `Rye` dispatches command tokens through
@@ -883,10 +958,21 @@ pub enum AffordanceInvoke {
         /// compose. Applied post-write so the opened view's fetch resolves
         /// against the just-written facet. Single-lens: replaces the center.
         open_view: Option<String>,
+        /// Step INTO the opened view rather than swap to it: the leaving view
+        /// and the facet context it read are pushed onto the lens stack so a
+        /// later pop restores them. This is the debugger step-in — walking the
+        /// execution tree down a level with a return path — vs the flat swap a
+        /// bare `open_view` performs. Only meaningful with `open_view` set on a
+        /// single-lens surface.
+        drill: bool,
     },
     Rye {
         tokens: Vec<String>,
         args: Value,
+        /// Optional success-notice template (`{result.<field>}` placeholders,
+        /// rendered against the invocation outcome), carried from the
+        /// affordance's `notice:` and surfaced when the invocation succeeds.
+        notice: Option<String>,
     },
     /// Invoke a service by ref with args through the daemon `/execute` path (as
     /// the foot input does). Args reach the daemon as `parameters` — unlike the
@@ -896,6 +982,10 @@ pub enum AffordanceInvoke {
     Service {
         item_ref: String,
         args: Value,
+        /// Optional success-notice template (`{result.<field>}` placeholders,
+        /// rendered against the invocation outcome), carried from the
+        /// affordance's `notice:` and surfaced when the invocation succeeds.
+        notice: Option<String>,
     },
 }
 
@@ -925,10 +1015,21 @@ pub fn resolve_affordance_invoke(
                 .get("open_view")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            drill: invoke
+                .get("drill")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
         "rye" => {
             // A `ref:` selects the service-invocation form (args → `/execute`
             // parameters); otherwise it's grammar-token dispatch.
+            // The success-notice template is rendered later against the result
+            // outcome (`{result.<field>}`), so it is carried raw, not
+            // payload-substituted here.
+            let notice = invoke
+                .get("notice")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             if let Some(item_ref) = invoke.get("ref").and_then(Value::as_str) {
                 Some(AffordanceInvoke::Service {
                     item_ref: item_ref.to_string(),
@@ -936,6 +1037,7 @@ pub fn resolve_affordance_invoke(
                         .get("args")
                         .map(|args| substitute_payload(args, payload))
                         .unwrap_or(Value::Null),
+                    notice,
                 })
             } else {
                 Some(AffordanceInvoke::Rye {
@@ -950,6 +1052,7 @@ pub fn resolve_affordance_invoke(
                         .get("args")
                         .map(|args| substitute_payload(args, payload))
                         .unwrap_or(Value::Null),
+                    notice,
                 })
             }
         }
@@ -984,6 +1087,8 @@ pub fn views_from_surface(effective_surface: Option<&Value>) -> BTreeMap<String,
                     )
                 } else if let Some(reason) = target_without_route_error(&binding) {
                     ViewBinding::degraded(view_ref, reason)
+                } else if let Some(reason) = refresh_keys_error(&binding) {
+                    ViewBinding::degraded(view_ref, reason)
                 } else {
                     binding.view_ref = Some(view_ref.clone());
                     binding
@@ -1012,6 +1117,40 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn project_table_per_column_tone_is_independent_of_row_tone() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:ui/studio/threads/list", "collection": "threads" },
+            "projections": {
+                "columns": [
+                    { "label": "thread", "field": "thread_id" },
+                    { "label": "follow", "field": "follow.role",
+                      "tone": { "field": "follow.display_state",
+                                "map": { "suspended": "warn", "resumed": "good" } } }
+                ],
+                "tone": { "field": "status", "map": { "failed": "danger" }, "default": "neutral" }
+            }
+        }))
+        .unwrap();
+        let response = json!({ "threads": [
+            { "thread_id": "T-ab", "status": "running",
+              "follow": { "role": "suspended_parent", "display_state": "suspended" } },
+            { "thread_id": "T-cd", "status": "failed" }
+        ]});
+        let columns = table_columns(&binding);
+        let rows = project_table(&binding, &response, &columns);
+
+        // Follow row: row tone from status (neutral default), follow CELL warn.
+        assert_eq!(rows[0].tone.as_deref(), Some("neutral"));
+        assert_eq!(rows[0].cell_tones, vec![None, Some("warn".to_string())]);
+
+        // Non-follow row: no follow fact and no `missing:` declared → the
+        // cell stays untoned; the row tone still comes from status.
+        assert_eq!(rows[1].tone.as_deref(), Some("danger"));
+        assert_eq!(rows[1].cell_tones, vec![None, None]);
     }
 
     #[test]
@@ -1167,6 +1306,21 @@ mod tests {
     }
 
     #[test]
+    fn daemon_embedded_degraded_entry_carries_reason() {
+        // A view the daemon could not resolve server-side arrives as
+        // `{"degraded": <reason>}` in the embedded views map. It must
+        // become a placeholder binding carrying that reason verbatim —
+        // the same degrade path as a client-side parse failure.
+        let surface = json!({ "views": {
+            "view:ryeos/gone": { "degraded": "item not found" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/gone").expect("present");
+        assert_eq!(binding.degraded.as_deref(), Some("item not found"));
+        assert_eq!(binding.view_ref.as_deref(), Some("view:ryeos/gone"));
+    }
+
+    #[test]
     fn valid_input_target_parses() {
         let surface = json!({ "views": {
             "view:ryeos/ok": { "widget": "text",
@@ -1207,6 +1361,39 @@ mod tests {
         assert!(
             b.degraded.as_deref().is_some_and(|m| m.contains("invalid view binding")),
             "unknown cycle vocabulary degrades, not silently ignored: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn unknown_refresh_key_degrades() {
+        // A typo'd refresh rule (e.g. `on_face`) would silently never refresh;
+        // it must degrade visibly like any other binding mistake.
+        let surface = json!({ "views": {
+            "view:ryeos/badrefresh": { "widget": "text", "refresh": { "on_face": "selection" } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/badrefresh").expect("present");
+        assert!(
+            b.degraded
+                .as_deref()
+                .is_some_and(|m| m.contains("invalid view binding") && m.contains("on_face")),
+            "a typo'd refresh key degrades visibly, not silently: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn known_refresh_keys_parse() {
+        let surface = json!({ "views": {
+            "view:ryeos/okrefresh": { "widget": "text",
+                "refresh": { "on_facet": "selection", "on_hint": "thread" } }
+        }});
+        let b = views_from_surface(Some(&surface));
+        let b = b.get("view:ryeos/okrefresh").expect("present");
+        assert!(
+            b.degraded.is_none(),
+            "known refresh keys parse cleanly: {:?}",
             b.degraded
         );
     }
@@ -1540,6 +1727,7 @@ mod tests {
                 value: Some(json!({ "thread": "T-1" })),
                 merge: None,
                 open_view: None,
+                drill: false,
             }
         );
     }
@@ -1569,6 +1757,7 @@ mod tests {
                 value: None,
                 merge: Some(json!({ "thread": "T-9", "chain_root": "T-root" })),
                 open_view: Some("view:ryeos/chain/timeline".into()),
+                drill: false,
             }
         );
     }
@@ -1596,6 +1785,7 @@ mod tests {
             AffordanceInvoke::Service {
                 item_ref: "service:commands/submit".into(),
                 args: json!({ "thread_id": "T-7", "command_type": "cancel" }),
+                notice: None,
             }
         );
     }
@@ -1613,6 +1803,7 @@ mod tests {
             AffordanceInvoke::Rye {
                 tokens: vec!["thread".into(), "input".into()],
                 args: json!({ "line": "hello world" }),
+                notice: None,
             }
         );
     }

@@ -54,6 +54,13 @@ pub struct ResumeState {
     /// instead of re-dispatching. Absent on a plain (non-follow) resume.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_result: Option<Value>,
+    /// Per-step retry attempts already spent on `current_node` (checkpoint v2).
+    /// `None` only on the event-replay path (no checkpoint) → the walker resumes
+    /// with a zero attempt count. Pre-v2 checkpoints do NOT reach here: they are
+    /// rejected at resume (a killed form), so a resumed checkpoint always carries
+    /// this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<u32>,
 }
 
 /// Reconstruct a [`ResumeState`] for the thread by scanning its
@@ -115,6 +122,8 @@ pub async fn load_resume_state(
         // spliced child envelope); the event-replay path never resumes a follow.
         pending_follow: None,
         follow_result: None,
+        // Event-replay cannot reconstruct the retry counter; resume from 0.
+        retry_attempt: None,
     }))
 }
 
@@ -123,13 +132,14 @@ pub async fn load_resume_state(
 /// Payload shape (written by `walker::write_checkpoint`):
 /// ```json
 /// {
-///   "schema_version": 1,
+///   "schema_version": 2,
 ///   "graph_run_id": "...",
 ///   "current_node": "<NEXT cursor>",
 ///   "step_count": N,
 ///   "state": {...},
 ///   "accounting": {"total": {...}|null, "nodes": [...]},
 ///   "suppressed_errors": [{"step": N, "node": "...", "error": "..."}],
+///   "retry_attempt": 0,
 ///   "written_at": "<iso>"
 /// }
 /// ```
@@ -182,6 +192,10 @@ pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
         suppressed_errors: value.get("suppressed_errors").cloned(),
         pending_follow: value.get(crate::walker::follow_keys::PENDING_FOLLOW).cloned(),
         follow_result: value.get(crate::walker::follow_keys::FOLLOW_RESULT).cloned(),
+        retry_attempt: value
+            .get("retry_attempt")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
     })
 }
 
@@ -324,6 +338,7 @@ mod tests {
         async fn complete_command(
             &self,
             _: &str,
+            _: i64,
             _: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {
@@ -428,13 +443,14 @@ mod tests {
     #[test]
     fn from_checkpoint_value_parses_valid_payload() {
         let payload = json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "graph_run_id": "gr-test",
             "current_node": "step4",
             "step_count": 7,
             "state": {"counter": 42},
             "accounting": {"total": null, "nodes": []},
             "suppressed_errors": [{"step": 2, "node": "n1", "error": "boom"}],
+            "retry_attempt": 2,
             "written_at": "2026-01-01T00:00:00Z",
         });
         let state = from_checkpoint_value(&payload).unwrap();
@@ -442,6 +458,11 @@ mod tests {
         assert_eq!(state.step_count, 7);
         assert_eq!(state.graph_run_id, "gr-test");
         assert_eq!(state.state["counter"], 42);
+        assert_eq!(
+            state.retry_attempt,
+            Some(2),
+            "retry_attempt carried through from the v2 checkpoint"
+        );
         assert_eq!(
             state.accounting,
             Some(json!({"total": null, "nodes": []})),
@@ -467,17 +488,26 @@ mod tests {
             "state": {},
         });
         assert!(from_checkpoint_value(&future).is_err());
+        // The prior v1 shape (pre-retry_attempt) is a killed form — rejected,
+        // never read as a v2 payload with a defaulted counter.
+        let v1 = json!({
+            "schema_version": 1,
+            "current_node": "x",
+            "step_count": 1,
+            "state": {},
+        });
+        assert!(from_checkpoint_value(&v1).is_err());
     }
 
     #[test]
     fn from_checkpoint_value_rejects_missing_fields() {
-        let missing_node = json!({"schema_version": 1, "step_count": 1, "state": {}});
+        let missing_node = json!({"schema_version": 2, "step_count": 1, "state": {}});
         assert!(from_checkpoint_value(&missing_node).is_err());
 
-        let missing_step = json!({"schema_version": 1, "current_node": "x", "state": {}});
+        let missing_step = json!({"schema_version": 2, "current_node": "x", "state": {}});
         assert!(from_checkpoint_value(&missing_step).is_err());
 
-        let missing_state = json!({"schema_version": 1, "current_node": "x", "step_count": 1});
+        let missing_state = json!({"schema_version": 2, "current_node": "x", "step_count": 1});
         assert!(from_checkpoint_value(&missing_state).is_err());
     }
 

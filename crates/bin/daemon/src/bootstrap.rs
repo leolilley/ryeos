@@ -253,7 +253,7 @@ pub fn init(config: &Config, options: &InitOptions) -> Result<()> {
         )?;
     }
 
-    // NOTE: Bundle registrations are written by `ryeos init` (ryeos-tools),
+    // NOTE: Bundle registrations are written by `ryeos init` (ryeos-core-tools),
     // not by daemon bootstrap. The daemon only reads registrations during
     // `load_node_config_two_phase`. Any bundles discovered by init are
     // registered at `app_root/.ai/node/bundles/{name}.yaml`.

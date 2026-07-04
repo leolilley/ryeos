@@ -21,9 +21,12 @@ pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_remove;
+pub mod bundle_smoke;
 pub mod commands_dispatch;
+pub mod commands_get;
 pub mod commands_list;
 pub mod commands_submit;
+pub mod commands_wait;
 pub mod events_chain_replay;
 pub mod events_replay;
 pub mod federation_capabilities;
@@ -84,6 +87,7 @@ pub mod threads_get;
 pub mod threads_input;
 pub mod threads_list;
 pub mod threads_receipts;
+pub mod threads_set_facet;
 pub mod threads_tail;
 pub mod tool_env_check;
 pub mod usage_summary;
@@ -124,6 +128,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     threads_tail::DESCRIPTOR,
     threads_cancel::DESCRIPTOR,
     threads_children::DESCRIPTOR,
+    threads_set_facet::DESCRIPTOR,
     commands_dispatch::DESCRIPTOR,
     commands_list::DESCRIPTOR,
     threads_chain::DESCRIPTOR,
@@ -136,10 +141,13 @@ pub const ALL: &[ServiceDescriptor] = &[
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,
     commands_submit::DESCRIPTOR,
+    commands_get::DESCRIPTOR,
+    commands_wait::DESCRIPTOR,
     bundle_install::DESCRIPTOR,
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
+    bundle_smoke::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
     rebuild::DESCRIPTOR,
     node_sign::DESCRIPTOR,

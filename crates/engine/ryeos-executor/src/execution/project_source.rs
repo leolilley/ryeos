@@ -185,8 +185,6 @@ pub fn resolve_project_context(
             let project_str = canonical_project_ref(&project_path.to_string_lossy())?;
             let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
             let principal_key = ryeos_state::refs::principal_storage_key(principal_id);
-            let cas_root = state.state_store.cas_root()?;
-            let cas = lillux::cas::CasStore::new(cas_root.clone());
 
             let snap_hash = state
                 .state_store
@@ -195,80 +193,7 @@ pub fn resolve_project_context(
                     project_path: project_str.to_string(),
                 })?;
 
-            let snap_obj = cas
-                .get_object(&snap_hash)
-                .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?
-                .ok_or_else(|| {
-                    ProjectSourceError::CheckoutFailed(format!(
-                        "snapshot {} not found in CAS",
-                        snap_hash
-                    ))
-                })?;
-            let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
-                .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
-            if snapshot.user_manifest_hash.is_some() {
-                return Err(ProjectSourceError::CheckoutFailed(
-                    "legacy snapshots with user_manifest_hash are not supported; re-push the project"
-                        .to_string(),
-                ));
-            }
-
-            // ── 1. Always materialise the project checkout (request-owned) ──
-            let manifest_hash = &snapshot.project_manifest_hash;
-            let runtime_cache = state.config.runtime_root().cache();
-            let exec_dir = runtime_cache.join("executions").join(checkout_id);
-            let materialization_cache =
-                crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
-            let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
-            crate::execution::checkout_project(
-                &cas_root,
-                manifest_hash,
-                &exec_dir,
-                Some(&materialization_cache),
-            )
-            .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
-
-            // ── 2. Check cache for a previously-built engine ──
-            let cache_key = ryeos_app::engine_cache::CacheKey {
-                system_install_generation: state.engine_cache.system_install_generation(),
-                snapshot_hash: snap_hash.clone(),
-            };
-
-            let request_engine = state.engine_cache.get_or_insert_with(
-                cache_key,
-                || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
-                    // Re-read live bundle roots from the same signed
-                    // registry used by daemon startup. Only runs on cache
-                    // miss (generation bump invalidates the key), so the
-                    // read cost is bounded.
-                    let bundle_roots = load_live_bundle_roots(state)?;
-                    let built = ryeos_app::engine_init::build_engine_for_roots(
-                        &state.config,
-                        &bundle_roots,
-                        Some(exec_dir.as_path()),
-                        None,
-                    )
-                    .map_err(|e| {
-                        ProjectSourceError::CheckoutFailed(format!(
-                            "per-request engine build failed: {e}"
-                        ))
-                    })?;
-
-                    Ok((Arc::new(built), None))
-                },
-            )?;
-
-            ResolvedProjectContext {
-                effective_path: exec_dir.clone(),
-                original_path,
-                source: source.clone(),
-                snapshot_hash: Some(snap_hash),
-                // Request-owned: wrapped in Arc<TempDirGuard> so the
-                // runner and cache can both hold references. The project
-                // checkout is cleaned up when the last Arc drops.
-                temp_dir: Some(project_guard),
-                request_engine,
-            }
+            resolve_pinned_snapshot_context(state, &snap_hash, original_path, checkout_id)?
         }
     };
 
@@ -281,6 +206,97 @@ pub fn resolve_project_context(
     );
 
     Ok(ctx)
+}
+
+/// Build a pushed-head execution context for an already-known snapshot
+/// hash: materialise the checkout (request-owned temp dir) and look
+/// up / build the snapshot-scoped overlay engine via the engine cache
+/// (keyed `(system_install_generation, snapshot_hash)`).
+///
+/// Shared by the fresh pushed-head spawn (after the HEAD lookup above)
+/// and the pushed-head resume path, which carries the pinned hash in
+/// its resume record and must NOT re-read HEAD — the principal's HEAD
+/// may have advanced since the original spawn.
+pub fn resolve_pinned_snapshot_context(
+    state: &AppState,
+    snapshot_hash: &str,
+    original_path: PathBuf,
+    checkout_id: &str,
+) -> Result<ResolvedProjectContext, ProjectSourceError> {
+    let cas_root = state.state_store.cas_root()?;
+    let cas = lillux::cas::CasStore::new(cas_root.clone());
+
+    let snap_obj = cas
+        .get_object(snapshot_hash)
+        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?
+        .ok_or_else(|| {
+            ProjectSourceError::CheckoutFailed(format!(
+                "snapshot {} not found in CAS",
+                snapshot_hash
+            ))
+        })?;
+    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
+        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+    if snapshot.user_manifest_hash.is_some() {
+        return Err(ProjectSourceError::CheckoutFailed(
+            "snapshots with user_manifest_hash are not supported; re-push the project".to_string(),
+        ));
+    }
+
+    // ── 1. Always materialise the project checkout (request-owned) ──
+    let manifest_hash = &snapshot.project_manifest_hash;
+    let runtime_cache = state.config.runtime_root().cache();
+    let exec_dir = runtime_cache.join("executions").join(checkout_id);
+    let materialization_cache =
+        crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
+    let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
+    crate::execution::checkout_project(
+        &cas_root,
+        manifest_hash,
+        &exec_dir,
+        Some(&materialization_cache),
+    )
+    .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+
+    // ── 2. Check cache for a previously-built engine ──
+    let cache_key = ryeos_app::engine_cache::CacheKey {
+        system_install_generation: state.engine_cache.system_install_generation(),
+        snapshot_hash: snapshot_hash.to_string(),
+    };
+
+    let request_engine = state.engine_cache.get_or_insert_with(
+        cache_key,
+        || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
+            // Re-read live bundle roots from the same signed
+            // registry used by daemon startup. Only runs on cache
+            // miss (generation bump invalidates the key), so the
+            // read cost is bounded.
+            let bundle_roots = load_live_bundle_roots(state)?;
+            let built = ryeos_app::engine_init::build_engine_for_roots(
+                &state.config,
+                &bundle_roots,
+                Some(exec_dir.as_path()),
+                None,
+            )
+            .map_err(|e| {
+                ProjectSourceError::CheckoutFailed(format!("per-request engine build failed: {e}"))
+            })?;
+
+            Ok((Arc::new(built), None))
+        },
+    )?;
+
+    Ok(ResolvedProjectContext {
+        effective_path: exec_dir,
+        original_path,
+        source: ProjectSource::PushedHead,
+        snapshot_hash: Some(snapshot_hash.to_string()),
+        // Request-owned: wrapped in Arc<TempDirGuard> so the
+        // runner and cache can both hold references. The project
+        // checkout is cleaned up when the last Arc drops.
+        temp_dir: Some(project_guard),
+        request_engine,
+    })
 }
 
 /// Sentinel value for `--no-project` mode: the caller has chosen to

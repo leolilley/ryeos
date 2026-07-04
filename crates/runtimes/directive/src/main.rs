@@ -121,6 +121,11 @@ fn run_directive() -> Result<RuntimeResult> {
 
 async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let project_root = envelope.roots.project_root.clone();
+    // Callback identity + state-write anchor: the deliberate `state_root`
+    // override when the launch carried one, otherwise the project root. The
+    // daemon minted this run's callback token against exactly this path, so
+    // every callback must advertise it; resolution stays on `project_root`.
+    let state_root = envelope.roots.state_root().to_path_buf();
     let bundle_roots = envelope.roots.bundle_roots.clone();
 
     // The runtime no longer parses the directive body or walks extends.
@@ -139,7 +144,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     let callback = ryeos_runtime::callback_client::CallbackClient::new(
         &envelope.callback,
         &envelope.thread_id,
-        envelope.roots.project_root.to_str().unwrap_or(""),
+        state_root.to_str().unwrap_or(""),
         &thread_auth_token,
     );
 
@@ -402,7 +407,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
     // routes it through the same finalize-as-failed path as any
     // other terminal error.
     if let Err(e) = crate::knowledge::write_thread_transcript(
-        &project_root,
+        &state_root,
         &envelope.thread_id,
         &envelope.resolution.root.source_path.to_string_lossy(),
         runner_inst.messages(),
@@ -418,7 +423,7 @@ async fn run_with_envelope(envelope: LaunchEnvelope) -> Result<RuntimeResult> {
         });
     }
     if let Err(e) = crate::knowledge::write_capabilities(
-        &project_root,
+        &state_root,
         &envelope.thread_id,
         runner_inst.tools(),
         None,

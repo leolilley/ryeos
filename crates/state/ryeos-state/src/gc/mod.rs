@@ -16,6 +16,7 @@
 pub mod compact;
 pub mod event_log;
 pub mod lock;
+pub mod retention;
 
 use std::fs;
 use std::path::Path;
@@ -33,6 +34,26 @@ pub use event_log::GcEvent;
 pub use lock::GcLock;
 
 /// GC parameters.
+///
+/// # Default vs deep profile (operational-hygiene decision)
+///
+/// A bare `ryeos gc` (all flags false) runs **only** the CAS mark-and-sweep —
+/// it never touches runtime history, caches, trace output, or append-only logs.
+/// The heavier reclamation is opt-in. Rather than flipping the manual default
+/// to destructive (which would surprise operators), the decision is to keep the
+/// **`deep` umbrella flag** (`--deep`) as the single opt-in that turns on every
+/// disposable-state pass at once: chain-ref pruning, cache purge, trace
+/// truncation, and the retention sweeps (schedule-fire JSONL + sync-job rows).
+/// The individual `purge_cache` / `truncate_trace` / `prune_runtime_history`
+/// flags remain available for targeted reclamation.
+///
+/// The scheduled maintenance fire (`service:maintenance/gc`) runs the deep
+/// profile — it dispatches with `{"deep": true}` — so an unattended install
+/// reclaims fully on cadence while interactive `ryeos gc` stays conservative.
+/// Retention sweeps run under `deep || prune_runtime_history` and are therefore
+/// off for the bare default. Destructive-ish steps (trace truncation, fire
+/// pruning) log loudly and report freed bytes so they're visible in the GC
+/// event log.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcParams {
@@ -42,9 +63,11 @@ pub struct GcParams {
     /// Compact project snapshot history before sweep.
     #[serde(default)]
     pub compact: bool,
-    /// Purge disposable runtime state before sweeping CAS.
+    /// Deep profile: the opt-in umbrella that enables every disposable-state
+    /// pass — chain-ref pruning, cache purge, trace truncation, and the
+    /// retention sweeps. The scheduled maintenance fire sets this. Bare
+    /// `ryeos gc` leaves it false and does a pure CAS sweep.
     ///
-    /// This is intentionally opt-in: normal GC preserves execution history.
     /// Deep GC drops local runtime-only history/caches that can be rebuilt or
     /// are not part of operator config, node identity, installed bundles, or
     /// project/deployed heads.
@@ -56,8 +79,11 @@ pub struct GcParams {
     /// Truncate `.ai/state/trace-events.ndjson`.
     #[serde(default)]
     pub truncate_trace: bool,
-    /// Drop generic execution chain refs before CAS sweep, making local thread
-    /// and chain runtime history collectible.
+    /// Drop generic execution chain refs before CAS sweep, making local chain
+    /// runtime history collectible. Does NOT touch per-thread state: daemon
+    /// replay checkpoints live under `<app_root>/threads/<id>` (not this runtime
+    /// dir), and `.ai/state/threads/<id>` holds audit metadata for live/resumable
+    /// threads with no liveness signal at this layer.
     #[serde(default)]
     pub prune_runtime_history: bool,
     /// Retention policy for compaction (uses default if None).
@@ -89,6 +115,15 @@ pub struct GcResult {
     pub deleted_objects: usize,
     pub deleted_blobs: usize,
     pub deleted_runtime_files: usize,
+    /// Schedule-fire JSONL lines dropped by the retention sweep.
+    #[serde(default)]
+    pub deleted_fire_records: usize,
+    /// Terminal sync-job rows dropped by the retention sweep.
+    #[serde(default)]
+    pub deleted_sync_jobs: usize,
+    /// Sync-job attempt rows dropped alongside their retired jobs.
+    #[serde(default)]
+    pub deleted_sync_job_attempts: usize,
     pub freed_bytes: u64,
     pub compaction: Option<CompactionResult>,
     pub duration_ms: u64,
@@ -114,6 +149,18 @@ pub fn purge_runtime_state(
             params.dry_run,
             result,
         )?;
+        // Per-thread state is deliberately NOT purged here. Daemon replay
+        // checkpoints live under `<app_root>/threads/<id>/checkpoints` (see
+        // `daemon_thread_state_dir`), NOT under this runtime state dir — a purge
+        // here never reclaimed them. And `.ai/state/threads/<id>` holds thread
+        // audit metadata for LIVE and resumable threads, with no liveness signal
+        // available at this layer. Blindly deleting per-thread dirs on the daily
+        // deep schedule would drop live-thread metadata (and, if retargeted at
+        // the real checkpoint tree without filtering, resumable checkpoints that
+        // follow/continuation resume hard-requires). A correct per-thread GC must
+        // target the real checkpoint tree AND exclude non-terminal / suspended /
+        // resumable thread ids — that needs daemon runtime state threaded in,
+        // tracked as a separate change.
     }
 
     if params.deep || params.purge_cache {
@@ -125,8 +172,27 @@ pub fn purge_runtime_state(
     }
 
     if params.deep || params.truncate_trace {
-        truncate_file(
-            &runtime_state_dir.join("trace-events.ndjson"),
+        let trace_path = runtime_state_dir.join("trace-events.ndjson");
+        let before = result.freed_bytes;
+        truncate_file(&trace_path, params.dry_run, result)?;
+        if result.freed_bytes > before {
+            tracing::warn!(
+                path = %trace_path.display(),
+                freed_bytes = result.freed_bytes - before,
+                dry_run = params.dry_run,
+                "GC: truncating daemon trace log"
+            );
+        }
+    }
+
+    // Retention sweep: age/count-bound the append-only schedule fire history.
+    // Runs under the deep profile only, so a bare `ryeos gc` stays a pure CAS
+    // sweep (see the GcParams profile docs).
+    if params.deep || params.prune_runtime_history {
+        retention::sweep_fire_jsonl(
+            runtime_state_dir,
+            retention::FIRE_JSONL_MAX_AGE_DAYS,
+            retention::FIRE_JSONL_MAX_COUNT,
             params.dry_run,
             result,
         )?;
@@ -710,16 +776,21 @@ mod tests {
             runtime_state_dir.join("refs/generic/bundle_events/email/event/head");
         let cache_file = runtime_state_dir.join("cache/executors/hash/runtime/bin");
         let trace_file = runtime_state_dir.join("trace-events.ndjson");
+        let thread_meta = runtime_state_dir.join("threads/T-1/meta.json");
+        let thread_checkpoint = runtime_state_dir.join("threads/T-1/checkpoints/ck.bin");
 
         fs::create_dir_all(chain_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(project_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(bundle_event_ref.parent().unwrap()).unwrap();
         fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(thread_checkpoint.parent().unwrap()).unwrap();
         fs::write(&chain_ref, b"chain").unwrap();
         fs::write(&project_ref, b"project").unwrap();
         fs::write(&bundle_event_ref, b"bundle-event").unwrap();
         fs::write(&cache_file, b"cache").unwrap();
         fs::write(&trace_file, b"trace line\n").unwrap();
+        fs::write(&thread_meta, b"meta").unwrap();
+        fs::write(&thread_checkpoint, b"ckpt").unwrap();
 
         let mut result = GcResult::default();
         let params = GcParams {
@@ -740,6 +811,14 @@ mod tests {
             fs::metadata(&trace_file).unwrap().len(),
             0,
             "deep purge should truncate daemon trace output"
+        );
+        assert!(
+            thread_meta.exists(),
+            "deep purge must NOT blindly drop per-thread audit metadata — there is no liveness guard at this layer"
+        );
+        assert!(
+            thread_checkpoint.exists(),
+            "deep purge must NOT drop per-thread state — real checkpoints live under <app_root>/threads and need a liveness-guarded GC"
         );
         assert!(
             project_ref.exists(),
