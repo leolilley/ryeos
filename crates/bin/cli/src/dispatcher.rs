@@ -1097,6 +1097,18 @@ async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError>
 }
 
 fn print_result(payload: serde_json::Value) {
+    // A state-root override echoes both roots as top-level `execution`
+    // diagnostics; surface them on stderr so stdout stays the bare result
+    // for scripts.
+    if let Some(execution) = payload.get("execution") {
+        if let (Some(source), Some(state)) = (
+            execution.get("source_root").and_then(|v| v.as_str()),
+            execution.get("state_root").and_then(|v| v.as_str()),
+        ) {
+            eprintln!("source_root: {source}");
+            eprintln!("state_root:  {state}");
+        }
+    }
     let result = payload.get("result").cloned().unwrap_or(payload);
     let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     println!("{pretty}");
