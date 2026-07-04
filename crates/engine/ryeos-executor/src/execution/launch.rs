@@ -16,9 +16,11 @@ use super::limits::{
 };
 use super::thread_meta::ThreadMeta;
 use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_ttl};
+use ryeos_app::event_store_service::{EventAppendItem, EventAppendParams};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
+use ryeos_runtime::events::RuntimeEventType;
 
 /// Typed error for native executor materialization failures.
 ///
@@ -1593,6 +1595,42 @@ async fn run_claimed_thread_row(
         &engine.trust_store,
         ryeos_engine::resolution::TrustClass::TrustedBundle, // executor binaries ship in system bundles
     )?;
+
+    // Persist a slim as-launched resolution digest as a durable braid event
+    // (the same seam the lineage facts use): the extends chain as composed
+    // (refs + content digests), the composed policy facts, and the effective
+    // trust class. This lets the explain view render what the thread launched
+    // with instead of a fresh re-resolve. Digests only — the full composed
+    // value is reconstructable from CAS by digest. Best-effort: a failed append
+    // must not sink an otherwise-launchable thread, since the digest serves a
+    // rare drift-debug read. Emitted before `resolution` moves into the
+    // envelope below.
+    match serde_json::to_value(resolution.as_launched_digest()) {
+        Ok(payload) => {
+            if let Err(e) = state.events.append(&EventAppendParams {
+                thread_id: thread_id.clone(),
+                event: EventAppendItem {
+                    event_type: RuntimeEventType::AsLaunchedResolution.as_str().to_string(),
+                    storage_class: RuntimeEventType::AsLaunchedResolution
+                        .storage_class()
+                        .as_str()
+                        .to_string(),
+                    payload,
+                },
+            }) {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "failed to persist as-launched resolution digest"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(
+            thread_id = %thread_id,
+            error = %e,
+            "failed to serialize as-launched resolution digest"
+        ),
+    }
 
     // 8. Build envelope
     //    Using LaunchEnvelopeBuilder to centralize construction and

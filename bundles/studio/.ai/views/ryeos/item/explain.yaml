@@ -90,7 +90,57 @@ sections:
           error: danger
         default: neutral
 
-# Re-fetch whenever the selected item changes (the explain affordance writes
-# selection.item before opening this lens).
+  # ── Thread-scoped (as-launched) sections ────────────────────────────────
+  # When a thread is selected (selection.thread), the handler attaches an
+  # `as_launched` block: the digest the thread persisted AT LAUNCH, rendered as
+  # truth. The sections above are the fresh "resolved now" — reading both side
+  # by side IS the re-resolve comparison. Empty when no thread is selected (the
+  # as_launched block is absent) or none was recorded (present: false).
+
+  # As launched: the launch-time root ref + effective trust class, toned by the
+  # weakest-link trust the thread actually launched under.
+  - title: As launched
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+        thread_id: "@facet:selection.thread"
+      collection: as_launched.root
+    projection:
+      primary: resolved_ref
+      meta: raw_content_digest
+      tone:
+        field: trust_class
+        map:
+          trusted_bundle: good
+          trusted_project: good
+          untrusted_project: danger
+          unsigned: warn
+        default: neutral
+
+  # As-launched extends chain: one row per ancestor as composed at launch,
+  # toned by `changed` so an ancestor whose content digest drifted since launch
+  # (edited, republished, or dropped from the chain) reads immediately. Meta is
+  # the pinned launch digest; the full bytes are reconstructable from CAS by it.
+  - title: As launched — extends chain
+    source:
+      ref: service:items/effective
+      params:
+        canonical_ref: "@facet:selection.item"
+        thread_id: "@facet:selection.thread"
+      collection: as_launched.ancestors
+    projection:
+      primary: resolved_ref
+      meta: raw_content_digest
+      tone:
+        field: changed
+        map:
+          "true": danger
+          "false": good
+        default: neutral
+
+# Re-fetch whenever the selected item or thread changes (the explain affordance
+# writes selection.item before opening this lens; thread-scoped entry also
+# writes selection.thread).
 refresh:
   on_facet: selection
