@@ -18,6 +18,7 @@ use serde_json::Value;
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::cascade::{cascade_descendants, CascadeMode};
 use ryeos_app::command_service::CommandSubmitParams;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -55,6 +56,8 @@ pub async fn handle(
         None
     };
 
+    let thread_id = req.thread_id.clone();
+    let command_type = req.command_type.clone();
     let record = state
         .commands
         .submit(&CommandSubmitParams {
@@ -64,6 +67,35 @@ pub async fn handle(
             params: req.params,
         })
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
+
+    // Daemon-side immediate propagation: a cancel/kill for this thread reaches
+    // its live descendants right now, regardless of whether the target itself
+    // cooperatively handles its own command (a graph blocked on an inline child
+    // cannot claim between nodes). kill hard-stops each descendant; cancel is
+    // graceful. A cascade failure is logged, not raised — the command is already
+    // enqueued and the target's own handling is unaffected.
+    let cascade_mode = match command_type.as_str() {
+        "kill" => Some(CascadeMode::Hard),
+        "cancel" => Some(CascadeMode::Graceful),
+        _ => None,
+    };
+    if let Some(mode) = cascade_mode {
+        match cascade_descendants(&state.state_store, &thread_id, mode) {
+            Ok(report) => tracing::info!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                signalled = report.len(),
+                "cancel/kill cascade signalled descendants"
+            ),
+            Err(e) => tracing::warn!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                error = %e,
+                "descendant cascade failed on command submit"
+            ),
+        }
+    }
+
     serde_json::to_value(record).map_err(|e| HandlerError::Internal(e.to_string()))
 }
 

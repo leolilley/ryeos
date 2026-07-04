@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::cascade::{cascade_descendants, CascadeMode};
 use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
@@ -110,6 +111,27 @@ pub async fn handle(
     // `finalize_thread` persists then publishes the `thread_cancelled`
     // event, so live subscribers receive it directly.
 
+    // Cascade to live descendants: killing this thread's own pgid does not reach
+    // the children it spawned (each runs as its own setsid group), so a graph
+    // blocked on an inline child would leave that child running — and authoring —
+    // past the parent's cancel. Graceful, honouring each child's declared mode. A
+    // walk failure is logged, not raised: the primary is already settled.
+    let cascade = match cascade_descendants(
+        &state.state_store,
+        &req.thread_id,
+        CascadeMode::Graceful,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!(
+                thread_id = %req.thread_id,
+                error = %e,
+                "descendant cascade failed during cancel"
+            );
+            Vec::new()
+        }
+    };
+
     // If the cancelled thread was a followed child's chain terminal, its finalize
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —
     // kick the parent resume live so it does not wait for the next daemon restart.
@@ -123,6 +145,7 @@ pub async fn handle(
         "thread_id": req.thread_id,
         "status": finalized.status,
         "kill": kill_info,
+        "cascade": cascade,
     }))
 }
 
