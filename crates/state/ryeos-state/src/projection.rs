@@ -279,7 +279,12 @@ const PROJECTION_APP_ID: i32 = 0x5259_504a;
 /// Current projection schema epoch. This is stored in SQLite's
 /// `PRAGMA user_version` slot, but RyeOS treats it as the projection
 /// schema epoch. Bump this for incompatible projection schema changes.
-const PROJECTION_SCHEMA_EPOCH: i32 = 3;
+///
+/// Epoch 4: added the `idx_facets_key_value` index for cohort/fleet reverse
+/// lookups. An existing epoch-3 DB lacks the index, so a bump forces the
+/// reset-and-rebuild-from-CAS that recreates the schema (rather than failing the
+/// `assert_owned` schema self-check on the missing index).
+const PROJECTION_SCHEMA_EPOCH: i32 = 4;
 
 /// Schema spec for projection.db — the single source of truth for
 /// what tables/columns/indexes this database must contain.
