@@ -2504,7 +2504,7 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "status", "source", "created"]
+            ["thread", "kind", "item", "status", "source", "follow", "created"]
         );
         let rows = project_table(
             &binding,
