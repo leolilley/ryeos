@@ -404,15 +404,15 @@ impl SseStream {
         }
     }
 
-    /// Poll for the next SSE event. Returns None when the stream is done.
-    pub async fn next_event(&mut self) -> Option<crate::transport::sse::SseEvent> {
+    /// Poll for the next SSE frame. Returns None when the stream is done.
+    pub async fn next_event(&mut self) -> Option<crate::transport::sse::SseFrame> {
         if self.done {
             return None;
         }
 
         // Try to parse a complete event from the buffer
-        if let Some(event) = self.try_parse_event() {
-            return Some(event);
+        if let Some(frame) = self.try_parse_event() {
+            return Some(frame);
         }
 
         // Read the next chunk of body bytes.
@@ -428,7 +428,7 @@ impl SseStream {
         }
     }
 
-    fn try_parse_event(&mut self) -> Option<crate::transport::sse::SseEvent> {
+    fn try_parse_event(&mut self) -> Option<crate::transport::sse::SseFrame> {
         // Look for double newline (event boundary)
         let event_end = self.buffer.find("\n\n")?;
         let event_text = self.buffer[..event_end].to_string();
@@ -452,6 +452,9 @@ impl SseStream {
             return None;
         }
 
-        Some(crate::transport::sse::SseEvent::parse(event_type, &data))
+        Some(crate::transport::sse::SseFrame {
+            event_type: event_type.to_string(),
+            data,
+        })
     }
 }
