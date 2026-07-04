@@ -84,11 +84,17 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
             // degraded entry the tile renders as a placeholder carrying
             // the reason — never a missing binding.
             let mut composed = effective.composed_value;
-            ryeos_api::surface_views::embed_surface_views(
+            let failures = ryeos_api::surface_views::embed_surface_views(
                 &state.engine,
                 project_path.as_deref().map(std::path::Path::new),
                 &mut composed,
             );
+            // The session response has no diagnostics channel (the degraded
+            // pane carries the reason on-screen); keep the daemon log honest
+            // about what failed to embed.
+            for (view_ref, reason) in &failures {
+                tracing::warn!(view_ref = %view_ref, reason = %reason, "view embed failed");
+            }
             composed
         });
 

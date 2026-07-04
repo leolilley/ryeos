@@ -2512,11 +2512,11 @@ dependencies = [
  "reqwest",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-core-tools",
  "ryeos-engine",
  "ryeos-node",
  "ryeos-runtime",
  "ryeos-state",
- "ryeos-tools",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2538,6 +2538,35 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "unicode-width",
+]
+
+[[package]]
+name = "ryeos-core-tools"
+version = "0.5.24"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "dirs",
+ "glob",
+ "lillux",
+ "rand 0.8.5",
+ "rmp-serde",
+ "ryeos-app",
+ "ryeos-bundle",
+ "ryeos-engine",
+ "ryeos-runtime",
+ "ryeos-state",
+ "ryeos-tracing",
+ "ryeos-vault",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -2633,6 +2662,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "signal-hook",
  "tempfile",
  "tokio",
  "tracing",
@@ -2761,35 +2791,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ryeos-tools"
-version = "0.5.24"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "dirs",
- "glob",
- "lillux",
- "rand 0.8.5",
- "rmp-serde",
- "ryeos-app",
- "ryeos-bundle",
- "ryeos-engine",
- "ryeos-runtime",
- "ryeos-state",
- "ryeos-tracing",
- "ryeos-vault",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
 name = "ryeos-tracing"
 version = "0.1.0"
 dependencies = [
@@ -2823,6 +2824,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tracing",
  "uuid",
 ]
 
@@ -2934,13 +2936,13 @@ dependencies = [
  "rusqlite",
  "ryeos-api",
  "ryeos-app",
+ "ryeos-core-tools",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-node",
  "ryeos-runtime",
  "ryeos-scheduler",
  "ryeos-state",
- "ryeos-tools",
  "ryeos-tracing",
  "ryeos-ui",
  "serde",

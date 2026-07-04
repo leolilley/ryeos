@@ -177,6 +177,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_successor
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_child_chain
     ON follow_waiter(child_chain_root_id);
+
+CREATE TABLE IF NOT EXISTS thread_child_link (
+    child_thread_id TEXT PRIMARY KEY,
+    parent_thread_id TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
+    ON thread_child_link(parent_thread_id);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -359,6 +369,15 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "thread_child_link",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "parent_thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "relation", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -384,6 +403,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "follow_waiter",
                 columns: &["child_chain_root_id"],
                 unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_child_link_parent",
+                table: "thread_child_link",
+                columns: &["parent_thread_id"],
+                unique: false,
             },
         ],
     }
@@ -770,7 +795,83 @@ impl RuntimeDb {
     }
 
     fn load_command(&self, command_id: i64) -> Result<CommandRecord> {
-        self.conn
+        self.get_command(command_id)?
+            .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
+    }
+
+    /// Settle every still-open (`pending`/`claimed`) command for a finalized
+    /// thread and return the affected records so a waiter blocked in
+    /// `commands.wait` is woken instead of riding to its timeout. A command whose
+    /// intent the terminal fulfilled — `cancel` for a `cancelled` thread, `kill`
+    /// for a `killed` one — settles `completed` (the action took effect); any
+    /// other open command settles `rejected` (the thread ended before it was
+    /// handled). Each `UPDATE` is guarded on the still-open status, so a row a
+    /// runtime completed in the interim is left at its real terminal status.
+    pub fn settle_open_commands(
+        &self,
+        thread_id: &str,
+        terminal_status: &str,
+    ) -> Result<Vec<CommandRecord>> {
+        let open: Vec<(i64, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT command_id, command_type FROM thread_commands
+                 WHERE thread_id = ?1 AND status IN ('pending', 'claimed')
+                 ORDER BY command_id ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![thread_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let now = now_rfc3339();
+        let mut settled = Vec::with_capacity(open.len());
+        for (id, command_type) in open {
+            let fulfilled = command_fulfilled_by_terminal(&command_type, terminal_status);
+            let status = if fulfilled { "completed" } else { "rejected" };
+            let result = serde_json::json!({
+                "reason": if fulfilled {
+                    format!("thread settled {terminal_status}, fulfilling the {command_type} command")
+                } else {
+                    format!("thread finalized ({terminal_status}) before the {command_type} command was handled")
+                }
+            });
+            let updated = self.conn.execute(
+                "UPDATE thread_commands SET status = ?2, result = ?3, completed_at = ?4
+                 WHERE command_id = ?1 AND status IN ('pending', 'claimed')",
+                params![id, status, json_blob_ref(Some(&result))?, now],
+            )?;
+            if updated > 0 {
+                if let Some(record) = self.get_command(id)? {
+                    settled.push(record);
+                }
+            }
+        }
+        Ok(settled)
+    }
+
+    /// Whether a `kill` command was ever submitted for `thread_id`. The
+    /// launcher's abnormal-exit fallback uses this as the kill-intent marker: a
+    /// subprocess SIGKILLed by a daemon-issued `kill` exits with no callback
+    /// finalization (which otherwise normalizes to `failed`); a recorded kill
+    /// distinguishes that intentional stop from a genuine crash so it settles
+    /// `killed`.
+    pub fn thread_has_kill_command(&self, thread_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM thread_commands WHERE thread_id = ?1 AND command_type = 'kill'",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Read one command by id, or `None` if it does not exist. Unlike
+    /// [`Self::load_command`] this is not an error on absence — `commands.get`
+    /// and `commands.wait` distinguish "no such command" from a real row.
+    pub fn get_command(&self, command_id: i64) -> Result<Option<CommandRecord>> {
+        Ok(self
+            .conn
             .query_row(
                 "SELECT command_id, thread_id, command_type, status, requested_by, params,
                         result, created_at, claimed_at, completed_at
@@ -779,8 +880,76 @@ impl RuntimeDb {
                 params![command_id],
                 read_command_row,
             )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
+            .optional()?)
+    }
+
+    // ── Child links ──────────────────────────────────────────────────────
+    //
+    // Operational lineage: which threads a parent spawned (inline dispatch,
+    // follow child, …), kept distinct from `follow_waiter` (follow-specific
+    // resume state) and the projection (portable history). It exists so a
+    // cancel/kill can cascade to a blocked parent's live descendants — a blocked
+    // parent cannot claim its own commands, and inline children are fresh
+    // projection roots with no descendant query. The pgid is deliberately NOT
+    // stored here: the authoritative pgid lives in `thread_runtime` and
+    // attaches/updates after thread creation, so the cascade resolves each
+    // descendant's CURRENT pgid at signal time rather than trusting a stale copy.
+
+    /// Record that `parent_thread_id` spawned `child_thread_id`. Idempotent on
+    /// the child (a re-driven launch does not error or duplicate the link).
+    ///
+    /// `relation` is a descriptive tag only — the cascade walks every descendant
+    /// regardless. The sole production caller records `"dispatch"` for both
+    /// inline and follow children (they share one launch path); the value is
+    /// reserved for a finer distinction if a consumer ever needs one.
+    pub fn record_child_link(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO thread_child_link (child_thread_id, parent_thread_id, relation, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(child_thread_id) DO NOTHING",
+            params![
+                child_thread_id,
+                parent_thread_id,
+                relation,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every transitive descendant of `root_thread_id`, breadth-first in spawn
+    /// order. `root` itself is excluded, and a `seen` set guards against a link
+    /// cycle ever driving an unbounded walk.
+    pub fn descendant_thread_ids(&self, root_thread_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT child_thread_id FROM thread_child_link
+             WHERE parent_thread_id = ?1
+             ORDER BY created_at_ms ASC, child_thread_id ASC",
+        )?;
+
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::from([root_thread_id.to_string()]);
+        let mut queue: std::collections::VecDeque<String> =
+            std::collections::VecDeque::from([root_thread_id.to_string()]);
+        let mut order = Vec::new();
+
+        while let Some(parent) = queue.pop_front() {
+            let children = stmt
+                .query_map(params![parent], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<String>, _>>()?;
+            for child in children {
+                if seen.insert(child.clone()) {
+                    order.push(child.clone());
+                    queue.push_back(child);
+                }
+            }
+        }
+        Ok(order)
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -1143,6 +1312,16 @@ fn now_rfc3339() -> String {
     lillux::time::iso8601_now()
 }
 
+/// Whether a thread's terminal status fulfils a control command's intent — a
+/// `cancel` that ended `cancelled`, or a `kill` that ended `killed`. Used to
+/// settle such a command `completed` (it took effect) rather than `rejected`.
+fn command_fulfilled_by_terminal(command_type: &str, terminal_status: &str) -> bool {
+    matches!(
+        (command_type, terminal_status),
+        ("cancel", "cancelled") | ("kill", "killed")
+    )
+}
+
 fn json_blob(value: &Option<Value>) -> Result<Option<Vec<u8>>> {
     value
         .as_ref()
@@ -1194,6 +1373,102 @@ mod tests {
         assert_eq!(info.pgid, Some(5678));
         let back = info.launch_metadata.expect("launch_metadata");
         assert_eq!(back.cancellation_mode, lm.cancellation_mode);
+    }
+
+    #[test]
+    fn child_links_walk_transitively_in_spawn_order() {
+        let (_tmp, db) = fresh_db();
+        // parent → a, b ; a → a1 ; a1 → a2 (a chain under one branch).
+        db.record_child_link("parent", "a", "inline").unwrap();
+        db.record_child_link("parent", "b", "follow").unwrap();
+        db.record_child_link("a", "a1", "inline").unwrap();
+        db.record_child_link("a1", "a2", "inline").unwrap();
+
+        let descendants = db.descendant_thread_ids("parent").unwrap();
+        assert_eq!(descendants, vec!["a", "b", "a1", "a2"]);
+
+        // A subtree root walks only its own descendants.
+        assert_eq!(db.descendant_thread_ids("a").unwrap(), vec!["a1", "a2"]);
+        // A leaf has none.
+        assert!(db.descendant_thread_ids("a2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_child_link_is_idempotent_on_the_child() {
+        let (_tmp, db) = fresh_db();
+        db.record_child_link("parent", "child", "inline").unwrap();
+        // A re-driven launch of the same child must not error or duplicate.
+        db.record_child_link("parent", "child", "inline").unwrap();
+        assert_eq!(db.descendant_thread_ids("parent").unwrap(), vec!["child"]);
+    }
+
+    #[test]
+    fn descendant_walk_terminates_on_a_link_cycle() {
+        let (_tmp, db) = fresh_db();
+        // A pathological cycle (a → b → a) must not drive an unbounded walk.
+        // From `a`, the only descendant is `b`; the back-edge to `a` is dropped
+        // because the root is pre-seeded into the `seen` set.
+        db.record_child_link("a", "b", "inline").unwrap();
+        db.record_child_link("b", "a", "inline").unwrap();
+        assert_eq!(db.descendant_thread_ids("a").unwrap(), vec!["b"]);
+    }
+
+    #[test]
+    fn settle_open_commands_completes_fulfilled_rejects_the_rest_for_the_thread_only() {
+        let (_tmp, db) = fresh_db();
+        let mk = |thread: &str, kind: &str| NewCommandRecord {
+            thread_id: thread.to_string(),
+            command_type: kind.to_string(),
+            requested_by: None,
+            params: None,
+        };
+        let cancel = db.submit_command(&mk("t1", "cancel")).unwrap();
+        let kill = db.submit_command(&mk("t1", "kill")).unwrap();
+        let other = db.submit_command(&mk("t2", "cancel")).unwrap();
+        // Claim t1's commands so one open command is `claimed`, the other `pending`.
+        db.claim_commands("t1").unwrap();
+
+        // Thread finalized `cancelled`: the cancel command was fulfilled, the kill
+        // was not.
+        let settled = db.settle_open_commands("t1", "cancelled").unwrap();
+        assert_eq!(settled.len(), 2, "both open commands settled");
+        assert!(settled
+            .iter()
+            .all(|r| r.completed_at.is_some() && r.result.is_some()));
+        assert_eq!(
+            db.get_command(cancel.command_id).unwrap().unwrap().status,
+            "completed",
+            "cancel fulfilled by a cancelled terminal"
+        );
+        assert_eq!(
+            db.get_command(kill.command_id).unwrap().unwrap().status,
+            "rejected",
+            "kill not fulfilled by a cancelled terminal"
+        );
+        // Another thread's command is untouched.
+        assert_eq!(
+            db.get_command(other.command_id).unwrap().unwrap().status,
+            "pending"
+        );
+        // Idempotent: nothing open remains to settle.
+        assert!(db.settle_open_commands("t1", "cancelled").unwrap().is_empty());
+    }
+
+    #[test]
+    fn thread_has_kill_command_detects_the_kill_intent_marker() {
+        let (_tmp, db) = fresh_db();
+        let mk = |thread: &str, kind: &str| NewCommandRecord {
+            thread_id: thread.to_string(),
+            command_type: kind.to_string(),
+            requested_by: None,
+            params: None,
+        };
+        db.submit_command(&mk("t1", "cancel")).unwrap();
+        assert!(!db.thread_has_kill_command("t1").unwrap());
+        db.submit_command(&mk("t1", "kill")).unwrap();
+        assert!(db.thread_has_kill_command("t1").unwrap());
+        // Scoped to the thread.
+        assert!(!db.thread_has_kill_command("t2").unwrap());
     }
 
     #[test]

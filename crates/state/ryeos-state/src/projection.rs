@@ -137,6 +137,10 @@ CREATE TABLE IF NOT EXISTS thread_facets (
 
 CREATE INDEX IF NOT EXISTS idx_facets_thread ON thread_facets(thread_id);
 
+-- Reverse lookup for cohort/fleet queries: "the threads where key=value"
+-- (e.g. fleet=<run id>). Without this a fleet filter scans every facet row.
+CREATE INDEX IF NOT EXISTS idx_facets_key_value ON thread_facets(key, value);
+
 -- Latest cumulative usage per thread. Raw thread_usage events are cumulative,
 -- so summary queries must read this latest-per-thread projection instead of
 -- summing the events table directly.
@@ -1175,6 +1179,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_facets_thread",
                 table: "thread_facets",
                 columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_facets_key_value",
+                table: "thread_facets",
+                columns: &["key", "value"],
                 unique: false,
             },
             sqlite_schema::IndexSpec {
@@ -2899,7 +2909,7 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         .context("failed to project event")?;
 
     // Derive artifact row from artifact_published events (CAS-truth derived)
-    if event.event_type == "artifact_published" {
+    if event.event_type == crate::event_types::ARTIFACT_PUBLISHED {
         if let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str()) {
             let metadata = event.payload.get("metadata").cloned();
             let metadata_blob = metadata
@@ -2923,12 +2933,72 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         }
     }
 
-    if event.event_type == "thread_usage" {
+    if event.event_type == crate::event_types::THREAD_USAGE {
         project_thread_usage_latest(db, event)?;
     }
 
-    if event.event_type == "thread_created" {
+    if event.event_type == crate::event_types::THREAD_CREATED {
         project_thread_usage_subject(db, event)?;
+    }
+
+    // Derive a dispatch thread-edge from a child_thread_spawned event. An
+    // inline-dispatched directive/sub-graph child is a FRESH ROOT with no
+    // upstream_thread_id, so the snapshot-derived edge above never links it; this
+    // event carries the only portable parent→child lineage. Rebuild-safe (the
+    // edge re-derives from the event on projection rebuild); INSERT OR IGNORE
+    // keeps re-projection idempotent. The emitting thread is the parent.
+    if event.event_type == crate::event_types::CHILD_THREAD_SPAWNED {
+        if let Some(child_id) = event
+            .payload
+            .get("child_thread_id")
+            .and_then(|v| v.as_str())
+        {
+            let spawn_reason = event
+                .payload
+                .get("spawn_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("dispatch");
+            db.connection()
+                .execute(
+                    "INSERT OR IGNORE INTO thread_edges (
+                        chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason, created_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?)",
+                    rusqlite::params![
+                        &event.chain_root_id,
+                        &event.thread_id,
+                        child_id,
+                        spawn_reason,
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project dispatch thread edge")?;
+        }
+    }
+
+    // Derive a facet row from a thread_facet_set event. Facets MUST originate in
+    // an event (not a bare table write) to survive a projection rebuild, which
+    // clears thread_facets and re-derives it from the event log. Upsert on
+    // (thread_id, key): the latest set wins.
+    if event.event_type == crate::event_types::THREAD_FACET_SET {
+        if let (Some(key), Some(value)) = (
+            event.payload.get("key").and_then(|v| v.as_str()),
+            event.payload.get("value").and_then(|v| v.as_str()),
+        ) {
+            db.connection()
+                .execute(
+                    "INSERT INTO thread_facets (thread_id, key, value, updated_at)
+                     VALUES (?, ?, ?, ?)
+                     ON CONFLICT(thread_id, key)
+                     DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    rusqlite::params![
+                        &event.thread_id,
+                        key,
+                        value.as_bytes(),
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project thread facet")?;
+        }
     }
 
     Ok(())

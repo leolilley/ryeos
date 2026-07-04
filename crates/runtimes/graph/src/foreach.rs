@@ -229,7 +229,7 @@ pub async fn run_foreach_sequential(
         .await
         {
             Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                let crate::dispatch::ActionSuccess { result: val, cost } = success;
+                let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
                 add_cost(&mut total_cost, cost);
                 // Interpolate assign BEFORE committing the result, so an
                 // assign failure makes this item a Null/error — matching
@@ -396,7 +396,7 @@ pub async fn run_foreach_parallel(
             .await
             {
                 Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                    let crate::dispatch::ActionSuccess { result: val, cost } = success;
+                    let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
                     let assign_val = if let Some(ref assign_expr) = assign {
                         let mut assign_ctx_map =
                             assign_ctx_base.as_object().cloned().unwrap_or_default();

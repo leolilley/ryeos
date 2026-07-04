@@ -100,7 +100,7 @@ fn prepare_core_registry(root: &Path, key: &SigningKey) -> PathBuf {
     let registry = root.join("core");
     copy_dir_recursive(&core_bundle(), &registry);
     stage_core_handler_binaries(&registry);
-    ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&registry, key)
+    ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&registry, key)
         .unwrap_or_else(|e| panic!("prepare core registry failed: {e:#}"));
     registry
 }
@@ -109,7 +109,7 @@ fn run_publish_once(
     bundle_dir: &Path,
     registry_root: &Path,
     key: &SigningKey,
-) -> ryeos_tools::actions::publish::PublishReport {
+) -> ryeos_core_tools::actions::publish::PublishReport {
     run_publish_once_with_trust(bundle_dir, registry_root, key, None)
 }
 
@@ -118,8 +118,8 @@ fn run_publish_once_with_trust(
     registry_root: &Path,
     key: &SigningKey,
     base_trust_store: Option<TrustStore>,
-) -> ryeos_tools::actions::publish::PublishReport {
-    let opts = ryeos_tools::actions::publish::PublishOptions {
+) -> ryeos_core_tools::actions::publish::PublishReport {
+    let opts = ryeos_core_tools::actions::publish::PublishOptions {
         bundle_source: bundle_dir.to_path_buf(),
         registry_roots: vec![registry_root.to_path_buf()],
         signing_key: key.clone(),
@@ -131,7 +131,7 @@ fn run_publish_once_with_trust(
         allow_uncovered_item_dirs: false,
         emit_trust_doc: false,
     };
-    ryeos_tools::actions::publish::run_publish(&opts)
+    ryeos_core_tools::actions::publish::run_publish(&opts)
         .unwrap_or_else(|e| panic!("publish failed: {e:#}"))
 }
 
@@ -193,8 +193,8 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
     let bundle = create_declarative_bundle(tmp.path());
     let registry = prepare_core_registry(tmp.path(), &registry_key);
 
-    let err = ryeos_tools::actions::publish::run_publish(
-        &ryeos_tools::actions::publish::PublishOptions {
+    let err = ryeos_core_tools::actions::publish::run_publish(
+        &ryeos_core_tools::actions::publish::PublishOptions {
             bundle_source: bundle.to_path_buf(),
             registry_roots: vec![registry.to_path_buf()],
             signing_key: author_key.clone(),
@@ -317,7 +317,7 @@ fn publish_hard_fails_on_uncovered_item_dir() {
     std::fs::create_dir_all(&kdir).unwrap();
     std::fs::write(kdir.join("notes.md"), "# notes\n").unwrap();
 
-    let base_opts = |allow_uncovered: bool| ryeos_tools::actions::publish::PublishOptions {
+    let base_opts = |allow_uncovered: bool| ryeos_core_tools::actions::publish::PublishOptions {
         bundle_source: bundle.to_path_buf(),
         registry_roots: vec![registry.to_path_buf()],
         signing_key: key.clone(),
@@ -330,7 +330,7 @@ fn publish_hard_fails_on_uncovered_item_dir() {
         emit_trust_doc: false,
     };
 
-    let err = ryeos_tools::actions::publish::run_publish(&base_opts(false))
+    let err = ryeos_core_tools::actions::publish::run_publish(&base_opts(false))
         .expect_err("uncovered knowledge/ dir must hard-fail the publish");
     let err = format!("{err:#}");
     assert!(
@@ -339,7 +339,7 @@ fn publish_hard_fails_on_uncovered_item_dir() {
     );
 
     // Opting out proceeds — the knowledge items are skipped, no error.
-    ryeos_tools::actions::publish::run_publish(&base_opts(true))
+    ryeos_core_tools::actions::publish::run_publish(&base_opts(true))
         .expect("allow_uncovered_item_dirs should let a partial publish proceed");
 }
 
@@ -349,7 +349,7 @@ fn direct_binary_rebuild_remains_strict_without_bin_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let bundle = create_declarative_bundle(tmp.path());
 
-    let err = ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&bundle, &key)
+    let err = ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&bundle, &key)
         .expect_err("direct binary CAS rebuild should require .ai/bin");
 
     assert!(

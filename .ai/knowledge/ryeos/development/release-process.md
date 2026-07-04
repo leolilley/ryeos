@@ -202,7 +202,7 @@ For bundle-aware changes, ensure bundles are freshly populated/signed:
 
 `--all` is REQUIRED: `populate-bundles.sh` refuses to rebuild the whole bundle
 set implicitly (it would otherwise exit 2). Pass `--all` for a full rebuild, or
-`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-tools`
+`--crates "<crate ...>"` to rebuild only what changed (e.g. `--crates ryeos-core-tools`
 for core-tools). `--jobs N` caps cargo parallelism if a full release build
 exhausts memory. The release Dockerfiles already pass `--all`.
 

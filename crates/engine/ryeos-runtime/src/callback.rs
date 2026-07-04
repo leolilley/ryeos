@@ -241,10 +241,14 @@ pub trait RuntimeCallbackAPI: Send + Sync {
 
     async fn claim_commands(&self, thread_id: &str) -> Result<Value, CallbackError>;
 
+    /// Report a claimed command as `completed` or `rejected`. `command_id` is the
+    /// numeric id from the claimed `CommandRecord`; `status` must be
+    /// `"completed"` or `"rejected"`.
     async fn complete_command(
         &self,
         thread_id: &str,
-        command_id: &str,
+        command_id: i64,
+        status: &str,
         result: Value,
     ) -> Result<Value, CallbackError>;
 

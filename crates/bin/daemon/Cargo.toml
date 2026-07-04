@@ -60,7 +60,7 @@ url = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }
-ryeos-tools = { workspace = true, features = ["test-support"] }
+ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }
 http-body-util = { workspace = true }

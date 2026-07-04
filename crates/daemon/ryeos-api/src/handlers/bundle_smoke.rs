@@ -138,10 +138,15 @@ pub async fn handle(
     };
 
     // Temporary state root, outside the source by construction. Created here
-    // so per-entry dispatches inherit an existing directory.
+    // so per-entry dispatches inherit an existing directory. The pid +
+    // process-wide counter make concurrent smoke runs collision-free even
+    // within one millisecond.
+    static SMOKE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let state_root = std::env::temp_dir().join(format!(
-        "ryeos-smoke-{}",
-        lillux::time::timestamp_millis()
+        "ryeos-smoke-{}-{}-{}",
+        lillux::time::timestamp_millis(),
+        std::process::id(),
+        SMOKE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::create_dir_all(&state_root).map_err(|e| {
         HandlerError::Internal(format!(
@@ -284,23 +289,34 @@ async fn run_entry(
 
     match result {
         Ok(value) => {
-            outcome.thread_id = value
+            // Inline dispatch resolves Ok for finalized threads regardless of
+            // terminal status; the envelope is `{thread: <ThreadDetail>,
+            // result: <runtime result>}`. A smoke entry passes ONLY on a
+            // `completed` thread whose runtime result doesn't claim failure —
+            // any unrecognized shape fails loudly rather than passing.
+            let thread = value.get("thread").cloned().unwrap_or(Value::Null);
+            outcome.thread_id = thread
                 .get("thread_id")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            // Inline dispatch resolves Ok for finalized threads regardless of
-            // terminal status; a smoke entry passes only on a successful one.
-            let status = value.get("status").and_then(Value::as_str).unwrap_or("");
-            let success_flag = value.get("success").and_then(Value::as_bool);
-            if success_flag == Some(false) || matches!(status, "failed" | "errored" | "killed") {
+            let status = thread.get("status").and_then(Value::as_str).unwrap_or("");
+            let result_claims_failure = value
+                .get("result")
+                .and_then(|r| r.get("success"))
+                .and_then(Value::as_bool)
+                == Some(false);
+            if status == "completed" && !result_claims_failure {
+                outcome.status = "passed";
+            } else {
                 outcome.error = Some(
                     value
                         .get("result")
+                        .filter(|r| !r.is_null())
                         .map(|r| r.to_string())
-                        .unwrap_or_else(|| format!("thread finished with status '{status}'")),
+                        .unwrap_or_else(|| {
+                            format!("thread finished with status '{status}'")
+                        }),
                 );
-            } else {
-                outcome.status = "passed";
             }
         }
         Err(e) => {

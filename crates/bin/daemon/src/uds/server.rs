@@ -773,8 +773,37 @@ fn handle_submit_command(
 ) -> Result<serde_json::Value> {
     let params: CommandSubmitParams =
         serde_json::from_value(params.clone()).context("invalid commands.submit params")?;
-    serde_json::to_value(state.commands.submit(&params)?)
-        .context("failed to encode commands.submit result")
+    let thread_id = params.thread_id.clone();
+    let command_type = params.command_type.clone();
+    let record = state.commands.submit(&params)?;
+
+    // Same daemon-side enforcement as the API `commands.submit`: a cancel/kill
+    // submitted over the runtime callback signals the target and cascades to its
+    // live descendants, so both entry points behave identically. Logged, not
+    // raised — the command is already enqueued.
+    let stop_mode = match command_type.as_str() {
+        "kill" => Some(ryeos_app::cascade::CascadeMode::Hard),
+        "cancel" => Some(ryeos_app::cascade::CascadeMode::Graceful),
+        _ => None,
+    };
+    if let Some(mode) = stop_mode {
+        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode) {
+            Ok(report) => tracing::info!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                report = %report,
+                "cancel/kill signalled target and descendants"
+            ),
+            Err(e) => tracing::warn!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                error = %e,
+                "cancel/kill stop failed on runtime submit_command"
+            ),
+        }
+    }
+
+    serde_json::to_value(record).context("failed to encode commands.submit result")
 }
 
 fn handle_claim_commands(
@@ -787,14 +816,54 @@ fn handle_claim_commands(
         .context("failed to encode commands.claim result")
 }
 
+/// Runtime-facing params for `runtime.complete_command`. Unlike the service-side
+/// `CommandCompleteParams`, it carries `thread_id` — validated against the
+/// callback token at the exact-thread trust boundary before this handler runs —
+/// which is then dropped when mapping to the service params.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeCompleteCommandParams {
+    #[allow(dead_code)]
+    thread_id: String,
+    command_id: i64,
+    status: String,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+}
+
 fn handle_complete_command(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
-    let params: CommandCompleteParams =
-        serde_json::from_value(params.clone()).context("invalid commands.complete params")?;
-    serde_json::to_value(state.commands.complete(&params)?)
-        .context("failed to encode commands.complete result")
+    let rt: RuntimeCompleteCommandParams = serde_json::from_value(params.clone())
+        .context("invalid runtime.complete_command params")?;
+    // Trust boundary: the callback token was validated against `rt.thread_id`,
+    // but `command_id` is a global autoincrement. Confirm the command belongs to
+    // this thread before settling it — otherwise a runtime holding a valid token
+    // for its OWN thread could settle, or inject a `result` into, another
+    // thread's command, and that forged record would be delivered to the
+    // victim's `commands.wait`. A command's thread binding is immutable, so this
+    // read-then-settle is not a TOCTOU.
+    match state.state_store.get_command(rt.command_id)? {
+        Some(existing) if existing.thread_id == rt.thread_id => {}
+        Some(_) => anyhow::bail!(
+            "command {} does not belong to thread {}",
+            rt.command_id,
+            rt.thread_id
+        ),
+        None => anyhow::bail!("command {} not found", rt.command_id),
+    }
+    let complete = CommandCompleteParams {
+        command_id: rt.command_id,
+        status: rt.status,
+        result: rt.result,
+    };
+    let record = state.commands.complete(&complete)?;
+    // Wake any `commands.wait` blocked on this command's settlement. Publish
+    // after the row is durably updated so a woken waiter reads a consistent
+    // terminal row.
+    ryeos_app::command_hub::global().publish(&record);
+    serde_json::to_value(record).context("failed to encode runtime.complete_command result")
 }
 
 fn handle_publish_artifact(
@@ -1304,6 +1373,7 @@ mod tests {
                     },
                     original_snapshot_hash: None,
                     original_pushed_head_ref: None,
+            state_root: None,
                     current_site_id: "site:test".into(),
                     origin_site_id: "site:test".into(),
                     requested_by: EffectivePrincipal::Local(Principal {

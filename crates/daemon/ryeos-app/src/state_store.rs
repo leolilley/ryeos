@@ -2196,6 +2196,51 @@ impl StateStore {
         g.runtime_db.complete_command(command_id, status, result)
     }
 
+    /// Read one command by id, or `None` if it does not exist.
+    pub fn get_command(&self, command_id: i64) -> Result<Option<CommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.get_command(command_id)
+    }
+
+    /// Whether a `kill` command was ever submitted for `thread_id` (the launcher's
+    /// kill-intent marker). See [`RuntimeDb::thread_has_kill_command`].
+    pub fn thread_has_kill_command(&self, thread_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.thread_has_kill_command(thread_id)
+    }
+
+    /// Settle every still-open command for a finalized thread (fulfilled →
+    /// `completed`, else `rejected`), returning the affected records so waiters
+    /// can be woken. See [`RuntimeDb::settle_open_commands`].
+    pub fn settle_open_commands(
+        &self,
+        thread_id: &str,
+        terminal_status: &str,
+    ) -> Result<Vec<CommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.settle_open_commands(thread_id, terminal_status)
+    }
+
+    /// Record that `parent_thread_id` spawned `child_thread_id` (operational
+    /// lineage for cancel/kill cascade). Idempotent on the child.
+    pub fn record_child_link(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .record_child_link(parent_thread_id, child_thread_id, relation)
+    }
+
+    /// Every transitive descendant thread id of `root_thread_id`, breadth-first
+    /// in spawn order (excludes `root`).
+    pub fn descendant_thread_ids(&self, root_thread_id: &str) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.descendant_thread_ids(root_thread_id)
+    }
+
     pub fn get_facets(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
         let g = self.lock()?;
         let facet_rows = queries::get_facets(g.state_db.projection(), thread_id)?;
@@ -2206,7 +2251,11 @@ impl StateStore {
     }
 }
 
-fn is_terminal_status(status: &str) -> bool {
+/// Whether a thread's persisted `status` is terminal. The canonical predicate —
+/// `ThreadTerminalStatus`'s string mapping omits daemon-owned `timed_out`, so it
+/// is not usable for this; callers outside this module (e.g. the cancel cascade)
+/// reuse this rather than re-listing the statuses.
+pub fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
         "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"

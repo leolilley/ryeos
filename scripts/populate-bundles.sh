@@ -44,7 +44,7 @@ while [[ $# -gt 0 ]]; do
     # Rebuild only these crates instead of the whole bundle set. Staging still
     # copies every bundle binary from target/release, so the others must already
     # be built (e.g. from a prior populate). Use when iterating on one binary —
-    # `--crates ryeos-tools` rebuilds core-tools without the full workspace.
+    # `--crates ryeos-core-tools` rebuilds core-tools without the full workspace.
     --crates) CRATES_OVERRIDE="$2"; shift 2 ;;
     --all) POPULATE_ALL=1; shift ;;
     *) echo "populate-bundles.sh: unknown arg: $1" >&2; exit 2 ;;
@@ -56,7 +56,7 @@ done
 # changed, or opt into the whole set with --all.
 if [[ -z "$CRATES_OVERRIDE" && "$POPULATE_ALL" -ne 1 ]]; then
   echo "populate-bundles.sh: refusing to rebuild the full bundle set implicitly." >&2
-  echo "  Pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-tools)," >&2
+  echo "  Pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools)," >&2
   echo "  or --all to rebuild the whole '$BUNDLE_SET' set." >&2
   exit 2
 fi
@@ -221,15 +221,15 @@ done
 case "$BUNDLE_SET" in
   full)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-tools ryeos-web-tools ryeos-browser-tools \
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-browser-tools \
           ryeos-ui-terminal ryeos-ui-web)
     ;;
   standard|hosted-workflow)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
-          ryeos-handler-bins ryeos-cli ryeos-tools)
+          ryeos-handler-bins ryeos-cli ryeos-core-tools)
     ;;
   hosted-node)
-    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-tools)
+    pkgs=(ryeosd ryeos-handler-bins ryeos-cli ryeos-core-tools)
     ;;
 esac
 

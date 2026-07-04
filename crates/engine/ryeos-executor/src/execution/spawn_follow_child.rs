@@ -244,8 +244,14 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 item_ref: params.child_item_ref.clone(),
                 launch_mode: parent.launch_mode.clone(),
                 parameters: params.child_parameters.clone(),
+                // Resume identity derives from validated server-side state
+                // (the token's provenance), never the request body: the wire
+                // `project_path` is the token-equality proof and, under a
+                // state-root override, points at the STATE root — persisting
+                // it here would make a reconcile relaunch resolve items
+                // against runtime state instead of the source.
                 project_context: ProjectContext::LocalPath {
-                    path: project_path.clone(),
+                    path: cap.provenance.effective_path().to_path_buf(),
                 },
                 original_snapshot_hash: None,
                 // A follow child borrows the parent's workspace; it never
@@ -253,6 +259,12 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 // seeded (rebuilding one would take over pin/foldback the
                 // parent owns).
                 original_pushed_head_ref: None,
+                // The parent's state-root override carries to the child so
+                // its state/callback anchor stays isolated with the parent's.
+                state_root: cap
+                    .provenance
+                    .state_root_override()
+                    .map(|p| p.to_path_buf()),
                 current_site_id: parent.current_site_id.clone(),
                 origin_site_id: parent.origin_site_id.clone(),
                 requested_by: requested_by.clone(),

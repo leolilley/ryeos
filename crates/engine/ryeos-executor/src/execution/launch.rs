@@ -980,6 +980,50 @@ async fn run_claimed_thread_row(
     // the callback cap's chain root.
     let chain_root_id = thread.chain_root_id.clone();
 
+    // Record operational lineage the instant we commit to launching a child, so a
+    // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
+    // execution context is a child — inline-dispatched and follow children both
+    // flow through here; a fresh root launch and a continuation successor carry no
+    // parent context and are (correctly) not linked. Best-effort: a lineage-row
+    // failure degrades cascade coverage but must not fail an otherwise-launchable
+    // child (the child's own runtime row already exists).
+    if let Some(parent_ctx) = parent_execution_context {
+        if let Err(e) =
+            state
+                .state_store
+                .record_child_link(&parent_ctx.parent_thread_id, &thread_id, "dispatch")
+        {
+            tracing::warn!(
+                parent_thread_id = %parent_ctx.parent_thread_id,
+                child_thread_id = %thread_id,
+                error = %e,
+                "failed to record child link; cancel/kill cascade will not reach this child"
+            );
+        }
+    }
+
+    // A machine-continuation successor continues its predecessor's work under a
+    // fresh thread id and carries no parent execution context, so the block above
+    // does not link it. Link it to its immediate predecessor: on continuation the
+    // predecessor goes terminal and is a dead end in the descendant walk, so
+    // without this a cancel/kill of an ancestor would stop at the (terminal)
+    // predecessor and miss the live successor still running — and authoring — the
+    // work. (`previous_thread_id` and a parent context are mutually exclusive, so
+    // this never contends with the link above.)
+    if let Some(previous) = previous_thread_id {
+        if let Err(e) = state
+            .state_store
+            .record_child_link(previous, &thread_id, "continuation")
+        {
+            tracing::warn!(
+                previous_thread_id = %previous,
+                child_thread_id = %thread_id,
+                error = %e,
+                "failed to record continuation link; cancel/kill cascade will not reach this successor"
+            );
+        }
+    }
+
     // Arm the persistence-first guard: any post-create failure below finalizes
     // the thread `failed` instead of leaving it stuck at `created` (no-op once
     // the thread is terminal).
@@ -1364,6 +1408,9 @@ async fn run_claimed_thread_row(
             // live-fs spawns and borrowed children.
             original_pushed_head_ref:
                 ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(provenance),
+            state_root: provenance
+                .state_root_override()
+                .map(std::path::Path::to_path_buf),
             current_site_id: resolved.current_site_id.clone(),
             origin_site_id: resolved.origin_site_id.clone(),
             requested_by: resolved.plan_context.requested_by.clone(),
@@ -1450,9 +1497,18 @@ async fn run_claimed_thread_row(
     // a `duration > 3600s` run does not lose callback authority mid-run.
     let ttl = launch_token_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
+    // The token's project identity is the run's state/callback anchor: the
+    // deliberate state-root override when one is in play, else the project.
+    // The runtime advertises exactly `envelope.roots.state_root()` on every
+    // callback and validation is equality — minting the source root here
+    // would reject every dispatch of an overridden run.
+    let token_project = provenance
+        .state_root_override()
+        .unwrap_or(project_path)
+        .to_path_buf();
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,
-        project_path.to_path_buf(),
+        token_project,
         ttl,
         effective_caps.clone(),
         child_provenance,
@@ -1733,7 +1789,15 @@ async fn run_claimed_thread_row(
     // misleading `thread_not_terminal` error.
     let mut thread_detail = state.threads.get_thread(&thread_id)?.unwrap_or(thread);
     if !is_runtime_terminal_status(&thread_detail.status) {
-        let terminal_status = normalize_runtime_terminal_status(&runtime_result.status);
+        let mut terminal_status = normalize_runtime_terminal_status(&runtime_result.status);
+        // Kill-intent: a subprocess SIGKILLed by a daemon-issued `kill` exits
+        // abnormally with no self-finalization, which normalizes to `failed`. If
+        // a kill was requested for this thread, that stop was intentional —
+        // settle `killed`, not `failed`, so the terminal reflects the operator's
+        // action instead of looking like a crash.
+        if terminal_status == "failed" && state.state_store.thread_has_kill_command(&thread_id)? {
+            terminal_status = "killed";
+        }
         let terminal_error = if terminal_status == "completed" {
             None
         } else {

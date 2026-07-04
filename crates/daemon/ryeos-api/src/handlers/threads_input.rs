@@ -380,6 +380,7 @@ pub async fn handle(
         original_snapshot_hash: None,
         // Operator follow-up launches against the live project tree.
         original_pushed_head_ref: None,
+            state_root: None,
         current_site_id: previous.current_site_id.clone(),
         origin_site_id: previous.origin_site_id.clone(),
         requested_by: EffectivePrincipal::Local(Principal {

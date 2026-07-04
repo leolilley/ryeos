@@ -328,6 +328,11 @@ enum Cmd {
         /// creating a new item.
         #[arg(long)]
         format_ext: Option<String>,
+
+        /// Compare-and-swap guard for `--mode upsert`: the incumbent's authored
+        /// `content_digest` must equal this or the upsert fails with a conflict.
+        #[arg(long)]
+        expected_digest: Option<String>,
     },
     /// Manage sealed secrets in the daemon vault.
     Vault {
@@ -594,12 +599,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 obj
             };
-            let params: ryeos_tools::actions::inspect::fetch::FetchParams =
+            let params: ryeos_core_tools::actions::inspect::fetch::FetchParams =
                 serde_json::from_value(params)?;
-            let engine = ryeos_tools::actions::inspect::boot(
+            let engine = ryeos_core_tools::actions::inspect::boot(
                 params.project_path.as_deref().map(std::path::Path::new),
             )?;
-            let report = ryeos_tools::actions::inspect::fetch::run_fetch(params, &engine)?;
+            let report = ryeos_core_tools::actions::inspect::fetch::run_fetch(params, &engine)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -617,12 +622,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 obj
             };
-            let params: ryeos_tools::actions::inspect::verify::VerifyParams =
+            let params: ryeos_core_tools::actions::inspect::verify::VerifyParams =
                 serde_json::from_value(params)?;
-            let engine = ryeos_tools::actions::inspect::boot(
+            let engine = ryeos_core_tools::actions::inspect::boot(
                 params.project_path.as_deref().map(std::path::Path::new),
             )?;
-            let report = ryeos_tools::actions::inspect::verify::run_verify(params, &engine)?;
+            let report = ryeos_core_tools::actions::inspect::verify::run_verify(params, &engine)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -638,9 +643,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 obj
             };
-            let params: ryeos_tools::actions::inspect::identity::IdentityParams =
+            let params: ryeos_core_tools::actions::inspect::identity::IdentityParams =
                 serde_json::from_value(params)?;
-            let report = ryeos_tools::actions::inspect::identity::run_identity(params)?;
+            let report = ryeos_core_tools::actions::inspect::identity::run_identity(params)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -693,7 +698,15 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             content,
             mode,
             format_ext,
-        } => run_author_item(item_ref, content, mode, format_ext, cli.stdin_json),
+            expected_digest,
+        } => run_author_item(
+            item_ref,
+            content,
+            mode,
+            format_ext,
+            expected_digest,
+            cli.stdin_json,
+        ),
         Cmd::Vault { cmd } => run_vault(cmd),
     }
 }
@@ -713,6 +726,8 @@ struct AuthorItemParams {
     mode: Option<String>,
     #[serde(default)]
     format_ext: Option<String>,
+    #[serde(default)]
+    expected_digest: Option<String>,
 }
 
 /// Propose a project item to the daemon `runtime.author_item` callback. This is
@@ -725,6 +740,7 @@ fn run_author_item(
     content: Option<String>,
     mode: String,
     format_ext: Option<String>,
+    expected_digest: Option<String>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     let request = if stdin_json {
@@ -739,6 +755,9 @@ fn run_author_item(
         }
         if let Some(ext) = params.format_ext {
             request["format_ext"] = serde_json::json!(ext);
+        }
+        if let Some(digest) = params.expected_digest {
+            request["expected_digest"] = serde_json::json!(digest);
         }
         request
     } else {
@@ -760,6 +779,9 @@ fn run_author_item(
         });
         if let Some(ext) = format_ext {
             request["format_ext"] = serde_json::json!(ext);
+        }
+        if let Some(digest) = expected_digest {
+            request["expected_digest"] = serde_json::json!(digest);
         }
         request
     };
@@ -790,7 +812,7 @@ fn run_author_item(
 }
 
 fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
-    use ryeos_tools::actions::snapshot::{
+    use ryeos_core_tools::actions::snapshot::{
         run_create, run_log, run_show, run_status, SnapshotCreateParams, SnapshotLogParams,
         SnapshotShowParams, SnapshotStatusParams,
     };
@@ -883,7 +905,7 @@ fn run_build(
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_engine::roots;
-    use ryeos_tools::actions::publish::{run_publish, PublishOptions};
+    use ryeos_core_tools::actions::publish::{run_publish, PublishOptions};
 
     let (
         bundle_source,
@@ -936,7 +958,7 @@ fn run_build(
         );
     }
 
-    let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+    let signing_key = ryeos_core_tools::actions::build_bundle::load_signing_key(&key_path)
         .with_context(|| format!("load signing key from {}", key_path.display()))?;
 
     let source_path = canonical_bundle_source(&bundle_source)?;
@@ -998,11 +1020,11 @@ fn run_manifest_sign(
             key_path.display()
         );
     }
-    let signing_key = ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+    let signing_key = ryeos_core_tools::actions::build_bundle::load_signing_key(&key_path)
         .with_context(|| format!("load signing key from {}", key_path.display()))?;
 
     let source_path = canonical_bundle_source(&bundle_source)?;
-    let report = ryeos_tools::actions::manifest_sign::manifest_sign(
+    let report = ryeos_core_tools::actions::manifest_sign::manifest_sign(
         &source_path,
         name.as_deref(),
         &signing_key,
@@ -1038,7 +1060,7 @@ fn run_logs(app_root: Option<PathBuf>, lines: usize, stdin_json: bool) -> anyhow
             }),
     };
 
-    let report = ryeos_tools::actions::node_logs::read_node_logs(&app_root, lines);
+    let report = ryeos_core_tools::actions::node_logs::read_node_logs(&app_root, lines);
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -1131,7 +1153,7 @@ fn run_doctor(
         .map(|e| format!("{e:#}"))
         .unwrap_or_default();
 
-    let report = ryeos_tools::actions::doctor::run_doctor(
+    let report = ryeos_core_tools::actions::doctor::run_doctor(
         engine.as_ref().map_err(|_| engine_err.as_str()),
         &source_path,
         &dependency_roots,
@@ -1420,11 +1442,11 @@ fn run_bundle_sign(
         .context("load trust store for registry roots")?;
 
     if source_path.join(ryeos_engine::AI_DIR).join("bin").is_dir() {
-        ryeos_tools::actions::build_bundle::rebuild_bundle_manifest(&source_path, &signing_key)
+        ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&source_path, &signing_key)
             .context("rebuild source bundle binary manifest")?;
     }
 
-    let report = ryeos_tools::actions::sign_bundle::sign_bundle_items_with_trust(
+    let report = ryeos_core_tools::actions::sign_bundle::sign_bundle_items_with_trust(
         &source_path,
         &dependency_roots,
         &signing_key,
@@ -1489,7 +1511,7 @@ fn load_operator_signing_key() -> anyhow::Result<lillux::crypto::SigningKey> {
         );
     }
 
-    ryeos_tools::actions::build_bundle::load_signing_key(&key_path)
+    ryeos_core_tools::actions::build_bundle::load_signing_key(&key_path)
         .with_context(|| format!("load signing key from {}", key_path.display()))
 }
 
@@ -1716,7 +1738,7 @@ fn run_sign(
     source: String,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_tools::actions::sign::{run_sign, BatchReport, ItemOutcome, SignSource};
+    use ryeos_core_tools::actions::sign::{run_sign, BatchReport, ItemOutcome, SignSource};
 
     let (item_refs, project_arg, source_str) = if stdin_json {
         if !item_refs.is_empty() {
@@ -1832,7 +1854,7 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
             };
 
             let report =
-                ryeos_tools::actions::vault::run_put(&ryeos_tools::actions::vault::PutOptions {
+                ryeos_core_tools::actions::vault::run_put(&ryeos_core_tools::actions::vault::PutOptions {
                     app_root: ssd,
                     entries: vec![(name, value)],
                 })?;
@@ -1842,7 +1864,7 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
         VaultCmd::List { app_root } => {
             let ssd = resolve_app_root(app_root)?;
             let report =
-                ryeos_tools::actions::vault::run_list(&ryeos_tools::actions::vault::ListOptions {
+                ryeos_core_tools::actions::vault::run_list(&ryeos_core_tools::actions::vault::ListOptions {
                     app_root: ssd,
                 })?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1850,8 +1872,8 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
         }
         VaultCmd::Rm { keys, app_root } => {
             let ssd = resolve_app_root(app_root)?;
-            let report = ryeos_tools::actions::vault::run_remove(
-                &ryeos_tools::actions::vault::RemoveOptions {
+            let report = ryeos_core_tools::actions::vault::run_remove(
+                &ryeos_core_tools::actions::vault::RemoveOptions {
                     app_root: ssd,
                     keys,
                 },
@@ -1861,8 +1883,8 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
         }
         VaultCmd::Rewrap { app_root } => {
             let ssd = resolve_app_root(app_root)?;
-            let report = ryeos_tools::actions::vault::run_rewrap(
-                &ryeos_tools::actions::vault::RewrapOptions { app_root: ssd },
+            let report = ryeos_core_tools::actions::vault::run_rewrap(
+                &ryeos_core_tools::actions::vault::RewrapOptions { app_root: ssd },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
@@ -1879,7 +1901,7 @@ fn run_authorize_client(
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
-    use ryeos_tools::actions::authorize::{run_authorize_client as run, AuthorizeClientParams};
+    use ryeos_core_tools::actions::authorize::{run_authorize_client as run, AuthorizeClientParams};
 
     let params = if stdin_json {
         let val = read_stdin_json()?;
@@ -1973,7 +1995,7 @@ fn run_admission_token(
     ttl_secs: u64,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
+    use ryeos_core_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
 
     let (app_root, scopes, label, ttl_secs) = if stdin_json {
         let val = read_stdin_json()?;
@@ -2019,7 +2041,7 @@ fn run_remote_descriptor(
     output: Option<PathBuf>,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_tools::actions::remote_descriptor::{
+    use ryeos_core_tools::actions::remote_descriptor::{
         run_export_remote_descriptor, ExportRemoteDescriptorParams,
     };
 

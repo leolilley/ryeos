@@ -89,8 +89,8 @@ struct IdentityArgs {
 
 fn run_identity_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<IdentityArgs>(argv)?;
-    let report = ryeos_tools::actions::inspect::identity::run_identity(
-        ryeos_tools::actions::inspect::identity::IdentityParams {
+    let report = ryeos_core_tools::actions::inspect::identity::run_identity(
+        ryeos_core_tools::actions::inspect::identity::IdentityParams {
             app_root: args.app_root.map(|p| p.to_string_lossy().into_owned()),
             project_path: None,
         },
@@ -205,7 +205,7 @@ struct NodeDoctorArgs {
 /// broken. Every check degrades independently; the command itself only
 /// errors when it cannot even load config.
 async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
-    use ryeos_tools::actions::doctor::{CheckResult, FAIL, NA, OK, WARN};
+    use ryeos_core_tools::actions::doctor::{CheckResult, FAIL, NA, OK, WARN};
 
     let args = parse_or_handle_help::<NodeDoctorArgs>(argv)?;
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
@@ -239,6 +239,8 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     // 2. Lifecycle status + binary/metadata skew (the stale-daemon detection
     //    `ryeos node status` warns about, as a first-class check).
     let mut daemon_running = false;
+    let mut daemon_stale_pid: Option<u32> = None;
+    let mut daemon_stale = false;
     match controller.status().await {
         Ok(LifecycleStatus::Running { metadata }) => {
             daemon_running = true;
@@ -268,7 +270,12 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         Ok(LifecycleStatus::Stopped { .. }) => {
             checks.push(check("daemon", OK, serde_json::json!({ "state": "stopped" })));
         }
-        Ok(LifecycleStatus::Stale { diagnostics, .. }) => {
+        Ok(LifecycleStatus::Stale {
+            metadata,
+            diagnostics,
+        }) => {
+            daemon_stale = true;
+            daemon_stale_pid = metadata.pid;
             checks.push(check(
                 "daemon",
                 WARN,
@@ -289,32 +296,65 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     }
 
     // 3. App-root storage: a write probe covers both permissions and a full
-    //    disk — the two storage reasons a start fails.
-    let probe = config.app_root.join(format!(".doctor-probe-{}", std::process::id()));
-    match std::fs::write(&probe, b"probe").and_then(|()| std::fs::remove_file(&probe)) {
-        Ok(()) => checks.push(check(
+    //    disk — the two storage reasons a start fails. On an uninitialized
+    //    node the app root may not exist yet; the init check already carries
+    //    the one real fix, so don't pile misdiagnoses on top of it.
+    if !initialized {
+        checks.push(check(
             "storage",
-            OK,
-            serde_json::json!({ "app_root": config.app_root, "write_probe": "ok" }),
-        )),
-        Err(e) => checks.push(check(
-            "storage",
-            FAIL,
-            serde_json::json!({
-                "app_root": config.app_root,
-                "error": format!("{e}"),
-                "note": "app root is not writable (permissions or disk full)",
-            }),
-        )),
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
+    } else {
+        let probe = config.app_root.join(format!(".doctor-probe-{}", std::process::id()));
+        match std::fs::write(&probe, b"probe").and_then(|()| std::fs::remove_file(&probe)) {
+            Ok(()) => checks.push(check(
+                "storage",
+                OK,
+                serde_json::json!({ "app_root": config.app_root, "write_probe": "ok" }),
+            )),
+            Err(e) => checks.push(check(
+                "storage",
+                FAIL,
+                serde_json::json!({
+                    "app_root": config.app_root,
+                    "error": format!("{e}"),
+                    "note": "app root is not writable (permissions or disk full)",
+                }),
+            )),
+        }
     }
 
     // 4. Socket bindability — only meaningful when nothing should be holding
-    //    them. A running daemon holding both is the healthy case.
+    //    them. A running daemon holding both is the healthy case; a STALE
+    //    daemon (metadata present, not responding) may be hung-but-alive and
+    //    still holding both, so a bind failure there must NOT prescribe
+    //    deleting the socket file out from under it.
     if daemon_running {
         checks.push(check(
             "sockets",
             OK,
             serde_json::json!({ "note": "held by the running daemon" }),
+        ));
+    } else if daemon_stale {
+        checks.push(check(
+            "sockets",
+            NA,
+            serde_json::json!({
+                "note": format!(
+                    "daemon state is stale — a hung daemon{} may still hold the \
+                     sockets; run `ryeos stop` (or kill the pid) and re-run doctor",
+                    daemon_stale_pid
+                        .map(|p| format!(" (recorded pid {p})"))
+                        .unwrap_or_default()
+                ),
+            }),
+        ));
+    } else if !initialized {
+        checks.push(check(
+            "sockets",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
         ));
     } else {
         let mut detail = serde_json::Map::new();
@@ -373,7 +413,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                         // Static checks only (no offline engine): the doctor
                         // must stay fast and dependency-free; import dry-runs
                         // belong to the bundle-level `ryeos doctor <source>`.
-                        let report = ryeos_tools::actions::doctor::run_doctor(
+                        let report = ryeos_core_tools::actions::doctor::run_doctor(
                             Err("node doctor runs static checks only"),
                             &record.path,
                             &roots,
@@ -446,8 +486,8 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
-fn check(name: &str, status: &str, detail: serde_json::Value) -> ryeos_tools::actions::doctor::CheckResult {
-    ryeos_tools::actions::doctor::CheckResult {
+fn check(name: &str, status: &str, detail: serde_json::Value) -> ryeos_core_tools::actions::doctor::CheckResult {
+    ryeos_core_tools::actions::doctor::CheckResult {
         name: name.to_string(),
         status: status.to_string(),
         detail,

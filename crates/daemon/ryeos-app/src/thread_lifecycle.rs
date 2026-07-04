@@ -21,7 +21,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
     FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem, RuntimeEnvSource,
-    ThreadTerminalStatus, TrustClass,
+    TrustClass,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_state::UsageSubject;
@@ -812,13 +812,7 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        let terminal_status = match completion.status {
-            ThreadTerminalStatus::Completed => "completed",
-            ThreadTerminalStatus::Failed => "failed",
-            ThreadTerminalStatus::Cancelled => "cancelled",
-            ThreadTerminalStatus::Continued => "continued",
-            ThreadTerminalStatus::Killed => "killed",
-        };
+        let terminal_status = completion.status.as_str();
         let outcome_code = completion.outcome_code.clone().or_else(|| {
             Some(if terminal_status == "completed" {
                 "success".to_string()
@@ -848,6 +842,13 @@ impl ThreadLifecycleService {
         // write (above), so the queue `closed` tombstone and the persist-path
         // running-guard together bound the race from either ordering.
         self.close_live_input(thread_id);
+
+        // Settle any commands still open for this now-terminal thread and wake
+        // blocked `commands.wait` callers. This is the primary cooperative path —
+        // a runtime self-finalizing over its callback (e.g. a directive cancelled
+        // by signal, which never drains its own command) reaches finalization
+        // HERE, not through `finalize_thread_inner`.
+        self.settle_open_commands(thread_id, terminal_status);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the
@@ -972,6 +973,13 @@ impl ThreadLifecycleService {
             params.result.as_ref(),
         );
 
+        // Settle any commands still open for this now-terminal thread. It will
+        // never cooperatively handle them (a force-stopped directive, or a run
+        // that finished with a queued cancel), so reject them and wake any
+        // `commands.wait` blocked on them — otherwise the await rides to its
+        // timeout. Best-effort: a failure here must not fail finalization.
+        self.settle_open_commands(&params.thread_id, terminal_status);
+
         let finalized = self
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))?;
@@ -987,6 +995,34 @@ impl ThreadLifecycleService {
         );
 
         Ok(finalized)
+    }
+
+    /// Reject any commands still open for a finalized thread and wake blocked
+    /// `commands.wait` callers via the settlement hub. Best-effort — logged, not
+    /// raised, so a settlement failure never fails finalization.
+    fn settle_open_commands(&self, thread_id: &str, terminal_status: &str) {
+        match self
+            .state_store
+            .settle_open_commands(thread_id, terminal_status)
+        {
+            Ok(settled) => {
+                for record in &settled {
+                    crate::command_hub::global().publish(record);
+                }
+                if !settled.is_empty() {
+                    tracing::debug!(
+                        thread_id,
+                        count = settled.len(),
+                        "settled open commands on thread finalize"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                thread_id,
+                error = %e,
+                "failed to settle open commands on thread finalize"
+            ),
+        }
     }
 
     /// After a thread finalizes, record its result on any follow waiter awaiting
@@ -1548,6 +1584,39 @@ impl ThreadLifecycleService {
         Ok(json!({ "threads": threads, "next_cursor": null }))
     }
 
+    /// As [`Self::list_threads_filtered`] but with an explicit sort — the
+    /// public `threads.list` exposes `newest` ("what just ran"; the limit
+    /// truncates, so oldest-first + limit returns the OLDEST rows) and
+    /// `watch` alongside the default oldest-first order.
+    pub fn list_threads_filtered_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Value> {
+        let threads = self.list_thread_views_sorted(limit, filter_principal, sort)?;
+        Ok(json!({ "threads": threads, "next_cursor": null }))
+    }
+
+    /// As [`Self::list_threads_filtered_sorted`] but also narrows to a cohort
+    /// facet (`key == value`, e.g. `fleet=<run id>`) when one is given — the
+    /// fleet-membership query, on top of the owner-scope principal.
+    pub fn list_threads_filtered_sorted_facet(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        facet: Option<(String, String)>,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Value> {
+        let filter = ryeos_state::queries::ThreadListFilter {
+            principal: filter_principal.map(str::to_string),
+            facet,
+            ..Default::default()
+        };
+        let threads = self.list_thread_views_query(limit, &filter, sort)?;
+        Ok(json!({ "threads": threads, "next_cursor": null }))
+    }
+
     pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadView>> {
         self.state_store
             .list_thread_children(thread_id)?
@@ -1932,6 +2001,10 @@ pub struct SpawnItemParams<'a> {
     /// `launch_metadata::OriginalPushedHeadRef::from_provenance`).
     /// `None` for live-fs spawns and borrowed children.
     pub original_pushed_head_ref: Option<&'a crate::launch_metadata::OriginalPushedHeadRef>,
+    /// The spawn's deliberate state-root override
+    /// (`provenance.state_root_override()`), persisted on the resume
+    /// context so a resumed run keeps the same state/callback anchor.
+    pub state_root: Option<&'a std::path::Path>,
 }
 
 #[tracing::instrument(
@@ -1958,6 +2031,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         is_resume,
         original_snapshot_hash,
         original_pushed_head_ref,
+        state_root,
     } = params;
     // vault_bindings: user-provided secret/capability env vars.
     // daemon_callback_env: daemon infrastructure env (socket path, callback
@@ -2156,6 +2230,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 project_context: resolved.plan_context.project_context.clone(),
                 original_snapshot_hash: original_snapshot_hash.map(str::to_string),
                 original_pushed_head_ref: original_pushed_head_ref.cloned(),
+                state_root: state_root.map(std::path::Path::to_path_buf),
                 current_site_id: resolved.plan_context.current_site_id.clone(),
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),

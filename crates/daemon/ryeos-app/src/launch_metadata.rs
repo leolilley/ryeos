@@ -195,6 +195,13 @@ pub struct ResumeContext {
     /// the LocalPath native-resume pin allocated by the runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_pushed_head_ref: Option<OriginalPushedHeadRef>,
+    /// Deliberate runtime state-root override captured at original spawn
+    /// time (`/execute` `state_root`). Re-applied to the rebuilt provenance
+    /// on resume so a crashed overridden run keeps writing its state — and
+    /// advertising its callback identity — under the override instead of
+    /// silently reverting into the source project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_root: Option<std::path::PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
     /// Full engine principal from the original `PlanContext`.
@@ -502,6 +509,7 @@ mod tests {
                 snapshot_hash: "snap-ph".to_string(),
                 original_project_path: PathBuf::from("/tmp/orig"),
             }),
+            state_root: Some(PathBuf::from("/tmp/smoke-state")),
             current_site_id: "site:a".to_string(),
             origin_site_id: "site:a".to_string(),
             requested_by: local_principal(),

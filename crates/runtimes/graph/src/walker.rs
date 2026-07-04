@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -208,6 +209,50 @@ enum CommitResult {
     Terminate(GraphResult),
 }
 
+/// A cooperative control action drained from the thread's command queue between
+/// nodes. Ordered by severity so `Kill` supersedes `Cancel` when both queue in a
+/// single drained batch (`Kill > Cancel`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ControlAction {
+    Cancel,
+    Kill,
+}
+
+impl ControlAction {
+    /// The cooperative-termination action for a command's `command_type`, or
+    /// `None` for a type the walker does not action between nodes.
+    fn from_command_type(command_type: &str) -> Option<Self> {
+        match command_type {
+            "cancel" => Some(Self::Cancel),
+            "kill" => Some(Self::Kill),
+            _ => None,
+        }
+    }
+
+    /// The command_type this action was raised from (for the ack payload).
+    fn command_type(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Kill => "kill",
+        }
+    }
+
+    /// The terminal status the run settles as.
+    fn terminal_status(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancelled",
+            Self::Kill => "killed",
+        }
+    }
+}
+
+/// The cooperative control decision for one between-nodes drain: which action
+/// won the batch and the reason recorded on the terminal.
+struct ControlDirective {
+    action: ControlAction,
+    reason: Option<String>,
+}
+
 pub struct Walker {
     graph: GraphDefinition,
     project_path: String,
@@ -238,6 +283,12 @@ pub struct Walker {
     /// of re-suspending. Taken once, at the follow node. Interior-mutable for the
     /// same `&self` reason as `accounting`.
     follow_resume: Mutex<Option<FollowResumeState>>,
+    /// Signal-driven cooperative cancel. Set by the graph process's `SIGTERM`
+    /// handler (mirroring the directive runtime's `cancelled_flag`); the run loop
+    /// checks it at each node boundary and finalizes `cancelled` cleanly, so a
+    /// daemon graceful-cancel signal stops a graph at a checkpoint boundary
+    /// instead of the process dying mid-node. `None` in tests / when unset.
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// A pending follow result armed at resume, consumed at its follow node.
@@ -320,7 +371,16 @@ impl Walker {
             warnings: Mutex::new(Vec::new()),
             accounting: Mutex::new(GraphAccounting::default()),
             follow_resume: Mutex::new(None),
+            cancel_flag: None,
         }
+    }
+
+    /// Arm a signal-driven cooperative cancel flag (set by the process `SIGTERM`
+    /// handler). When set, the run loop finalizes `cancelled` at the next node
+    /// boundary.
+    pub fn with_cancel_flag(mut self, cancel_flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(cancel_flag);
+        self
     }
 
     /// If a follow result is armed for `node`, take it (consumed once). The
@@ -638,6 +698,38 @@ impl Walker {
         let segment_limit = cfg.segment_steps.unwrap_or(u32::MAX);
         let mut steps_this_segment: u32 = 0;
         while step < cfg.max_steps && steps_this_segment < segment_limit {
+            // Cooperative control: between every node, drain any operator commands
+            // (cancel/kill/…) queued for this thread and settle each, then fall
+            // back to the signal-driven cancel flag (daemon graceful cancel via
+            // SIGTERM). A cancel or kill routes a terminal outcome through
+            // commit_step exactly like any other terminal — full lifecycle,
+            // checkpoint semantics, the thread settles cancelled/killed — rather
+            // than a hard process signal landing mid-node.
+            if let Some(control) = self.pending_control().await {
+                let outcome = StepOutcome::Terminal {
+                    status: control.action.terminal_status(),
+                    error: control.reason,
+                };
+                return match self
+                    .commit_step(CommitStepInput {
+                        graph_run_id: &graph_run_id,
+                        step,
+                        current: &current,
+                        state: &mut state,
+                        receipts: &mut receipts,
+                        suppressed_errors: &mut suppressed_errors,
+                        outcome,
+                        guard: &mut guard,
+                        inputs: &inputs,
+                        execution: &execution_context,
+                    })
+                    .await
+                {
+                    CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                    CommitResult::Terminate(result) => result,
+                };
+            }
+
             let node = match cfg.nodes.get(&current) {
                 Some(n) => n,
                 None => {
@@ -742,6 +834,35 @@ impl Walker {
             };
         }
 
+        // A cancel/kill that arrived during the final segment step (or a SIGTERM
+        // flag set) must not be lost to the continuation cut: the successor would
+        // launch fresh, carrying no cancel. Re-check before handing off and
+        // finalize cooperatively instead of continuing.
+        if let Some(control) = self.pending_control().await {
+            let outcome = StepOutcome::Terminal {
+                status: control.action.terminal_status(),
+                error: control.reason,
+            };
+            return match self
+                .commit_step(CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: &current,
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    inputs: &inputs,
+                    execution: &execution_context,
+                })
+                .await
+            {
+                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                CommitResult::Terminate(result) => result,
+            };
+        }
+
         // Segment budget exhausted: cut a machine continuation. A failed handoff
         // settles the thread as a terminal error rather than leaving it
         // `continued` with no successor.
@@ -807,6 +928,113 @@ impl Walker {
             cost: agg_cost,
             node_costs,
         }
+    }
+
+    /// Drain and settle every operator command queued for this thread between
+    /// nodes. Returns `Some` when a `cancel`/`kill` was seen (the walker should
+    /// terminate cooperatively); `None` otherwise.
+    ///
+    /// Claiming a command transitions it to `claimed`, so EVERY drained command
+    /// is settled here or it hangs: `cancel`/`kill` are acknowledged `completed`;
+    /// any command type the walker does not action between nodes is `rejected` so
+    /// state never leaks a stuck `claimed` row. A claim-RPC hiccup is recorded as
+    /// callback drift and treated as "nothing pending" — a transient failure must
+    /// not fell a healthy run, and the next node re-drains.
+    /// The pending cooperative-control decision at a node boundary: a claimed
+    /// cancel/kill command (drained and settled here) or, failing that, the
+    /// signal-driven cancel flag (a daemon graceful cancel via SIGTERM). Draining
+    /// first means a queued command is still settled even when a SIGTERM also
+    /// arrived. Evaluated at each loop top AND before a segment-continuation cut,
+    /// so a cancel racing the cut is not lost to a fresh successor.
+    async fn pending_control(&self) -> Option<ControlDirective> {
+        match self.drain_control_commands().await {
+            Some(control) => Some(control),
+            None if self
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed)) =>
+            {
+                Some(ControlDirective {
+                    action: ControlAction::Cancel,
+                    reason: Some("cooperative cancel by signal".to_string()),
+                })
+            }
+            None => None,
+        }
+    }
+
+    async fn drain_control_commands(&self) -> Option<ControlDirective> {
+        let claimed = match self.client.claim_commands().await {
+            Ok(v) => v,
+            Err(e) => {
+                self.record_callback_warning("claim_commands", Err(e));
+                return None;
+            }
+        };
+        let commands = claimed
+            .get("commands")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut winner: Option<ControlAction> = None;
+        for cmd in commands {
+            let Some(command_id) = cmd.get("command_id").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let command_type = cmd
+                .get("command_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match ControlAction::from_command_type(command_type) {
+                Some(action) => {
+                    // Keep the highest-severity action when several queue in one
+                    // batch (Kill > Cancel).
+                    winner = Some(winner.map_or(action, |w| w.max(action)));
+                    self.settle_command(
+                        command_id,
+                        "completed",
+                        json!({ "acknowledged": action.command_type() }),
+                    )
+                    .await;
+                }
+                None => {
+                    // Not actioned by the walker between nodes; settle it rejected
+                    // so it never hangs in `claimed`.
+                    self.settle_command(
+                        command_id,
+                        "rejected",
+                        json!({
+                            "reason": format!(
+                                "graph walker does not action `{command_type}` between nodes"
+                            )
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+        winner.map(|action| ControlDirective {
+            action,
+            reason: Some(format!(
+                "cooperative {} between nodes",
+                action.command_type()
+            )),
+        })
+    }
+
+    /// Settle one claimed command, recording a warning (never failing the run)
+    /// if the acknowledgement RPC fails — by the time we ack it the command's
+    /// effect is already decided.
+    async fn settle_command(&self, command_id: i64, status: &str, result: Value) {
+        let r = self
+            .client
+            .complete_command(command_id, status, result)
+            .await;
+        self.record_callback_warning(
+            &format!("complete_command({command_id},{status})"),
+            r.map(|_| ()),
+        );
     }
 
     /// Run a single node's body, producing a `StepOutcome` without
@@ -1011,7 +1239,7 @@ impl Walker {
             current,
             node,
             cfg,
-            step: _step,
+            step,
             state,
             inputs,
             exec_ctx,
@@ -1263,7 +1491,36 @@ impl Walker {
                 }
             }
             Ok(dispatch::ActionOutcome::Success(success)) => {
-                let dispatch::ActionSuccess { result: val, cost } = success;
+                let dispatch::ActionSuccess {
+                    result: val,
+                    cost,
+                    child_thread_id,
+                } = success;
+                // Portable dispatch lineage: when this node spawned a native
+                // child thread (a directive or sub-graph), emit a
+                // `child_thread_spawned` event into THIS (parent) thread's stream
+                // so the edge lands in rebuild-safe history — the braid drill
+                // target and the derived `threads.children` edge both come from
+                // it. The daemon's `thread_child_link` (recorded at launch) is the
+                // separate, non-portable cascade copy. Do NOT set the child's
+                // `upstream_thread_id`: that is the continuation-predecessor link
+                // and stamping it cross-chain corrupts the child's resume.
+                if let Some(ref child_id) = child_thread_id {
+                    let r = self
+                        .client
+                        .append_runtime_event(
+                            RuntimeEventType::ChildThreadSpawned,
+                            json!({
+                                "child_thread_id": child_id,
+                                "node": current,
+                                "step": step,
+                                "item_id": dispatched_item_id,
+                                "spawn_reason": "dispatch",
+                            }),
+                        )
+                        .await;
+                    self.record_callback_warning("child_thread_spawned", r);
+                }
                 // Interpolate `assign` HERE (not in commit_step) so an
                 // interpolation failure becomes a node error that obeys
                 // on_error — never a suppressed error that merges the raw
@@ -2057,6 +2314,8 @@ impl Walker {
                 (true, s)
             }
             "max_steps_exceeded" => (false, "max_steps_exceeded".to_string()),
+            "cancelled" => (false, "cancelled".to_string()),
+            "killed" => (false, "killed".to_string()),
             _ => (false, "error".to_string()),
         };
 
@@ -2196,11 +2455,28 @@ impl Walker {
             .await;
         self.record_callback_warning("publish_artifact", r.map(|_| ()));
 
-        // Finalize thread. `TerminalCompletion.cost` is raw JSON on the
-        // callback wire — serialize the typed aggregate.
+        // Finalize thread. A cooperative cancel/kill settles the THREAD as
+        // cancelled/killed (a distinct terminal an operator can tell apart from a
+        // failure), not the coarse completed/failed split every other terminal
+        // collapses to. `TerminalCompletion.cost` is raw JSON on the callback
+        // wire — serialize the typed aggregate.
+        let thread_status = match status.as_str() {
+            "cancelled" => "cancelled",
+            "killed" => "killed",
+            _ if success => "completed",
+            _ => "failed",
+        };
         let completion = TerminalCompletion {
-            status: if success { "completed" } else { "failed" }.to_string(),
-            outcome_code: Some(if success { "success" } else { "failed" }.to_string()),
+            status: thread_status.to_string(),
+            outcome_code: Some(
+                match thread_status {
+                    "completed" => "success",
+                    "cancelled" => "cancelled",
+                    "killed" => "killed",
+                    _ => "failed",
+                }
+                .to_string(),
+            ),
             result: graph_result.result.clone(),
             error: graph_result.error.as_ref().map(|e| json!(e)),
             cost: graph_result
@@ -2772,13 +3048,28 @@ mod tests {
 
     struct MockClient {
         results: Mutex<Vec<Value>>,
+        /// Commands handed back on the FIRST `claim_commands`, then drained empty.
+        pending_commands: Mutex<Vec<Value>>,
+        /// Recorded `(command_id, status)` for every `complete_command`.
+        completed: Mutex<Vec<(i64, String)>>,
+        /// Status carried by the terminal `finalize_thread`, if any.
+        finalized_status: Mutex<Option<String>>,
     }
 
     impl MockClient {
         fn new(results: Vec<Value>) -> Self {
             Self {
                 results: Mutex::new(results),
+                pending_commands: Mutex::new(Vec::new()),
+                completed: Mutex::new(Vec::new()),
+                finalized_status: Mutex::new(None),
             }
+        }
+
+        fn with_pending_commands(results: Vec<Value>, commands: Vec<Value>) -> Self {
+            let mock = Self::new(results);
+            *mock.pending_commands.lock().unwrap() = commands;
+            mock
         }
     }
 
@@ -2807,8 +3098,9 @@ mod tests {
         async fn finalize_thread(
             &self,
             _: &str,
-            _: ryeos_runtime::TerminalCompletion,
+            completion: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
+            *self.finalized_status.lock().unwrap() = Some(completion.status.clone());
             Ok(json!({}))
         }
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
@@ -2862,14 +3154,20 @@ mod tests {
             Ok(json!({"keys": []}))
         }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
-            Ok(json!({}))
+            let commands = std::mem::take(&mut *self.pending_commands.lock().unwrap());
+            Ok(json!({ "commands": commands }))
         }
         async fn complete_command(
             &self,
             _: &str,
-            _: &str,
+            command_id: i64,
+            status: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {
+            self.completed
+                .lock()
+                .unwrap()
+                .push((command_id, status.to_string()));
             Ok(json!({}))
         }
         async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
@@ -2967,6 +3265,163 @@ config:
         assert!(result.success);
         assert_eq!(result.status, "completed");
         assert_eq!(result.steps, 1);
+    }
+
+    /// A cancel queued before the first node runs is drained between nodes: the
+    /// walker acks it `completed`, settles the run/thread `cancelled`, and never
+    /// executes the node.
+    #[tokio::test]
+    async fn cooperative_cancel_settles_cancelled_and_acks_command() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let mock = Arc::new(MockClient::with_pending_commands(
+            vec![json!({"msg": "hello"})],
+            vec![json!({"command_id": 7, "command_type": "cancel"})],
+        ));
+        let client = CallbackClient::from_inner(
+            mock.clone(),
+            "thread-test",
+            "/tmp/test-project",
+            "tat-test",
+        );
+        let w = Walker::new(
+            graph,
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            client,
+            None,
+        );
+        let result = w.execute(json!({}), None).await;
+
+        assert!(!result.success);
+        assert_eq!(result.status, "cancelled");
+        // Terminated before running step1.
+        assert_eq!(result.steps, 0);
+        // The cancel was acknowledged completed…
+        assert_eq!(
+            *mock.completed.lock().unwrap(),
+            vec![(7, "completed".to_string())]
+        );
+        // …and the thread finalized cancelled, not failed.
+        assert_eq!(
+            mock.finalized_status.lock().unwrap().as_deref(),
+            Some("cancelled")
+        );
+    }
+
+    /// When cancel and kill queue in the same drained batch, kill (the harder
+    /// stop) wins the terminal status, and BOTH commands are still acked so
+    /// neither hangs in `claimed`.
+    #[tokio::test]
+    async fn cooperative_kill_outranks_cancel_in_one_batch() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let mock = Arc::new(MockClient::with_pending_commands(
+            vec![json!({"msg": "hello"})],
+            vec![
+                json!({"command_id": 1, "command_type": "cancel"}),
+                json!({"command_id": 2, "command_type": "kill"}),
+            ],
+        ));
+        let client = CallbackClient::from_inner(
+            mock.clone(),
+            "thread-test",
+            "/tmp/test-project",
+            "tat-test",
+        );
+        let w = Walker::new(
+            graph,
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            client,
+            None,
+        );
+        let result = w.execute(json!({}), None).await;
+
+        assert_eq!(result.status, "killed");
+        assert_eq!(
+            mock.finalized_status.lock().unwrap().as_deref(),
+            Some("killed")
+        );
+        // Both commands acked completed, regardless of which won the terminal.
+        let completed = mock.completed.lock().unwrap().clone();
+        assert!(completed.contains(&(1, "completed".to_string())));
+        assert!(completed.contains(&(2, "completed".to_string())));
+    }
+
+    /// A signal-driven cancel flag (SIGTERM) already set finalizes the run
+    /// cancelled at the first node boundary, without executing a node — the same
+    /// cooperative terminal a claimed cancel command produces, but with no
+    /// command to settle.
+    #[tokio::test]
+    async fn signal_cancel_flag_settles_cancelled_between_nodes() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let mock = Arc::new(MockClient::new(vec![json!({"msg": "hello"})]));
+        let client = CallbackClient::from_inner(
+            mock.clone(),
+            "thread-test",
+            "/tmp/test-project",
+            "tat-test",
+        );
+        // Flag pre-set, as if SIGTERM already arrived before the first node.
+        let flag = Arc::new(AtomicBool::new(true));
+        let w = Walker::new(
+            graph,
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            client,
+            None,
+        )
+        .with_cancel_flag(flag);
+        let result = w.execute(json!({}), None).await;
+
+        assert_eq!(result.status, "cancelled");
+        assert!(!result.success);
+        assert_eq!(result.steps, 0);
+        assert_eq!(
+            mock.finalized_status.lock().unwrap().as_deref(),
+            Some("cancelled")
+        );
     }
 
     #[tokio::test]
@@ -4627,6 +5082,7 @@ config:
         async fn complete_command(
             &self,
             _: &str,
+            _: i64,
             _: &str,
             _: Value,
         ) -> Result<Value, CallbackError> {

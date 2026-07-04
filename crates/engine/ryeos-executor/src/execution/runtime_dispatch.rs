@@ -174,6 +174,11 @@ async fn handle_execute(
     };
 
     let project_path = child_provenance.effective_path().to_path_buf();
+    // C0 diagnostic: snapshot the run's resolution source before `provenance` is
+    // moved into the dispatch request, so a content-hash mismatch can be pinned
+    // to its origin below.
+    let diag_source = child_provenance.project_source();
+    let diag_effective_path = child_provenance.effective_path().to_path_buf();
     let dispatch_req = crate::dispatch::DispatchRequest {
         launch_mode: params.action.thread.as_str(),
         target_site_id: None,
@@ -195,9 +200,25 @@ async fn handle_execute(
     // we await `dispatch::dispatch` directly. The previous
     // `Handle::current().block_on(...)` was a panic/deadlock risk on
     // the P3b hot path (a runtime-thread blocking on its own runtime).
-    crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    let result =
+        crate::dispatch::dispatch(&params.action.item_id, &dispatch_req, &exec_ctx, state).await;
+    if let Err(err) = &result {
+        // C0: attribute a content-hash mismatch to its resolution source. A
+        // `LiveFs` run means the dispatched item's bytes were re-signed on disk
+        // mid-run; a `PushedHead` run means dispatch read a stale materialized
+        // checkout (`effective_path`). This is the signal the re-sign/pin
+        // investigation needs before any pin policy is designed.
+        if err.to_string().contains("content hash mismatch") {
+            tracing::warn!(
+                item_id = %params.action.item_id,
+                project_source = ?diag_source,
+                effective_path = %diag_effective_path.display(),
+                error = %err,
+                "C0: content-hash mismatch during callback dispatch",
+            );
+        }
+    }
+    result.map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn parent_execution_context_from_capability(

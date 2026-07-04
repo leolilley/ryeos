@@ -14,9 +14,12 @@ use serde_json::{json, Value};
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
+use ryeos_app::cascade::{cascade_descendants, CascadeMode};
 use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_app::state::AppState;
+use ryeos_app::state_store::is_terminal_status;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+use ryeos_engine::contracts::ThreadTerminalStatus;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
@@ -41,7 +44,7 @@ pub async fn handle(
 
     // Check if already terminal — bail early with a clear message.
     let current_status = thread.status.as_str();
-    if is_terminal(current_status) {
+    if is_terminal_status(current_status) {
         return Err(HandlerError::BadRequest(format!(
             "thread {} is already {} — cannot cancel",
             req.thread_id, current_status
@@ -56,8 +59,10 @@ pub async fn handle(
         )));
     }
 
-    // If the thread has a PGID, kill the process group.
-    let kill_info = if let Some(pgid) = thread.runtime.pgid {
+    // If the thread has a usable PGID, kill the process group. A non-positive
+    // pgid is unusable — `kill(-0, …)` would hit the daemon's own group — so it
+    // is treated as "no process to kill", not signalled.
+    let kill_info = if let Some(pgid) = thread.runtime.pgid.filter(|&p| p > 0) {
         let action = resolve_shutdown_action(
             thread
                 .runtime
@@ -90,25 +95,62 @@ pub async fn handle(
 
     // Finalize via ThreadLifecycleService so scheduler fire records
     // get updated correctly (a raw state_store call would skip that).
-    let finalized = state
-        .threads
-        .finalize_thread(&ThreadFinalizeParams {
-            thread_id: req.thread_id.clone(),
-            status: "cancelled".to_string(),
-            outcome_code: Some("cancelled".to_string()),
-            result: None,
-            error: Some(json!({
-                "reason": "cancelled_by_request",
-            })),
-            metadata: None,
-            artifacts: Vec::new(),
-            final_cost: None,
-            summary_json: None,
-        })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    //
+    // Race: a graph that honours the SIGTERM cooperative-cancel flag may
+    // self-finalize `cancelled` over its callback within the kill's grace window,
+    // between the kill above and here. That leaves this thread already terminal,
+    // so `finalize_thread` would reject the same-status transition. Treat an
+    // already-terminal target as success — the cancel took effect — rather than
+    // surfacing the benign race as an Internal error.
+    let finalized = match state.threads.finalize_thread(&ThreadFinalizeParams {
+        thread_id: req.thread_id.clone(),
+        status: ThreadTerminalStatus::Cancelled.as_str().to_string(),
+        outcome_code: Some(ThreadTerminalStatus::Cancelled.as_str().to_string()),
+        result: None,
+        error: Some(json!({
+            "reason": "cancelled_by_request",
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    }) {
+        Ok(finalized) => finalized,
+        Err(e) => {
+            let current = state
+                .state_store
+                .get_thread(&req.thread_id)
+                .map_err(|read_err| HandlerError::Internal(read_err.to_string()))?;
+            match current {
+                Some(thread) if is_terminal_status(&thread.status) => thread,
+                _ => return Err(HandlerError::Internal(e.to_string())),
+            }
+        }
+    };
 
     // `finalize_thread` persists then publishes the `thread_cancelled`
     // event, so live subscribers receive it directly.
+
+    // Cascade to live descendants: killing this thread's own pgid does not reach
+    // the children it spawned (each runs as its own setsid group), so a graph
+    // blocked on an inline child would leave that child running — and authoring —
+    // past the parent's cancel. Graceful, honouring each child's declared mode. A
+    // walk failure is logged, not raised: the primary is already settled.
+    let cascade = match cascade_descendants(
+        &state.state_store,
+        &req.thread_id,
+        CascadeMode::Graceful,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::warn!(
+                thread_id = %req.thread_id,
+                error = %e,
+                "descendant cascade failed during cancel"
+            );
+            Vec::new()
+        }
+    };
 
     // If the cancelled thread was a followed child's chain terminal, its finalize
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —
@@ -123,14 +165,8 @@ pub async fn handle(
         "thread_id": req.thread_id,
         "status": finalized.status,
         "kill": kill_info,
+        "cascade": cascade,
     }))
-}
-
-fn is_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
-    )
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
@@ -160,7 +196,11 @@ mod tests {
             "timed_out",
             "continued",
         ] {
-            assert!(is_terminal(status), "expected '{}' to be terminal", status);
+            assert!(
+                is_terminal_status(status),
+                "expected '{}' to be terminal",
+                status
+            );
         }
     }
 
@@ -168,7 +208,7 @@ mod tests {
     fn is_terminal_rejects_non_terminal() {
         for status in &["created", "running", "pending", "paused"] {
             assert!(
-                !is_terminal(status),
+                !is_terminal_status(status),
                 "expected '{}' to NOT be terminal",
                 status
             );

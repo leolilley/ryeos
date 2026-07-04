@@ -43,7 +43,7 @@ Options:
   --jobs N              Cap cargo build parallelism during --populate (cargo -j N).
                         Use a smaller N if a full release build exhausts memory.
   --crates "A B C"      With --populate, rebuild only these crates (e.g.
-                        --crates ryeos-tools to refresh just core-tools). Other
+                        --crates ryeos-core-tools to refresh just core-tools). Other
                         bundle binaries must already exist in target/release.
   --all                 With --populate, rebuild the whole bundle set. Required to
                         do a full rebuild — --populate refuses to build everything
@@ -368,7 +368,7 @@ if [[ $run_populate -eq 1 ]]; then
     [[ -s "$key" ]] || die "publisher key missing or empty: $key"
     # Be explicit about scope — never trigger a full workspace rebuild implicitly.
     if [[ -z "$crates" && $populate_all -eq 0 ]]; then
-        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-tools), or --all to rebuild the whole '$bundle_set' set"
+        die "--populate needs an explicit scope: pass --crates \"<crate ...>\" to rebuild only what changed (e.g. --crates ryeos-core-tools), or --all to rebuild the whole '$bundle_set' set"
     fi
     echo "[install-local-direct] populating bundles"
     populate_args=(--key "$key" --owner "$owner" --bundle-set "$bundle_set")

@@ -4,7 +4,7 @@
 //! (`<state>/.ai/node/vault/private_key.pem`) and the sealed
 //! secret-store (`<state>/.ai/state/secrets/store.enc`). They run
 //! locally without the daemon so rotation works even when the daemon
-//! is down — that's why this module sits in `ryeos-tools` and is
+//! is down — that's why this module sits in `ryeos-core-tools` and is
 //! invoked through `crates/bin/cli/src/lifecycle_commands.rs`.
 //!
 //! The library functions (policy, paths, sealed I/O, dotenv) are now

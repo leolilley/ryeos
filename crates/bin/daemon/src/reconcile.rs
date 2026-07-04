@@ -796,6 +796,7 @@ mod tests {
             },
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
+            state_root: None,
             current_site_id: "site:a".into(),
             origin_site_id: "site:a".into(),
             requested_by: principal(),

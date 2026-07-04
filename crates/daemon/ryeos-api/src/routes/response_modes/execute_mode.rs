@@ -70,7 +70,8 @@ pub struct ExecuteRequest {
     /// Deliberate runtime state-root override: run against the live
     /// `project_path` source tree while runtime state (thread state,
     /// transcripts, thread knowledge) is placed under this absolute path
-    /// instead of the project. Live-fs + inline only; requires an explicit
+    /// instead of the project. Live-fs only (inline or detached; the
+    /// `accepted` launch mode rejects it) and requires an explicit
     /// `project_path`. Both roots are echoed in the response's `execution`
     /// diagnostics block.
     #[serde(default)]
@@ -318,17 +319,30 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": format!("state_root must be an absolute path, got '{raw}'") })),
                     ).into_response());
                 }
+                // The override's whole purpose is keeping runtime state OUT
+                // of the executed source tree; a state root inside (or equal
+                // to) the project recreates the pollution with extra
+                // indirection. Lexical check first (so a rejected path is
+                // never even created), then the canonical check below —
+                // after creation, when both paths exist — so symlinked
+                // spellings can't sneak one in.
+                if path.starts_with(&project_path) {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": format!(
+                            "state_root '{raw}' is inside the project source tree \
+                             '{}'; the override exists to keep runtime state out of \
+                             the executed source — pick a path outside the project",
+                            project_path.display()
+                        ) })),
+                    ).into_response());
+                }
                 if let Err(e) = std::fs::create_dir_all(&path) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
                         axum::Json(json!({ "error": format!("state_root '{raw}' could not be created: {e}") })),
                     ).into_response());
                 }
-                // The override's whole purpose is keeping runtime state OUT
-                // of the executed source tree; a state root inside (or equal
-                // to) the project recreates the pollution with extra
-                // indirection. Compare canonicalized paths — both exist at
-                // this point — so symlinked spellings can't sneak one in.
                 let canonical_state = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                 let canonical_project = std::fs::canonicalize(&project_path)
                     .unwrap_or_else(|_| project_path.clone());
@@ -1229,6 +1243,7 @@ mod tests {
             call: None,
             usage_subject: None,
             debug_raw: false,
+            state_root: None,
         }
     }
 

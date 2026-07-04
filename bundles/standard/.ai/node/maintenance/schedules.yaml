@@ -7,9 +7,9 @@
 # then projects and fires it like any other schedule, so `ryeos thread list`
 # shows maintenance fires and `scheduler pause maintenance-gc` pauses them.
 #
-# This is the source of record for the maintenance cadence/params; it mirrors
-# the daemon's built-in default so a fresh node schedules maintenance even
-# before this file materialises. Edit here to change the default cadence.
+# This is the ONLY source of maintenance cadence/params: no declaration, no
+# scheduled GC — the daemon schedules nothing implicitly. Edit here to change
+# the cadence; delete the entry (or the file) to leave GC unscheduled.
 #
 # Runs the deep GC profile daily (see GcParams profile docs): CAS sweep plus
 # cache purge, trace truncation, runtime-history pruning, and the retention
@@ -23,7 +23,10 @@ schedules:
     timezone: UTC
     misfire_policy: skip
     overlap_policy: skip
-    enabled: true
+    # Disabled 2026-07-04 while the deep-GC profile settles post-deploy;
+    # flip back to re-enable. Kept declared-but-disabled (rather than
+    # deleted) so the schedule stays visible in data.
+    enabled: false
     params:
       deep: true
     capabilities:

@@ -240,6 +240,41 @@ impl CallbackClient {
         Ok(())
     }
 
+    /// Drain pending thread commands (cancel/kill/…) for this thread. A missing
+    /// UDS client is a hard error — cooperative cancellation must not silently
+    /// no-op into "no commands".
+    pub async fn claim_commands(&self) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback claim_commands called without an inner UDS client \
+                 (socket missing); cannot drain thread commands"
+            )
+        })?;
+        client
+            .claim_commands(&self.thread_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Settle a claimed command as `completed` or `rejected`.
+    pub async fn complete_command(
+        &self,
+        command_id: i64,
+        status: &str,
+        result: Value,
+    ) -> Result<Value> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback complete_command called without an inner UDS client \
+                 (socket missing); cannot settle command {command_id}"
+            )
+        })?;
+        client
+            .complete_command(&self.thread_id, command_id, status, result)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Resume-critical: must hard-fail on disconnect.
     pub async fn finalize_thread(&self, completion: TerminalCompletion) -> Result<()> {
         let client = self.inner.as_ref().ok_or_else(|| {
@@ -952,7 +987,8 @@ mod tests {
         async fn complete_command(
             &self,
             _thread_id: &str,
-            _command_id: &str,
+            _command_id: i64,
+            _status: &str,
             _result: Value,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
@@ -1381,7 +1417,7 @@ mod tests {
         async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
         async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
         async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn complete_command(&self, _: &str, _: i64, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
         async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
     }

@@ -47,9 +47,11 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         .clamp(1, MAX_THREAD_LIST_LIMIT);
 
     // Optional ordering: the watch dashboard requests `sort: watch`
-    // (active-first, then newest); anything else keeps the default order.
+    // (active-first, then newest), `newest` is newest-first; anything else
+    // keeps the default order.
     let sort = match params.get("sort").and_then(|v| v.as_str()) {
         Some("watch") => ryeos_app::thread_lifecycle::ThreadSort::Watch,
+        Some("newest") => ryeos_app::thread_lifecycle::ThreadSort::Newest,
         _ => ryeos_app::thread_lifecycle::ThreadSort::Default,
     };
 
@@ -63,6 +65,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         status: string_filter(&params, "status"),
         kind: string_filter(&params, "kind"),
         requested_by: string_filter(&params, "requested_by"),
+        facet: string_filter(&params, "facet_key")
+            .zip(string_filter(&params, "facet_value")),
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored

@@ -59,7 +59,7 @@ use anyhow::{anyhow, bail, Result};
 use ryeos_engine::roots;
 
 // Vault key-name policy + write helpers live in
-// `ryeos_tools::actions::vault` so they can be shared with the CLI
+// `ryeos_core_tools::actions::vault` so they can be shared with the CLI
 // `ryeos vault {put,list,remove,rewrap}` verbs without a circular
 // crate dependency. We re-export the pieces public callers (tests,
 // fixtures, dispatch) need so this module's surface is unchanged.
