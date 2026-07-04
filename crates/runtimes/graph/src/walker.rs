@@ -704,23 +704,8 @@ impl Walker {
             // SIGTERM). A cancel or kill routes a terminal outcome through
             // commit_step exactly like any other terminal — full lifecycle,
             // checkpoint semantics, the thread settles cancelled/killed — rather
-            // than a hard process signal landing mid-node. Draining first means a
-            // queued command is still settled even when a SIGTERM also arrived.
-            let control = match self.drain_control_commands().await {
-                Some(control) => Some(control),
-                None if self
-                    .cancel_flag
-                    .as_ref()
-                    .is_some_and(|f| f.load(Ordering::Relaxed)) =>
-                {
-                    Some(ControlDirective {
-                        action: ControlAction::Cancel,
-                        reason: Some("cooperative cancel by signal".to_string()),
-                    })
-                }
-                None => None,
-            };
-            if let Some(control) = control {
+            // than a hard process signal landing mid-node.
+            if let Some(control) = self.pending_control().await {
                 let outcome = StepOutcome::Terminal {
                     status: control.action.terminal_status(),
                     error: control.reason,
@@ -849,6 +834,35 @@ impl Walker {
             };
         }
 
+        // A cancel/kill that arrived during the final segment step (or a SIGTERM
+        // flag set) must not be lost to the continuation cut: the successor would
+        // launch fresh, carrying no cancel. Re-check before handing off and
+        // finalize cooperatively instead of continuing.
+        if let Some(control) = self.pending_control().await {
+            let outcome = StepOutcome::Terminal {
+                status: control.action.terminal_status(),
+                error: control.reason,
+            };
+            return match self
+                .commit_step(CommitStepInput {
+                    graph_run_id: &graph_run_id,
+                    step,
+                    current: &current,
+                    state: &mut state,
+                    receipts: &mut receipts,
+                    suppressed_errors: &mut suppressed_errors,
+                    outcome,
+                    guard: &mut guard,
+                    inputs: &inputs,
+                    execution: &execution_context,
+                })
+                .await
+            {
+                CommitResult::Advance { .. } => unreachable!("Terminal always terminates"),
+                CommitResult::Terminate(result) => result,
+            };
+        }
+
         // Segment budget exhausted: cut a machine continuation. A failed handoff
         // settles the thread as a terminal error rather than leaving it
         // `continued` with no successor.
@@ -926,6 +940,29 @@ impl Walker {
     /// state never leaks a stuck `claimed` row. A claim-RPC hiccup is recorded as
     /// callback drift and treated as "nothing pending" — a transient failure must
     /// not fell a healthy run, and the next node re-drains.
+    /// The pending cooperative-control decision at a node boundary: a claimed
+    /// cancel/kill command (drained and settled here) or, failing that, the
+    /// signal-driven cancel flag (a daemon graceful cancel via SIGTERM). Draining
+    /// first means a queued command is still settled even when a SIGTERM also
+    /// arrived. Evaluated at each loop top AND before a segment-continuation cut,
+    /// so a cancel racing the cut is not lost to a fresh successor.
+    async fn pending_control(&self) -> Option<ControlDirective> {
+        match self.drain_control_commands().await {
+            Some(control) => Some(control),
+            None if self
+                .cancel_flag
+                .as_ref()
+                .is_some_and(|f| f.load(Ordering::Relaxed)) =>
+            {
+                Some(ControlDirective {
+                    action: ControlAction::Cancel,
+                    reason: Some("cooperative cancel by signal".to_string()),
+                })
+            }
+            None => None,
+        }
+    }
+
     async fn drain_control_commands(&self) -> Option<ControlDirective> {
         let claimed = match self.client.claim_commands().await {
             Ok(v) => v,
