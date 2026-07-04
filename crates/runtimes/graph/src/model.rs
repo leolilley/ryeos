@@ -139,8 +139,8 @@ impl GraphNode {
     /// Every action clone site that dispatches (plain action node, sequential
     /// foreach, parallel foreach) must route through this fold BEFORE
     /// interpolation — `dispatch_action` defaults a missing `thread` to
-    /// `"inline"`, which launches the child as a blocking inline run and holds
-    /// the callback connection for the child's entire lifetime.
+    /// `"inline"`, and the callback boundary rejects an inline dispatch of a
+    /// thread-run kind, so a site that skips the fold fails the node.
     pub fn fold_detach_into_action(&self, action: &mut Value) {
         if !self.detach {
             return;
