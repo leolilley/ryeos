@@ -538,8 +538,9 @@ impl Walker {
                     graph_run_id = rid.to_string();
                 }
                 // Restore the per-step retry counter so a mid-retry segment cut
-                // or crash resumes with the attempts already spent (absent on a
-                // pre-v2 checkpoint or a fresh-node resume → 0).
+                // or crash resumes with the attempts already spent. Schema-mismatched
+                // checkpoints are rejected before this point; absence here means a
+                // fresh-node resume or non-retry checkpoint, so default to 0.
                 retry_attempt = resume_val
                     .get("retry_attempt")
                     .and_then(|v| v.as_u64())
