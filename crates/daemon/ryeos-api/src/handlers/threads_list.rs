@@ -19,15 +19,28 @@ use crate::handler_context::HandlerContext;
 pub struct Request {
     #[serde(default = "default_list_limit")]
     pub limit: usize,
+    /// Row order: `default` (oldest-first), `newest` (newest-first — the
+    /// "what just ran" order; the limit truncates, so oldest-first + limit
+    /// returns the OLDEST rows), or `watch` (active-first, then newest).
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     let Some(filter_principal) = ctx.is_present().then_some(ctx.fingerprint.as_str()) else {
         return Ok(serde_json::json!([]));
     };
+    let sort = match req.sort.as_deref() {
+        None | Some("default") => ryeos_app::thread_lifecycle::ThreadSort::Default,
+        Some("newest") => ryeos_app::thread_lifecycle::ThreadSort::Newest,
+        Some("watch") => ryeos_app::thread_lifecycle::ThreadSort::Watch,
+        Some(other) => anyhow::bail!(
+            "invalid sort '{other}': expected one of default | newest | watch"
+        ),
+    };
     state
         .threads
-        .list_threads_filtered(req.limit, Some(filter_principal))
+        .list_threads_filtered_sorted(req.limit, Some(filter_principal), sort)
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

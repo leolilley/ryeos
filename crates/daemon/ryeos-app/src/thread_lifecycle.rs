@@ -1584,6 +1584,20 @@ impl ThreadLifecycleService {
         Ok(json!({ "threads": threads, "next_cursor": null }))
     }
 
+    /// As [`Self::list_threads_filtered`] but with an explicit sort — the
+    /// public `threads.list` exposes `newest` ("what just ran"; the limit
+    /// truncates, so oldest-first + limit returns the OLDEST rows) and
+    /// `watch` alongside the default oldest-first order.
+    pub fn list_threads_filtered_sorted(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Value> {
+        let threads = self.list_thread_views_sorted(limit, filter_principal, sort)?;
+        Ok(json!({ "threads": threads, "next_cursor": null }))
+    }
+
     pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadView>> {
         self.state_store
             .list_thread_children(thread_id)?

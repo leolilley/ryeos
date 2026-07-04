@@ -2,7 +2,7 @@
 tokens:
 - thread
 - list
-description: List threads (audit + runtime), optionally limited
+description: "List threads (audit + runtime), optionally limited; --sort newest for newest-first (\"what just ran\"), --sort watch for active-first"
 dispatch:
   kind: execute_ref
   execute: service:threads/list

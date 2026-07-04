@@ -6,4 +6,5 @@ endpoint: threads.list
 required_caps: []
 schema:
   limit: integer?
-description: "List threads, optionally limited"
+  sort: string?
+description: "List threads, optionally limited; sort: default (oldest-first) | newest (newest-first) | watch (active-first, then newest)"
