@@ -816,8 +816,10 @@ impl RuntimeDb {
                  WHERE thread_id = ?1 AND status IN ('pending', 'claimed')
                  ORDER BY command_id ASC",
             )?;
-            stmt.query_map(params![thread_id], |row| row.get::<_, i64>(0))?
-                .collect::<std::result::Result<Vec<_>, _>>()?
+            let ids = stmt
+                .query_map(params![thread_id], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            ids
         };
         if ids.is_empty() {
             return Ok(Vec::new());
