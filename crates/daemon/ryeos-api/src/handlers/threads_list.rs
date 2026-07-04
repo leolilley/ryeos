@@ -24,6 +24,12 @@ pub struct Request {
     /// returns the OLDEST rows), or `watch` (active-first, then newest).
     #[serde(default)]
     pub sort: Option<String>,
+    /// Cohort/fleet filter: keep only threads carrying facet `key == value`
+    /// (e.g. `fleet=<run id>`). Both must be given together, or neither.
+    #[serde(default)]
+    pub facet_key: Option<String>,
+    #[serde(default)]
+    pub facet_value: Option<String>,
 }
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -38,9 +44,17 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             "invalid sort '{other}': expected one of default | newest | watch"
         ),
     };
-    state
-        .threads
-        .list_threads_filtered_sorted(req.limit, Some(filter_principal), sort)
+    let facet = match (req.facet_key, req.facet_value) {
+        (Some(key), Some(value)) => Some((key, value)),
+        (None, None) => None,
+        _ => anyhow::bail!("facet_key and facet_value must be given together"),
+    };
+    state.threads.list_threads_filtered_sorted_facet(
+        req.limit,
+        Some(filter_principal),
+        facet,
+        sort,
+    )
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

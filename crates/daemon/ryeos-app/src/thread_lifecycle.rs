@@ -1598,6 +1598,25 @@ impl ThreadLifecycleService {
         Ok(json!({ "threads": threads, "next_cursor": null }))
     }
 
+    /// As [`Self::list_threads_filtered_sorted`] but also narrows to a cohort
+    /// facet (`key == value`, e.g. `fleet=<run id>`) when one is given — the
+    /// fleet-membership query, on top of the owner-scope principal.
+    pub fn list_threads_filtered_sorted_facet(
+        &self,
+        limit: usize,
+        filter_principal: Option<&str>,
+        facet: Option<(String, String)>,
+        sort: ryeos_state::queries::ThreadSort,
+    ) -> Result<Value> {
+        let filter = ryeos_state::queries::ThreadListFilter {
+            principal: filter_principal.map(str::to_string),
+            facet,
+            ..Default::default()
+        };
+        let threads = self.list_thread_views_query(limit, &filter, sort)?;
+        Ok(json!({ "threads": threads, "next_cursor": null }))
+    }
+
     pub fn list_children(&self, thread_id: &str) -> Result<Vec<ThreadView>> {
         self.state_store
             .list_thread_children(thread_id)?

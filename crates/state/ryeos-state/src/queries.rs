@@ -392,6 +392,10 @@ pub struct ThreadListFilter {
     pub status: Option<String>,
     pub kind: Option<String>,
     pub requested_by: Option<String>,
+    /// Cohort/fleet membership: keep only threads carrying facet `key == value`
+    /// (e.g. `("fleet", "<run id>")`). Exact match — a cohort id is not a
+    /// substring search.
+    pub facet: Option<(String, String)>,
 }
 
 pub fn list_threads_sorted(
@@ -447,6 +451,11 @@ pub fn list_threads_query(
     // type-to-filter box narrows as the operator types.
     let mut conditions: Vec<&str> = Vec::new();
     let mut params: Vec<&dyn rusqlite::types::ToSql> = Vec::new();
+    // `thread_facets.value` is a BLOB, so bind the facet value as bytes to match
+    // (a TEXT param would compare unequal to the stored BLOB). Precomputed here so
+    // the owned Vec outlives the borrowed params slice.
+    let facet_value_bytes: Option<Vec<u8>> =
+        filter.facet.as_ref().map(|(_, v)| v.as_bytes().to_vec());
     if let Some(principal) = &filter.principal {
         conditions.push("requested_by = ?");
         params.push(principal);
@@ -462,6 +471,13 @@ pub fn list_threads_query(
     if let Some(requested_by) = &filter.requested_by {
         conditions.push("requested_by LIKE '%' || ? || '%'");
         params.push(requested_by);
+    }
+    if let (Some((key, _)), Some(value_bytes)) = (&filter.facet, &facet_value_bytes) {
+        conditions.push(
+            "thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)",
+        );
+        params.push(key);
+        params.push(value_bytes);
     }
     let where_clause = if conditions.is_empty() {
         String::new()
