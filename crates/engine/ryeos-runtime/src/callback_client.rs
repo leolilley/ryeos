@@ -1139,6 +1139,7 @@ mod tests {
                 params: json!({}),
                 thread: "inline".to_string(),
                 call: None,
+                facets: None,
             },
         };
         let err = client.dispatch_action(req).await.unwrap_err();

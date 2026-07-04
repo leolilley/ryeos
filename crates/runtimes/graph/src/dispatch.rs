@@ -123,6 +123,10 @@ pub async fn dispatch_action(
         ),
     };
 
+    // Cohort/fleet facets ride the action Value (the walker sets them from the
+    // node's interpolated `facets:`); the daemon stamps them on a detached child.
+    let facets = action.get("facets").cloned();
+
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
@@ -131,6 +135,7 @@ pub async fn dispatch_action(
             params,
             thread: thread.to_string(),
             call,
+            facets,
         },
     };
 
