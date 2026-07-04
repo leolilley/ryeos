@@ -2232,7 +2232,11 @@ impl StateStore {
     }
 }
 
-fn is_terminal_status(status: &str) -> bool {
+/// Whether a thread's persisted `status` is terminal. The canonical predicate —
+/// `ThreadTerminalStatus`'s string mapping omits daemon-owned `timed_out`, so it
+/// is not usable for this; callers outside this module (e.g. the cancel cascade)
+/// reuse this rather than re-listing the statuses.
+pub fn is_terminal_status(status: &str) -> bool {
     matches!(
         status,
         "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"

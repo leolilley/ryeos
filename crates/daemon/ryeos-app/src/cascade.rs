@@ -52,13 +52,47 @@ pub fn cascade_descendants(
     let descendants = store.descendant_thread_ids(root_thread_id)?;
     let mut report = Vec::with_capacity(descendants.len());
     for child in descendants {
-        let Some(thread) = store.get_thread(&child)? else {
-            report.push(json!({ "thread_id": child, "skipped": "no_thread_row" }));
-            continue;
+        // One child's read failure must not abort the cascade for the rest.
+        let thread = match store.get_thread(&child) {
+            Ok(Some(thread)) => thread,
+            Ok(None) => {
+                report.push(json!({ "thread_id": child, "skipped": "no_thread_row" }));
+                continue;
+            }
+            Err(e) => {
+                report.push(json!({
+                    "thread_id": child,
+                    "skipped": "read_error",
+                    "error": e.to_string(),
+                }));
+                continue;
+            }
         };
-        let Some(pgid) = thread.runtime.pgid else {
-            report.push(json!({ "thread_id": child, "skipped": "no_pgid" }));
+        // A terminal descendant is already stopping/stopped, and its `pgid` is
+        // never cleared on finalize — signalling it would target a possibly
+        // OS-recycled group (an unrelated process). Only live threads are
+        // signalled, matching the primary guard in `threads.cancel`.
+        if crate::state_store::is_terminal_status(&thread.status) {
+            report.push(json!({
+                "thread_id": child,
+                "skipped": "terminal",
+                "status": thread.status,
+            }));
             continue;
+        }
+        // A non-positive pgid is unusable: `kill(-0, …)` would hit the daemon's
+        // own group and a negative value an arbitrary PID (kill_by_action only
+        // guards the daemon pgid, not `<= 0`).
+        let pgid = match thread.runtime.pgid {
+            Some(pgid) if pgid > 0 => pgid,
+            Some(_) => {
+                report.push(json!({ "thread_id": child, "skipped": "invalid_pgid" }));
+                continue;
+            }
+            None => {
+                report.push(json!({ "thread_id": child, "skipped": "no_pgid" }));
+                continue;
+            }
         };
         let cancellation_mode = thread
             .runtime

@@ -60,6 +60,22 @@ impl CommandHub {
             let _ = tx.send(record.clone());
         }
     }
+
+    /// Drop `command_id`'s lane if no receiver remains. A waiter calls this on
+    /// exit so a subscription that never received a `publish` — a settlement
+    /// that raced ahead of the subscribe, a timed-out wait, or a command that
+    /// never settles — does not leak a `Sender` for the daemon's lifetime. The
+    /// caller MUST drop its own receiver before calling, or the count won't
+    /// reach zero.
+    pub fn reap(&self, command_id: i64) {
+        let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
+        if lanes
+            .get(&command_id)
+            .is_some_and(|tx| tx.receiver_count() == 0)
+        {
+            lanes.remove(&command_id);
+        }
+    }
 }
 
 static GLOBAL: LazyLock<CommandHub> = LazyLock::new(CommandHub::new);
@@ -114,5 +130,28 @@ mod tests {
         let hub = CommandHub::new();
         // No subscriber → no lane → must not panic.
         hub.publish(&settled_record(99, "completed"));
+    }
+
+    #[tokio::test]
+    async fn reap_drops_lane_only_after_receiver_gone() {
+        let hub = CommandHub::new();
+        let rx = hub.subscribe(5);
+        // A live receiver keeps the lane — reap is a no-op.
+        hub.reap(5);
+        assert_eq!(hub.lanes.lock().unwrap().len(), 1);
+        // Once the waiter drops its receiver, reap collects the orphaned lane so
+        // a raced/timed-out subscription does not leak a Sender.
+        drop(rx);
+        hub.reap(5);
+        assert_eq!(hub.lanes.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn publish_leaves_no_lane_behind() {
+        let hub = CommandHub::new();
+        let _rx = hub.subscribe(3);
+        hub.publish(&settled_record(3, "completed"));
+        // publish removes the lane on delivery; nothing to reap.
+        assert_eq!(hub.lanes.lock().unwrap().len(), 0);
     }
 }

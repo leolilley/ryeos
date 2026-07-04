@@ -46,8 +46,25 @@ pub async fn handle(
     // Not settled yet: subscribe, THEN re-read to close the race between the read
     // above and the subscription — a settlement landing in that window is either
     // waiting on the lane (delivered by recv) or already visible in the re-read.
+    // The lane is reaped on EVERY exit below (after the receiver is dropped) so a
+    // raced/timed-out subscription does not leak a Sender.
     let mut rx = ryeos_app::command_hub::global().subscribe(req.command_id);
-    let record = super::commands_get::load_owned_command(&state, &ctx, req.command_id)?;
+    let outcome = wait_on_lane(&state, &ctx, &req, &mut rx).await;
+    drop(rx);
+    ryeos_app::command_hub::global().reap(req.command_id);
+    outcome
+}
+
+/// The post-subscribe wait: re-read to close the subscribe race, then await the
+/// settlement lane with the deadline. Split out so the caller can unconditionally
+/// drop the receiver and reap the lane afterwards, on every path.
+async fn wait_on_lane(
+    state: &AppState,
+    ctx: &HandlerContext,
+    req: &Request,
+    rx: &mut tokio::sync::broadcast::Receiver<CommandRecord>,
+) -> Result<Value, HandlerError> {
+    let record = super::commands_get::load_owned_command(state, ctx, req.command_id)?;
     if is_settled(&record.status) {
         return respond(record, false);
     }
@@ -59,13 +76,13 @@ pub async fn handle(
         // Lane closed/lagged (sender dropped, or buffer overrun): fall back to a
         // fresh authoritative read of the row.
         Ok(Err(_)) => {
-            let latest = super::commands_get::load_owned_command(&state, &ctx, req.command_id)?;
+            let latest = super::commands_get::load_owned_command(state, ctx, req.command_id)?;
             respond(latest, false)
         }
         // Deadline hit: return the latest row; `settled`/`timed_out` tell the
         // caller it is still pending.
         Err(_elapsed) => {
-            let latest = super::commands_get::load_owned_command(&state, &ctx, req.command_id)?;
+            let latest = super::commands_get::load_owned_command(state, ctx, req.command_id)?;
             let timed_out = !is_settled(&latest.status);
             respond(latest, timed_out)
         }

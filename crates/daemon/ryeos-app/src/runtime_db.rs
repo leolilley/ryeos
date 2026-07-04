@@ -830,6 +830,11 @@ impl RuntimeDb {
 
     /// Record that `parent_thread_id` spawned `child_thread_id`. Idempotent on
     /// the child (a re-driven launch does not error or duplicate the link).
+    ///
+    /// `relation` is a descriptive tag only — the cascade walks every descendant
+    /// regardless. The sole production caller records `"dispatch"` for both
+    /// inline and follow children (they share one launch path); the value is
+    /// reserved for a finer distinction if a consumer ever needs one.
     pub fn record_child_link(
         &self,
         parent_thread_id: &str,

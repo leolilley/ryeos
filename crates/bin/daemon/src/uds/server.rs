@@ -808,6 +808,22 @@ fn handle_complete_command(
 ) -> Result<serde_json::Value> {
     let rt: RuntimeCompleteCommandParams = serde_json::from_value(params.clone())
         .context("invalid runtime.complete_command params")?;
+    // Trust boundary: the callback token was validated against `rt.thread_id`,
+    // but `command_id` is a global autoincrement. Confirm the command belongs to
+    // this thread before settling it — otherwise a runtime holding a valid token
+    // for its OWN thread could settle, or inject a `result` into, another
+    // thread's command, and that forged record would be delivered to the
+    // victim's `commands.wait`. A command's thread binding is immutable, so this
+    // read-then-settle is not a TOCTOU.
+    match state.state_store.get_command(rt.command_id)? {
+        Some(existing) if existing.thread_id == rt.thread_id => {}
+        Some(_) => anyhow::bail!(
+            "command {} does not belong to thread {}",
+            rt.command_id,
+            rt.thread_id
+        ),
+        None => anyhow::bail!("command {} not found", rt.command_id),
+    }
     let complete = CommandCompleteParams {
         command_id: rt.command_id,
         status: rt.status,
