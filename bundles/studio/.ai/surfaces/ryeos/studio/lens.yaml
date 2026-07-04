@@ -18,9 +18,9 @@ tiling:
 
 # Open on the whole-run view: the fleet cohort (threads carrying a `fleet` tag,
 # newest first) is the landing lens, so the TUI opens on the run rather than a
-# flat thread list. Drilling into a game swaps the single center lens to its
-# braid (chain/timeline), which itself shows the game's children as drill-ins.
-# Breadth is swapping the lens, never arranging panes.
+# flat thread list. Drilling into a cohort thread swaps the single center lens
+# to its braid (chain/timeline), which itself shows that thread's children as
+# drill-ins. Breadth is swapping the lens, never arranging panes.
 tiles:
   - "view:ryeos/run/fleet"
 
