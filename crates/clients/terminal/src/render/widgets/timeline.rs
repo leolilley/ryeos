@@ -49,6 +49,7 @@ pub fn draw_timeline(
     surface: &mut TextSurface,
     rect: Rect,
     entries: &[StudioTimelineEntryVm],
+    entry_indents: &[u8],
     selected: Option<usize>,
 ) {
     let width = rect.w as usize;
@@ -57,7 +58,7 @@ pub fn draw_timeline(
         return;
     }
     let mut lines = Vec::new();
-    push_timeline_lines(&mut lines, entries, width);
+    push_timeline_lines(&mut lines, entries, entry_indents, width);
 
     let visible = lines.len().min(height);
     // Default bottom-anchored (the tail). If the point sits above the
@@ -90,7 +91,12 @@ pub fn draw_timeline(
     }
 }
 
-fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntryVm], width: usize) {
+fn push_timeline_lines(
+    lines: &mut Vec<FeedLine>,
+    entries: &[StudioTimelineEntryVm],
+    entry_indents: &[u8],
+    width: usize,
+) {
     if entries.is_empty() {
         lines.push(FeedLine::plain(
             "no timeline events loaded".to_string(),
@@ -100,6 +106,11 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
         return;
     }
     for (index, entry) in entries.iter().enumerate() {
+        // Call-tree indent: a graph node's tool calls and its directive fork
+        // nest one level under the node. Prefix every line this entry emits with
+        // two spaces per level, so the braid reads as a call tree. Panic-safe: a
+        // missing/short indent vector degrades to depth 0 (flat).
+        let first_line = lines.len();
         match entry {
             StudioTimelineEntryVm::Block { text, tone } => {
                 // The braid stores the raw cognition prose; the lens typesets
@@ -154,6 +165,17 @@ fn push_timeline_lines(lines: &mut Vec<FeedLine>, entries: &[StudioTimelineEntry
                     style_muted(),
                     Some(index),
                 ));
+            }
+        }
+        // Prefix every line this entry emitted with its call-tree depth (two
+        // spaces per level). Panic-safe: a missing indent degrades to flat.
+        let depth = entry_indents.get(index).copied().unwrap_or(0) as usize;
+        if depth > 0 {
+            let pad = "  ".repeat(depth);
+            for line in &mut lines[first_line..] {
+                if !line.text.is_empty() {
+                    line.text = format!("{pad}{}", line.text);
+                }
             }
         }
     }
@@ -443,7 +465,7 @@ mod tests {
             w: 20,
             h: 4,
         };
-        draw_timeline(&mut surface, rect, &entries, None);
+        draw_timeline(&mut surface, rect, &entries, &[], None);
         // The bottom row shows the newest entry — the feed tails.
         assert!(
             row_text(&surface, 20, 3).contains("entry 9"),
@@ -463,7 +485,7 @@ mod tests {
             h: 4,
         };
         // Point on the oldest entry — far above the tail; the feed scrolls up.
-        draw_timeline(&mut surface, rect, &entries, Some(0));
+        draw_timeline(&mut surface, rect, &entries, &[], Some(0));
         assert!(
             row_text(&surface, 20, 0).contains("entry 0"),
             "scrolled to reveal the selected oldest entry: {:?}",
