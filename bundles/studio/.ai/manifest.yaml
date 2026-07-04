@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T01:06:05Z:b8b0a827efdb3f42514f33ecf8e1163d720a9aab90a97f8702f11515c5d76c06:FleAZnbA9Im7F5qZiaPeEdT/nKUyXUa1S7diYCZU74liOykORWsrn8VXlw37LX7wz3LMdtkmoTCQi9R1Axl6DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T09:54:36Z:094c4ad70e3e1538d3b4e7140431988df16514a7f608d3b4ed092e2e614047e5:xmu8W46RhGib4WsbepJYvLuuIn09DXFRXQlm2IH78smmzxUUkUgstB9mFjTefBW7kObMGx79Ba/G3dUdxH5kCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio
 version: 0.5.0
 description: Studio surfaces, UI routes, operational inspector services, and v0 renderer launchers
@@ -12,4 +12,3 @@ uses_kinds:
 - graph
 - knowledge
 - tool
-runtime_authority: {}

@@ -55,8 +55,10 @@ pub struct ResumeState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_result: Option<Value>,
     /// Per-step retry attempts already spent on `current_node` (checkpoint v2).
-    /// `None` on the event-replay path and on pre-v2 checkpoints → the walker
-    /// resumes with a zero attempt count.
+    /// `None` only on the event-replay path (no checkpoint) → the walker resumes
+    /// with a zero attempt count. Pre-v2 checkpoints do NOT reach here: they are
+    /// rejected at resume (a killed form), so a resumed checkpoint always carries
+    /// this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_attempt: Option<u32>,
 }

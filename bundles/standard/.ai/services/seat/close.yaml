@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:42Z:ef185effa0220130a013fe8af59dcb3b10b2e13c03532f7d991021a8a5471538:aV38FInsg4JiFr4rMNfDMfHSrgKv/YZjoXDfLMTiZCTWzT4UzcLZP1/sM6wRjYyxfjfqZRfntEw/1nMSsA1XBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T09:54:32Z:72eae3fe71f9f68efc0fadb8d5b782bde126f2134f1e52bd4ced93e4598d8094:5cuhzMkW7FZxKkkt4OkB3nJinYPjmSN9N5Eb6x1kRSRj1oVCZi8gy0wnA8Tm5vYMNWVJO1vG28MngsxZW/iiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat/close
 version: "1.0.0"

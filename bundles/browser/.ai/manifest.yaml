@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T01:06:03Z:e0fb0dc4af277f6a450d4de524c7f95b4ea84cd98f345bea5757ce533f5d309a:wefE5sJM7p1jyFIFHyKJjBH7Yn76yI4vsuquHc5pj3hF+1t7elRvOW5wUf5f+AjX4a5+QIHZigVjvylFNKYQDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-03T09:54:35Z:3bc58afafe62956f2593656121a44db196d50d1cd8f8a532c4c765144f684235:6SXjNHIOCvjaCgYczpkBdwaUuWlzuaAc9b79DCipKSGIr8fQpDnBkh7Ok3eLYuyvYjElKEz3t3gzou4SDGtpCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: browser
 version: 0.1.0
 description: Optional browser automation tools for agents
@@ -6,4 +6,3 @@ provides_kinds: []
 requires_kinds:
 - tool
 uses_kinds: []
-runtime_authority: {}

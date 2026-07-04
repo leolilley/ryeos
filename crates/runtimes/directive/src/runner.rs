@@ -224,6 +224,11 @@ fn retry_backoff(
                 && execution.retry_status_codes.contains(code)
         }
         Some(ProviderStreamError::Timeout { .. }) => execution.retry_on_timeout,
+        // A pre-stream `.send()` transport failure (DNS/connect/TLS/reset) is
+        // always retry-safe — no cognition_out was persisted. Retry it under the
+        // shared `execution.retries` budget so a burst-fanout connect blip backs
+        // off and re-attempts instead of surfacing as a fatal generic error.
+        Some(ProviderStreamError::Send { .. }) => true,
         None => false,
     };
     if !retryable {
@@ -601,18 +606,35 @@ impl Runner {
                             Err(e) => match retry_backoff(&e, attempt, &self.execution) {
                                 Some(delay) => {
                                     attempt += 1;
+                                    // Surface whether this was a connect-phase
+                                    // transport failure (`Some(true)`) vs another
+                                    // pre-stream send/reset (`Some(false)`) vs a
+                                    // status/timeout retry (`None`) — the signal
+                                    // for telling burst-fanout connect blips apart
+                                    // from real provider throttling.
+                                    let send_connect_phase = e
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
+                                        )
+                                        .and_then(|pe| match pe {
+                                            crate::provider_adapter::ProviderStreamError::Send {
+                                                connect,
+                                                ..
+                                            } => Some(*connect),
+                                            _ => None,
+                                        });
                                     tracing::warn!(
                                         turn,
                                         attempt,
                                         max_retries = self.execution.retries,
                                         backoff_ms = delay.as_millis() as u64,
+                                        send_connect_phase = ?send_connect_phase,
                                         error = %e,
                                         "provider call failed with a retryable error; \
                                          backing off before retry"
                                     );
                                     warnings.push(format!(
                                         "provider retry {attempt}/{max} on turn {turn} \
-                                         after {ms}ms backoff: {e}",
+                                         after {ms}ms backoff: {e:#}",
                                         max = self.execution.retries,
                                         ms = delay.as_millis(),
                                     ));
@@ -631,7 +653,8 @@ impl Runner {
                                                     "attempt": attempt,
                                                     "max_retries": self.execution.retries,
                                                     "backoff_ms": delay.as_millis() as u64,
-                                                    "error": e.to_string(),
+                                                    "send_connect_phase": send_connect_phase,
+                                                    "error": format!("{e:#}"),
                                                 }),
                                             )
                                             .await,
@@ -863,7 +886,7 @@ impl Runner {
                             State::CheckingLimits
                         }
                         Err(e) => State::Errored {
-                            error: e.to_string(),
+                            error: format!("{e:#}"),
                         },
                     }
                 }
@@ -1173,7 +1196,7 @@ impl Runner {
                                     }
                                     Err(e) => {
                                         let body_str =
-                                            serde_json::to_string(&json!({"error": e.to_string()}))
+                                            serde_json::to_string(&json!({"error": format!("{e:#}")}))
                                                 .unwrap_or_else(|_| {
                                                     "{\"error\":\"dispatch failed\"}".to_string()
                                                 });
@@ -2370,6 +2393,31 @@ mod tests {
     fn retry_backoff_status_not_in_allowlist_is_not_retried() {
         let cfg = retry_cfg();
         assert_eq!(retry_backoff(&status_err(418), 0, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_retries_pre_stream_send_failure() {
+        use std::time::Duration;
+        // A `.send()` transport failure (DNS/connect/TLS/reset) is pre-stream and
+        // always retry-safe — retried under the shared budget, not gated by a
+        // status allowlist or the timeout flag. This is the burst-fanout fix.
+        let send_err = |connect: bool| {
+            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Send {
+                connect,
+                detail: "streaming request failed: error sending request".into(),
+            })
+        };
+        let cfg = retry_cfg();
+        assert_eq!(
+            retry_backoff(&send_err(true), 0, &cfg),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            retry_backoff(&send_err(false), 1, &cfg),
+            Some(Duration::from_millis(2000))
+        );
+        // Still bounded by the retry budget.
+        assert_eq!(retry_backoff(&send_err(true), 2, &cfg), None);
     }
 
     #[test]

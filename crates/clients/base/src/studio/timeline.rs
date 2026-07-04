@@ -169,6 +169,18 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
             entries.push(entry);
             continue;
         }
+        // Paired runtime exchanges (graph steps, tool calls) have multiple
+        // producer shapes: directive tools emit `{tool, call_id}`, graph
+        // action nodes emit `{item_id, node, step}`. When the authored
+        // projection does not match the producer's shape, the raw event would
+        // otherwise degrade to a bare `event_type` line. Read the stable
+        // payload fields directly and pair start with settle so the tail
+        // remains useful regardless of producer.
+        if let Some(kind) = paired_runtime_kind(&record) {
+            flush_flow(&mut pending_flow, &mut entries);
+            apply_paired_runtime_entry(kind, record, &mut entries, &mut pending_pairs);
+            continue;
+        }
         // `cognition_in` arrives in two shapes: the run-opening *stimulus*
         // (`{content}`) and a per-turn marker (`{turn}`). The stimulus is the
         // operator's turn-opening message — render its content (accent), read
@@ -355,6 +367,17 @@ enum FeedEventType {
     StreamSnapshot,
     CognitionReasoning,
     GraphForeachIteration,
+    GraphStarted,
+    GraphCompleted,
+    GraphStepStarted,
+    GraphStepCompleted,
+    GraphBranchTaken,
+    GraphNodeRetry,
+    ToolCallStart,
+    ToolCallResult,
+    ArtifactPublished,
+    ProviderRetry,
+    CostUntracked,
 }
 
 impl FeedEventType {
@@ -378,6 +401,17 @@ impl FeedEventType {
             "stream_snapshot" => Self::StreamSnapshot,
             "cognition_reasoning" => Self::CognitionReasoning,
             "graph_foreach_iteration" => Self::GraphForeachIteration,
+            "graph_started" => Self::GraphStarted,
+            "graph_completed" => Self::GraphCompleted,
+            "graph_step_started" => Self::GraphStepStarted,
+            "graph_step_completed" => Self::GraphStepCompleted,
+            "graph_branch_taken" => Self::GraphBranchTaken,
+            "graph_node_retry" => Self::GraphNodeRetry,
+            "tool_call_start" => Self::ToolCallStart,
+            "tool_call_result" => Self::ToolCallResult,
+            "artifact_published" => Self::ArtifactPublished,
+            "provider_retry" => Self::ProviderRetry,
+            "cost_untracked" => Self::CostUntracked,
             _ => return None,
         })
     }
@@ -459,12 +493,13 @@ fn is_interrupted_cognition_out(record: &ProjectedRecord) -> bool {
 }
 
 /// Build a legible entry for thread-execution milestone events (lifecycle,
-/// usage, forks) straight from the raw event. These otherwise fall through to
-/// the default projection and render as bare `event_type` lines; here they
-/// read as an execution — toned and labeled (the renderer's tone glyph then
-/// distinguishes them: ✓ done, ✗ failed, ! warned, › forked). Returns `None`
-/// for every other event so the role-based handling still applies. Best-effort
-/// on payload fields — never panics on a missing/odd shape.
+/// usage, forks, graph-run milestones, retries, untracked cost) straight from
+/// the raw event. These otherwise fall through to the default projection and
+/// render as bare `event_type` lines; here they read as an execution — toned
+/// and labeled (the renderer's tone glyph then distinguishes them: ✓ done,
+/// ✗ failed, ! warned, › forked). Returns `None` for every other event so the
+/// paired-exchange and role-based handling still apply. Best-effort on
+/// payload fields — never panics on a missing/odd shape.
 fn execution_entry(
     record: &ProjectedRecord,
     stimulus: &std::collections::BTreeMap<String, String>,
@@ -508,6 +543,61 @@ fn execution_entry(
             StudioTone::Accent,
         ),
         FeedEventType::ThreadUsage => (usage_summary(payload?)?, None, StudioTone::Neutral),
+        // Graph-run milestones and runtime economics, read from stable payload
+        // fields for the same reason as the lifecycle arms above: their events
+        // carry no authored projection and would degrade to bare `event_type`
+        // lines. The paired exchanges (steps, tool calls) are handled by
+        // `apply_paired_runtime_entry` instead — they need the coalescer state.
+        FeedEventType::GraphStarted => (
+            "graph started".to_string(),
+            payload.and_then(graph_ref_meta),
+            StudioTone::Accent,
+        ),
+        FeedEventType::GraphCompleted => {
+            let status = payload.and_then(|p| p.get("status")).and_then(Value::as_str);
+            (
+                match status {
+                    Some(status) => format!("graph {status}"),
+                    None => "graph completed".to_string(),
+                },
+                payload.and_then(graph_ref_meta),
+                status_tone(status),
+            )
+        }
+        FeedEventType::GraphBranchTaken => {
+            let target = payload.and_then(|p| p.get("target")).and_then(Value::as_str);
+            (
+                match target {
+                    Some(target) => format!("branch → {target}"),
+                    None => "branch resolved".to_string(),
+                },
+                payload.and_then(node_step_meta),
+                StudioTone::Neutral,
+            )
+        }
+        FeedEventType::GraphNodeRetry => (
+            payload
+                .and_then(|p| payload_text(p, "node"))
+                .map(|node| format!("retrying {node}"))
+                .unwrap_or_else(|| "retrying node".to_string()),
+            payload.and_then(retry_meta),
+            StudioTone::Warn,
+        ),
+        FeedEventType::ProviderRetry => (
+            "provider retry".to_string(),
+            payload.and_then(retry_meta),
+            StudioTone::Warn,
+        ),
+        FeedEventType::CostUntracked => (
+            "cost untracked".to_string(),
+            payload.and_then(cost_untracked_meta),
+            StudioTone::Warn,
+        ),
+        FeedEventType::ArtifactPublished => (
+            payload.map_or_else(|| "artifact published".to_string(), artifact_summary),
+            payload.and_then(artifact_meta),
+            StudioTone::Good,
+        ),
         _ => return None,
     };
     // What activating this entry does, and its launcher-secondary affordance:
@@ -680,6 +770,320 @@ fn failure_reason(payload: Option<&Value>) -> Option<String> {
         .or_else(|| p.get("message").and_then(Value::as_str))
         .or_else(|| p.get("outcome_code").and_then(Value::as_str))
         .map(str::to_string)
+}
+
+/// The runtime exchanges rendered as start/settle pairs — graph steps and
+/// tool calls. These need the coalescer's pending-pair state, so they are
+/// folded by `apply_paired_runtime_entry` in `timeline_entries` rather than
+/// by `execution_entry`.
+fn paired_runtime_kind(record: &ProjectedRecord) -> Option<FeedEventType> {
+    match feed_event_type(record)? {
+        kind @ (FeedEventType::GraphStepStarted
+        | FeedEventType::GraphStepCompleted
+        | FeedEventType::ToolCallStart
+        | FeedEventType::ToolCallResult) => Some(kind),
+        _ => None,
+    }
+}
+
+/// Fold one paired runtime exchange event into the entries. A `…start` opens
+/// a pending Pair keyed by the exchange's stable identity; the matching
+/// settle event closes it in place (meta and tone updated, pending cleared).
+/// An unmatched settle (a replay window opened mid-exchange) degrades to a
+/// settled Line rather than being dropped. Keys are namespaced (`step:` /
+/// `tool:`) so they can never collide with projection-authored pair keys in
+/// the shared map.
+fn apply_paired_runtime_entry(
+    kind: FeedEventType,
+    record: ProjectedRecord,
+    entries: &mut Vec<StudioTimelineEntryVm>,
+    pending_pairs: &mut std::collections::BTreeMap<String, usize>,
+) {
+    let payload = record.raw.get("payload").unwrap_or(&Value::Null);
+    match kind {
+        FeedEventType::GraphStepStarted => {
+            let key = format!("step:{}", graph_step_key(payload));
+            let index = entries.len();
+            entries.push(StudioTimelineEntryVm::Pair {
+                summary: graph_step_summary(payload),
+                meta: graph_step_meta(payload),
+                tone: StudioTone::Accent,
+                pending: true,
+            });
+            pending_pairs.insert(key, index);
+        }
+        FeedEventType::GraphStepCompleted => {
+            let key = format!("step:{}", graph_step_key(payload));
+            let meta = graph_step_result_meta(payload);
+            let tone = status_tone(payload.get("status").and_then(Value::as_str));
+            if let Some(index) = pending_pairs.remove(&key) {
+                if let Some(StudioTimelineEntryVm::Pair {
+                    meta: existing_meta,
+                    tone: existing_tone,
+                    pending,
+                    ..
+                }) = entries.get_mut(index)
+                {
+                    *existing_meta = meta;
+                    *existing_tone = tone;
+                    *pending = false;
+                }
+            } else {
+                entries.push(StudioTimelineEntryVm::Line {
+                    primary: graph_step_summary(payload),
+                    meta,
+                    tone,
+                    action: None,
+                    secondary_action: None,
+                });
+            }
+        }
+        FeedEventType::ToolCallStart => {
+            let key = format!("tool:{}", tool_call_key(payload));
+            let index = entries.len();
+            entries.push(StudioTimelineEntryVm::Pair {
+                summary: tool_call_summary(payload, &record),
+                meta: tool_call_start_meta(payload, &record),
+                tone: StudioTone::Accent,
+                pending: true,
+            });
+            pending_pairs.insert(key, index);
+        }
+        FeedEventType::ToolCallResult => {
+            let key = format!("tool:{}", tool_call_key(payload));
+            let meta = tool_call_result_meta(payload, &record);
+            let tone = tool_result_tone(payload, &record);
+            if let Some(index) = pending_pairs.remove(&key) {
+                if let Some(StudioTimelineEntryVm::Pair {
+                    meta: existing_meta,
+                    tone: existing_tone,
+                    pending,
+                    ..
+                }) = entries.get_mut(index)
+                {
+                    *existing_meta = meta;
+                    *existing_tone = tone;
+                    *pending = false;
+                }
+            } else {
+                entries.push(StudioTimelineEntryVm::Line {
+                    primary: tool_call_summary(payload, &record),
+                    meta,
+                    tone,
+                    action: None,
+                    secondary_action: None,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn payload_text(payload: &Value, key: &str) -> Option<String> {
+    payload.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn payload_u64_text(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|n| n.to_string())
+}
+
+/// The stable identity of one graph step execution, shared by its started and
+/// completed events.
+fn graph_step_key(payload: &Value) -> String {
+    ["graph_run_id", "step", "node"]
+        .iter()
+        .filter_map(|key| payload_text(payload, key).or_else(|| payload_u64_text(payload, key)))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn graph_step_summary(payload: &Value) -> String {
+    payload_text(payload, "node")
+        .map(|node| format!("step {node}"))
+        .unwrap_or_else(|| "graph step".to_string())
+}
+
+fn graph_step_meta(payload: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(step) = payload_u64_text(payload, "step") {
+        parts.push(format!("#{step}"));
+    }
+    if let Some(item) = payload_text(payload, "node_ref") {
+        parts.push(item);
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn graph_step_result_meta(payload: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(status) = payload_text(payload, "status") {
+        parts.push(status);
+    }
+    if let Some(error) = payload_text(payload, "error") {
+        parts.push(error);
+    }
+    if parts.is_empty() {
+        graph_step_meta(payload)
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+/// The stable identity of one tool exchange: the directive runtime keys by
+/// `call_id`; graph action nodes carry none, so their identity is composed
+/// from the run coordinates.
+fn tool_call_key(payload: &Value) -> String {
+    payload_text(payload, "call_id").unwrap_or_else(|| {
+        ["graph_run_id", "step", "node", "item_id", "tool"]
+            .iter()
+            .filter_map(|key| payload_text(payload, key).or_else(|| payload_u64_text(payload, key)))
+            .collect::<Vec<_>>()
+            .join(":")
+    })
+}
+
+fn tool_call_summary(payload: &Value, record: &ProjectedRecord) -> String {
+    payload_text(payload, "tool")
+        .or_else(|| payload_text(payload, "item_id"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| record.primary.clone())
+}
+
+fn tool_call_start_meta(payload: &Value, record: &ProjectedRecord) -> Option<String> {
+    record
+        .meta
+        .clone()
+        .or_else(|| payload_text(payload, "call_id"))
+        .or_else(|| node_step_meta(payload))
+}
+
+fn tool_call_result_meta(payload: &Value, record: &ProjectedRecord) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(status) = payload_text(payload, "status") {
+        parts.push(status);
+    }
+    if let Some(size) = payload.get("result_size_bytes").and_then(Value::as_u64) {
+        parts.push(format_bytes(size));
+    }
+    if let Some(reason) = payload_text(payload, "truncated_reason") {
+        parts.push(reason);
+    }
+    if parts.is_empty() {
+        record.meta.clone().or_else(|| node_step_meta(payload))
+    } else {
+        Some(parts.join(" · "))
+    }
+}
+
+fn tool_result_tone(payload: &Value, record: &ProjectedRecord) -> StudioTone {
+    if let Some(reason) = payload.get("truncated_reason").and_then(Value::as_str) {
+        return match reason {
+            "error_envelope" => StudioTone::Danger,
+            _ => StudioTone::Warn,
+        };
+    }
+    if let Some(status) = payload.get("status").and_then(Value::as_str) {
+        return status_tone(Some(status));
+    }
+    tone_from_name(record.tone.as_deref())
+}
+
+fn artifact_summary(payload: &Value) -> String {
+    payload_text(payload, "artifact_type")
+        .map(|kind| format!("artifact {kind}"))
+        .unwrap_or_else(|| "artifact published".to_string())
+}
+
+fn artifact_meta(payload: &Value) -> Option<String> {
+    payload_text(payload, "uri").or_else(|| payload_text(payload, "content_hash"))
+}
+
+fn graph_ref_meta(payload: &Value) -> Option<String> {
+    payload_text(payload, "definition_ref").or_else(|| payload_text(payload, "graph_run_id"))
+}
+
+fn node_step_meta(payload: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(node) = payload_text(payload, "node") {
+        parts.push(node);
+    }
+    if let Some(step) = payload_u64_text(payload, "step") {
+        parts.push(format!("#{step}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The retry-context meta shared by `graph_node_retry` (`attempts` /
+/// `delay_ms`) and `provider_retry` (`max_retries` / `backoff_ms`): which
+/// attempt out of how many, the backoff, and the error being retried.
+fn retry_meta(payload: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    let attempt = payload.get("attempt").and_then(Value::as_u64);
+    let total = payload
+        .get("attempts")
+        .or_else(|| payload.get("max_retries"))
+        .and_then(Value::as_u64);
+    match (attempt, total) {
+        (Some(attempt), Some(total)) => parts.push(format!("attempt {attempt}/{total}")),
+        (Some(attempt), None) => parts.push(format!("attempt {attempt}")),
+        _ => {}
+    }
+    if let Some(ms) = payload
+        .get("delay_ms")
+        .or_else(|| payload.get("backoff_ms"))
+        .and_then(Value::as_u64)
+    {
+        parts.push(format!("{ms}ms backoff"));
+    }
+    if let Some(error) = payload_text(payload, "error") {
+        parts.push(error);
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// The untracked-spend meta from a `cost_untracked` payload: the model whose
+/// pricing was missing, the token volume that went unpriced, and the reason.
+fn cost_untracked_meta(payload: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(model) = payload_text(payload, "model") {
+        parts.push(model);
+    }
+    let input = payload.get("input_tokens").and_then(Value::as_u64);
+    let output = payload.get("output_tokens").and_then(Value::as_u64);
+    if let (Some(input), Some(output)) = (input, output) {
+        parts.push(format!(
+            "↑{} ↓{}",
+            compact_count(input),
+            compact_count(output)
+        ));
+    }
+    if let Some(reason) = payload_text(payload, "reason") {
+        parts.push(reason);
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn status_tone(status: Option<&str>) -> StudioTone {
+    match status {
+        Some("completed" | "success" | "succeeded" | "ok") => StudioTone::Good,
+        Some("error" | "failed" | "failure") => StudioTone::Danger,
+        Some("cancelled" | "timeout" | "timed_out") => StudioTone::Warn,
+        Some(_) => StudioTone::Neutral,
+        None => StudioTone::Good,
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 impl StudioCore {
@@ -1333,6 +1737,228 @@ mod tests {
                     if summary == "read_file" && matches!(tone, StudioTone::Good)
             )),
             "tool_call_start/result must settle into one closed Pair: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn graph_runtime_events_render_payload_details_not_bare_event_types() {
+        use super::super::content::{project_records, ViewBinding};
+
+        // This intentionally keeps the shipped tool projection shape
+        // (`tool/call_id`) while feeding graph action events (`item_id/node/step`)
+        // to prove the coalescer repairs the fallback from raw event_type lines.
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "timeline",
+            "source": { "ref": "service:events/chain_replay", "collection": "events" },
+            "projections": {
+                "event_kinds": {
+                    "tool_call_start": {
+                        "primary": "payload.tool", "meta": "payload.call_id",
+                        "role": "pair_open", "pair_key": "payload.call_id"
+                    },
+                    "tool_call_result": {
+                        "primary": "payload.tool", "meta": "payload.result_size_bytes",
+                        "role": "pair_close", "pair_key": "payload.call_id",
+                        "tone": { "field": "payload.truncated_reason", "missing": "good" }
+                    }
+                },
+                "default": { "primary": "event_type", "meta": "ts" }
+            }
+        }))
+        .unwrap();
+
+        let response = json!({ "events": [
+            { "event_type": "graph_step_started", "payload": {
+                "graph_run_id": "gr-1", "node": "fetch", "node_ref": "graph:test#node:fetch", "step": 7
+            } },
+            { "event_type": "tool_call_start", "payload": {
+                "graph_run_id": "gr-1", "node": "fetch", "step": 7, "item_id": "tool:test/fetch"
+            } },
+            { "event_type": "tool_call_result", "payload": {
+                "graph_run_id": "gr-1", "node": "fetch", "step": 7, "item_id": "tool:test/fetch", "status": "success"
+            } },
+            { "event_type": "artifact_published", "payload": {
+                "artifact_type": "json", "uri": "artifact://result"
+            } },
+            { "event_type": "graph_step_completed", "payload": {
+                "graph_run_id": "gr-1", "node": "fetch", "node_ref": "graph:test#node:fetch", "step": 7, "status": "success"
+            } }
+        ]});
+
+        let entries = timeline_entries(project_records(&binding, &response));
+
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                StudioTimelineEntryVm::Pair { summary, meta, pending: false, tone }
+                    if summary == "step fetch"
+                        && meta.as_deref() == Some("success")
+                        && matches!(tone, StudioTone::Good)
+            )),
+            "graph step start/completed should settle into a payload-labeled pair: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                StudioTimelineEntryVm::Pair { summary, meta, pending: false, tone }
+                    if summary == "tool:test/fetch"
+                        && meta.as_deref() == Some("success")
+                        && matches!(tone, StudioTone::Good)
+            )),
+            "graph tool call start/result should use item_id/status, not event_type: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                StudioTimelineEntryVm::Line { primary, meta, tone, .. }
+                    if primary == "artifact json"
+                        && meta.as_deref() == Some("artifact://result")
+                        && matches!(tone, StudioTone::Good)
+            )),
+            "artifact_published should show artifact details: {entries:?}"
+        );
+        assert!(
+            entries.iter().all(|e| !matches!(
+                e,
+                StudioTimelineEntryVm::Line { primary, .. }
+                    if matches!(
+                        primary.as_str(),
+                        "graph_step_started" | "tool_call_start" | "tool_call_result"
+                            | "artifact_published" | "graph_step_completed"
+                    )
+            )),
+            "runtime entries should not degrade to bare event_type lines: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn graph_lifecycle_and_branch_render_from_payload() {
+        let started = exec(json!({
+            "event_type": "graph_started",
+            "payload": { "definition_ref": "graph:test/pipeline", "graph_run_id": "gr-1" }
+        }));
+        assert!(
+            matches!(
+                started,
+                Some(StudioTimelineEntryVm::Line { primary, meta, tone, .. })
+                    if primary == "graph started"
+                        && meta.as_deref() == Some("graph:test/pipeline")
+                        && matches!(tone, StudioTone::Accent)
+            ),
+            "graph_started carries its definition ref"
+        );
+
+        let completed = exec(json!({
+            "event_type": "graph_completed",
+            "payload": { "definition_ref": "graph:test/pipeline", "status": "failed" }
+        }));
+        assert!(
+            matches!(
+                completed,
+                Some(StudioTimelineEntryVm::Line { primary, tone, .. })
+                    if primary == "graph failed" && matches!(tone, StudioTone::Danger)
+            ),
+            "graph_completed carries its status with a status-derived tone"
+        );
+
+        let branch = exec(json!({
+            "event_type": "graph_branch_taken",
+            "payload": { "target": "publish", "node": "gate", "step": 4 }
+        }));
+        assert!(
+            matches!(
+                branch,
+                Some(StudioTimelineEntryVm::Line { primary, meta, tone, .. })
+                    if primary == "branch → publish"
+                        && meta.as_deref() == Some("gate · #4")
+                        && matches!(tone, StudioTone::Neutral)
+            ),
+            "graph_branch_taken names its target and origin"
+        );
+    }
+
+    #[test]
+    fn graph_node_retry_renders_attempt_backoff_and_error() {
+        // Shape mirrors the walker's graph_node_retry emission.
+        let entry = exec(json!({
+            "event_type": "graph_node_retry",
+            "payload": {
+                "graph_run_id": "gr-1", "node": "fetch", "step": 7,
+                "attempt": 1, "attempts": 3, "delay_ms": 1500, "error": "boom"
+            }
+        }));
+        assert!(
+            matches!(
+                entry,
+                Some(StudioTimelineEntryVm::Line { primary, meta, tone, .. })
+                    if primary == "retrying fetch"
+                        && meta.as_deref() == Some("attempt 1/3 · 1500ms backoff · boom")
+                        && matches!(tone, StudioTone::Warn)
+            ),
+            "graph_node_retry reads as a warn milestone with retry context"
+        );
+    }
+
+    #[test]
+    fn provider_retry_and_cost_untracked_render_as_warn_milestones() {
+        // Shapes mirror the directive runner's emissions.
+        let retry = exec(json!({
+            "event_type": "provider_retry",
+            "payload": {
+                "turn": 1, "attempt": 1, "max_retries": 2, "backoff_ms": 1000,
+                "send_connect_phase": true, "error": "streaming request failed"
+            }
+        }));
+        assert!(
+            matches!(
+                retry,
+                Some(StudioTimelineEntryVm::Line { primary, meta, tone, .. })
+                    if primary == "provider retry"
+                        && meta.as_deref() == Some("attempt 1/2 · 1000ms backoff · streaming request failed")
+                        && matches!(tone, StudioTone::Warn)
+            ),
+            "provider_retry reads as a warn milestone with retry context"
+        );
+
+        let cost = exec(json!({
+            "event_type": "cost_untracked",
+            "payload": {
+                "turn": 3, "model": "m-large", "input_tokens": 1200,
+                "output_tokens": 400, "reason": "pricing_missing"
+            }
+        }));
+        assert!(
+            matches!(
+                cost,
+                Some(StudioTimelineEntryVm::Line { primary, meta, tone, .. })
+                    if primary == "cost untracked"
+                        && meta.as_deref() == Some("m-large · ↑1.2k ↓400 · pricing_missing")
+                        && matches!(tone, StudioTone::Warn)
+            ),
+            "cost_untracked names the unpriced model and token volume"
+        );
+    }
+
+    #[test]
+    fn tool_result_truncation_reason_drives_tone() {
+        // An unmatched result (replay window opened mid-exchange) degrades to a
+        // Line; the truncation reason still drives the tone and shows in meta.
+        let entries = timeline_entries(vec![raw_record(json!({
+            "event_type": "tool_call_result",
+            "payload": {
+                "tool": "fetch_page", "call_id": "c9",
+                "result_size_bytes": 2048, "truncated_reason": "error_envelope"
+            }
+        }))]);
+        assert!(
+            matches!(
+                entries.as_slice(),
+                [StudioTimelineEntryVm::Line { primary, meta, tone, .. }]
+                    if primary == "fetch_page"
+                        && meta.as_deref() == Some("2.0 KiB · error_envelope")
+                        && matches!(tone, StudioTone::Danger)
+            ),
+            "an error-enveloped tool result reads danger with its size and reason: {entries:?}"
         );
     }
 }

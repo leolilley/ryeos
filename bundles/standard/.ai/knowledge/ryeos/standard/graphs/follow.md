@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-03T09:54:31Z:37c0b8e20165a7c59b0e46ebfedd70ed94dc597bfa9bd92598e29b26d2069de0:jjS0FglEMN3mMGlW/DLQsAIdnxBrOAC7RRQCL7v7TiXfYz0mEppNlmt2Xb308TJ2WPyf1qnuVsETxbsD1DmPBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]

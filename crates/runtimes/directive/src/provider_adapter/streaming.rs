@@ -92,29 +92,37 @@ fn safe_error_body(body: &str) -> String {
     }
 }
 
-/// A provider-call failure classified for the runner's retry loop. Both
-/// variants describe failures that occur STRICTLY BEFORE any SSE byte is
-/// consumed — the HTTP status check and the send timeout both precede stream
-/// consumption — so retrying them cannot duplicate an already-persisted
-/// `cognition_out`. Any failure that surfaces after the stream opens is
-/// returned as a plain `anyhow` error and is never retried.
+/// A provider-call failure classified for the runner's retry loop. Every
+/// variant describes a failure that occurs STRICTLY BEFORE any SSE byte is
+/// consumed — the status check, the send timeout, and a `.send()` transport
+/// failure all precede stream consumption — so retrying them cannot duplicate
+/// an already-persisted `cognition_out`. Any failure that surfaces after the
+/// stream opens is returned as a plain `anyhow` error and is never retried.
 ///
-/// Returned wrapped in `anyhow::Error` so the existing `e.to_string()`
-/// diagnostic surface is preserved verbatim (Display carries the full detail);
-/// the runner `downcast_ref`s to read the retry classification.
+/// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
+/// typed detail while the runner `downcast_ref`s to read the retry
+/// classification.
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
     Status { code: u16, detail: String },
     /// The request timed out before any response arrived.
     Timeout { detail: String },
+    /// A pre-stream transport failure at `.send().await` — DNS resolution, TCP
+    /// connect, TLS handshake, or a connection reset before any response byte.
+    /// No SSE byte has arrived, so retrying is safe. Common under burst fanout
+    /// (many concurrent directive streams opening connections at once), where a
+    /// transient connect-phase failure would otherwise be fatal. `connect` marks
+    /// a reqwest connect-phase error (vs a body/read transport error).
+    Send { connect: bool, detail: String },
 }
 
 impl std::fmt::Display for ProviderStreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProviderStreamError::Status { detail, .. }
-            | ProviderStreamError::Timeout { detail } => f.write_str(detail),
+            | ProviderStreamError::Timeout { detail }
+            | ProviderStreamError::Send { detail, .. } => f.write_str(detail),
         }
     }
 }
@@ -878,25 +886,37 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         .send()
         .await
         .map_err(|e| {
-            // A send-side timeout is a pre-stream failure (no SSE byte has
-            // arrived), so it is safe to classify as retryable. Other transport
-            // failures stay opaque and non-retryable.
-            if e.is_timeout() {
+            // Every `.send().await` failure is a pre-stream failure (no SSE byte
+            // has arrived yet), so every one is safe to classify as retryable —
+            // a retry cannot duplicate a persisted cognition_out. Capture the
+            // reqwest classifiers before wrapping, then let anyhow's alternate
+            // Display walk the source chain; reqwest 0.12's Display alone drops
+            // the underlying DNS / TCP / TLS / reset cause.
+            let is_timeout = e.is_timeout();
+            let connect = e.is_connect();
+            let chain = format!("{:#}", anyhow::Error::new(e));
+            if is_timeout {
                 anyhow::Error::new(ProviderStreamError::Timeout {
                     detail: format!(
-                        "streaming request timed out after {}s: {e}",
+                        "streaming request timed out after {}s: {chain}",
                         execution.timeout_seconds
                     ),
                 })
             } else {
-                anyhow!("streaming request failed: {e}")
+                anyhow::Error::new(ProviderStreamError::Send {
+                    connect,
+                    detail: format!("streaming request failed: {chain}"),
+                })
             }
         })?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_else(|e| {
-            tracing::warn!("failed to read error response body: {e}");
+            tracing::warn!(
+                "failed to read error response body: {:#}",
+                anyhow::Error::new(e)
+            );
             String::new()
         });
         // Lead with the provider's own error body — it's the actionable part
@@ -1010,7 +1030,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             }
         };
 
-        let chunk: Bytes = chunk_res.map_err(|e| anyhow!("stream chunk error: {e}"))?;
+        let chunk: Bytes = chunk_res.map_err(|e| anyhow::Error::new(e).context("stream chunk error"))?;
         // Prepend any partial UTF-8 sequence carried from the previous
         // chunk and decode the longest complete-UTF-8 prefix. The
         // incomplete tail (if any) is stashed back in `utf8_carry`
