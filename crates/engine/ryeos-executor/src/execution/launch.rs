@@ -987,6 +987,28 @@ async fn run_claimed_thread_row(
         }
     }
 
+    // A machine-continuation successor continues its predecessor's work under a
+    // fresh thread id and carries no parent execution context, so the block above
+    // does not link it. Link it to its immediate predecessor: on continuation the
+    // predecessor goes terminal and is a dead end in the descendant walk, so
+    // without this a cancel/kill of an ancestor would stop at the (terminal)
+    // predecessor and miss the live successor still running — and authoring — the
+    // work. (`previous_thread_id` and a parent context are mutually exclusive, so
+    // this never contends with the link above.)
+    if let Some(previous) = previous_thread_id {
+        if let Err(e) = state
+            .state_store
+            .record_child_link(previous, &thread_id, "continuation")
+        {
+            tracing::warn!(
+                previous_thread_id = %previous,
+                child_thread_id = %thread_id,
+                error = %e,
+                "failed to record continuation link; cancel/kill cascade will not reach this successor"
+            );
+        }
+    }
+
     // Arm the persistence-first guard: any post-create failure below finalizes
     // the thread `failed` instead of leaving it stuck at `created` (no-op once
     // the thread is terminal).
