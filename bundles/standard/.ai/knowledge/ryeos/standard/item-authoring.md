@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-04T03:34:03Z:78c6cfbee6260b7b6e6869677b105c040ce1bb917599a5a8792dfb799e053707:6ZYFmUFRS13opnNMZyJdpaHurZ6AOP2BC0LbEtwXo9Ibnx9E5aUJpPqMJOqyIXf1hp/vPhoPA3ricqFaEKQuBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-04T03:59:54Z:8dc2bd1e73eb3f9683e045cef60f340b88efe130175a9c114203722fbe3edac0:3wgvmx1D3/QBnmrLgpQPPK1EkF+OfaOZfkfTtgd6rIhLMgYlNmQ3lXcTB3KTbQN60S4JPlL2baNTr4iGZjkiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
