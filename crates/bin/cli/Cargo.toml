@@ -31,7 +31,7 @@ ryeos-engine   = { workspace = true }
 ryeos-node     = { workspace = true }
 ryeos-runtime  = { workspace = true }
 ryeos-state    = { workspace = true }
-ryeos-tools    = { workspace = true }
+ryeos-core-tools    = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -89,8 +89,8 @@ struct IdentityArgs {
 
 fn run_identity_command(argv: &[String]) -> Result<()> {
     let args = parse_or_handle_help::<IdentityArgs>(argv)?;
-    let report = ryeos_tools::actions::inspect::identity::run_identity(
-        ryeos_tools::actions::inspect::identity::IdentityParams {
+    let report = ryeos_core_tools::actions::inspect::identity::run_identity(
+        ryeos_core_tools::actions::inspect::identity::IdentityParams {
             app_root: args.app_root.map(|p| p.to_string_lossy().into_owned()),
             project_path: None,
         },
@@ -205,7 +205,7 @@ struct NodeDoctorArgs {
 /// broken. Every check degrades independently; the command itself only
 /// errors when it cannot even load config.
 async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
-    use ryeos_tools::actions::doctor::{CheckResult, FAIL, NA, OK, WARN};
+    use ryeos_core_tools::actions::doctor::{CheckResult, FAIL, NA, OK, WARN};
 
     let args = parse_or_handle_help::<NodeDoctorArgs>(argv)?;
     let controller = LifecycleController::from_env(local_env(args.app_root)?);
@@ -413,7 +413,7 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                         // Static checks only (no offline engine): the doctor
                         // must stay fast and dependency-free; import dry-runs
                         // belong to the bundle-level `ryeos doctor <source>`.
-                        let report = ryeos_tools::actions::doctor::run_doctor(
+                        let report = ryeos_core_tools::actions::doctor::run_doctor(
                             Err("node doctor runs static checks only"),
                             &record.path,
                             &roots,
@@ -486,8 +486,8 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
-fn check(name: &str, status: &str, detail: serde_json::Value) -> ryeos_tools::actions::doctor::CheckResult {
-    ryeos_tools::actions::doctor::CheckResult {
+fn check(name: &str, status: &str, detail: serde_json::Value) -> ryeos_core_tools::actions::doctor::CheckResult {
+    ryeos_core_tools::actions::doctor::CheckResult {
         name: name.to_string(),
         status: status.to_string(),
         detail,

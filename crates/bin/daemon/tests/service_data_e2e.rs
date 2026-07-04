@@ -21,13 +21,13 @@ use serde_json::{json, Value};
 /// `target/test-bundles/service_data_e2e/<test_name>/` so concurrent
 /// nextest processes never race the same `target/debug/ryeos-core-tools`
 /// symlink against the bundle manifest hash. See
-/// [`ryeos_tools::test_support::isolated_core_bundle`] and
+/// [`ryeos_core_tools::test_support::isolated_core_bundle`] and
 /// `docs/operations/dev-tree-caveats.md`.
 async fn start_with_isolated_bundle(
     test_name: &str,
 ) -> (DaemonHarness, common::fast_fixture::FastFixture) {
     let bundle =
-        ryeos_tools::test_support::isolated_core_bundle(&format!("service_data_e2e/{test_name}"));
+        ryeos_core_tools::test_support::isolated_core_bundle(&format!("service_data_e2e/{test_name}"));
     DaemonHarness::start_fast_with(
         |state, _, fixture| common::fast_fixture::register_standard_bundle(state, fixture),
         move |cmd| {
