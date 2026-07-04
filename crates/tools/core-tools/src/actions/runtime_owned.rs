@@ -15,18 +15,6 @@ use std::path::Path;
 use ryeos_engine::AI_DIR;
 use ryeos_state::project_sync::{classify_project_ai_path, ProjectAiPathClass};
 
-/// Runtime thread knowledge is emitted by the daemon under this subpath of the
-/// otherwise-authorable `.ai/knowledge` surface. It is runtime output, not
-/// authored source, so it is excluded from signing.
-///
-/// This is the one runtime-output subpath the sync-policy floor does not yet
-/// cover (`.ai/knowledge` is a deployable surface). The clean end-state is
-/// relocating the runtime writer under `.ai/state/` — node-owned by the floor,
-/// invisible to every signing surface — at which point this constant becomes a
-/// dead no-op. Until that writer moves, this declares the subpath as runtime
-/// output so a bundle publish never signs daemon-emitted thread knowledge.
-const RUNTIME_KNOWLEDGE_OUTPUT_PREFIX: &str = ".ai/knowledge/state";
-
 /// True when a `.ai/`-relative path is node runtime state or a signing secret,
 /// and therefore never a signable authoring source.
 ///
@@ -34,17 +22,14 @@ const RUNTIME_KNOWLEDGE_OUTPUT_PREFIX: &str = ".ai/knowledge/state";
 /// - `NodeOwned` — `.ai/state`, `.ai/node/{schedules,routes,bundles}`;
 /// - `NeverDeploySecret` — `.ai/config/keys/signing`, node identity/auth/vault.
 ///
-/// Plus the one runtime-output subpath the floor does not yet own
-/// ([`RUNTIME_KNOWLEDGE_OUTPUT_PREFIX`]).
+/// The floor is exhaustive: every runtime writer emits under `.ai/state/`
+/// (per-thread transcripts in `.ai/state/threads/<id>/`, graph-run transcripts
+/// in `.ai/state/graphs/<id>/`), so nothing writes under `.ai/knowledge/` at
+/// runtime and the whole `.ai/knowledge` surface stays authorable.
 ///
 /// The `ignore` matcher is deliberately unused: runtime ownership is a floor,
 /// independent of any project ignore file.
 pub fn is_runtime_owned_ai_path(ai_rel_path: &str) -> bool {
-    if ai_rel_path == RUNTIME_KNOWLEDGE_OUTPUT_PREFIX
-        || ai_rel_path.starts_with(&format!("{RUNTIME_KNOWLEDGE_OUTPUT_PREFIX}/"))
-    {
-        return true;
-    }
     matches!(
         classify_project_ai_path(ai_rel_path, None),
         ProjectAiPathClass::NodeOwned { .. } | ProjectAiPathClass::NeverDeploySecret { .. }
@@ -94,13 +79,23 @@ mod tests {
     }
 
     #[test]
-    fn runtime_thread_knowledge_output_is_runtime_owned() {
-        // Daemon-emitted thread knowledge under `.ai/knowledge/state/` is
-        // runtime output, not authored source — excluded from signing.
-        assert!(is_runtime_owned_ai_path(".ai/knowledge/state/thread-xyz.md"));
-        assert!(is_runtime_owned_ai_path(".ai/knowledge/state"));
-        // A sibling authored knowledge item named `state.md` is NOT under the
-        // runtime-output subpath and stays signable.
+    fn runtime_transcript_output_is_node_owned_state() {
+        // Runtime-emitted thread/graph transcripts live under `.ai/state/`,
+        // which the `NodeOwned` floor covers — excluded from signing.
+        assert!(is_runtime_owned_ai_path(
+            ".ai/state/threads/T-abc/transcript.md"
+        ));
+        assert!(is_runtime_owned_ai_path(
+            ".ai/state/threads/T-abc/capabilities.md"
+        ));
+        assert!(is_runtime_owned_ai_path(".ai/state/graphs/flow/gr-1.md"));
+    }
+
+    #[test]
+    fn knowledge_surface_is_entirely_signable() {
+        // Nothing writes under `.ai/knowledge/` at runtime, so the whole
+        // surface is authored source — including subtrees named `state`.
+        assert!(!is_runtime_owned_ai_path(".ai/knowledge/state/notes.md"));
         assert!(!is_runtime_owned_ai_path(".ai/knowledge/state.md"));
         assert!(!is_runtime_owned_ai_path(".ai/knowledge/stateful/notes.md"));
     }
