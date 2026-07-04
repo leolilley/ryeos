@@ -116,7 +116,11 @@ pub struct ProviderPreflight {
 
 const ENVELOPE_FIELD_PROVIDER_SNAPSHOT: &str = "provider_snapshot";
 
-pub(crate) fn requires_provider_snapshot(required_envelope_fields: &[String]) -> bool {
+/// Whether a runtime's declared envelope fields include the provider
+/// snapshot — i.e. launching this kind resolves a provider (and possibly its
+/// auth secret). Public so read-only preflight surfaces (env-check) apply
+/// the same gate the launch path does.
+pub fn requires_provider_snapshot(required_envelope_fields: &[String]) -> bool {
     required_envelope_fields
         .iter()
         .any(|field| field == ENVELOPE_FIELD_PROVIDER_SNAPSHOT)
@@ -600,7 +604,11 @@ fn build_verified_loader_for_thread(
     ))
 }
 
-pub(crate) fn resolve_provider_preflight(
+/// Resolve the provider a composed item would launch with (model header →
+/// provider config → auth env var), WITHOUT injecting anything. Shared by
+/// the launch/resume paths and read-only preflight surfaces (env-check),
+/// so enumeration can never diverge from what a real launch resolves.
+pub fn resolve_provider_preflight(
     composed: &ryeos_engine::resolution::KindComposedView,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     operator_trusted_keys_dir: &Path,
