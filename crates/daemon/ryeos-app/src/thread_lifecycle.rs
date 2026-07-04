@@ -291,11 +291,33 @@ pub struct ThreadListView {
     pub follow: Option<FollowFact>,
     #[serde(skip_serializing_if = "is_zero_usize")]
     pub pending: usize,
+    /// Operator-stamped `(key, value)` facets (cohort/fleet tags via
+    /// `threads.set_facet`), so a client view can column on `facets.<key>`
+    /// (e.g. `facets.game`, `facets.fleet`). Empty for untagged threads.
+    #[serde(skip_serializing_if = "is_empty_str_map")]
+    pub facets: std::collections::BTreeMap<String, String>,
+    /// Live execution head for a graph thread: `{node, step}` from its latest
+    /// `graph_step_started`. `None` for a non-graph or not-yet-started thread.
+    /// Lets a fleet overview show "where is each thread now" without a trace
+    /// replay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_node: Option<CurrentNode>,
+}
+
+/// A graph thread's current node/step (see [`ThreadListView::current_node`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentNode {
+    pub node: String,
+    pub step: u32,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_usize(n: &usize) -> bool {
     *n == 0
+}
+
+fn is_empty_str_map(m: &std::collections::BTreeMap<String, String>) -> bool {
+    m.is_empty()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1361,11 +1383,27 @@ impl ThreadLifecycleService {
                         .map(|w| FollowFact::resume_successor_live(w))
                 });
                 let pending = self.pending_input(&item.thread_id);
+                // Cohort/fleet tags for client columns. Best-effort per row (fine
+                // at fleet scale); a facet-read hiccup just yields no tags, never
+                // fails the list.
+                let facets = self
+                    .state_store
+                    .get_facets(&item.thread_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                let current_node = self
+                    .state_store
+                    .current_graph_node(&item.thread_id)
+                    .unwrap_or_default()
+                    .map(|(node, step)| CurrentNode { node, step });
                 ThreadListView {
                     item,
                     execution,
                     follow,
                     pending,
+                    facets,
+                    current_node,
                 }
             })
             .collect())
@@ -2403,6 +2441,8 @@ mod tests {
             },
             follow: None,
             pending: 0,
+            facets: std::collections::BTreeMap::new(),
+            current_node: None,
         };
         let v = serde_json::to_value(&view).unwrap();
         assert!(v.get("follow").is_none(), "absent follow omitted");

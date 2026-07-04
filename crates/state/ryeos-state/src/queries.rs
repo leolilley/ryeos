@@ -914,6 +914,45 @@ pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<Face
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+/// A graph thread's current node: the `(node, step)` of its latest
+/// `graph_step_started` event. A cheap per-thread "where is it right now" for a
+/// live fleet overview — a single indexed row read, not a full-trace replay.
+/// `None` for a thread that has emitted no graph step (non-graph, or not yet
+/// started).
+pub fn current_graph_node(
+    db: &ProjectionDb,
+    thread_id: &str,
+) -> anyhow::Result<Option<(String, u32)>> {
+    let conn = db.connection();
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM events
+             WHERE thread_id = ?1 AND event_type = ?2
+             ORDER BY thread_seq DESC LIMIT 1",
+        )
+        .context("prepare current_graph_node")?;
+    let mut rows = stmt
+        .query_map(
+            rusqlite::params![thread_id, crate::event_types::GRAPH_STEP_STARTED],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .context("query current_graph_node")?;
+    let Some(row) = rows.next() else {
+        return Ok(None);
+    };
+    let payload: serde_json::Value = serde_json::from_slice(&row.context("read step payload")?)
+        .context("decode graph_step_started payload")?;
+    let node = payload
+        .get("node")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let step = payload
+        .get("step")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0) as u32;
+    Ok(node.map(|n| (n, step)))
+}
+
 const THREAD_USAGE_LATEST_COLUMNS: &str = r#"
     thread_id, chain_root_id, chain_seq, thread_seq,
     completed_turns, input_tokens, output_tokens, spend_usd, spawns_used,

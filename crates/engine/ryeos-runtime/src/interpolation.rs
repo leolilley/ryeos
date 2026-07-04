@@ -5,9 +5,30 @@ use serde_json::Value;
 
 use crate::condition::resolve_path;
 
-static WHOLE_EXPR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\$\{([^}]+)\}$").unwrap());
-
 static INTERP_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{([^}]+)\}").unwrap());
+
+/// If `template` is a SINGLE whole `${ … }` expression, return its inner text.
+/// Unlike a `[^}]`-based regex this tolerates balanced braces inside — object /
+/// empty-object literals in a `||` fallback (`${x || {}}`) — while still
+/// rejecting multi-expression strings (`${a}${b}`) whose stripped body has an
+/// unbalanced `}`.
+fn whole_expr_inner(template: &str) -> Option<&str> {
+    let inner = template.strip_prefix("${")?.strip_suffix('}')?;
+    let mut depth = 0i32;
+    for c in inner.chars() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    return None; // a `}` closed the expression early
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(inner)
+}
 
 static INPUT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{input:(\w+)(\?|[:|][^}]*)?\}").unwrap());
@@ -67,8 +88,7 @@ fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> 
     // Whole-expression fast path: if the entire template is a single ${...},
     // resolve it and preserve the native type (number, bool, etc.) instead
     // of stringifying.
-    if let Some(caps) = WHOLE_EXPR_RE.captures(template) {
-        let expr = &caps[1];
+    if let Some(expr) = whole_expr_inner(template) {
         if let Some(val) = resolve_expression(expr, context) {
             return Ok(val);
         }
@@ -200,27 +220,31 @@ fn resolve_expression(expr: &str, context: &Value) -> Option<Value> {
     let fallbacks: Vec<&str> = path_part.split("||").map(|s| s.trim()).collect();
 
     let mut resolved: Option<Value> = None;
-    let mut matched_fallback: Option<&str> = None;
     for fallback in &fallbacks {
-        let val = resolve_path(context, fallback);
-        if let Some(v) = val {
+        // A `||` token is either a bare PATH (identifier chain: `state.x`,
+        // `result.outputs.y`) or a JSON LITERAL (`0`, `-1.5`, `"text"`, `[]`,
+        // `{}`, `true`, `false`, `null`). A literal always parses as JSON; a
+        // path never does (bare identifiers / dotted chains are not JSON), so
+        // try-JSON-first disambiguates. A literal is an explicit author-written
+        // default: it is used as-is when reached (including `null`) — no state
+        // sentinel needed, and the fallback lives at the use-site.
+        if let Ok(literal) = serde_json::from_str::<Value>(fallback) {
+            resolved = Some(literal);
+            break;
+        }
+        // Otherwise resolve as a path. Resolve-or-else, NOT truthiness: a path
+        // that is unresolved (no match) or resolves to `null` falls through to
+        // the next token; a resolved value the author produced on purpose —
+        // including `""`, `[]`, `0`, `false` — passes through untouched.
+        if let Some(v) = resolve_path(context, fallback) {
             if !v.is_null() {
                 resolved = Some(v.clone());
-                matched_fallback = Some(fallback);
                 break;
             }
         }
     }
 
-    let resolved = match resolved {
-        Some(v) => v,
-        None => {
-            tracing::trace!(expr = %expr, "expression unresolved (no fallback matched)");
-            return None;
-        }
-    };
-    tracing::trace!(expr = %expr, matched = matched_fallback.unwrap_or(""), pipe_count = pipes.len(), "expression resolved");
-
+    let resolved = resolved?;
     apply_pipes(resolved, &pipes)
 }
 
@@ -369,6 +393,61 @@ mod tests {
         assert_eq!(
             interpolate(&json!("${state.missing || backup.name | upper}"), &ctx).unwrap(),
             json!("ALICE")
+        );
+    }
+
+    #[test]
+    fn literal_fallbacks_keep_their_json_type_as_a_whole_expr() {
+        let ctx = json!({"result": {"outputs": {}}});
+        // Missing path → the literal default, with its JSON type preserved.
+        assert_eq!(
+            interpolate(&json!("${result.outputs.confidence || 0}"), &ctx).unwrap(),
+            json!(0)
+        );
+        assert_eq!(
+            interpolate(&json!("${result.outputs.body || \"\"}"), &ctx).unwrap(),
+            json!("")
+        );
+        assert_eq!(
+            interpolate(&json!("${result.outputs.cases || []}"), &ctx).unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            interpolate(&json!("${result.outputs.flag || false}"), &ctx).unwrap(),
+            json!(false)
+        );
+        // Object literal — needs the brace-aware whole-expr extraction.
+        assert_eq!(
+            interpolate(&json!("${result.outputs.obj || {}}"), &ctx).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn resolve_or_else_passes_resolved_falsy_through() {
+        // A resolved-but-falsy value the author produced (empty array, 0, "")
+        // is NOT overridden by the fallback — only unresolved/null falls through.
+        let ctx = json!({"inputs": {"game_ids": []}, "state": {"defaults": [1, 2]}});
+        assert_eq!(
+            interpolate(&json!("${inputs.game_ids || state.defaults}"), &ctx).unwrap(),
+            json!([]),
+            "an explicit empty array is a value, not a trigger for the fallback"
+        );
+        // Unresolved → the fallback (a literal here).
+        assert_eq!(
+            interpolate(&json!("${inputs.missing || [1, 2]}"), &ctx).unwrap(),
+            json!([1, 2])
+        );
+    }
+
+    #[test]
+    fn path_fallbacks_still_resolve_and_chain() {
+        // A bare identifier chain is still a path (not JSON), so existing
+        // `|| state.x` graphs are unchanged; chaining picks the first resolved.
+        let ctx = json!({"state": {"primary": null, "backup": "b"}});
+        assert_eq!(
+            interpolate(&json!("${state.primary || state.backup || \"z\"}"), &ctx).unwrap(),
+            json!("b")
         );
     }
 

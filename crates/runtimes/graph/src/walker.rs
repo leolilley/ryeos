@@ -1521,6 +1521,32 @@ impl Walker {
                         .await;
                     self.record_callback_warning("child_thread_spawned", r);
                 }
+                // Domain milestones: a tool/directive result may carry a
+                // `milestones` array of `{kind, payload}`; emit one generic
+                // `milestone` event per entry into this thread's stream
+                // (runtime-on-behalf-of-tool — tools stay pure content, the engine
+                // owns only the generic event; a view styles the kinds via
+                // `projections.event_kinds`). `node`/`step` locate it in the braid.
+                if let Some(milestones) = val.get("milestones").and_then(|v| v.as_array()) {
+                    for entry in milestones {
+                        let Some(kind) = entry.get("kind").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let r = self
+                            .client
+                            .append_runtime_event(
+                                RuntimeEventType::Milestone,
+                                json!({
+                                    "kind": kind,
+                                    "payload": entry.get("payload").cloned().unwrap_or(Value::Null),
+                                    "node": current,
+                                    "step": step,
+                                }),
+                            )
+                            .await;
+                        self.record_callback_warning("milestone", r);
+                    }
+                }
                 // Interpolate `assign` HERE (not in commit_step) so an
                 // interpolation failure becomes a node error that obeys
                 // on_error — never a suppressed error that merges the raw
