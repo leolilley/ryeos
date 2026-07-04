@@ -6,7 +6,7 @@
 //! cycle. `ryeos-runtime` re-exports these types for compatibility.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::resolution::ResolutionOutput;
 use serde::{Deserialize, Serialize};
@@ -196,6 +196,20 @@ pub struct EnvelopeRoots {
     /// The runtime's `VerifiedLoader` takes its trust context from here
     /// and the project root — never from bundle roots, never from env.
     pub operator_trusted_keys_dir: PathBuf,
+    /// Deliberate runtime state-root override (`/execute` `state_root`).
+    /// Item resolution stays anchored at `project_root`; runtime-state
+    /// writes (thread state, transcripts, thread knowledge) should target
+    /// [`Self::state_root`] instead of the project root when this is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_root: Option<PathBuf>,
+}
+
+impl EnvelopeRoots {
+    /// The root runtime-state writes should target: the deliberate override
+    /// when present, otherwise the project root.
+    pub fn state_root(&self) -> &Path {
+        self.state_root.as_deref().unwrap_or(&self.project_root)
+    }
 }
 
 /// Intentionally open payload — shape is kind-defined.
@@ -323,6 +337,7 @@ mod tests {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
                 operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                state_root: None,
             },
             request: EnvelopeRequest {
                 inputs: serde_json::json!({}),
@@ -405,6 +420,33 @@ mod tests {
     }
 
     #[test]
+    fn state_root_falls_back_to_project_root() {
+        let mut roots = EnvelopeRoots {
+            project_root: PathBuf::from("/project"),
+            bundle_roots: vec![],
+            operator_trusted_keys_dir: PathBuf::from("/keys"),
+            state_root: None,
+        };
+        assert_eq!(roots.state_root(), Path::new("/project"));
+        roots.state_root = Some(PathBuf::from("/tmp/smoke-state"));
+        assert_eq!(roots.state_root(), Path::new("/tmp/smoke-state"));
+    }
+
+    #[test]
+    fn envelope_roots_without_state_root_deserializes() {
+        // `state_root` is an optional key: absence must decode as None
+        // (fall back to the project root), never error.
+        let roots: EnvelopeRoots = serde_json::from_value(serde_json::json!({
+            "project_root": "/project",
+            "bundle_roots": [],
+            "operator_trusted_keys_dir": "/keys",
+        }))
+        .unwrap();
+        assert!(roots.state_root.is_none());
+        assert_eq!(roots.state_root(), Path::new("/project"));
+    }
+
+    #[test]
     fn builder_produces_same_envelope() {
         let resolution = ResolutionOutput {
             root: crate::resolution::ResolvedAncestor {
@@ -433,6 +475,7 @@ mod tests {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
                 operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                state_root: None,
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),
             EnvelopePolicy::new(vec!["ryeos.execute.*".to_string()], HardLimits::default()),

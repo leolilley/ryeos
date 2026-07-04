@@ -41,3 +41,6 @@ control_flags:
 - flag: args
   help: "Method args as a JSON object; sets call.args"
   binding: call_args
+- flag: state-root
+  help: "Place runtime state (thread state, transcripts) under this path instead of the project; resolution still runs against the project source"
+  binding: state_root

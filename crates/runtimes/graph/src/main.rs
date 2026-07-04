@@ -40,15 +40,22 @@ struct Cli {
     pre_registered: bool,
 
     /// Accepted for spawn-contract parity with the daemon launcher. Ignored
-    /// in favour of `envelope.roots.project_root` (which is the single
-    /// source of truth per C1).
+    /// in favour of `envelope.roots` (which is the single source of truth
+    /// per C1).
     #[arg(long)]
     project_path: Option<String>,
 }
 
 /// Normalized launch data from the envelope.
 struct ResolvedLaunch {
-    project_root: std::path::PathBuf,
+    /// Callback identity + state-write anchor: `envelope.roots.state_root()`
+    /// — the deliberate override when the launch carried one, otherwise the
+    /// project root. The daemon minted this run's callback token against
+    /// exactly this path, so every callback (dispatch, hooks, author) must
+    /// advertise it; the transcript write anchors here too. Graph resolution
+    /// needs no source root of its own: the composed definition arrives in
+    /// the envelope and children resolve daemon-side from token provenance.
+    state_root: std::path::PathBuf,
     graph_path: std::path::PathBuf,
     thread_id: String,
     graph_run_id: Option<String>,
@@ -122,7 +129,7 @@ fn main() -> anyhow::Result<()> {
         Some(cb) => CallbackClient::new(
             cb,
             &resolved.thread_id,
-            resolved.project_root.to_str().unwrap_or(""),
+            resolved.state_root.to_str().unwrap_or(""),
             &thread_auth_token,
         ),
         None => {
@@ -137,7 +144,7 @@ fn main() -> anyhow::Result<()> {
             CallbackClient::new(
                 &cb_env,
                 &resolved.thread_id,
-                resolved.project_root.to_str().unwrap_or(""),
+                resolved.state_root.to_str().unwrap_or(""),
                 &thread_auth_token,
             )
         }
@@ -293,7 +300,7 @@ fn main() -> anyhow::Result<()> {
 
     let w = walker::Walker::new(
         graph,
-        resolved.project_root.to_string_lossy().to_string(),
+        resolved.state_root.to_string_lossy().to_string(),
         resolved.thread_id.clone(),
         callback,
         checkpoint,
@@ -338,7 +345,7 @@ fn resolve_from_envelope(stdin_data: &[u8], cli: &Cli) -> anyhow::Result<Resolve
         .unwrap_or_else(|| envelope.resolution.root.source_path.clone());
 
     Ok(ResolvedLaunch {
-        project_root: envelope.roots.project_root.clone(),
+        state_root: envelope.roots.state_root().to_path_buf(),
         graph_path,
         thread_id: envelope.thread_id.clone(),
         graph_run_id: cli.graph_run_id.clone(),
