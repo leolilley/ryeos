@@ -1249,7 +1249,7 @@ impl Walker {
             retry_attempt,
         } = ctx;
         let execution = exec_ctx.as_context_value();
-        let action = match &node.action {
+        let mut action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 // Action node with no action — treat as terminal.
@@ -1271,6 +1271,23 @@ impl Walker {
                 };
             }
         };
+
+        // A `detach: true` node launches a lineage-linked, cohort-tagged child
+        // that runs concurrently while this walk continues — the native fanout
+        // primitive (`foreach → launch`). Route it by setting the dispatch mode
+        // to `detached` (the daemon's `spawn_detached_child`) and folding the
+        // node's `facets:` into the action so they interpolate alongside it
+        // (`fleet=${run_id}`) and the daemon stamps them on the child. `detach`
+        // and `follow` are mutually exclusive (enforced at validation); a detach
+        // node never suspends, so it flows straight to dispatch below.
+        if node.detach {
+            if let Some(obj) = action.as_object_mut() {
+                obj.insert("thread".to_string(), json!("detached"));
+                if let Some(facets) = &node.facets {
+                    obj.insert("facets".to_string(), facets.clone());
+                }
+            }
+        }
 
         let item_id = action
             .get("item_id")
