@@ -882,6 +882,10 @@ pub struct BuildAndLaunchParams<'a> {
 struct FinalizeFailedOnDrop<'a> {
     state: &'a AppState,
     thread_id: String,
+    /// The launch failure, captured by the wrapper before the guard drops so
+    /// the terminal `thread_failed` event carries the cause. `None` only on a
+    /// panic/cancellation mid-launch, where no error value exists to record.
+    error: Option<Value>,
 }
 
 impl Drop for FinalizeFailedOnDrop<'_> {
@@ -890,7 +894,7 @@ impl Drop for FinalizeFailedOnDrop<'_> {
             self.state,
             &self.thread_id,
             "failed",
-            None,
+            self.error.take(),
         );
     }
 }
@@ -939,6 +943,32 @@ pub async fn build_and_launch(
 /// the runtime folds the chain. Behavior-preserving for fresh launches: the
 /// body is the original run-half verbatim.
 async fn run_claimed_thread_row(
+    params: BuildAndLaunchParams<'_>,
+    thread: ryeos_app::state_store::ThreadDetail,
+) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let state = params.state;
+    let thread_id = thread.thread_id.clone();
+    // Persistence-first net: any failure below finalizes the thread `failed`
+    // WITH its cause on the terminal event — a spawn-phase death must never
+    // settle as an empty `thread_failed` the operator cannot diagnose. Paths
+    // that finalize explicitly (with richer outcome codes) run first; the
+    // guard no-ops once the thread is terminal.
+    let mut guard = FinalizeFailedOnDrop {
+        state,
+        thread_id,
+        error: None,
+    };
+    let result = run_claimed_thread_row_inner(params, thread).await;
+    if let Err(ref err) = result {
+        guard.error = Some(json!({
+            "code": "launch_failure",
+            "message": format!("{err:#}"),
+        }));
+    }
+    result
+}
+
+async fn run_claimed_thread_row_inner(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
@@ -1025,14 +1055,6 @@ async fn run_claimed_thread_row(
             );
         }
     }
-
-    // Arm the persistence-first guard: any post-create failure below finalizes
-    // the thread `failed` instead of leaving it stuck at `created` (no-op once
-    // the thread is terminal).
-    let _finalize_guard = FinalizeFailedOnDrop {
-        state,
-        thread_id: thread_id.clone(),
-    };
 
     let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
     let effective_parsers = engine
