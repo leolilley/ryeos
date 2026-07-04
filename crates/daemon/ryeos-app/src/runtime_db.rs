@@ -177,6 +177,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_successor
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_child_chain
     ON follow_waiter(child_chain_root_id);
+
+CREATE TABLE IF NOT EXISTS thread_child_link (
+    child_thread_id TEXT PRIMARY KEY,
+    parent_thread_id TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
+    ON thread_child_link(parent_thread_id);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -359,6 +369,15 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "thread_child_link",
+                columns: &[
+                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: true, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "parent_thread_id", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "relation", col_type: "TEXT", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -384,6 +403,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "follow_waiter",
                 columns: &["child_chain_root_id"],
                 unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_thread_child_link_parent",
+                table: "thread_child_link",
+                columns: &["parent_thread_id"],
+                unique: false,
             },
         ],
     }
@@ -781,6 +806,70 @@ impl RuntimeDb {
             )
             .optional()?
             .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
+    }
+
+    // ── Child links ──────────────────────────────────────────────────────
+    //
+    // Operational lineage: which threads a parent spawned (inline dispatch,
+    // follow child, …), kept distinct from `follow_waiter` (follow-specific
+    // resume state) and the projection (portable history). It exists so a
+    // cancel/kill can cascade to a blocked parent's live descendants — a blocked
+    // parent cannot claim its own commands, and inline children are fresh
+    // projection roots with no descendant query. The pgid is deliberately NOT
+    // stored here: the authoritative pgid lives in `thread_runtime` and
+    // attaches/updates after thread creation, so the cascade resolves each
+    // descendant's CURRENT pgid at signal time rather than trusting a stale copy.
+
+    /// Record that `parent_thread_id` spawned `child_thread_id`. Idempotent on
+    /// the child (a re-driven launch does not error or duplicate the link).
+    pub fn record_child_link(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO thread_child_link (child_thread_id, parent_thread_id, relation, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(child_thread_id) DO NOTHING",
+            params![
+                child_thread_id,
+                parent_thread_id,
+                relation,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every transitive descendant of `root_thread_id`, breadth-first in spawn
+    /// order. `root` itself is excluded, and a `seen` set guards against a link
+    /// cycle ever driving an unbounded walk.
+    pub fn descendant_thread_ids(&self, root_thread_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT child_thread_id FROM thread_child_link
+             WHERE parent_thread_id = ?1
+             ORDER BY created_at_ms ASC, child_thread_id ASC",
+        )?;
+
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::from([root_thread_id.to_string()]);
+        let mut queue: std::collections::VecDeque<String> =
+            std::collections::VecDeque::from([root_thread_id.to_string()]);
+        let mut order = Vec::new();
+
+        while let Some(parent) = queue.pop_front() {
+            let children = stmt
+                .query_map(params![parent], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<String>, _>>()?;
+            for child in children {
+                if seen.insert(child.clone()) {
+                    order.push(child.clone());
+                    queue.push_back(child);
+                }
+            }
+        }
+        Ok(order)
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -1194,6 +1283,44 @@ mod tests {
         assert_eq!(info.pgid, Some(5678));
         let back = info.launch_metadata.expect("launch_metadata");
         assert_eq!(back.cancellation_mode, lm.cancellation_mode);
+    }
+
+    #[test]
+    fn child_links_walk_transitively_in_spawn_order() {
+        let (_tmp, db) = fresh_db();
+        // parent → a, b ; a → a1 ; a1 → a2 (a chain under one branch).
+        db.record_child_link("parent", "a", "inline").unwrap();
+        db.record_child_link("parent", "b", "follow").unwrap();
+        db.record_child_link("a", "a1", "inline").unwrap();
+        db.record_child_link("a1", "a2", "inline").unwrap();
+
+        let descendants = db.descendant_thread_ids("parent").unwrap();
+        assert_eq!(descendants, vec!["a", "b", "a1", "a2"]);
+
+        // A subtree root walks only its own descendants.
+        assert_eq!(db.descendant_thread_ids("a").unwrap(), vec!["a1", "a2"]);
+        // A leaf has none.
+        assert!(db.descendant_thread_ids("a2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_child_link_is_idempotent_on_the_child() {
+        let (_tmp, db) = fresh_db();
+        db.record_child_link("parent", "child", "inline").unwrap();
+        // A re-driven launch of the same child must not error or duplicate.
+        db.record_child_link("parent", "child", "inline").unwrap();
+        assert_eq!(db.descendant_thread_ids("parent").unwrap(), vec!["child"]);
+    }
+
+    #[test]
+    fn descendant_walk_terminates_on_a_link_cycle() {
+        let (_tmp, db) = fresh_db();
+        // A pathological cycle (a → b → a) must not drive an unbounded walk.
+        // From `a`, the only descendant is `b`; the back-edge to `a` is dropped
+        // because the root is pre-seeded into the `seen` set.
+        db.record_child_link("a", "b", "inline").unwrap();
+        db.record_child_link("b", "a", "inline").unwrap();
+        assert_eq!(db.descendant_thread_ids("a").unwrap(), vec!["b"]);
     }
 
     #[test]

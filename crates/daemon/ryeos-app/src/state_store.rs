@@ -2196,6 +2196,26 @@ impl StateStore {
         g.runtime_db.complete_command(command_id, status, result)
     }
 
+    /// Record that `parent_thread_id` spawned `child_thread_id` (operational
+    /// lineage for cancel/kill cascade). Idempotent on the child.
+    pub fn record_child_link(
+        &self,
+        parent_thread_id: &str,
+        child_thread_id: &str,
+        relation: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db
+            .record_child_link(parent_thread_id, child_thread_id, relation)
+    }
+
+    /// Every transitive descendant thread id of `root_thread_id`, breadth-first
+    /// in spawn order (excludes `root`).
+    pub fn descendant_thread_ids(&self, root_thread_id: &str) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.descendant_thread_ids(root_thread_id)
+    }
+
     pub fn get_facets(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
         let g = self.lock()?;
         let facet_rows = queries::get_facets(g.state_db.projection(), thread_id)?;
