@@ -19,6 +19,7 @@ use ryeos_app::process::{kill_by_action, resolve_shutdown_action};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::is_terminal_status;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
+use ryeos_engine::contracts::ThreadTerminalStatus;
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
@@ -94,22 +95,38 @@ pub async fn handle(
 
     // Finalize via ThreadLifecycleService so scheduler fire records
     // get updated correctly (a raw state_store call would skip that).
-    let finalized = state
-        .threads
-        .finalize_thread(&ThreadFinalizeParams {
-            thread_id: req.thread_id.clone(),
-            status: "cancelled".to_string(),
-            outcome_code: Some("cancelled".to_string()),
-            result: None,
-            error: Some(json!({
-                "reason": "cancelled_by_request",
-            })),
-            metadata: None,
-            artifacts: Vec::new(),
-            final_cost: None,
-            summary_json: None,
-        })
-        .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    //
+    // Race: a graph that honours the SIGTERM cooperative-cancel flag may
+    // self-finalize `cancelled` over its callback within the kill's grace window,
+    // between the kill above and here. That leaves this thread already terminal,
+    // so `finalize_thread` would reject the same-status transition. Treat an
+    // already-terminal target as success — the cancel took effect — rather than
+    // surfacing the benign race as an Internal error.
+    let finalized = match state.threads.finalize_thread(&ThreadFinalizeParams {
+        thread_id: req.thread_id.clone(),
+        status: ThreadTerminalStatus::Cancelled.as_str().to_string(),
+        outcome_code: Some(ThreadTerminalStatus::Cancelled.as_str().to_string()),
+        result: None,
+        error: Some(json!({
+            "reason": "cancelled_by_request",
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    }) {
+        Ok(finalized) => finalized,
+        Err(e) => {
+            let current = state
+                .state_store
+                .get_thread(&req.thread_id)
+                .map_err(|read_err| HandlerError::Internal(read_err.to_string()))?;
+            match current {
+                Some(thread) if is_terminal_status(&thread.status) => thread,
+                _ => return Err(HandlerError::Internal(e.to_string())),
+            }
+        }
+    };
 
     // `finalize_thread` persists then publishes the `thread_cancelled`
     // event, so live subscribers receive it directly.

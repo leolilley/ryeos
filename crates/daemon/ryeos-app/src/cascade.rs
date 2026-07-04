@@ -14,28 +14,44 @@ use serde_json::{json, Value};
 
 use ryeos_engine::contracts::CancellationMode;
 
-use crate::process::{kill_by_action, resolve_shutdown_action, ShutdownAction};
+use crate::process::signal_process_group;
 use crate::state_store::StateStore;
 
-/// How hard to stop each descendant.
+/// How hard to stop a thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CascadeMode {
     /// SIGKILL immediately (a `kill`).
     Hard,
-    /// Each child's own graceful shutdown action (a `cancel`).
+    /// One-shot SIGTERM — a cooperative `cancel`.
     Graceful,
 }
 
-/// Resolve the shutdown action for one descendant: `Hard` is an unconditional
-/// SIGKILL; `Graceful` honours the child's own declared cancellation mode
-/// (defaulting to a graceful SIGTERM-then-SIGKILL when unset).
-fn shutdown_action_for(
-    mode: CascadeMode,
-    cancellation_mode: Option<CancellationMode>,
-) -> ShutdownAction {
+/// The single signal to deliver for `mode`. Deliberately ONE-SHOT: never an
+/// escalating SIGTERM→wait→SIGKILL. Escalation would block the async handler for
+/// the grace period AND preempt the runtime's cooperative cancel — both runtimes
+/// honour SIGTERM at their own boundary (a graph at its next node, a directive
+/// by cutting its stream), so a forced SIGKILL after a fixed grace would kill a
+/// long node mid-flight and settle it `failed` instead of `cancelled`. `kill` is
+/// SIGKILL; a graceful `cancel` is SIGTERM unless the tool declared it can only
+/// be hard-stopped (`Hard` cancellation mode), in which case a one-shot SIGKILL.
+/// A hung target is escalated by the operator with an explicit `kill`.
+fn cancel_signal(mode: CascadeMode, cancellation_mode: Option<CancellationMode>) -> i32 {
     match mode {
-        CascadeMode::Hard => ShutdownAction::Hard,
-        CascadeMode::Graceful => resolve_shutdown_action(cancellation_mode),
+        CascadeMode::Hard => libc::SIGKILL,
+        CascadeMode::Graceful => match cancellation_mode {
+            Some(CancellationMode::Hard) => libc::SIGKILL,
+            _ => libc::SIGTERM,
+        },
+    }
+}
+
+fn signal_name(signal: i32) -> &'static str {
+    if signal == libc::SIGKILL {
+        "SIGKILL"
+    } else if signal == libc::SIGTERM {
+        "SIGTERM"
+    } else {
+        "signal"
     }
 }
 
@@ -87,12 +103,13 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
         .launch_metadata
         .as_ref()
         .and_then(|lm| lm.cancellation_mode);
-    let result = kill_by_action(pgid, shutdown_action_for(mode, cancellation_mode));
+    let signal = cancel_signal(mode, cancellation_mode);
+    let result = signal_process_group(pgid, signal);
     json!({
         "thread_id": thread_id,
         "pgid": pgid,
-        "method": result.method,
-        "success": result.success,
+        "signal": signal_name(signal),
+        "result": result.as_str(),
     })
 }
 
@@ -115,41 +132,36 @@ pub fn stop_thread_and_descendants(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn hard_mode_always_sigkills_ignoring_declared_mode() {
-        // Even a child that declared a graceful mode is hard-killed under Hard.
+        // Even a thread that declared a graceful mode is SIGKILLed under Hard.
         assert_eq!(
-            shutdown_action_for(
+            cancel_signal(
                 CascadeMode::Hard,
                 Some(CancellationMode::Graceful { grace_secs: 30 })
             ),
-            ShutdownAction::Hard
+            libc::SIGKILL
         );
-        assert_eq!(
-            shutdown_action_for(CascadeMode::Hard, None),
-            ShutdownAction::Hard
-        );
+        assert_eq!(cancel_signal(CascadeMode::Hard, None), libc::SIGKILL);
     }
 
     #[test]
-    fn graceful_mode_honours_the_childs_declared_cancellation_mode() {
+    fn graceful_cancel_is_one_shot_sigterm_unless_the_tool_is_hard_only() {
+        // The common case: a single SIGTERM, never an escalating SIGKILL.
+        assert_eq!(cancel_signal(CascadeMode::Graceful, None), libc::SIGTERM);
         assert_eq!(
-            shutdown_action_for(CascadeMode::Graceful, Some(CancellationMode::Hard)),
-            ShutdownAction::Hard
-        );
-        assert_eq!(
-            shutdown_action_for(
+            cancel_signal(
                 CascadeMode::Graceful,
                 Some(CancellationMode::Graceful { grace_secs: 7 })
             ),
-            ShutdownAction::Graceful(Duration::from_secs(7))
+            libc::SIGTERM
         );
-        // Unset → the default graceful window.
+        // A tool that declared it can only be hard-stopped gets a one-shot
+        // SIGKILL even on a cancel.
         assert_eq!(
-            shutdown_action_for(CascadeMode::Graceful, None),
-            ShutdownAction::Graceful(Duration::from_secs(3))
+            cancel_signal(CascadeMode::Graceful, Some(CancellationMode::Hard)),
+            libc::SIGKILL
         );
     }
 }

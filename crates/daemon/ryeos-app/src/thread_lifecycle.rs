@@ -21,7 +21,7 @@ use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{
     EffectivePrincipal, EngineContext, ExecutionArtifact, ExecutionCompletion, ExecutionHints,
     FinalCost, LaunchMode, PlanContext, Principal, ProjectContext, ResolvedItem, RuntimeEnvSource,
-    ThreadTerminalStatus, TrustClass,
+    TrustClass,
 };
 use ryeos_engine::engine::Engine;
 use ryeos_state::UsageSubject;
@@ -812,13 +812,7 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        let terminal_status = match completion.status {
-            ThreadTerminalStatus::Completed => "completed",
-            ThreadTerminalStatus::Failed => "failed",
-            ThreadTerminalStatus::Cancelled => "cancelled",
-            ThreadTerminalStatus::Continued => "continued",
-            ThreadTerminalStatus::Killed => "killed",
-        };
+        let terminal_status = completion.status.as_str();
         let outcome_code = completion.outcome_code.clone().or_else(|| {
             Some(if terminal_status == "completed" {
                 "success".to_string()
@@ -848,6 +842,13 @@ impl ThreadLifecycleService {
         // write (above), so the queue `closed` tombstone and the persist-path
         // running-guard together bound the race from either ordering.
         self.close_live_input(thread_id);
+
+        // Settle any commands still open for this now-terminal thread and wake
+        // blocked `commands.wait` callers. This is the primary cooperative path —
+        // a runtime self-finalizing over its callback (e.g. a directive cancelled
+        // by signal, which never drains its own command) reaches finalization
+        // HERE, not through `finalize_thread_inner`.
+        self.settle_open_commands(thread_id, terminal_status);
 
         // Failure-gated stderr surfacing. A subprocess tool's real error
         // (traceback, `logger.error(...)`) rides in `error.stderr`; on the

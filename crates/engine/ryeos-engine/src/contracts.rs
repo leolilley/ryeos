@@ -3308,6 +3308,20 @@ pub enum ThreadTerminalStatus {
     Killed,
 }
 
+impl ThreadTerminalStatus {
+    /// The canonical persisted/wire string for this terminal status — the single
+    /// source of truth, so call sites never spell the literal themselves.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Continued => "continued",
+            Self::Killed => "killed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionArtifact {
