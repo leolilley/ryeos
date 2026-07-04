@@ -70,6 +70,36 @@ A concrete request must fall under a declared pattern. A request that itself
 carries a `*`/`?` wildcard must exactly match a declared pattern — it cannot
 widen it.
 
+## Wildcard semantics: fails closed, at mint and compose time
+
+The pattern rule is subtle enough to state precisely. It is the same rule in
+both places it applies — when the daemon mints a token from the manifest, and
+when an `extends` chain composes a child's `requires` against its parent's —
+and it applies identically to every `runtime_authority` family
+(`bundle_events`, `runtime_vault`, `item_authoring`):
+
+- **Concrete vs pattern — glob match.** A concrete request (no `*`/`?`) is
+  backed by any declared pattern that matches it:
+  `namespace: runtime-authored/foo` is backed by a declared
+  `runtime-authored/*`.
+- **Pattern vs pattern — identity only.** A request that itself carries a
+  wildcard is backed **only** by an *identical* declaration. There is no
+  containment analysis between two patterns: deciding whether one glob's
+  match-set falls inside another's is exactly the kind of cleverness that
+  ships an escalation, so the check refuses to try. `runtime-authored/*`
+  requested against a declared `runtime-*/*` **fails**, even though every
+  string the first matches, the second also matches.
+- **Compose time is the same check.** In an `extends` chain, a child may
+  *narrow* a parent's pattern with a concrete value (`runtime-authored/foo`
+  under a parent's `runtime-authored/*` composes fine). A child carrying a
+  wildcard composes only when the parent declares the identical pattern;
+  anything else is treated as widening and fails the composition — loudly,
+  at signing/resolution, not at run time.
+
+Practical consequence for authors: declare patterns in the manifest, request
+**concrete** values in items wherever you can, and reuse the manifest's exact
+spelling on the rare occasion an item genuinely needs the whole pattern.
+
 ## The `runtime.author_item` callback
 
 Item authoring is a **daemon runtime callback** — not a tool ref, a service

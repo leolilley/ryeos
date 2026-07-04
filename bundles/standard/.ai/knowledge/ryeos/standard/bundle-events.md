@@ -55,6 +55,12 @@ tool that does **create-or-append** — read the current chain, then append — 
 **both** capabilities granted: `scan` (to read) and `append` (to write).
 Declaring only `append` produces a confusing `scan` denial on the read.
 
+Event-kind patterns follow the shared runtime-authority wildcard rule —
+concrete requests glob-match a declared pattern, but a wildcard request is
+backed only by an *identical* declaration (glob-vs-glob fails closed, at mint
+and compose time alike). The full rule is stated in
+`knowledge:ryeos/standard/item-authoring` § "Wildcard semantics".
+
 ## Declaring authority in the manifest
 
 Declare the event kinds and operations in the bundle's
