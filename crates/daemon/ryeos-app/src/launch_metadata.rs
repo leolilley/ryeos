@@ -53,6 +53,20 @@ pub fn daemon_thread_state_dir(app_root: &std::path::Path, thread_id: &str) -> s
     app_root.join("threads").join(thread_id)
 }
 
+/// Subdirectory of [`daemon_thread_state_dir`] holding a replay-aware
+/// runtime's checkpoints. For call sites that already hold the thread state
+/// dir; everyone else goes through [`daemon_checkpoint_dir`].
+pub const CHECKPOINTS_SUBDIR: &str = "checkpoints";
+
+/// Per-thread checkpoint directory for replay-aware runtimes, under
+/// [`daemon_thread_state_dir`]. Every reader/writer of checkpoints
+/// (allocation, machine-continuation copy-forward, follow-resume splice,
+/// GC) must derive the path through here — scattered hand-joined spellings
+/// of the same location are how state roots silently diverge.
+pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std::path::PathBuf {
+    daemon_thread_state_dir(app_root, thread_id).join(CHECKPOINTS_SUBDIR)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeLaunchMetadata {

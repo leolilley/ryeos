@@ -2007,7 +2007,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         for node in &plan.nodes {
             if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
                 if spec.execution.native_resume.is_some() {
-                    let ckpt = ts_dir.join("checkpoints");
+                    let ckpt = ts_dir.join(crate::launch_metadata::CHECKPOINTS_SUBDIR);
                     std::fs::create_dir_all(&ckpt).map_err(|e| {
                         anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
                     })?;

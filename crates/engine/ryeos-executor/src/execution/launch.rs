@@ -1272,12 +1272,8 @@ async fn run_claimed_thread_row(
     // FAIL the launch rather than spawn a replay-aware process with no checkpoint
     // env (the finalize-on-drop guard records a failed thread).
     let checkpoint_dir: Option<std::path::PathBuf> = if native_resume.is_some() {
-        let dir = state
-            .config
-            .app_root
-            .join("threads")
-            .join(&thread_id)
-            .join("checkpoints");
+        let dir =
+            ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, &thread_id);
         std::fs::create_dir_all(&dir).map_err(|e| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "failed to allocate checkpoint dir for replay-aware runtime `{}`: {e}",
@@ -1314,12 +1310,8 @@ async fn run_claimed_thread_row(
                 resolved.item_ref
             ))
         })?;
-        let prev_dir = state
-            .config
-            .app_root
-            .join("threads")
-            .join(prev)
-            .join("checkpoints");
+        let prev_dir =
+            ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, prev);
         let copied = ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir)
             .map_err(|e| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
@@ -2760,18 +2752,12 @@ async fn launch_follow_resume_claimed(
     // Seed the successor's checkpoint = parent's checkpoint + the child's canonical
     // envelope spliced under `follow_result`. The successor is `created` (not yet
     // running), so writing its checkpoint here races nothing.
-    let prev_dir = state
-        .config
-        .app_root
-        .join("threads")
-        .join(&waiter.parent_thread_id)
-        .join("checkpoints");
-    let succ_dir = state
-        .config
-        .app_root
-        .join("threads")
-        .join(successor_id)
-        .join("checkpoints");
+    let prev_dir = ryeos_app::launch_metadata::daemon_checkpoint_dir(
+        &state.config.app_root,
+        &waiter.parent_thread_id,
+    );
+    let succ_dir =
+        ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, successor_id);
     let spliced = ryeos_runtime::checkpoint::CheckpointWriter::copy_latest_with_splice(
         &prev_dir,
         &succ_dir,
