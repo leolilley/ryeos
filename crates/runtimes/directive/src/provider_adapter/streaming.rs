@@ -99,9 +99,9 @@ fn safe_error_body(body: &str) -> String {
 /// an already-persisted `cognition_out`. Any failure that surfaces after the
 /// stream opens is returned as a plain `anyhow` error and is never retried.
 ///
-/// Returned wrapped in `anyhow::Error` so the existing `e.to_string()`
-/// diagnostic surface is preserved verbatim (Display carries the full detail);
-/// the runner `downcast_ref`s to read the retry classification.
+/// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
+/// typed detail while the runner `downcast_ref`s to read the retry
+/// classification.
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
@@ -888,22 +888,24 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         .map_err(|e| {
             // Every `.send().await` failure is a pre-stream failure (no SSE byte
             // has arrived yet), so every one is safe to classify as retryable —
-            // a retry cannot duplicate a persisted cognition_out. Format with
-            // `{e:#}` (alternate Display) so the reqwest source chain survives:
-            // reqwest 0.12's own Display drops the underlying cause (DNS / TCP
-            // connect / TLS / connection reset), which is exactly the detail
-            // needed to tell a transport blip apart from real rate limiting.
-            if e.is_timeout() {
+            // a retry cannot duplicate a persisted cognition_out. Capture the
+            // reqwest classifiers before wrapping, then let anyhow's alternate
+            // Display walk the source chain; reqwest 0.12's Display alone drops
+            // the underlying DNS / TCP / TLS / reset cause.
+            let is_timeout = e.is_timeout();
+            let connect = e.is_connect();
+            let chain = format!("{:#}", anyhow::Error::new(e));
+            if is_timeout {
                 anyhow::Error::new(ProviderStreamError::Timeout {
                     detail: format!(
-                        "streaming request timed out after {}s: {e:#}",
+                        "streaming request timed out after {}s: {chain}",
                         execution.timeout_seconds
                     ),
                 })
             } else {
                 anyhow::Error::new(ProviderStreamError::Send {
-                    connect: e.is_connect(),
-                    detail: format!("streaming request failed: {e:#}"),
+                    connect,
+                    detail: format!("streaming request failed: {chain}"),
                 })
             }
         })?;
@@ -911,7 +913,10 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_else(|e| {
-            tracing::warn!("failed to read error response body: {e}");
+            tracing::warn!(
+                "failed to read error response body: {:#}",
+                anyhow::Error::new(e)
+            );
             String::new()
         });
         // Lead with the provider's own error body — it's the actionable part
@@ -1025,7 +1030,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             }
         };
 
-        let chunk: Bytes = chunk_res.map_err(|e| anyhow!("stream chunk error: {e}"))?;
+        let chunk: Bytes = chunk_res.map_err(|e| anyhow::Error::new(e).context("stream chunk error"))?;
         // Prepend any partial UTF-8 sequence carried from the previous
         // chunk and decode the longest complete-UTF-8 prefix. The
         // incomplete tail (if any) is stashed back in `utf8_carry`

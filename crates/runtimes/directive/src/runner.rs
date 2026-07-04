@@ -634,7 +634,7 @@ impl Runner {
                                     );
                                     warnings.push(format!(
                                         "provider retry {attempt}/{max} on turn {turn} \
-                                         after {ms}ms backoff: {e}",
+                                         after {ms}ms backoff: {e:#}",
                                         max = self.execution.retries,
                                         ms = delay.as_millis(),
                                     ));
@@ -654,7 +654,7 @@ impl Runner {
                                                     "max_retries": self.execution.retries,
                                                     "backoff_ms": delay.as_millis() as u64,
                                                     "send_connect_phase": send_connect_phase,
-                                                    "error": e.to_string(),
+                                                    "error": format!("{e:#}"),
                                                 }),
                                             )
                                             .await,
@@ -886,7 +886,7 @@ impl Runner {
                             State::CheckingLimits
                         }
                         Err(e) => State::Errored {
-                            error: e.to_string(),
+                            error: format!("{e:#}"),
                         },
                     }
                 }
@@ -1196,7 +1196,7 @@ impl Runner {
                                     }
                                     Err(e) => {
                                         let body_str =
-                                            serde_json::to_string(&json!({"error": e.to_string()}))
+                                            serde_json::to_string(&json!({"error": format!("{e:#}")}))
                                                 .unwrap_or_else(|_| {
                                                     "{\"error\":\"dispatch failed\"}".to_string()
                                                 });
