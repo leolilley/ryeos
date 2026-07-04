@@ -7,14 +7,11 @@
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use ryeos_client_base::studio::view_model::{StudioLayoutNodeVm, StudioViewVm};
 use ryeos_client_base::studio::{
     studio_key_command, BrowserSession as StudioBrowserSession, BrowserViewport, StudioCore,
-    StudioEffect, StudioEffectResult, StudioEnvelope, StudioEvent, StudioKeyCommand,
-    StudioKeyEvent, StudioUiEvent,
+    StudioEffectResult, StudioEnvelope, StudioEvent, StudioKeyCommand, StudioKeyEvent,
 };
 use ryeos_client_base::studio::{SeatEvent, SeatEventKind};
-use ryeos_client_base::workspace::{FocusDirection, ViewLocalState};
 
 use std::cell::RefCell;
 
@@ -127,7 +124,10 @@ pub fn studio_key(event_json: JsValue) -> Result<JsValue, JsValue> {
         // quit and leaves the key native. Ignore is an unbound key — also
         // native, so browser chords (Ctrl+R, F5, copy) still work.
         let handled = !matches!(command, StudioKeyCommand::Quit | StudioKeyCommand::Ignore);
-        let effects = apply_key_command(core, command);
+        // Interpretation is shared: `StudioCore::apply_key_command` owns the
+        // row-cursor walk, focus fallback, and launcher edits for BOTH
+        // renderers.
+        let effects = core.apply_key_command(command);
         let outcome = StudioKeyOutcome {
             handled,
             envelope: core.envelope(effects),
@@ -135,132 +135,6 @@ pub fn studio_key(event_json: JsValue) -> Result<JsValue, JsValue> {
         serde_wasm_bindgen::to_value(&outcome)
             .map_err(|e| JsValue::from_str(&format!("serialize RyeOS key outcome: {e}")))
     })
-}
-
-/// Apply a resolved shared-keymap command to the core, mirroring the terminal
-/// key adapter (`clients/terminal/src/app/keys.rs`) so both renderers resolve
-/// the row-cursor/launcher fallbacks identically.
-fn apply_key_command(core: &mut StudioCore, command: StudioKeyCommand) -> Vec<StudioEffect> {
-    match command {
-        StudioKeyCommand::Ui { event } => core.dispatch(StudioEvent::Ui { event }),
-        StudioKeyCommand::MoveFocusedRowOrFocus {
-            delta,
-            fallback_direction,
-        } => move_focused_row_or_focus(core, delta, fallback_direction),
-        StudioKeyCommand::InsertLauncherChar { ch } => {
-            let mut query = core.ui.launcher.query.clone();
-            query.push(ch);
-            core.dispatch(StudioEvent::Ui {
-                event: StudioUiEvent::SetLauncherQuery { query },
-            })
-        }
-        StudioKeyCommand::DeleteLauncherChar => {
-            let mut query = core.ui.launcher.query.clone();
-            query.pop();
-            core.dispatch(StudioEvent::Ui {
-                event: StudioUiEvent::SetLauncherQuery { query },
-            })
-        }
-        StudioKeyCommand::Quit | StudioKeyCommand::Ignore => Vec::new(),
-    }
-}
-
-/// Move the point within the focused list, falling back to a directional focus
-/// change when the focused lens has no selectable rows. Mirrors the terminal
-/// adapter's `move_focused_row_or_focus`.
-fn move_focused_row_or_focus(
-    core: &mut StudioCore,
-    delta: i32,
-    fallback_direction: FocusDirection,
-) -> Vec<StudioEffect> {
-    let (handled, effects) = move_focused_row(core, delta);
-    if handled {
-        effects
-    } else {
-        core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::FocusDirection {
-                direction: fallback_direction,
-            },
-        })
-    }
-}
-
-fn move_focused_row(core: &mut StudioCore, delta: i32) -> (bool, Vec<StudioEffect>) {
-    let vm = core.envelope(Vec::new()).view_model;
-    let focused = vm.workspace.focused_tile;
-    let Some(root) = vm.workspace.root.as_ref() else {
-        return (false, Vec::new());
-    };
-    let Some((count, is_feed)) = focused_selectable(root, &focused) else {
-        return (false, Vec::new());
-    };
-    if count == 0 {
-        return (false, Vec::new());
-    }
-    let current = stored_cursor(core).min(count.saturating_sub(1));
-    // The feed cursor is distance-from-bottom (0 = newest), so arrow-up walks
-    // back into history — the opposite sense from a top-down row list.
-    let step = if is_feed { -delta } else { delta };
-    let next = if step < 0 {
-        current.saturating_sub(1)
-    } else {
-        (current + 1).min(count.saturating_sub(1))
-    };
-    if next == current {
-        return (false, Vec::new());
-    }
-    let effects = core.dispatch(StudioEvent::Ui {
-        event: StudioUiEvent::SetTileCursor {
-            tile_id: focused,
-            index: next,
-        },
-    });
-    (true, effects)
-}
-
-/// The focused tile's selectable count and whether it is a feed (timeline).
-fn focused_selectable(node: &StudioLayoutNodeVm, focused: &str) -> Option<(usize, bool)> {
-    match node {
-        StudioLayoutNodeVm::Tile { tile_id, view, .. } if tile_id == focused => {
-            Some(selectable_of(view))
-        }
-        StudioLayoutNodeVm::Tile { .. } => None,
-        StudioLayoutNodeVm::Split { first, second, .. } => {
-            focused_selectable(first, focused).or_else(|| focused_selectable(second, focused))
-        }
-    }
-}
-
-fn selectable_of(view: &StudioViewVm) -> (usize, bool) {
-    match view {
-        StudioViewVm::Rows { rows, .. } => (rows.len(), false),
-        StudioViewVm::Table { rows, .. } => (rows.len(), false),
-        StudioViewVm::Timeline { entries, .. } => (entries.len(), true),
-        // The point walks a flat top-down list: an expanded section's rows, or
-        // a collapsed section's single header (so it stays re-expandable).
-        StudioViewVm::Sections { sections, .. } => {
-            let points = sections
-                .iter()
-                .map(|section| if section.collapsed { 1 } else { section.rows.len() })
-                .sum();
-            (points, false)
-        }
-        _ => (0, false),
-    }
-}
-
-/// The focused tile's stored list cursor (row index, or feed distance-from-
-/// bottom). Both renderers store it the same way; the meaning is per-widget.
-fn stored_cursor(core: &StudioCore) -> usize {
-    match core
-        .workspace
-        .tiles
-        .get(&core.workspace.focused_tile)
-        .map(|tile| &tile.local)
-    {
-        Some(ViewLocalState::GenericList { cursor, .. }) => *cursor,
-        _ => 0,
-    }
 }
 
 /// Return the current RyeOS view model without mutating state.

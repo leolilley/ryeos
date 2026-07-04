@@ -1,7 +1,9 @@
 //! Terminal key translation: crossterm events → shared studio key
-//! commands → core events. The bindings themselves live in
-//! `ryeos-client-base` (`studio_key_command`) so terminal and web agree;
-//! this is only the crossterm adapter and the row-cursor fallback.
+//! commands → core events. Both the bindings (`studio_key_command`) and the
+//! command interpretation (`StudioCore::apply_key_command`) live in
+//! `ryeos-client-base` so terminal and web agree; this is only the
+//! crossterm adapter plus the one deliberate terminal-local binding
+//! (plain ←/→ feed folding).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ryeos_client_base::studio::view_model::{StudioLayoutNodeVm, StudioViewVm};
@@ -9,7 +11,6 @@ use ryeos_client_base::studio::{
     studio_key_command, StudioCore, StudioEffect, StudioEvent, StudioKey, StudioKeyCommand,
     StudioKeyContext, StudioKeyEvent, StudioKeyModifiers, StudioUiEvent,
 };
-use ryeos_client_base::workspace::{FocusDirection, ViewLocalState};
 
 pub fn handle_key(core: &mut StudioCore, key: KeyEvent) -> Vec<StudioEffect> {
     let Some(event) = terminal_studio_key_event(key) else {
@@ -35,29 +36,8 @@ pub fn handle_key(core: &mut StudioCore, key: KeyEvent) -> Vec<StudioEffect> {
             });
         }
     }
-    match studio_key_command(event, key_context(core)) {
-        StudioKeyCommand::Ui { event } => core.dispatch(StudioEvent::Ui { event }),
-        StudioKeyCommand::MoveFocusedRowOrFocus {
-            delta,
-            fallback_direction,
-        } => move_focused_row_or_focus(core, delta, fallback_direction),
-        StudioKeyCommand::InsertLauncherChar { ch } => {
-            let mut query = core.ui.launcher.query.clone();
-            query.push(ch);
-            core.dispatch(StudioEvent::Ui {
-                event: StudioUiEvent::SetLauncherQuery { query },
-            })
-        }
-        StudioKeyCommand::DeleteLauncherChar => {
-            let mut query = core.ui.launcher.query.clone();
-            query.pop();
-            core.dispatch(StudioEvent::Ui {
-                event: StudioUiEvent::SetLauncherQuery { query },
-            })
-        }
-        StudioKeyCommand::Quit => Vec::new(),
-        StudioKeyCommand::Ignore => Vec::new(),
-    }
+    let command = studio_key_command(event, key_context(core));
+    core.apply_key_command(command)
 }
 
 pub fn should_quit(core: &StudioCore, key: &KeyEvent) -> bool {
@@ -103,71 +83,6 @@ fn key_context(core: &StudioCore) -> StudioKeyContext {
     core.key_context()
 }
 
-fn move_focused_row(core: &mut StudioCore, delta: i32) -> (bool, Vec<StudioEffect>) {
-    let vm = core.envelope(Vec::new()).view_model;
-    let focused = vm.workspace.focused_tile;
-    let Some(root) = vm.workspace.root.as_ref() else {
-        return (false, Vec::new());
-    };
-    let Some((count, is_feed)) = focused_selectable(root, &focused) else {
-        return (false, Vec::new());
-    };
-    if count == 0 {
-        return (false, Vec::new());
-    }
-    let current = stored_cursor(core).min(count.saturating_sub(1));
-    // The feed cursor is distance-from-bottom (0 = newest), so arrow-up
-    // walks back into history — the opposite sense from a top-down row list.
-    let step = if is_feed { -delta } else { delta };
-    let next = if step < 0 {
-        current.saturating_sub(1)
-    } else {
-        (current + 1).min(count.saturating_sub(1))
-    };
-    if next == current {
-        return (false, Vec::new());
-    }
-    let effects = core.dispatch(StudioEvent::Ui {
-        event: StudioUiEvent::SetTileCursor {
-            tile_id: focused,
-            index: next,
-        },
-    });
-    (true, effects)
-}
-
-fn move_focused_row_or_focus(
-    core: &mut StudioCore,
-    delta: i32,
-    fallback_direction: FocusDirection,
-) -> Vec<StudioEffect> {
-    let (handled, effects) = move_focused_row(core, delta);
-    if handled {
-        effects
-    } else {
-        core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::FocusDirection {
-                direction: fallback_direction,
-            },
-        })
-    }
-}
-
-/// The focused tile's selectable count and whether it is a feed (timeline).
-/// Feeds count their coalesced entries and address them as distance-from-
-/// bottom; row lists count rows addressed top-down.
-fn focused_selectable(node: &StudioLayoutNodeVm, focused: &str) -> Option<(usize, bool)> {
-    match node {
-        StudioLayoutNodeVm::Tile { tile_id, view, .. } if tile_id == focused => {
-            Some(selectable_of(view))
-        }
-        StudioLayoutNodeVm::Tile { .. } => None,
-        StudioLayoutNodeVm::Split { first, second, .. } => {
-            focused_selectable(first, focused).or_else(|| focused_selectable(second, focused))
-        }
-    }
-}
-
 /// The focused tile id and the foldable turn-section under its point, when
 /// the focused lens is a feed positioned on one. Drives plain ←/→ folding.
 fn focused_fold_section(core: &mut StudioCore) -> Option<(String, usize)> {
@@ -190,39 +105,6 @@ fn find_fold_section(node: &StudioLayoutNodeVm, focused: &str) -> Option<usize> 
         StudioLayoutNodeVm::Split { first, second, .. } => {
             find_fold_section(first, focused).or_else(|| find_fold_section(second, focused))
         }
-    }
-}
-
-fn selectable_of(view: &StudioViewVm) -> (usize, bool) {
-    match view {
-        StudioViewVm::Rows { rows, .. } => (rows.len(), false),
-        StudioViewVm::Table { rows, .. } => (rows.len(), false),
-        StudioViewVm::Timeline { entries, .. } => (entries.len(), true),
-        // The point walks a flat top-down list: an expanded section's rows,
-        // or a collapsed section's single header (so it stays re-expandable) —
-        // matching the flat cursor the resolver projects selection from.
-        StudioViewVm::Sections { sections, .. } => {
-            let points = sections
-                .iter()
-                .map(|section| if section.collapsed { 1 } else { section.rows.len() })
-                .sum();
-            (points, false)
-        }
-        _ => (0, false),
-    }
-}
-
-/// The focused tile's stored list cursor (row index, or feed distance-from-
-/// bottom). Both renderers store it the same way; the meaning is per-widget.
-fn stored_cursor(core: &StudioCore) -> usize {
-    match core
-        .workspace
-        .tiles
-        .get(&core.workspace.focused_tile)
-        .map(|tile| &tile.local)
-    {
-        Some(ViewLocalState::GenericList { cursor, .. }) => *cursor,
-        _ => 0,
     }
 }
 

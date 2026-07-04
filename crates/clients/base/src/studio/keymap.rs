@@ -322,6 +322,151 @@ impl StudioKeyModifiers {
     }
 }
 
+impl super::model::StudioCore {
+    /// Apply a resolved shared-keymap command to the core. This is the ONE
+    /// interpretation of `StudioKeyCommand` — the row-cursor walk, the
+    /// focus fallback, and the launcher query edits live here so renderers
+    /// cannot drift on what a command does. Platform adapters translate
+    /// their native key events into `StudioKeyEvent`, call
+    /// [`studio_key_command`], and hand the command straight in; `Quit` is
+    /// interpreted by the platform (terminal exits, browser leaves the key
+    /// native) and is a no-op here, like `Ignore`.
+    pub fn apply_key_command(&mut self, command: StudioKeyCommand) -> Vec<super::StudioEffect> {
+        use super::{StudioEvent, StudioUiEvent};
+        match command {
+            StudioKeyCommand::Ui { event } => self.dispatch(StudioEvent::Ui { event }),
+            StudioKeyCommand::MoveFocusedRowOrFocus {
+                delta,
+                fallback_direction,
+            } => self.move_focused_row_or_focus(delta, fallback_direction),
+            StudioKeyCommand::InsertLauncherChar { ch } => {
+                let mut query = self.ui.launcher.query.clone();
+                query.push(ch);
+                self.dispatch(StudioEvent::Ui {
+                    event: StudioUiEvent::SetLauncherQuery { query },
+                })
+            }
+            StudioKeyCommand::DeleteLauncherChar => {
+                let mut query = self.ui.launcher.query.clone();
+                query.pop();
+                self.dispatch(StudioEvent::Ui {
+                    event: StudioUiEvent::SetLauncherQuery { query },
+                })
+            }
+            StudioKeyCommand::Quit | StudioKeyCommand::Ignore => Vec::new(),
+        }
+    }
+
+    /// Move the point within the focused list, falling back to a directional
+    /// focus change when the focused lens has no selectable rows.
+    fn move_focused_row_or_focus(
+        &mut self,
+        delta: i32,
+        fallback_direction: FocusDirection,
+    ) -> Vec<super::StudioEffect> {
+        use super::{StudioEvent, StudioUiEvent};
+        let (handled, effects) = self.move_focused_row(delta);
+        if handled {
+            effects
+        } else {
+            self.dispatch(StudioEvent::Ui {
+                event: StudioUiEvent::FocusDirection {
+                    direction: fallback_direction,
+                },
+            })
+        }
+    }
+
+    fn move_focused_row(&mut self, delta: i32) -> (bool, Vec<super::StudioEffect>) {
+        use super::{StudioEvent, StudioUiEvent};
+        let vm = self.envelope(Vec::new()).view_model;
+        let focused = vm.workspace.focused_tile;
+        let Some(root) = vm.workspace.root.as_ref() else {
+            return (false, Vec::new());
+        };
+        let Some((count, is_feed)) = focused_selectable(root, &focused) else {
+            return (false, Vec::new());
+        };
+        if count == 0 {
+            return (false, Vec::new());
+        }
+        let current = self.stored_cursor().min(count.saturating_sub(1));
+        // The feed cursor is distance-from-bottom (0 = newest), so arrow-up
+        // walks back into history — the opposite sense from a top-down row
+        // list.
+        let step = if is_feed { -delta } else { delta };
+        let next = if step < 0 {
+            current.saturating_sub(1)
+        } else {
+            (current + 1).min(count.saturating_sub(1))
+        };
+        if next == current {
+            return (false, Vec::new());
+        }
+        let effects = self.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: focused,
+                index: next,
+            },
+        });
+        (true, effects)
+    }
+
+    /// The focused tile's stored list cursor (row index, or feed distance-
+    /// from-bottom). Both renderers store it the same way; the meaning is
+    /// per-widget.
+    fn stored_cursor(&self) -> usize {
+        match self
+            .workspace
+            .tiles
+            .get(&self.workspace.focused_tile)
+            .map(|tile| &tile.local)
+        {
+            Some(crate::workspace::ViewLocalState::GenericList { cursor, .. }) => *cursor,
+            _ => 0,
+        }
+    }
+}
+
+/// The focused tile's selectable count and whether it is a feed (timeline).
+/// Feeds count their coalesced entries and address them as distance-from-
+/// bottom; row lists count rows addressed top-down.
+fn focused_selectable(
+    node: &super::view_model::StudioLayoutNodeVm,
+    focused: &str,
+) -> Option<(usize, bool)> {
+    use super::view_model::StudioLayoutNodeVm;
+    match node {
+        StudioLayoutNodeVm::Tile { tile_id, view, .. } if tile_id == focused => {
+            Some(selectable_of(view))
+        }
+        StudioLayoutNodeVm::Tile { .. } => None,
+        StudioLayoutNodeVm::Split { first, second, .. } => {
+            focused_selectable(first, focused).or_else(|| focused_selectable(second, focused))
+        }
+    }
+}
+
+fn selectable_of(view: &super::view_model::StudioViewVm) -> (usize, bool) {
+    use super::view_model::StudioViewVm;
+    match view {
+        StudioViewVm::Rows { rows, .. } => (rows.len(), false),
+        StudioViewVm::Table { rows, .. } => (rows.len(), false),
+        StudioViewVm::Timeline { entries, .. } => (entries.len(), true),
+        // The point walks a flat top-down list: an expanded section's rows,
+        // or a collapsed section's single header (so it stays re-expandable)
+        // — matching the flat cursor the resolver projects selection from.
+        StudioViewVm::Sections { sections, .. } => {
+            let points = sections
+                .iter()
+                .map(|section| if section.collapsed { 1 } else { section.rows.len() })
+                .sum();
+            (points, false)
+        }
+        _ => (0, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
