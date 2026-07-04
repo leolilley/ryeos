@@ -1243,6 +1243,7 @@ mod tests {
             call: None,
             usage_subject: None,
             debug_raw: false,
+            state_root: None,
         }
     }
 
