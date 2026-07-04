@@ -1239,7 +1239,7 @@ impl Walker {
             current,
             node,
             cfg,
-            step: _step,
+            step,
             state,
             inputs,
             exec_ctx,
@@ -1491,7 +1491,36 @@ impl Walker {
                 }
             }
             Ok(dispatch::ActionOutcome::Success(success)) => {
-                let dispatch::ActionSuccess { result: val, cost } = success;
+                let dispatch::ActionSuccess {
+                    result: val,
+                    cost,
+                    child_thread_id,
+                } = success;
+                // Portable dispatch lineage: when this node spawned a native
+                // child thread (a directive or sub-graph), emit a
+                // `child_thread_spawned` event into THIS (parent) thread's stream
+                // so the edge lands in rebuild-safe history — the braid drill
+                // target and the derived `threads.children` edge both come from
+                // it. The daemon's `thread_child_link` (recorded at launch) is the
+                // separate, non-portable cascade copy. Do NOT set the child's
+                // `upstream_thread_id`: that is the continuation-predecessor link
+                // and stamping it cross-chain corrupts the child's resume.
+                if let Some(ref child_id) = child_thread_id {
+                    let r = self
+                        .client
+                        .append_runtime_event(
+                            RuntimeEventType::ChildThreadSpawned,
+                            json!({
+                                "child_thread_id": child_id,
+                                "node": current,
+                                "step": step,
+                                "item_id": dispatched_item_id,
+                                "spawn_reason": "dispatch",
+                            }),
+                        )
+                        .await;
+                    self.record_callback_warning("child_thread_spawned", r);
+                }
                 // Interpolate `assign` HERE (not in commit_step) so an
                 // interpolation failure becomes a node error that obeys
                 // on_error — never a suppressed error that merges the raw

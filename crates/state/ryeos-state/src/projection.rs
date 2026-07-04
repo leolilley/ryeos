@@ -2931,6 +2931,40 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
         project_thread_usage_subject(db, event)?;
     }
 
+    // Derive a dispatch thread-edge from a child_thread_spawned event. An
+    // inline-dispatched directive/sub-graph child is a FRESH ROOT with no
+    // upstream_thread_id, so the snapshot-derived edge above never links it; this
+    // event carries the only portable parent→child lineage. Rebuild-safe (the
+    // edge re-derives from the event on projection rebuild); INSERT OR IGNORE
+    // keeps re-projection idempotent. The emitting thread is the parent.
+    if event.event_type == "child_thread_spawned" {
+        if let Some(child_id) = event
+            .payload
+            .get("child_thread_id")
+            .and_then(|v| v.as_str())
+        {
+            let spawn_reason = event
+                .payload
+                .get("spawn_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("dispatch");
+            db.connection()
+                .execute(
+                    "INSERT OR IGNORE INTO thread_edges (
+                        chain_root_id, parent_thread_id, child_thread_id, spawn_seq, spawn_reason, created_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?)",
+                    rusqlite::params![
+                        &event.chain_root_id,
+                        &event.thread_id,
+                        child_id,
+                        spawn_reason,
+                        &event.ts,
+                    ],
+                )
+                .context("failed to project dispatch thread edge")?;
+        }
+    }
+
     Ok(())
 }
 
