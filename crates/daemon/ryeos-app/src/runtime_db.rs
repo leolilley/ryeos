@@ -799,6 +799,47 @@ impl RuntimeDb {
             .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
     }
 
+    /// Reject every still-open (`pending`/`claimed`) command for `thread_id` —
+    /// the thread has finalized and will never cooperatively handle them. Returns
+    /// the affected records so a waiter blocked in `commands.wait` can be woken
+    /// instead of riding to its timeout. A concurrent runtime completion that
+    /// races the bulk update simply leaves that row at its real terminal status;
+    /// the returned record reflects it.
+    pub fn reject_open_commands(
+        &self,
+        thread_id: &str,
+        terminal_status: &str,
+    ) -> Result<Vec<CommandRecord>> {
+        let ids: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT command_id FROM thread_commands
+                 WHERE thread_id = ?1 AND status IN ('pending', 'claimed')
+                 ORDER BY command_id ASC",
+            )?;
+            stmt.query_map(params![thread_id], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let result_json = serde_json::json!({
+            "reason": format!("thread finalized ({terminal_status}) before the command was handled")
+        });
+        self.conn.execute(
+            "UPDATE thread_commands
+             SET status = 'rejected', result = ?2, completed_at = ?3
+             WHERE thread_id = ?1 AND status IN ('pending', 'claimed')",
+            params![thread_id, json_blob_ref(Some(&result_json))?, now_rfc3339()],
+        )?;
+        let mut rejected = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(record) = self.get_command(id)? {
+                rejected.push(record);
+            }
+        }
+        Ok(rejected)
+    }
+
     /// Read one command by id, or `None` if it does not exist. Unlike
     /// [`Self::load_command`] this is not an error on absence — `commands.get`
     /// and `commands.wait` distinguish "no such command" from a real row.
@@ -1334,6 +1375,41 @@ mod tests {
         db.record_child_link("a", "b", "inline").unwrap();
         db.record_child_link("b", "a", "inline").unwrap();
         assert_eq!(db.descendant_thread_ids("a").unwrap(), vec!["b"]);
+    }
+
+    #[test]
+    fn reject_open_commands_settles_pending_and_claimed_for_the_thread_only() {
+        let (_tmp, db) = fresh_db();
+        let mk = |thread: &str, kind: &str| NewCommandRecord {
+            thread_id: thread.to_string(),
+            command_type: kind.to_string(),
+            requested_by: None,
+            params: None,
+        };
+        let c1 = db.submit_command(&mk("t1", "cancel")).unwrap();
+        let _c2 = db.submit_command(&mk("t1", "kill")).unwrap();
+        let other = db.submit_command(&mk("t2", "cancel")).unwrap();
+        // Claim c1/c2 so one open command is `claimed`, the other `pending`.
+        db.claim_commands("t1").unwrap();
+
+        let rejected = db.reject_open_commands("t1", "cancelled").unwrap();
+        assert_eq!(rejected.len(), 2, "both open commands settled");
+        assert!(rejected.iter().all(|r| r.status == "rejected"));
+        assert!(rejected
+            .iter()
+            .all(|r| r.completed_at.is_some() && r.result.is_some()));
+        // A completed one is re-fetchable as rejected.
+        assert_eq!(
+            db.get_command(c1.command_id).unwrap().unwrap().status,
+            "rejected"
+        );
+        // Another thread's command is untouched.
+        assert_eq!(
+            db.get_command(other.command_id).unwrap().unwrap().status,
+            "pending"
+        );
+        // Idempotent: nothing open remains to reject.
+        assert!(db.reject_open_commands("t1", "cancelled").unwrap().is_empty());
     }
 
     #[test]

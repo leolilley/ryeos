@@ -972,6 +972,13 @@ impl ThreadLifecycleService {
             params.result.as_ref(),
         );
 
+        // Settle any commands still open for this now-terminal thread. It will
+        // never cooperatively handle them (a force-stopped directive, or a run
+        // that finished with a queued cancel), so reject them and wake any
+        // `commands.wait` blocked on them — otherwise the await rides to its
+        // timeout. Best-effort: a failure here must not fail finalization.
+        self.settle_open_commands(&params.thread_id, terminal_status);
+
         let finalized = self
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow!("thread not found after finalize: {}", params.thread_id))?;
@@ -987,6 +994,34 @@ impl ThreadLifecycleService {
         );
 
         Ok(finalized)
+    }
+
+    /// Reject any commands still open for a finalized thread and wake blocked
+    /// `commands.wait` callers via the settlement hub. Best-effort — logged, not
+    /// raised, so a settlement failure never fails finalization.
+    fn settle_open_commands(&self, thread_id: &str, terminal_status: &str) {
+        match self
+            .state_store
+            .reject_open_commands(thread_id, terminal_status)
+        {
+            Ok(rejected) => {
+                for record in &rejected {
+                    crate::command_hub::global().publish(record);
+                }
+                if !rejected.is_empty() {
+                    tracing::debug!(
+                        thread_id,
+                        count = rejected.len(),
+                        "rejected open commands on thread finalize"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                thread_id,
+                error = %e,
+                "failed to settle open commands on thread finalize"
+            ),
+        }
     }
 
     /// After a thread finalizes, record its result on any follow waiter awaiting

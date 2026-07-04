@@ -2202,6 +2202,18 @@ impl StateStore {
         g.runtime_db.get_command(command_id)
     }
 
+    /// Reject every still-open command for a finalized thread, returning the
+    /// affected records so waiters can be woken. See
+    /// [`RuntimeDb::reject_open_commands`].
+    pub fn reject_open_commands(
+        &self,
+        thread_id: &str,
+        terminal_status: &str,
+    ) -> Result<Vec<CommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.reject_open_commands(thread_id, terminal_status)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). Idempotent on the child.
     pub fn record_child_link(
