@@ -2249,6 +2249,14 @@ impl StateStore {
             .map(|row| (row.key, String::from_utf8_lossy(&row.value).to_string()))
             .collect())
     }
+
+    /// A graph thread's current `(node, step)` from its latest
+    /// `graph_step_started` — the cheap live "where is it now". See
+    /// [`queries::current_graph_node`].
+    pub fn current_graph_node(&self, thread_id: &str) -> Result<Option<(String, u32)>> {
+        let g = self.lock()?;
+        queries::current_graph_node(g.state_db.projection(), thread_id)
+    }
 }
 
 /// Whether a thread's persisted `status` is terminal. The canonical predicate —
