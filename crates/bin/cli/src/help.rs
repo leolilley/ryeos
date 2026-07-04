@@ -53,6 +53,11 @@ pub fn print_help(
         "  {:<30} {}",
         "node status", "Show local node lifecycle status"
     )?;
+    writeln!(
+        out,
+        "  {:<30} {}",
+        "node doctor", "Offline checklist answering \"why won't it start\""
+    )?;
     writeln!(out)?;
     writeln!(out, "UNIVERSAL ESCAPE HATCH:")?;
     writeln!(
@@ -507,6 +512,19 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
             writeln!(out, "ryeos node status — Show local node lifecycle status")?;
             writeln!(out)?;
             writeln!(out, "USAGE: ryeos node status [--json] [--app-root <DIR>]")?;
+        }
+        Some("node" | "system") if command_tokens.get(1).map(String::as_str) == Some("doctor") => {
+            writeln!(
+                out,
+                "ryeos node doctor — Offline node-environment checklist: init state, \
+                 lifecycle + binary skew, storage write probe, socket bindability, \
+                 verified node config, per-bundle static doctor"
+            )?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "USAGE: ryeos node doctor [--json] [--no-bundles] [--app-root <DIR>]"
+            )?;
         }
         Some("system") if command_tokens.get(1).map(String::as_str) == Some("status") => {
             writeln!(

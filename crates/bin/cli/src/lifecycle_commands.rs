@@ -7,6 +7,7 @@
 //!   - `ryeos start`  — bring the local node runtime online
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
+//!   - `ryeos node doctor` — offline "why won't it start" checklist
 //!
 //! `ryeos identity` is local as a bootstrap affordance: remote
 //! operators need to copy their node public key before the daemon is running.
@@ -33,26 +34,32 @@ pub async fn try_dispatch(argv: &[String]) -> Result<bool, CliError> {
     if argv.is_empty() {
         return Ok(false);
     }
-    match argv[0].as_str() {
-        "identity" => {
+    match (argv[0].as_str(), argv.get(1).map(String::as_str)) {
+        ("identity", _) => {
             run_identity_command(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
-        "init" => {
+        ("init", _) => {
             run_init_command(&argv[1..]).map_err(map_local_err)?;
             Ok(true)
         }
-        "node" | "system" if argv.get(1).map(String::as_str) == Some("status") => {
+        ("node" | "system", Some("status")) => {
             run_status_command(&argv[2..])
                 .await
                 .map_err(map_local_err)?;
             Ok(true)
         }
-        "start" => {
+        ("node" | "system", Some("doctor")) => {
+            run_node_doctor_command(&argv[2..])
+                .await
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("start", _) => {
             run_start_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
-        "stop" => {
+        ("stop", _) => {
             run_stop_command(&argv[1..]).await.map_err(map_local_err)?;
             Ok(true)
         }
@@ -167,6 +174,284 @@ async fn run_status_command(argv: &[String]) -> Result<()> {
         print_lifecycle_status(&status);
     }
     Ok(())
+}
+
+// ── ryeos node doctor ───────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node doctor",
+    about = "Offline node-environment checklist: init state, lifecycle, sockets, \
+             storage, installed bundles — one command answering \"why won't it start\"",
+    no_binary_name = true
+)]
+struct NodeDoctorArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Emit the structured JSON report instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+
+    /// Skip the per-installed-bundle doctor pass (environment checks only).
+    #[arg(long)]
+    no_bundles: bool,
+}
+
+/// Node-environment doctor. Deliberately hardcoded (not descriptor-driven):
+/// descriptor resolution needs verified installed bundles and a reachable
+/// registry — exactly the machinery this command exists to diagnose when
+/// broken. Every check degrades independently; the command itself only
+/// errors when it cannot even load config.
+async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
+    use ryeos_tools::actions::doctor::{CheckResult, FAIL, NA, OK, WARN};
+
+    let args = parse_or_handle_help::<NodeDoctorArgs>(argv)?;
+    let controller = LifecycleController::from_env(local_env(args.app_root)?);
+    let config = controller.config().clone();
+    let mut checks: Vec<CheckResult> = Vec::new();
+
+    // 1. Init state — keys, trust store, bundles dir.
+    let initialized = match controller.init_state() {
+        Ok(ryeos_node::InitState::Initialized) => {
+            checks.push(check("init", OK, serde_json::json!({})));
+            true
+        }
+        Ok(ryeos_node::InitState::NotInitialized { diagnostics }) => {
+            checks.push(check(
+                "init",
+                FAIL,
+                serde_json::json!({
+                    "code": format!("{:?}", diagnostics.code),
+                    "message": diagnostics.message,
+                    "fix": "run: ryeos init",
+                }),
+            ));
+            false
+        }
+        Err(e) => {
+            checks.push(check("init", FAIL, serde_json::json!({ "error": format!("{e:#}") })));
+            false
+        }
+    };
+
+    // 2. Lifecycle status + binary/metadata skew (the stale-daemon detection
+    //    `ryeos node status` warns about, as a first-class check).
+    let mut daemon_running = false;
+    match controller.status().await {
+        Ok(LifecycleStatus::Running { metadata }) => {
+            daemon_running = true;
+            let current = ryeos_app::build_info::get();
+            let skew = is_revision_skew(metadata.revision.as_deref(), current.revision)
+                || ryeosd_installed_after_daemon_started(&metadata);
+            if skew {
+                checks.push(check(
+                    "daemon",
+                    WARN,
+                    serde_json::json!({
+                        "state": "running",
+                        "running_revision": metadata.revision,
+                        "installed_revision": current.revision,
+                        "note": "the running daemon is an older build than the installed binary",
+                        "fix": "ryeos stop && ryeos start",
+                    }),
+                ));
+            } else {
+                checks.push(check(
+                    "daemon",
+                    OK,
+                    serde_json::json!({ "state": "running", "pid": metadata.pid }),
+                ));
+            }
+        }
+        Ok(LifecycleStatus::Stopped { .. }) => {
+            checks.push(check("daemon", OK, serde_json::json!({ "state": "stopped" })));
+        }
+        Ok(LifecycleStatus::Stale { diagnostics, .. }) => {
+            checks.push(check(
+                "daemon",
+                WARN,
+                serde_json::json!({
+                    "state": "stale",
+                    "message": diagnostics.message,
+                    "note": "metadata says running but the daemon is not responding",
+                }),
+            ));
+        }
+        Ok(LifecycleStatus::NotInitialized { .. }) => {
+            // Covered by the init check; don't double-report.
+            checks.push(check("daemon", NA, serde_json::json!({ "state": "not initialized" })));
+        }
+        Err(e) => {
+            checks.push(check("daemon", FAIL, serde_json::json!({ "error": format!("{e:#}") })));
+        }
+    }
+
+    // 3. App-root storage: a write probe covers both permissions and a full
+    //    disk — the two storage reasons a start fails.
+    let probe = config.app_root.join(format!(".doctor-probe-{}", std::process::id()));
+    match std::fs::write(&probe, b"probe").and_then(|()| std::fs::remove_file(&probe)) {
+        Ok(()) => checks.push(check(
+            "storage",
+            OK,
+            serde_json::json!({ "app_root": config.app_root, "write_probe": "ok" }),
+        )),
+        Err(e) => checks.push(check(
+            "storage",
+            FAIL,
+            serde_json::json!({
+                "app_root": config.app_root,
+                "error": format!("{e}"),
+                "note": "app root is not writable (permissions or disk full)",
+            }),
+        )),
+    }
+
+    // 4. Socket bindability — only meaningful when nothing should be holding
+    //    them. A running daemon holding both is the healthy case.
+    if daemon_running {
+        checks.push(check(
+            "sockets",
+            OK,
+            serde_json::json!({ "note": "held by the running daemon" }),
+        ));
+    } else {
+        let mut detail = serde_json::Map::new();
+        let mut status = OK;
+        match std::net::TcpListener::bind(config.bind) {
+            Ok(l) => {
+                drop(l);
+                detail.insert("tcp".into(), serde_json::json!({ "bind": config.bind.to_string(), "status": "bindable" }));
+            }
+            Err(e) => {
+                status = FAIL;
+                detail.insert("tcp".into(), serde_json::json!({
+                    "bind": config.bind.to_string(),
+                    "error": format!("{e}"),
+                    "note": "another process holds the port",
+                }));
+            }
+        }
+        match std::os::unix::net::UnixListener::bind(&config.uds_path) {
+            Ok(l) => {
+                drop(l);
+                // Binding created the socket file; remove the probe artifact.
+                let _ = std::fs::remove_file(&config.uds_path);
+                detail.insert("uds".into(), serde_json::json!({ "path": config.uds_path, "status": "bindable" }));
+            }
+            Err(e) => {
+                status = FAIL;
+                detail.insert("uds".into(), serde_json::json!({
+                    "path": config.uds_path,
+                    "error": format!("{e}"),
+                    "note": "with no daemon running this is usually a stale socket file — remove it",
+                }));
+            }
+        }
+        checks.push(check("sockets", status, serde_json::Value::Object(detail)));
+    }
+
+    // 5. Verified node config + per-bundle doctor. Requires init; degrades to
+    //    n/a rather than piling failures onto an uninitialized node.
+    if initialized {
+        match crate::node_descriptors::load_verified_snapshot(&config.app_root) {
+            Ok(snapshot) => {
+                let roots: Vec<PathBuf> =
+                    snapshot.bundles.iter().map(|b| b.path.clone()).collect();
+                checks.push(check(
+                    "node_config",
+                    OK,
+                    serde_json::json!({ "bundles": roots.len() }),
+                ));
+                if !args.no_bundles {
+                    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(
+                        config.app_root.clone(),
+                    )
+                    .config();
+                    for record in &snapshot.bundles {
+                        // Static checks only (no offline engine): the doctor
+                        // must stay fast and dependency-free; import dry-runs
+                        // belong to the bundle-level `ryeos doctor <source>`.
+                        let report = ryeos_tools::actions::doctor::run_doctor(
+                            Err("node doctor runs static checks only"),
+                            &record.path,
+                            &roots,
+                            &operator_config_root,
+                        );
+                        checks.push(check(
+                            &format!("bundle:{}", record.name),
+                            if report.ok { OK } else { FAIL },
+                            serde_json::json!({
+                                "path": record.path,
+                                "failed": report
+                                    .checks
+                                    .iter()
+                                    .filter(|c| c.status == FAIL)
+                                    .map(|c| serde_json::json!({ "check": c.name, "detail": c.detail }))
+                                    .collect::<Vec<_>>(),
+                            }),
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                checks.push(check(
+                    "node_config",
+                    FAIL,
+                    serde_json::json!({
+                        "error": format!("{e:#}"),
+                        "note": "installed bundle registrations failed verification",
+                    }),
+                ));
+            }
+        }
+    } else {
+        checks.push(check("node_config", NA, serde_json::json!({ "note": "not initialized" })));
+    }
+
+    let ok = checks.iter().all(|c| c.status != FAIL);
+    let report = serde_json::json!({
+        "app_root": config.app_root,
+        "ok": ok,
+        "checks": checks
+            .iter()
+            .map(|c| serde_json::json!({ "name": c.name, "status": c.status, "detail": c.detail }))
+            .collect::<Vec<_>>(),
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("node doctor — {}", config.app_root.display());
+        for c in &checks {
+            let glyph = match c.status.as_str() {
+                s if s == OK => "✓",
+                s if s == FAIL => "✗",
+                s if s == WARN => "⚠",
+                _ => "·",
+            };
+            println!("  {glyph} {:<24} {}", c.name, c.status);
+            if c.status != OK {
+                println!("      {}", c.detail);
+            }
+        }
+    }
+    if ok {
+        Ok(())
+    } else {
+        anyhow::bail!("node doctor found failing checks (rerun with --json for detail)")
+    }
+}
+
+/// Build a check row in core-tools doctor vocabulary (its constructor is
+/// module-private; the fields are the contract).
+fn check(name: &str, status: &str, detail: serde_json::Value) -> ryeos_tools::actions::doctor::CheckResult {
+    ryeos_tools::actions::doctor::CheckResult {
+        name: name.to_string(),
+        status: status.to_string(),
+        detail,
+    }
 }
 
 #[derive(Parser, Debug)]
