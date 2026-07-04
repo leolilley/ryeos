@@ -216,6 +216,20 @@ pub struct StudioWorkspaceVm {
     pub tile_count: usize,
     #[serde(default)]
     pub docks: StudioDockPlaneVm,
+    /// Labels of the levels on the step-in return stack, root-first (the
+    /// deepest drill last). Empty at the top of the tree. Renderers draw it as
+    /// a breadcrumb — `threads ▸ ar25 ▸ …` — so the operator sees how deep the
+    /// execution drill is and that Backspace returns. Each is the level's own
+    /// label (the cognition/thread it showed) when known, else the view title.
+    /// The current (focused) level is NOT included; it is `lens_label` (or the
+    /// focused view's title) as the tail beyond this trail.
+    #[serde(default)]
+    pub lens_trail: Vec<String>,
+    /// Label of the CURRENT focused level (the cognition stepped into, e.g.
+    /// `study`), the breadcrumb tail. `None` at the top of the tree, where the
+    /// focused view's own title stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -844,6 +858,18 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
         backdrop: center_is_empty.then(|| backdrop_scene(core)).flatten(),
         tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
+        lens_trail: core
+            .workspace
+            .lens_stack
+            .iter()
+            .map(|frame| {
+                frame
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| tile_title(core, &frame.view))
+            })
+            .collect(),
+        lens_label: core.workspace.lens_label.clone(),
     }
 }
 

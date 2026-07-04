@@ -481,8 +481,9 @@ impl StudioCore {
                 value,
                 merge,
                 open_view,
+                drill,
             }) => {
-                let effects = self.apply_ui_affordance(facet, value, merge, open_view);
+                let effects = self.apply_ui_affordance(facet, value, merge, open_view, drill);
                 self.clear_focused_input();
                 effects
             }

@@ -68,7 +68,8 @@ impl StudioCore {
                 value,
                 merge,
                 open_view,
-            }) => self.apply_ui_affordance(facet, value, merge, open_view),
+                drill,
+            }) => self.apply_ui_affordance(facet, value, merge, open_view, drill),
             Some(super::content::AffordanceInvoke::Rye {
                 tokens,
                 args,
@@ -110,7 +111,29 @@ impl StudioCore {
         value: Option<serde_json::Value>,
         merge: Option<serde_json::Value>,
         open_view: Option<String>,
+        drill: bool,
     ) -> Vec<StudioEffect> {
+        // Step-in: before the drill writes its facet (and possibly swaps the
+        // center), record a return frame — the view being left plus the facet
+        // context it was reading — so a later pop restores them. Only on
+        // single-lens surfaces (where the drill is otherwise irreversible) and
+        // only when there is a center to leave. Captured BEFORE the facet write,
+        // so the frame holds the pre-drill values. Note: a drill need NOT carry
+        // `open_view` — a same-lens route retarget (stepping the braid timeline
+        // onto a child chain) is still a returnable step-in.
+        if drill
+            && self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
+            && !self.workspace.center_is_empty()
+        {
+            if let Some(view) = self.workspace.focused_view().cloned() {
+                let facets = self.seat.fold().snapshot();
+                // The frame carries the label of the level being left (the
+                // current lens label), so the breadcrumb reads the ancestor
+                // cognitions, not repeated view titles.
+                let label = self.workspace.lens_label.clone();
+                self.workspace.push_lens_frame(view, facets, label);
+            }
+        }
         let next = if let Some(merge) = merge {
             let mut current = self
                 .seat
@@ -128,6 +151,13 @@ impl StudioCore {
             value.unwrap_or(serde_json::Value::Null)
         };
         self.seat.append_facet(facet.clone(), next);
+        // A drill descends one level: default the new level's breadcrumb label
+        // to the thread it stepped onto (the route just written). A caller with
+        // a nicer label — e.g. DrillThread carrying the graph node `study` —
+        // overrides this afterward.
+        if drill {
+            self.workspace.lens_label = self.seat.fold().input_route().thread;
+        }
         self.bump_generation();
         let mut effects = self.effects_for_facet(&facet);
         // Open the view AFTER the facet write, so the opened view's fetch
@@ -527,6 +557,149 @@ mod tests {
             }
             other => panic!("cancel must resolve to a Service invoke; got {other:?}"),
         }
+    }
+
+    #[test]
+    fn drill_pushes_return_frame_and_pop_restores_braid_and_facets() {
+        // Step-in / return over the single-lens braid — the debugger drill.
+        // Stepping from the game braid (chain_root A) into a child braid
+        // (chain_root B) pushes a return frame; PopLens restores A and refetches
+        // it. This is the vertical-drill primitive the execution tracer hangs on.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        core.workspace
+            .add_tile(ViewSpec::bound("view:ryeos/chain/timeline"));
+        seed_view_value(
+            &mut core,
+            "view:ryeos/chain/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "source": {
+                    "ref": "service:events/chain_replay",
+                    "params": { "chain_root_id": "@facet:input.route.chain_root" },
+                    "collection": "events"
+                }
+            }),
+        );
+        // On the game braid (chain_root A).
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "chain_root": "A" }),
+        );
+
+        // Step into the child braid (chain_root B) with drill = true.
+        core.apply_ui_affordance(
+            crate::studio::seat::KEY_INPUT_ROUTE.to_string(),
+            None,
+            Some(serde_json::json!({ "chain_root": "B" })),
+            Some("view:ryeos/chain/timeline".to_string()),
+            true,
+        );
+
+        // A return frame captured the pre-drill braid; the fold now reads B.
+        assert_eq!(core.workspace.lens_depth(), 1);
+        assert_eq!(
+            core.seat.fold().get(crate::studio::seat::KEY_INPUT_ROUTE),
+            Some(&serde_json::json!({ "chain_root": "B" }))
+        );
+
+        // Return: PopLens restores chain_root A and refetches that braid.
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::PopLens,
+        });
+        assert_eq!(core.workspace.lens_depth(), 0);
+        assert_eq!(
+            core.seat.fold().get(crate::studio::seat::KEY_INPUT_ROUTE),
+            Some(&serde_json::json!({ "chain_root": "A" }))
+        );
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { source_ref, params, .. }
+                    if source_ref == "service:events/chain_replay"
+                        && params["chain_root_id"] == "A")),
+            "pop refetches the restored braid at chain_root A; got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn pop_lens_at_top_of_tree_is_a_noop() {
+        // No return frame → PopLens does nothing (no panic, no effects).
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::PopLens,
+        });
+        assert_eq!(core.workspace.lens_depth(), 0);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn drill_thread_steps_into_child_braid_and_pop_returns() {
+        // The cross-thread step-in (the deepest debugger drill, ready for the
+        // run-stability child_thread_spawned edge): DrillThread retargets the
+        // route at the child AND pushes a return frame — no open_view, the braid
+        // lens re-projects via the route facet. Backspace returns to the parent.
+        let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
+        core.workspace.tiling.mode = crate::surface::TilingModeSpec::SingleLens;
+        core.workspace
+            .add_tile(ViewSpec::bound("view:ryeos/chain/timeline"));
+        seed_view_value(
+            &mut core,
+            "view:ryeos/chain/timeline",
+            serde_json::json!({
+                "widget": "timeline",
+                "source": {
+                    "ref": "service:events/chain_replay",
+                    "params": { "chain_root_id": "@facet:input.route.chain_root" },
+                    "collection": "events"
+                }
+            }),
+        );
+        // On the parent braid (chain_root P).
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "chain_root": "P" }),
+        );
+
+        // Step into child C (a fresh root: both coords = C).
+        let effects = core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::Activate {
+                action: StudioAction::DrillThread {
+                    thread_id: "C".to_string(),
+                    chain_root_id: "C".to_string(),
+                    label: Some("study".to_string()),
+                },
+            },
+        });
+        assert_eq!(core.workspace.lens_depth(), 1);
+        // The breadcrumb tail reads the node stepped into, not the child id.
+        assert_eq!(core.workspace.lens_label.as_deref(), Some("study"));
+        let route = core.seat.fold();
+        let route = route.get(crate::studio::seat::KEY_INPUT_ROUTE).unwrap();
+        assert_eq!(route["thread"], "C");
+        assert_eq!(route["chain_root"], "C");
+        // The braid lens refetched onto the child chain via the route facet.
+        assert!(
+            effects.iter().any(|e| matches!(&e.kind,
+                StudioEffectKind::FetchSource { source_ref, params, .. }
+                    if source_ref == "service:events/chain_replay"
+                        && params["chain_root_id"] == "C")),
+            "drill refetches the child braid; got {effects:?}"
+        );
+
+        // Return to the parent braid.
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::PopLens,
+        });
+        assert_eq!(core.workspace.lens_depth(), 0);
+        assert_eq!(
+            core.workspace.lens_label, None,
+            "pop restores the top-of-tree label"
+        );
+        assert_eq!(
+            core.seat.fold().get(crate::studio::seat::KEY_INPUT_ROUTE),
+            Some(&serde_json::json!({ "chain_root": "P" })),
+            "pop restores the pre-drill route (parent braid, no child thread)"
+        );
     }
 
     #[test]

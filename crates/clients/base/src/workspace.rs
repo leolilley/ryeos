@@ -9,7 +9,8 @@ use crate::ids::TileId;
 use crate::layout::{layout_rects, LayoutTree, Rect, SplitAxis};
 use crate::surface::{ArrangeSpec, InsertSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -183,6 +184,29 @@ fn arrange_region(ids: &[TileId], arrange: ArrangeSpec) -> Option<LayoutTree> {
 // Workspace
 // ---------------------------------------------------------------------------
 
+/// One frame on the lens stack: the view a step-in left behind, plus the
+/// seat-facet context it read. Popping re-appends the captured facets
+/// (last-writer-wins over the seat log, so no history rewrite) and restores
+/// the view — the "return" half of the debugger step-in. Frames are recorded
+/// on single-lens surfaces, where the center is swapped in place, so the stack
+/// is the only record of where a drill came from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LensFrame {
+    /// The view the step-in replaced.
+    pub view: ViewSpec,
+    /// Snapshot of the seat facet fold at push time, keyed by facet name. On
+    /// pop, any facet whose current value differs is re-appended to this value,
+    /// restoring the braid/selection context the leaving view was reading.
+    pub facets: BTreeMap<String, Value>,
+    /// Human label for the level this frame represents (the cognition/thread it
+    /// was showing — e.g. `study`), for the breadcrumb. `None` falls back to the
+    /// view's title. Because a single-lens braid shows *which* execution via a
+    /// facet (not the view), this label is what makes `threads ▸ ar25 ▸ study`
+    /// legible instead of `threads ▸ timeline ▸ timeline`.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     /// The tiling algorithm (from the surface).
@@ -194,6 +218,18 @@ pub struct Workspace {
     pub tiles: HashMap<TileId, TileState>,
     /// Focused tile. Dangling when the center is empty.
     pub focused_tile: TileId,
+    /// Step-in return stack (single-lens surfaces). A drill pushes the view it
+    /// left and the facet context it read; a pop restores them. Empty at the
+    /// top of the tree. `#[serde(default)]` keeps older serialized workspaces
+    /// (no stack field) loadable.
+    #[serde(default)]
+    pub lens_stack: Vec<LensFrame>,
+    /// Human label for the CURRENT focused level (the cognition/thread stepped
+    /// into — e.g. `study`), the tail of the breadcrumb. `None` at the top of
+    /// the tree, where the focused view's own title stands. Set on drill,
+    /// restored on pop.
+    #[serde(default)]
+    pub lens_label: Option<String>,
 }
 
 impl Workspace {
@@ -221,7 +257,36 @@ impl Workspace {
             center_tiles,
             tiles,
             focused_tile,
+            lens_stack: Vec::new(),
+            lens_label: None,
         }
+    }
+
+    /// Push a return frame: the view a step-in is leaving, the facet context it
+    /// read, and the human label of that level. Recorded before the drill's
+    /// facet write + center swap so a pop can restore the pre-drill state.
+    pub fn push_lens_frame(
+        &mut self,
+        view: ViewSpec,
+        facets: BTreeMap<String, Value>,
+        label: Option<String>,
+    ) {
+        self.lens_stack.push(LensFrame {
+            view,
+            facets,
+            label,
+        });
+    }
+
+    /// Pop the most recent return frame, if any. The caller restores its facets
+    /// and view.
+    pub fn pop_lens_frame(&mut self) -> Option<LensFrame> {
+        self.lens_stack.pop()
+    }
+
+    /// Depth of the step-in stack (0 at the top of the tree).
+    pub fn lens_depth(&self) -> usize {
+        self.lens_stack.len()
     }
 
     /// The computed layout tree. None when the center is empty.

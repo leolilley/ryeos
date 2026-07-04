@@ -64,6 +64,10 @@ affordances:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/chain/timeline
+      # Step INTO the braid (returnable via Backspace) rather than a flat swap:
+      # the list + its context are pushed onto the drill stack so the operator
+      # can walk back up the execution tree.
+      drill: true
   # Watch the followed CHILD chain of a suspended parent — same shape as `watch`
   # but aims the route at the child chain root the daemon recorded on the follow
   # fact (`follow.child_chain_root_id`, head thread `follow.child_thread_id`), so
@@ -79,6 +83,9 @@ affordances:
         thread: "{record.follow.child_thread_id}"
         chain_root: "{record.follow.child_chain_root_id}"
       open_view: view:ryeos/chain/timeline
+      # Step into the child chain — a return frame lets Backspace walk back to
+      # the parent.
+      drill: true
   # Inspect swaps the center lens to the thread's detail sections. Write the
   # selected thread FIRST (the detail sources read @facet:selection.thread),
   # then open the lens — the P1 open_view ordering guarantees the facet is set

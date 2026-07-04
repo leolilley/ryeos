@@ -102,6 +102,16 @@ impl SeatFold {
         self.facets.get(key).map(|(_, value)| value)
     }
 
+    /// Snapshot every facet's current value (dropping the write seqs). Used by
+    /// the lens stack to capture the facet context a step-in leaves, so a pop
+    /// can re-append the ones that changed.
+    pub fn snapshot(&self) -> BTreeMap<String, Value> {
+        self.facets
+            .iter()
+            .map(|(key, (_, value))| (key.clone(), value.clone()))
+            .collect()
+    }
+
     /// Seq of the last event that wrote `key`; None if never written.
     pub fn seq_of(&self, key: &str) -> Option<u64> {
         self.facets.get(key).map(|(seq, _)| *seq)

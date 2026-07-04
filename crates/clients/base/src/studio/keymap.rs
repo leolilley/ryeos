@@ -184,6 +184,9 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
             ui(StudioUiEvent::DeleteInputChar)
         }
+        // Backspace outside an input steps back up the execution-drill stack —
+        // the "return" from a step-in. A no-op at the top of the tree.
+        StudioKey::Backspace if event.modifiers.none() => ui(StudioUiEvent::PopLens),
         // A live filter with multiple target fields owns Tab to cycle the field
         // (it has no completion or route-target, so Tab is otherwise free here).
         StudioKey::Tab if context.input_filter_fields && event.modifiers.none() => {

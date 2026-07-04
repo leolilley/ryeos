@@ -514,8 +514,17 @@ fn execution_entry(
         FeedEventType::ThreadTimedOut => {
             (terminal_reason("timed out", payload), None, StudioTone::Warn)
         }
+        // A dispatch fork: the parent stepped into a child execution (a
+        // directive/sub-graph node running as a child thread). Name the node
+        // being stepped into (`↘ study`) so the entry reads as a call into a
+        // named cognition, not an anonymous fork. Falls back to "forked
+        // subthread" when the producer carries no `node`. The child id (meta)
+        // is the drill target the `DrillThread` action below steps into.
         FeedEventType::ChildThreadSpawned => (
-            "forked subthread".to_string(),
+            payload
+                .and_then(|p| payload_text(p, "node"))
+                .map(|node| format!("↘ {node}"))
+                .unwrap_or_else(|| "forked subthread".to_string()),
             payload.and_then(child_thread_ref),
             StudioTone::Accent,
         ),
@@ -601,15 +610,23 @@ fn execution_entry(
         _ => return None,
     };
     // What activating this entry does, and its launcher-secondary affordance:
-    // - a forked subthread is navigable (Enter aims the route at the child);
+    // - a forked subthread is a step-in (Enter drills into the child braid,
+    //   pushing a return frame so Backspace walks back up);
     // - an error-like terminal (failed / timed out / killed) is inspectable
     //   (Enter opens its full structured error), and a *recoverable* failed
     //   turn additionally offers retry — re-submitting its own stimulus as a
     //   continuation. timed_out / killed are inspectable but NOT retryable:
     //   the daemon refuses continuation for those settled statuses (v1).
     let (action, secondary_action) = match event {
+        // Step INTO the spawned child (the dispatch edge): a child is a fresh
+        // root, so its chain_root equals its own id. DrillThread pushes a return
+        // frame, so Backspace walks back to this parent braid.
         FeedEventType::ChildThreadSpawned => (
-            meta.clone().map(|thread_id| StudioAction::AimThread { thread_id }),
+            meta.clone().map(|id| StudioAction::DrillThread {
+                thread_id: id.clone(),
+                chain_root_id: id,
+                label: payload.and_then(|p| payload_text(p, "node")),
+            }),
             None,
         ),
         FeedEventType::ThreadFailed => (
@@ -1403,21 +1420,43 @@ mod tests {
     }
 
     #[test]
-    fn child_thread_entry_is_actionable_aims_the_route() {
-        // A forked subthread is a navigable feed entry: activating it aims
-        // the route at the child so the feed re-projects to its braid.
+    fn child_thread_entry_steps_into_the_child_braid() {
+        // A dispatch fork is a step-in feed entry: it names the node being
+        // stepped into and activating it drills into the child (DrillThread),
+        // pushing a return frame. A child is a fresh root, so both route
+        // coordinates are the child id.
+        let entry = exec(json!({
+            "event_type": "child_thread_spawned",
+            "payload": { "child_thread_id": "T-child", "node": "study" }
+        }));
+        let Some(StudioTimelineEntryVm::Line { primary, meta, action, .. }) = entry else {
+            panic!("expected a forked-subthread line");
+        };
+        assert_eq!(primary, "↘ study", "the entry names the node stepped into");
+        assert_eq!(meta.as_deref(), Some("T-child"));
+        assert!(
+            matches!(
+                action,
+                Some(StudioAction::DrillThread { thread_id, chain_root_id, label })
+                    if thread_id == "T-child" && chain_root_id == "T-child"
+                        && label.as_deref() == Some("study")
+            ),
+            "the entry steps into the child braid, labelled by its node"
+        );
+    }
+
+    #[test]
+    fn child_thread_entry_without_a_node_falls_back() {
+        // No `node` in the payload → the generic label, but still drillable.
         let entry = exec(json!({
             "event_type": "child_thread_spawned",
             "payload": { "child_thread_id": "T-child" }
         }));
-        let Some(StudioTimelineEntryVm::Line { meta, action, .. }) = entry else {
+        let Some(StudioTimelineEntryVm::Line { primary, action, .. }) = entry else {
             panic!("expected a forked-subthread line");
         };
-        assert_eq!(meta.as_deref(), Some("T-child"));
-        assert!(
-            matches!(action, Some(StudioAction::AimThread { thread_id }) if thread_id == "T-child"),
-            "the entry aims the route at the child thread"
-        );
+        assert_eq!(primary, "forked subthread");
+        assert!(matches!(action, Some(StudioAction::DrillThread { .. })));
     }
 
     #[test]
