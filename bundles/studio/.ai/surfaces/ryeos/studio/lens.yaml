@@ -16,12 +16,13 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Open on the watch list: the live thread dashboard is the landing lens (what's
-# running/recent, active-first). Drilling into a row swaps the single center lens
-# to that thread's braid (chain/timeline). Breadth is swapping the lens, never
-# arranging panes.
+# Open on the whole-run view: the fleet cohort (threads carrying a `fleet` tag,
+# newest first) is the landing lens, so the TUI opens on the run rather than a
+# flat thread list. Drilling into a game swaps the single center lens to its
+# braid (chain/timeline), which itself shows the game's children as drill-ins.
+# Breadth is swapping the lens, never arranging panes.
 tiles:
-  - "view:ryeos/threads/list"
+  - "view:ryeos/run/fleet"
 
 # Only the foot input and a thin top status strip — no edge panes.
 slots:
@@ -35,6 +36,7 @@ backdrop: view:ryeos/backdrop/shard
 
 # The full lens set — swap the single center lens to reach any of these.
 library:
+  - view:ryeos/run/fleet
   - view:ryeos/chain/timeline
   - view:ryeos/studio/status
   - view:ryeos/input
