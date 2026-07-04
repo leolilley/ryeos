@@ -81,7 +81,9 @@ pub fn ensure_maintenance_schedule(state: &AppState) -> Result<()> {
 }
 
 fn apply_maintenance_schedules(node_dir: &Path, identity: &NodeIdentity) -> Result<()> {
-    let file = load_declaration(node_dir)?;
+    let Some(file) = load_declaration(node_dir)? else {
+        return Ok(());
+    };
 
     if file.spec_version != 1 {
         anyhow::bail!(
@@ -114,47 +116,27 @@ fn apply_maintenance_schedules(node_dir: &Path, identity: &NodeIdentity) -> Resu
     Ok(())
 }
 
-/// Load the maintenance declaration: the bundle-authored override at
-/// `.ai/node/maintenance/schedules.yaml` if it materialized, otherwise the
-/// built-in default. The shipped YAML (`bundles/standard/.ai/node/maintenance/
-/// schedules.yaml`) is the source of record and mirrors [`default_declaration`];
-/// the built-in exists so a fresh daemon always schedules maintenance even
-/// before the override is present.
-fn load_declaration(node_dir: &Path) -> Result<MaintenanceDeclarationFile> {
+/// Load the maintenance declaration at `.ai/node/maintenance/schedules.yaml`.
+///
+/// `None` when absent — and absent means NOTHING is scheduled. The
+/// declaration is the only source of maintenance cadence: no declaration,
+/// no scheduled GC. Deliberate; a node whose bundle doesn't declare
+/// maintenance must never grow a background job it can't see in data.
+fn load_declaration(node_dir: &Path) -> Result<Option<MaintenanceDeclarationFile>> {
     let declaration_path = node_dir.join(DECLARATION_REL);
     if !declaration_path.is_file() {
-        tracing::debug!(
+        tracing::info!(
             path = %declaration_path.display(),
-            "no maintenance declaration override; using built-in default"
+            "no maintenance declaration; nothing scheduled"
         );
-        return Ok(default_declaration());
+        return Ok(None);
     }
     let raw = std::fs::read_to_string(&declaration_path)
         .with_context(|| format!("read maintenance declaration {}", declaration_path.display()))?;
     let body_str = lillux::signature::strip_signature_lines(&raw);
     serde_yaml::from_str(&body_str)
+        .map(Some)
         .with_context(|| format!("parse maintenance declaration {}", declaration_path.display()))
-}
-
-/// Built-in default: daily deep GC at 04:00 UTC, overlap `skip`. Mirrors the
-/// shipped standard-bundle declaration.
-fn default_declaration() -> MaintenanceDeclarationFile {
-    MaintenanceDeclarationFile {
-        spec_version: 1,
-        schedules: vec![MaintenanceScheduleDeclaration {
-            schedule_id: "maintenance-gc".to_string(),
-            item_ref: "service:maintenance/gc".to_string(),
-            schedule_type: "cron".to_string(),
-            expression: "0 0 4 * * *".to_string(),
-            timezone: Some("UTC".to_string()),
-            misfire_policy: Some("skip".to_string()),
-            overlap_policy: Some("skip".to_string()),
-            lateness_grace_secs: None,
-            enabled: true,
-            params: serde_json::json!({ "deep": true }),
-            capabilities: vec!["ryeos.execute.service.maintenance/gc".to_string()],
-        }],
-    }
 }
 
 fn write_maintenance_spec(
@@ -317,37 +299,21 @@ schedules:
     }
 
     #[test]
-    fn applies_builtin_default_when_no_override() {
+    fn absent_declaration_schedules_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let node_dir = tmp.path().join(".ai").join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
         let id = identity();
 
-        // No override file present — the built-in default must still apply.
+        // No declaration → no schedule. The declaration is the only source
+        // of maintenance cadence; nothing is scheduled implicitly.
         apply_maintenance_schedules(&node_dir, &id).unwrap();
 
         let spec_path = node_dir.join("schedules").join("maintenance-gc.yaml");
-        assert!(spec_path.exists(), "built-in default should be applied");
-        let content = std::fs::read_to_string(&spec_path).unwrap();
-        let body = lillux::signature::strip_signature_lines(&content);
-        let parsed: serde_json::Value = serde_yaml::from_str(&body).unwrap();
-        assert_eq!(parsed["params"]["deep"], true);
-        assert_eq!(parsed["expression"], "0 0 4 * * *");
-        assert_eq!(parsed["overlap_policy"], "skip");
-    }
-
-    #[test]
-    fn builtin_default_declaration_is_valid() {
-        // The built-in must satisfy the same validation the projection applies.
-        let tmp = tempfile::tempdir().unwrap();
-        let node_dir = tmp.path().join(".ai").join("node");
-        std::fs::create_dir_all(&node_dir).unwrap();
-        let id = identity();
-        let decl = default_declaration();
-        assert_eq!(decl.spec_version, 1);
-        for d in &decl.schedules {
-            write_maintenance_spec(&node_dir, d, &id).expect("built-in default must be writable");
-        }
+        assert!(
+            !spec_path.exists(),
+            "no declaration must mean no schedule is written"
+        );
     }
 
     #[test]

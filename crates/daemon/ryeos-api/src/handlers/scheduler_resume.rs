@@ -1,6 +1,8 @@
 //! `scheduler.resume` — re-enable a paused schedule.
 //!
-//! Ownership check: callers can only resume their own schedules.
+//! Ownership check: callers resume their own schedules; node-owned
+//! schedules (daemon maintenance registrations) accept any verified
+//! local operator.
 
 use std::sync::Arc;
 
@@ -34,7 +36,14 @@ pub async fn handle(
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .ok_or(HandlerError::NotFound)?;
 
-    ctx.require_owner(Some(&spec.requester_fingerprint))?;
+    // Same operator carve-out as scheduler_pause: node-owned schedules are
+    // controllable by any verified local operator; everyone else controls
+    // only their own.
+    if spec.requester_fingerprint == state.identity.fingerprint() {
+        ctx.require_verified()?;
+    } else {
+        ctx.require_owner(Some(&spec.requester_fingerprint))?;
+    }
 
     if spec.enabled {
         return Ok(serde_json::json!({
