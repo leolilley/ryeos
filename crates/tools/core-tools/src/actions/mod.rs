@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod hosted_policy;
 pub mod inspect;
 pub mod install;
+pub mod manifest_audit;
 pub mod manifest_sign;
 pub mod node_logs;
 pub mod publish;

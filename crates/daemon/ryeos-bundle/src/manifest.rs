@@ -112,6 +112,26 @@ pub fn validate_smoke_decls(decls: &[SmokeDecl]) -> Result<()> {
     Ok(())
 }
 
+/// Validate a `shadows:` declaration list: every entry must be a canonical
+/// `<kind>:<bare-id>` ref (so it can match a shipped item by exact ref) and
+/// entries must be unique.
+pub fn validate_shadow_decls(shadows: &[String]) -> Result<()> {
+    let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for shadow in shadows {
+        match shadow.split_once(':') {
+            Some((kind, bare)) if !kind.trim().is_empty() && !bare.trim().is_empty() => {}
+            _ => bail!(
+                "invalid shadow ref '{}': expected a canonical `<kind>:<bare-id>` ref",
+                shadow
+            ),
+        }
+        if !seen.insert(shadow.as_str()) {
+            bail!("duplicate shadow declaration '{}'", shadow);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifestSource {
@@ -130,6 +150,14 @@ pub struct BundleManifestSource {
     /// never declared it byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub smoke: Vec<SmokeDecl>,
+    /// Declared config shadows: canonical refs this bundle deliberately ships
+    /// under a foreign namespace to override another bundle's config via
+    /// project-first resolution. Signed intent the namespace lint verifies
+    /// against what the bundle actually ships, so a deliberate override is
+    /// distinguishable from an accidental foreign-namespace item. Absent in
+    /// most manifests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -150,6 +178,10 @@ pub struct BundleManifest {
     /// so the generated (signed) manifest states them too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub smoke: Vec<SmokeDecl>,
+    /// Declared config shadows, carried verbatim from the source manifest so
+    /// the generated (signed) manifest states the override intent too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<String>,
 }
 
 pub fn derive_provides_kinds(ai_dir: &Path) -> Result<Vec<String>> {
@@ -197,6 +229,8 @@ pub fn materialize_manifest(
         .map_err(|e| anyhow::anyhow!("invalid `runtime_authority` declaration: {e}"))?;
     validate_smoke_decls(&source.smoke)
         .map_err(|e| anyhow::anyhow!("invalid `smoke` declaration: {e}"))?;
+    validate_shadow_decls(&source.shadows)
+        .map_err(|e| anyhow::anyhow!("invalid `shadows` declaration: {e}"))?;
     let provides_kinds = derive_provides_kinds(ai_dir)?;
     Ok(BundleManifest {
         name: source.name,
@@ -207,6 +241,7 @@ pub fn materialize_manifest(
         uses_kinds: source.uses_kinds,
         runtime_authority: source.runtime_authority,
         smoke: source.smoke,
+        shadows: source.shadows,
     })
 }
 
@@ -894,6 +929,7 @@ typo_field: oops
             uses_kinds: vec![],
             runtime_authority: RuntimeAuthorityDecls::default(),
             smoke: vec![],
+            shadows: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
@@ -921,6 +957,7 @@ typo_field: oops
                 ..Default::default()
             },
             smoke: vec![],
+            shadows: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "arc").unwrap_err();
         assert!(
@@ -1084,6 +1121,7 @@ smoke:
                 inputs: serde_json::Value::Null,
                 timeout_secs: None,
             }],
+            shadows: vec![],
         };
         let manifest = materialize_manifest(source.clone(), &ai_dir, "probe").unwrap();
         assert_eq!(manifest.smoke, source.smoke);
@@ -1091,6 +1129,76 @@ smoke:
         source.smoke[0].item_ref = "no-colon".to_string();
         let err = materialize_manifest(source, &ai_dir, "probe").unwrap_err();
         assert!(err.to_string().contains("smoke"), "{err}");
+    }
+
+    #[test]
+    fn shadows_absent_parses_empty_and_reserializes_without_field() {
+        let yaml = "name: test\nversion: \"1.0\"\n";
+        let source: BundleManifestSource = serde_yaml::from_str(yaml).unwrap();
+        assert!(source.shadows.is_empty());
+        let out = serde_yaml::to_string(&source).unwrap();
+        assert!(!out.contains("shadows"), "unexpected shadows key: {out}");
+    }
+
+    #[test]
+    fn shadows_present_parses_and_materialize_carries_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("downstream/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+
+        let yaml = r#"
+name: downstream
+version: "1.0"
+shadows:
+  - config:ryeos-runtime/execution
+  - config:ryeos-runtime/limits
+"#;
+        let source: BundleManifestSource = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            source.shadows,
+            vec![
+                "config:ryeos-runtime/execution".to_string(),
+                "config:ryeos-runtime/limits".to_string(),
+            ]
+        );
+
+        let manifest = materialize_manifest(source.clone(), &ai_dir, "downstream").unwrap();
+        assert_eq!(manifest.shadows, source.shadows);
+    }
+
+    #[test]
+    fn shadows_validation_rejects_malformed_and_duplicate_refs() {
+        let err = validate_shadow_decls(&["not-a-ref".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+
+        let err = validate_shadow_decls(&[":missing-kind".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("canonical"), "{err}");
+
+        let err = validate_shadow_decls(&[
+            "config:a/b".to_string(),
+            "config:a/b".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn materialize_rejects_malformed_shadow_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("downstream/.ai");
+        fs::create_dir_all(&ai_dir).unwrap();
+        let source = BundleManifestSource {
+            name: "downstream".to_string(),
+            version: "1.0".to_string(),
+            description: String::new(),
+            requires_kinds: vec![],
+            uses_kinds: vec![],
+            runtime_authority: RuntimeAuthorityDecls::default(),
+            smoke: vec![],
+            shadows: vec!["no-colon".to_string()],
+        };
+        let err = materialize_manifest(source, &ai_dir, "downstream").unwrap_err();
+        assert!(err.to_string().contains("shadows"), "{err}");
     }
 
     #[test]
