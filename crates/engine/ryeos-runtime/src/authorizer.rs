@@ -418,6 +418,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn path_prefix_grant_covers_subtree_but_respects_the_slash_boundary() {
+        // `ns/*` covers the namespace subtree at any depth…
+        assert!(cap_matches(
+            "ryeos.execute.tool.arc/*",
+            "ryeos.execute.tool.arc/explore"
+        ));
+        assert!(cap_matches(
+            "ryeos.execute.tool.arc/*",
+            "ryeos.execute.tool.arc/lib/goal"
+        ));
+        // …but the slash is literal: no bleed into sibling names or the
+        // bare namespace-named item.
+        assert!(!cap_matches(
+            "ryeos.execute.tool.arc/*",
+            "ryeos.execute.tool.arcane"
+        ));
+        assert!(!cap_matches(
+            "ryeos.execute.tool.arc/*",
+            "ryeos.execute.tool.arc"
+        ));
+    }
+
     // ── RequiredPattern parsing ───────────────────────────────────
 
     #[test]
@@ -849,6 +872,14 @@ mod tests {
 /// - `ryeos.<verb>.*` — any kind/subject for a specific verb
 /// - `ryeos.<verb>.<kind>.*` — any subject for a specific verb+kind
 /// - `ryeos.<verb>.<kind>.<subject>.*` — path-prefix subject wildcard
+/// - `ryeos.<verb>.<kind>.<ns>/*` — slash path-prefix subject wildcard:
+///   grants the whole `/`-namespace subtree (the matcher's documented
+///   path-prefix case, and the shape manifest runtime-authority caps
+///   already mint, e.g. `ryeos.author.knowledge.runtime-authored/*`).
+///   The `*` must be the TRAILING path piece of the FINAL segment — it
+///   can never sit in the verb/kind position or mid-path, so it cannot
+///   cut across the whole-segment overlap classification that guards
+///   manifest-only authority.
 /// - `*` — full wildcard (operator/node only — accepted as grammar
 ///   here; the wildcard-rejection policy lives in the TOML writer)
 ///
@@ -884,8 +915,9 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
             scope
         ));
     }
-    // Validate each segment's character class. `*` is permitted only
-    // as a complete segment.
+    // Validate each segment's character class. `*` is permitted as a
+    // complete segment, or as the trailing path piece of the final
+    // segment (the `ns/*` path-prefix grant).
     let parts: Vec<&str> = scope.split('.').collect();
     // Minimum canonical: ryeos.<verb>.* (3 segments) or ryeos.<verb>.<kind>.<subject> (4+).
     // `ryeos.*` and `ryeos.<verb>.*` are valid wildcard prefixes.
@@ -909,26 +941,41 @@ pub fn validate_scope_pattern(scope: &str) -> Result<(), String> {
             scope
         ));
     }
-    for segment in &parts {
+    let last_segment = parts.len() - 1;
+    for (idx, segment) in parts.iter().enumerate() {
         if segment.is_empty() {
             return Err(format!("scope '{}' has an empty segment", scope));
         }
         if *segment == "*" {
             continue;
         }
-        for ch in segment.chars() {
-            if !ch.is_ascii_lowercase()
-                && !ch.is_ascii_digit()
-                && ch != '-'
-                && ch != '_'
-                && ch != '/'
-            {
+        // Within a segment, validate each '/'-separated piece. A `*` piece is
+        // the slash path-prefix grant (`arc/*`) — admitted only as the
+        // trailing piece of the scope's final segment.
+        let pieces: Vec<&str> = segment.split('/').collect();
+        let last_piece = pieces.len() - 1;
+        for (pi, piece) in pieces.iter().enumerate() {
+            if *piece == "*" {
+                if idx == last_segment && pi == last_piece {
+                    continue;
+                }
                 return Err(format!(
-                    "scope '{}' segment '{}' contains invalid character '{}': \
-                     only lowercase a-z, 0-9, '-', '_', '/' allowed \
-                     (or '*' as a complete segment)",
-                    scope, segment, ch
+                    "scope '{}' segment '{}': '*' in a path is only admitted as \
+                     the trailing piece of the subject (a path-prefix grant \
+                     like 'ryeos.execute.tool.ns/*')",
+                    scope, segment
                 ));
+            }
+            for ch in piece.chars() {
+                if !ch.is_ascii_lowercase() && !ch.is_ascii_digit() && ch != '-' && ch != '_' {
+                    return Err(format!(
+                        "scope '{}' segment '{}' contains invalid character '{}': \
+                         only lowercase a-z, 0-9, '-', '_', '/' allowed \
+                         (or '*' as a complete segment, or a trailing '/*' \
+                         path wildcard)",
+                        scope, segment, ch
+                    ));
+                }
             }
         }
     }
@@ -972,6 +1019,34 @@ mod validate_scope_pattern_tests {
         assert!(validate_scope_pattern("ryeos.execute.*").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.*").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.bundle.*").is_ok());
+    }
+
+    #[test]
+    fn accepts_trailing_slash_path_prefix_wildcard() {
+        assert!(validate_scope_pattern("ryeos.execute.tool.arc/*").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.directive.arc/*").is_ok());
+        assert!(validate_scope_pattern("ryeos.execute.tool.ryeos/file-system/*").is_ok());
+        // The shape manifest runtime-authority caps already mint.
+        assert!(validate_scope_pattern("ryeos.author.knowledge.runtime-authored/*").is_ok());
+    }
+
+    #[test]
+    fn rejects_non_trailing_path_wildcards() {
+        // Embedded in a piece, leading, mid-path, or outside the final
+        // segment — all refused; only the trailing path-prefix form is a
+        // well-defined grant.
+        for scope in [
+            "ryeos.execute.tool.ar*",
+            "ryeos.execute.tool.*/explore",
+            "ryeos.execute.tool.arc/*/deep",
+            "ryeos.execute.tool.arc/*.tail",
+            "ryeos.exe/*.tool.x",
+        ] {
+            assert!(
+                validate_scope_pattern(scope).is_err(),
+                "{scope} should be rejected"
+            );
+        }
     }
 
     #[test]

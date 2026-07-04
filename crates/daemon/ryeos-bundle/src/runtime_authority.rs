@@ -587,9 +587,10 @@ pub enum ComposedGrantError {
     /// Not a canonical `ryeos.<verb>.<kind>.<subject>` scope — e.g. a partial
     /// wildcard like `ryeos.p*.vault.*` or a `?` glob. The authorizer's matcher
     /// honors `*`/`?` anywhere, but the scope grammar permits `*` only as a
-    /// whole segment; admitting a partial-wildcard grant would let it slip past
-    /// the whole-segment overlap classification yet still satisfy a
-    /// runtime-authority requirement. Refused outright.
+    /// whole segment or as the subject's trailing path piece (`ns/*`) — never
+    /// in the verb/kind position; admitting a partial-wildcard grant would let
+    /// it slip past the whole-segment overlap classification yet still satisfy
+    /// a runtime-authority requirement. Refused outright.
     Malformed { grant: String, reason: String },
     /// A well-formed grant that overlaps the manifest runtime-authority
     /// namespace (bundle events / vault / item authoring).
@@ -765,6 +766,31 @@ mod tests {
             "ryeos.author.knowledge.*",
             "ryeos.put.*",
             "ryeos.*",
+        ] {
+            let err = reject_disallowed_composed_grants(&[grant.into()]).unwrap_err();
+            assert!(
+                matches!(err, ComposedGrantError::Reserved { .. }),
+                "expected reserved for {grant}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subject_path_wildcard_is_admitted_but_cannot_evade_reserved_surfaces() {
+        // The trailing `/*` subject wildcard is valid grammar for ordinary
+        // execute grants (the fleet-parent namespace case)…
+        assert!(reject_disallowed_composed_grants(&[
+            "ryeos.execute.tool.arc/*".into(),
+            "ryeos.execute.directive.arc/*".into(),
+        ])
+        .is_ok());
+        // …and because classification keys on the verb/kind segments — which
+        // the subject wildcard never touches — a path wildcard on a
+        // manifest-authority surface still classifies Reserved.
+        for grant in [
+            "ryeos.append.bundle-events.ns/*",
+            "ryeos.put.vault.b/*",
+            "ryeos.author.knowledge.runtime-authored/*",
         ] {
             let err = reject_disallowed_composed_grants(&[grant.into()]).unwrap_err();
             assert!(
