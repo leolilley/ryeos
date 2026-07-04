@@ -250,6 +250,7 @@ pub fn bootstrap(
             context_positions,
             hooks,
             outputs: header.outputs,
+            return_nudge: header.return_nudge,
             continuation: header.continuation,
             continuation_runtime,
             risk_policy,

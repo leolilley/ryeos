@@ -45,6 +45,10 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
             bail!("stale daemon metadata: {}", diagnostics.message)
         }
         LifecycleStatus::Running { ref metadata } => metadata.uds_path.clone(),
+        // Busy-but-alive: proceed with the normal stop flow — the graceful
+        // shutdown call may itself time out, after which the deadline/force
+        // path below applies.
+        LifecycleStatus::Unresponsive { ref metadata, .. } => metadata.uds_path.clone(),
     };
 
     // Send shutdown to the UDS that just proved the daemon is alive,
@@ -77,7 +81,7 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
                     already_stopped: false,
                 })
             }
-            LifecycleStatus::Running { .. } => {}
+            LifecycleStatus::Running { .. } | LifecycleStatus::Unresponsive { .. } => {}
         }
 
         if Instant::now() >= deadline {

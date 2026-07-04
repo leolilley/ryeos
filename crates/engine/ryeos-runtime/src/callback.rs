@@ -124,6 +124,26 @@ pub struct ActionPayload {
     pub facets: Option<Value>,
 }
 
+/// Wire keys of [`ActionPayload`], for code that handles an action as a raw
+/// `Value` map (the graph walker builds/folds/interpolates actions untyped
+/// before dispatch). One source of truth: adding a field to `ActionPayload`
+/// means adding its key here and deciding whether `interpolate_action`
+/// resolves templates inside it — a literal that drifts from the struct is
+/// how `facets` shipped uninterpolated.
+pub mod action_keys {
+    pub const ITEM_ID: &str = "item_id";
+    pub const PARAMS: &str = "params";
+    pub const THREAD: &str = "thread";
+    pub const CALL: &str = "call";
+    pub const FACETS: &str = "facets";
+
+    /// Keys whose values may carry `${…}` templates and are resolved by
+    /// `interpolate_action`. `THREAD` stays literal (a dispatch mode, never
+    /// a template); `CALL.method` is literal but `CALL.args` interpolates,
+    /// so the whole block is included.
+    pub const INTERPOLATED: &[&str] = &[ITEM_ID, PARAMS, CALL, FACETS];
+}
+
 /// Runtime-owned control keys carried in dispatch/launch params — parent budget,
 /// parent thread, tree depth, and the continuation seed. Defined ONCE here (the
 /// crate both the graph dispatcher and the executor launch depend on) so the

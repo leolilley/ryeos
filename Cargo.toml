@@ -31,7 +31,9 @@ resolver = "2"
 
 [profile.release]
 lto = "thin"
-strip = "symbols"
+# Keep the symbol table (debuginfo is already absent at debug=0) so a live
+# process can be stack-dumped with named frames; costs a few MB per binary.
+strip = "debuginfo"
 
 [workspace.dependencies]
 # Internal crates

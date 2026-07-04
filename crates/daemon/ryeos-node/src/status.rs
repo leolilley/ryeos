@@ -23,6 +23,15 @@ pub enum LifecycleStatus {
         metadata: DaemonMetadata,
         diagnostics: StaleDiagnostics,
     },
+    /// A control probe reached a socket but the RPC bound elapsed without
+    /// an answer — a live-but-busy daemon (e.g. under a launch burst), not
+    /// a dead one. Distinct from `Stale` (refused/missing socket) because
+    /// the remediations are opposite: this clears on its own; starting a
+    /// replacement daemon would double-run.
+    Unresponsive {
+        metadata: DaemonMetadata,
+        diagnostics: StaleDiagnostics,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,12 +62,24 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
     let candidates = env.uds_candidates_from_hint(metadata_hint.as_ref());
     let timeout = env.rpc_timeout();
 
+    // A probe that TIMES OUT (vs. refused/missing) means something is
+    // listening but too busy to answer within the bound — classified
+    // separately below so a busy daemon is never reported as stale.
+    let mut probe_timed_out = false;
     for control_path in &candidates {
         let value = match crate::control::call(control_path, "lifecycle.status", json!({}), timeout)
             .await
         {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(err) => {
+                if err
+                    .downcast_ref::<crate::control::ControlCallTimeout>()
+                    .is_some()
+                {
+                    probe_timed_out = true;
+                }
+                continue;
+            }
         };
 
         // Guard: a successful RPC must explicitly report "running"
@@ -139,6 +160,19 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
 
     // No UDS responded.
     match metadata_hint {
+        Some(metadata) if probe_timed_out => {
+            let probed: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+            Ok(LifecycleStatus::Unresponsive {
+                metadata,
+                diagnostics: StaleDiagnostics {
+                    message: format!(
+                        "lifecycle control accepted a probe but did not answer within {timeout:?} \
+                         at: {} — the daemon appears alive but busy",
+                        probed.join(", ")
+                    ),
+                },
+            })
+        }
         Some(metadata) => {
             let probed: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
             Ok(LifecycleStatus::Stale {
@@ -221,6 +255,44 @@ mod tests {
 
         let status = status(&env).await.unwrap();
         assert!(matches!(status, LifecycleStatus::Stale { .. }));
+    }
+
+    #[tokio::test]
+    async fn accepted_but_silent_control_socket_is_unresponsive_not_stale() {
+        // A listener that accepts the probe but never answers is a busy live
+        // daemon; misclassifying it as Stale prescribes `ryeos start` — the
+        // wrong remediation (it would double-run).
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        std::fs::create_dir_all(config.uds_path.parent().unwrap()).unwrap();
+        DaemonMetadata {
+            pid: Some(4242),
+            bind: Some(config.bind.to_string()),
+            uds_path: Some(config.uds_path.clone()),
+            started_at: Some("now".to_string()),
+            version: Some("test".to_string()),
+            revision: None,
+            build_date: None,
+            app_root: config.app_root.clone(),
+        }
+        .write(&config.app_root)
+        .unwrap();
+
+        let listener = tokio::net::UnixListener::bind(&config.uds_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _request = read_frame(&mut stream).await;
+            std::future::pending::<()>().await;
+        });
+
+        let status = status(&env).await.unwrap();
+        server.abort();
+        assert!(
+            matches!(status, LifecycleStatus::Unresponsive { .. }),
+            "accepted-but-silent socket should be Unresponsive, got: {status:?}"
+        );
     }
 
     #[tokio::test]

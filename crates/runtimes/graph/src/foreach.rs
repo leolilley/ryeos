@@ -190,10 +190,13 @@ pub async fn run_foreach_sequential(
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
 
-        let action = match &node.action {
+        let mut action = match &node.action {
             Some(a) => a.clone(),
             None => continue,
         };
+        // Fold BEFORE interpolation so per-item facet templates resolve with
+        // the iteration variable in scope.
+        node.fold_detach_into_action(&mut action);
 
         let interpolated = match ryeos_runtime::interpolate_action(&action, &item_ctx_val) {
             Ok(v) => v,
@@ -229,7 +232,27 @@ pub async fn run_foreach_sequential(
         .await
         {
             Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
+                let crate::dispatch::ActionSuccess {
+                    result: val,
+                    cost,
+                    child_thread_id,
+                } = success;
+                // Same portable dispatch-lineage contract as the plain action
+                // path — see the parallel runner for the rationale.
+                if let Some(ref child_id) = child_thread_id {
+                    let _ = client
+                        .append_runtime_event(
+                            RuntimeEventType::ChildThreadSpawned,
+                            serde_json::json!({
+                                "child_thread_id": child_id,
+                                "node": retry_ev.node,
+                                "step": retry_ev.step,
+                                "item_id": item_dispatch_id,
+                                "spawn_reason": "dispatch",
+                            }),
+                        )
+                        .await;
+                }
                 add_cost(&mut total_cost, cost);
                 // Interpolate assign BEFORE committing the result, so an
                 // assign failure makes this item a Null/error — matching
@@ -340,13 +363,16 @@ pub async fn run_foreach_parallel(
             execution: Some(exec_ctx.as_context_value()),
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
-        let action = match &node.action {
+        let mut action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 drop(permit);
                 continue;
             }
         };
+        // Fold BEFORE interpolation so per-item facet templates resolve with
+        // the iteration variable in scope.
+        node.fold_detach_into_action(&mut action);
 
         // Interpolate before spawning. On failure, push an immediate-error
         // task (NOT a raw-template dispatch) so handle ordering — and thus
@@ -396,7 +422,30 @@ pub async fn run_foreach_parallel(
             .await
             {
                 Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                    let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
+                    let crate::dispatch::ActionSuccess {
+                        result: val,
+                        cost,
+                        child_thread_id,
+                    } = success;
+                    // Same portable dispatch-lineage contract as the plain
+                    // action path: a spawned native child lands in the parent's
+                    // braid as `child_thread_spawned`, so the fanout cohort is
+                    // drillable from the parent (fire-and-forget append — a
+                    // callback failure must not fail the iteration).
+                    if let Some(ref child_id) = child_thread_id {
+                        let _ = client
+                            .append_runtime_event(
+                                RuntimeEventType::ChildThreadSpawned,
+                                serde_json::json!({
+                                    "child_thread_id": child_id,
+                                    "node": retry_ev.node,
+                                    "step": retry_ev.step,
+                                    "item_id": item_dispatch_id,
+                                    "spawn_reason": "dispatch",
+                                }),
+                            )
+                            .await;
+                    }
                     let assign_val = if let Some(ref assign_expr) = assign {
                         let mut assign_ctx_map =
                             assign_ctx_base.as_object().cloned().unwrap_or_default();

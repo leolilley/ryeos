@@ -32,6 +32,15 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
             })
         }
         LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => {}
+        LifecycleStatus::Unresponsive { diagnostics, .. } => {
+            // A busy daemon is still a daemon — starting a second one here
+            // would double-run against the same state.
+            bail!(
+                "a daemon appears to be running but did not answer the control probe \
+                 ({}); retry shortly, or `ryeos stop` it first",
+                diagnostics.message
+            )
+        }
     }
 
     let _start_lock = loop {

@@ -43,7 +43,12 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
 
         let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
 
-        let span = tracing::debug_span!(
+        // INFO so the ndjson sink records span NEW/CLOSE per request — a
+        // request that arrives and never closes is then attributable by
+        // method + request_id + thread_id from the trace alone. Entered via
+        // `instrument` (not a held `enter()` guard, which detaches from the
+        // task across `.await`).
+        let span = tracing::info_span!(
             "uds:request",
             method = %request.method,
             request_id = %request.request_id,
@@ -53,9 +58,8 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
         if let Some(tid) = request.params.get("thread_id").and_then(|v| v.as_str()) {
             span.record("thread_id", tid);
         }
-        let _enter = span.enter();
 
-        let response = dispatch(request, &state).await;
+        let response = tracing::Instrument::instrument(dispatch(request, &state), span).await;
 
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;

@@ -1116,6 +1116,33 @@ impl Walker {
                 let var = node.foreach_var().to_string();
                 let parallel = node.parallel;
 
+                // The whole iteration set runs inside this ONE walker step, and
+                // step lifecycle events are committed only after the body
+                // settles — emit a braid-visible start marker first, so an
+                // in-flight fanout reads as "foreach running, N items" instead
+                // of silence after `graph_started`.
+                {
+                    let r = self
+                        .client
+                        .append_runtime_event(
+                            RuntimeEventType::GraphForeachStarted,
+                            json!({
+                                "graph_run_id": graph_run_id,
+                                "definition_ref": &self.graph.definition_ref,
+                                "definition_hash": &self.graph.definition_hash,
+                                "node": current,
+                                "node_ref": node_ref(&self.graph.definition_ref, current),
+                                "step": step,
+                                "total": items.len(),
+                                "parallel": parallel,
+                                "max_concurrency": node.max_concurrency,
+                                "detach": node.detach,
+                            }),
+                        )
+                        .await;
+                    self.record_callback_warning("graph_foreach_started", r);
+                }
+
                 let foreach_run = if parallel {
                     foreach::run_foreach_parallel(
                         foreach::ForeachContext {
@@ -1274,20 +1301,12 @@ impl Walker {
 
         // A `detach: true` node launches a lineage-linked, cohort-tagged child
         // that runs concurrently while this walk continues — the native fanout
-        // primitive (`foreach → launch`). Route it by setting the dispatch mode
-        // to `detached` (the daemon's `spawn_detached_child`) and folding the
-        // node's `facets:` into the action so they interpolate alongside it
-        // (`fleet=${run_id}`) and the daemon stamps them on the child. `detach`
-        // and `follow` are mutually exclusive (enforced at validation); a detach
-        // node never suspends, so it flows straight to dispatch below.
-        if node.detach {
-            if let Some(obj) = action.as_object_mut() {
-                obj.insert("thread".to_string(), json!("detached"));
-                if let Some(facets) = &node.facets {
-                    obj.insert("facets".to_string(), facets.clone());
-                }
-            }
-        }
+        // primitive (`foreach → launch`). The fold routes it to the daemon's
+        // `spawn_detached_child` and carries the node's `facets:` for per-child
+        // stamping. `detach` and `follow` are mutually exclusive (enforced at
+        // validation); a detach node never suspends, so it flows straight to
+        // dispatch below.
+        node.fold_detach_into_action(&mut action);
 
         let item_id = action
             .get("item_id")

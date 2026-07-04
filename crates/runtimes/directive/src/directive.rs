@@ -52,6 +52,13 @@ pub struct DirectiveHeader {
     pub hooks: Option<Vec<Value>>,
     #[serde(default)]
     pub continuation: ContinuationConfig,
+    /// Opt-in corrective turn: when the directive declares `outputs` and a
+    /// run is about to settle without a successful `directive_return`, grant
+    /// ONE extra turn that names the missing call before settling with empty
+    /// outputs. Default off — a directive that does not opt in settles
+    /// exactly as its final turn left it.
+    #[serde(default)]
+    pub return_nudge: bool,
 }
 
 /// Allow-list of composed-view top-level keys the runtime decodes
@@ -68,6 +75,7 @@ pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
     "context",
     "hooks",
     "continuation",
+    "return_nudge",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,6 +304,8 @@ pub struct BootstrapConfig {
     pub context_positions: HashMap<String, Vec<String>>,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
+    #[serde(default)]
+    pub return_nudge: bool,
     #[serde(default)]
     pub continuation: ContinuationConfig,
     #[serde(default)]

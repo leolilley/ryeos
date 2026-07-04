@@ -129,6 +129,35 @@ impl GraphNode {
     pub fn foreach_var(&self) -> &str {
         self.r#as.as_deref().unwrap_or("item")
     }
+
+    /// Fold the node's `detach` dispatch mode into a cloned action: set
+    /// `thread: "detached"` and carry the node's `facets:` templates so they
+    /// interpolate alongside the action (per iteration under `over:`, with the
+    /// item variable in scope) and the daemon stamps them on the child at
+    /// spawn. No-op unless `detach: true`.
+    ///
+    /// Every action clone site that dispatches (plain action node, sequential
+    /// foreach, parallel foreach) must route through this fold BEFORE
+    /// interpolation — `dispatch_action` defaults a missing `thread` to
+    /// `"inline"`, which launches the child as a blocking inline run and holds
+    /// the callback connection for the child's entire lifetime.
+    pub fn fold_detach_into_action(&self, action: &mut Value) {
+        if !self.detach {
+            return;
+        }
+        if let Some(obj) = action.as_object_mut() {
+            obj.insert(
+                ryeos_runtime::callback::action_keys::THREAD.to_string(),
+                Value::String("detached".to_string()),
+            );
+            if let Some(facets) = &self.facets {
+                obj.insert(
+                    ryeos_runtime::callback::action_keys::FACETS.to_string(),
+                    facets.clone(),
+                );
+            }
+        }
+    }
 }
 
 /// Per-step retry policy on an action node.

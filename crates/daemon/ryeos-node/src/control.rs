@@ -30,10 +30,38 @@ struct RpcError {
     message: String,
 }
 
+/// Marker error for a lifecycle RPC that exhausted its bound — a
+/// live-but-busy peer (or a full listener backlog). Callers downcast to
+/// keep this distinct from refused/missing-socket failures, which fail
+/// fast with io errors: the two conditions have opposite remediations,
+/// and collapsing them misreports a busy daemon as a dead one.
+#[derive(Debug)]
+pub struct ControlCallTimeout {
+    pub timeout: Duration,
+    pub method: String,
+    pub uds_path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for ControlCallTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lifecycle rpc timed out after {:?} for {} on {}",
+            self.timeout,
+            self.method,
+            self.uds_path.display()
+        )
+    }
+}
+
+impl std::error::Error for ControlCallTimeout {}
+
 /// Perform a single lifecycle RPC bounded by `timeout`.
 ///
 /// The timeout wraps the entire round trip (connect + write + read +
-/// decode); a wedged peer cannot stall the caller past `timeout`.
+/// decode); a wedged peer cannot stall the caller past `timeout`. An
+/// elapsed bound surfaces as [`ControlCallTimeout`] so callers can
+/// classify busy separately from dead.
 pub async fn call(
     uds_path: &Path,
     method: &str,
@@ -43,12 +71,11 @@ pub async fn call(
     tokio::time::timeout(timeout, call_inner(uds_path, method, params))
         .await
         .map_err(|_| {
-            anyhow!(
-                "lifecycle rpc timed out after {:?} for {} on {}",
+            anyhow::Error::new(ControlCallTimeout {
                 timeout,
-                method,
-                uds_path.display()
-            )
+                method: method.to_string(),
+                uds_path: uds_path.to_path_buf(),
+            })
         })?
 }
 
