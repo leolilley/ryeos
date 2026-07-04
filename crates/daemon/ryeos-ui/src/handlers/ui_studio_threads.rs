@@ -60,21 +60,15 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     // widens the list rather than emptying it. Seat auth is unchanged: a
     // browser session is admin context, so there is no owner (`principal`)
     // scope — these are operator-chosen facets, not an authorization boundary.
-    let facet_key = string_filter(&params, "facet_key");
-    let facet_value = string_filter(&params, "facet_value");
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
         principal: None,
         status: string_filter(&params, "status"),
         kind: string_filter(&params, "kind"),
         requested_by: string_filter(&params, "requested_by"),
-        facet: facet_key.clone().zip(facet_value.clone()),
-        // A facet KEY with no value is cohort PRESENCE — every thread in some
-        // fleet run, across runs — the generic whole-run landing's filter. A
-        // key+value pair stays exact cohort membership (one specific run).
-        facet_key_present: match (&facet_key, &facet_value) {
-            (Some(key), None) => Some(key.clone()),
-            _ => None,
-        },
+        facet: string_filter(&params, "facet_key").zip(string_filter(&params, "facet_value")),
+        // `active: true` narrows to the agent's live (non-terminal) threads —
+        // the activity view's landing filter.
+        active_only: params.get("active").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored

@@ -16,13 +16,13 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Open on the whole-run view: the fleet cohort (threads carrying a `fleet` tag,
-# newest first) is the landing lens, so the TUI opens on the run rather than a
-# flat thread list. Drilling into a cohort thread swaps the single center lens
-# to its braid (chain/timeline), which itself shows that thread's children as
-# drill-ins. Breadth is swapping the lens, never arranging panes.
+# Open on the agent's live activity: its active (non-terminal) threads, newest
+# first — what the one key is running now, not the settled history. Drilling
+# into a thread swaps the single center lens to its braid (chain/timeline),
+# which itself shows that thread's children as drill-ins. Breadth is swapping
+# the lens, never arranging panes.
 tiles:
-  - "view:ryeos/run/fleet"
+  - "view:ryeos/run/activity"
 
 # Only the foot input and a thin top status strip — no edge panes.
 slots:
@@ -36,7 +36,7 @@ backdrop: view:ryeos/backdrop/shard
 
 # The full lens set — swap the single center lens to reach any of these.
 library:
-  - view:ryeos/run/fleet
+  - view:ryeos/run/activity
   - view:ryeos/chain/timeline
   - view:ryeos/studio/status
   - view:ryeos/input

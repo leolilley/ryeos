@@ -396,11 +396,9 @@ pub struct ThreadListFilter {
     /// (e.g. `("fleet", "<run id>")`). Exact match — a cohort id is not a
     /// substring search.
     pub facet: Option<(String, String)>,
-    /// Cohort PRESENCE: keep only threads carrying facet `key` with ANY value
-    /// (e.g. `"fleet"` — every thread that belongs to some fleet run, across
-    /// runs). The generic whole-run landing reads this: it does not know a
-    /// specific fleet id, only that fleet-tagged threads are the cohort.
-    pub facet_key_present: Option<String>,
+    /// Keep only ACTIVE (non-terminal) threads — the agent's live cognition,
+    /// what the one key is running now rather than the settled history.
+    pub active_only: bool,
 }
 
 pub fn list_threads_sorted(
@@ -484,9 +482,14 @@ pub fn list_threads_query(
         params.push(key);
         params.push(value_bytes);
     }
-    if let Some(key) = &filter.facet_key_present {
-        conditions.push("thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ?)");
-        params.push(key);
+    if filter.active_only {
+        // Active = not terminal. The six terminal statuses are stable substrate
+        // vocabulary (see TERMINAL_STATUSES), inlined as a fixed placeholder
+        // list so this stays a borrowed &str condition.
+        conditions.push("status NOT IN (?, ?, ?, ?, ?, ?)");
+        for status in TERMINAL_STATUSES.iter() {
+            params.push(status);
+        }
     }
     let where_clause = if conditions.is_empty() {
         String::new()
