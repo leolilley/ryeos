@@ -2517,7 +2517,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].cells,
-            ["T-ab", "directive", "directive:ops/base", "running", "fp:claude", "2026-06-29T00:00:00Z"]
+            ["T-ab", "directive", "directive:ops/base", "running", "fp:claude", "", "2026-06-29T00:00:00Z"]
         );
         // Tone reuses the shared status→tone block the rows widget would.
         assert_eq!(rows[0].tone.as_deref(), Some("accent"));
