@@ -95,6 +95,8 @@ pub(crate) struct FoldedTimeline {
     pub entries: Vec<StudioTimelineEntryVm>,
     /// Section index per *visible* entry (parallel to `entries`).
     pub sections: Vec<usize>,
+    /// Call-tree indent depth per *visible* entry (parallel to `entries`).
+    pub indents: Vec<u8>,
     /// Sections that *can* be folded — those headed by a real `Separator`.
     pub collapsible: std::collections::BTreeSet<usize>,
 }
@@ -102,8 +104,11 @@ pub(crate) struct FoldedTimeline {
 /// Apply the operator's folds to a coalesced timeline. A section is foldable
 /// only if it is headed by a `Separator` (section 0 without one can't collapse
 /// to nothing). Collapsed sections keep their header, marked `▸`, body hidden.
+/// `full_indents` is the call-tree depth parallel to `full`; it is filtered in
+/// lockstep with the entries so the visible `indents` stay aligned.
 pub(crate) fn fold_timeline(
     full: Vec<StudioTimelineEntryVm>,
+    full_indents: Vec<u8>,
     collapsed: &std::collections::BTreeSet<usize>,
 ) -> FoldedTimeline {
     let section_of = timeline_sections(&full);
@@ -118,6 +123,7 @@ pub(crate) fn fold_timeline(
     }
     let mut entries = Vec::new();
     let mut sections = Vec::new();
+    let mut indents = Vec::new();
     for (i, entry) in full.into_iter().enumerate() {
         let sec = section_of[i];
         let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
@@ -136,16 +142,39 @@ pub(crate) fn fold_timeline(
         };
         entries.push(entry);
         sections.push(sec);
+        indents.push(full_indents.get(i).copied().unwrap_or(0));
     }
     FoldedTimeline {
         entries,
         sections,
+        indents,
         collapsible,
     }
 }
 
+/// Entries without the indent vector — a test convenience over
+/// [`timeline_entries_indented`]. Only the indent-aware form is used in the
+/// render path, so this is compiled for tests alone.
+#[cfg(test)]
 pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimelineEntryVm> {
+    timeline_entries_indented(records).0
+}
+
+/// Build the timeline entries AND a parallel indent depth per entry, so a graph
+/// braid reads as a call tree: a graph node's tool calls and its directive/
+/// sub-graph fork nest one level under the node's step. Depth tracks open graph
+/// steps — a `graph_step_started` opens a level (its own header sits at the
+/// parent depth), `graph_step_completed` closes it; tool calls and cognition in
+/// between inherit the open depth. `indents[i]` is the depth of `entries[i]`;
+/// the two vectors stay the same length (the renderer degrades a mismatch to
+/// depth 0 rather than trusting the index). Only graph steps move the depth —
+/// tool calls and cognition never nest each other.
+pub(crate) fn timeline_entries_indented(
+    records: Vec<ProjectedRecord>,
+) -> (Vec<StudioTimelineEntryVm>, Vec<u8>) {
     let mut entries = Vec::new();
+    let mut indents: Vec<u8> = Vec::new();
+    let mut depth: u8 = 0;
     let mut pending_flow: Option<(String, StudioTone)> = None;
     let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
     // Turn-opening stimulus text per thread, so a failed terminal can recover
@@ -155,139 +184,163 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
     let stimulus = stimulus_by_thread(&records);
 
     for record in records {
-        // Plumbing/stream lifecycle events are the substrate's bookkeeping,
-        // not cognition — drop them so the feed reads as the cognition braid.
-        // Outcomes (completed/failed/cancelled) and usage still render via
-        // execution_entry; cognition and tool calls still render via roles.
-        if is_plumbing_event(&record) {
-            continue;
-        }
-        // Execution milestones (lifecycle, usage, forks) read as an
-        // execution, not as bare default-projection lines.
-        if let Some(entry) = execution_entry(&record, &stimulus) {
-            flush_flow(&mut pending_flow, &mut entries);
-            entries.push(entry);
-            continue;
-        }
-        // Paired runtime exchanges (graph steps, tool calls) have multiple
-        // producer shapes: directive tools emit `{tool, call_id}`, graph
-        // action nodes emit `{item_id, node, step}`. When the authored
-        // projection does not match the producer's shape, the raw event would
-        // otherwise degrade to a bare `event_type` line. Read the stable
-        // payload fields directly and pair start with settle so the tail
-        // remains useful regardless of producer.
-        if let Some(kind) = paired_runtime_kind(&record) {
-            flush_flow(&mut pending_flow, &mut entries);
-            apply_paired_runtime_entry(kind, record, &mut entries, &mut pending_pairs);
-            continue;
-        }
-        // `cognition_in` arrives in two shapes: the run-opening *stimulus*
-        // (`{content}`) and a per-turn marker (`{turn}`). The stimulus is the
-        // operator's turn-opening message — render its content (accent), read
-        // straight from the raw event so a binding that only projects `turn`
-        // can't drop it to raw JSON. The bare turn marker carries no content
-        // and falls through to its boundary separator below.
-        if feed_event_type(&record) == Some(FeedEventType::CognitionIn) {
-            if let Some(content) = record
-                .raw
-                .get("payload")
-                .and_then(|payload| payload.get("content"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|content| !content.is_empty())
-            {
+        // This record's entry depth, and the running open-step depth. A step's
+        // own header sits at the parent depth (compute `d` before incrementing);
+        // a completed step drops back before its (rare) degraded line renders.
+        let d = match feed_event_type(&record) {
+            Some(FeedEventType::GraphStepStarted) => {
+                let d = depth;
+                depth = depth.saturating_add(1);
+                d
+            }
+            Some(FeedEventType::GraphStepCompleted) => {
+                depth = depth.saturating_sub(1);
+                depth
+            }
+            _ => depth,
+        };
+        // One record → 0+ entries. The labeled block lets every early exit fall
+        // through to the single indent-resize below, which pads any entries this
+        // record pushed with `d` — keeping `indents` parallel to `entries`
+        // across the pair-coalescer's in-place updates without threading the
+        // depth through every push site.
+        'record: {
+            // Plumbing/stream lifecycle events are the substrate's bookkeeping,
+            // not cognition — drop them so the feed reads as the cognition braid.
+            // Outcomes (completed/failed/cancelled) and usage still render via
+            // execution_entry; cognition and tool calls still render via roles.
+            if is_plumbing_event(&record) {
+                break 'record;
+            }
+            // Execution milestones (lifecycle, usage, forks) read as an
+            // execution, not as bare default-projection lines.
+            if let Some(entry) = execution_entry(&record, &stimulus) {
                 flush_flow(&mut pending_flow, &mut entries);
-                entries.push(StudioTimelineEntryVm::Line {
-                    primary: content.to_string(),
-                    meta: None,
-                    tone: StudioTone::Accent,
-                    action: None,
-                    secondary_action: None,
-                });
-                continue;
+                entries.push(entry);
+                break 'record;
             }
-        }
-        // A `cognition_out` cut short by a live interrupt: render whatever partial
-        // content it produced (normal tone — it is real, if truncated, cognition),
-        // then a seam separator marking where the cognition was cut and the next
-        // `cognition_in` folds in. Read from the raw event because `cognition_out`
-        // is projected by role, not a FeedEventType.
-        if is_interrupted_cognition_out(&record) {
-            flush_flow(&mut pending_flow, &mut entries);
-            if !record.primary.trim().is_empty() {
-                entries.push(StudioTimelineEntryVm::Block {
-                    text: record.primary.clone(),
-                    tone: tone_from_name(record.tone.as_deref()),
-                });
+            // Paired runtime exchanges (graph steps, tool calls) have multiple
+            // producer shapes: directive tools emit `{tool, call_id}`, graph
+            // action nodes emit `{item_id, node, step}`. When the authored
+            // projection does not match the producer's shape, the raw event would
+            // otherwise degrade to a bare `event_type` line. Read the stable
+            // payload fields directly and pair start with settle so the tail
+            // remains useful regardless of producer.
+            if let Some(kind) = paired_runtime_kind(&record) {
+                flush_flow(&mut pending_flow, &mut entries);
+                apply_paired_runtime_entry(kind, record, &mut entries, &mut pending_pairs);
+                break 'record;
             }
-            entries.push(StudioTimelineEntryVm::Separator {
-                label: "interrupted".to_string(),
-            });
-            continue;
-        }
-        match record.role {
-            TimelineRole::Flow => {
-                if record.primary.is_empty() {
-                    continue;
-                }
-                let tone = tone_from_name(record.tone.as_deref());
-                if let Some((text, existing_tone)) = pending_flow.as_mut() {
-                    text.push_str(&record.primary);
-                    if *existing_tone == StudioTone::Neutral {
-                        *existing_tone = tone;
-                    }
-                } else {
-                    pending_flow = Some((record.primary, tone));
+            // `cognition_in` arrives in two shapes: the run-opening *stimulus*
+            // (`{content}`) and a per-turn marker (`{turn}`). The stimulus is the
+            // operator's turn-opening message — render its content (accent), read
+            // straight from the raw event so a binding that only projects `turn`
+            // can't drop it to raw JSON. The bare turn marker carries no content
+            // and falls through to its boundary separator below.
+            if feed_event_type(&record) == Some(FeedEventType::CognitionIn) {
+                if let Some(content) = record
+                    .raw
+                    .get("payload")
+                    .and_then(|payload| payload.get("content"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|content| !content.is_empty())
+                {
+                    flush_flow(&mut pending_flow, &mut entries);
+                    entries.push(StudioTimelineEntryVm::Line {
+                        primary: content.to_string(),
+                        meta: None,
+                        tone: StudioTone::Accent,
+                        action: None,
+                        secondary_action: None,
+                    });
+                    break 'record;
                 }
             }
-            TimelineRole::Boundary => {
+            // A `cognition_out` cut short by a live interrupt: render whatever partial
+            // content it produced (normal tone — it is real, if truncated, cognition),
+            // then a seam separator marking where the cognition was cut and the next
+            // `cognition_in` folds in. Read from the raw event because `cognition_out`
+            // is projected by role, not a FeedEventType.
+            if is_interrupted_cognition_out(&record) {
                 flush_flow(&mut pending_flow, &mut entries);
+                if !record.primary.trim().is_empty() {
+                    entries.push(StudioTimelineEntryVm::Block {
+                        text: record.primary.clone(),
+                        tone: tone_from_name(record.tone.as_deref()),
+                    });
+                }
                 entries.push(StudioTimelineEntryVm::Separator {
-                    label: record.primary,
+                    label: "interrupted".to_string(),
                 });
+                break 'record;
             }
-            TimelineRole::PairOpen => {
-                flush_flow(&mut pending_flow, &mut entries);
-                let key = record.pair_key.unwrap_or_default();
-                let index = entries.len();
-                entries.push(StudioTimelineEntryVm::Pair {
-                    summary: record.primary,
-                    meta: record.meta,
-                    tone: tone_from_name(record.tone.as_deref()),
-                    pending: true,
-                });
-                pending_pairs.insert(key, index);
-            }
-            TimelineRole::PairClose => {
-                flush_flow(&mut pending_flow, &mut entries);
-                let Some(key) = record.pair_key.as_deref() else {
-                    entries.push(line_entry(record));
-                    continue;
-                };
-                if let Some(index) = pending_pairs.remove(key) {
-                    if let Some(StudioTimelineEntryVm::Pair {
-                        meta,
-                        tone,
-                        pending,
-                        ..
-                    }) = entries.get_mut(index)
-                    {
-                        *meta = record.meta;
-                        *tone = tone_from_name(record.tone.as_deref());
-                        *pending = false;
+            match record.role {
+                TimelineRole::Flow => {
+                    if record.primary.is_empty() {
+                        break 'record;
                     }
-                } else {
+                    let tone = tone_from_name(record.tone.as_deref());
+                    if let Some((text, existing_tone)) = pending_flow.as_mut() {
+                        text.push_str(&record.primary);
+                        if *existing_tone == StudioTone::Neutral {
+                            *existing_tone = tone;
+                        }
+                    } else {
+                        pending_flow = Some((record.primary, tone));
+                    }
+                }
+                TimelineRole::Boundary => {
+                    flush_flow(&mut pending_flow, &mut entries);
+                    entries.push(StudioTimelineEntryVm::Separator {
+                        label: record.primary,
+                    });
+                }
+                TimelineRole::PairOpen => {
+                    flush_flow(&mut pending_flow, &mut entries);
+                    let key = record.pair_key.unwrap_or_default();
+                    let index = entries.len();
+                    entries.push(StudioTimelineEntryVm::Pair {
+                        summary: record.primary,
+                        meta: record.meta,
+                        tone: tone_from_name(record.tone.as_deref()),
+                        pending: true,
+                    });
+                    pending_pairs.insert(key, index);
+                }
+                TimelineRole::PairClose => {
+                    flush_flow(&mut pending_flow, &mut entries);
+                    let Some(key) = record.pair_key.as_deref() else {
+                        entries.push(line_entry(record));
+                        break 'record;
+                    };
+                    if let Some(index) = pending_pairs.remove(key) {
+                        if let Some(StudioTimelineEntryVm::Pair {
+                            meta,
+                            tone,
+                            pending,
+                            ..
+                        }) = entries.get_mut(index)
+                        {
+                            *meta = record.meta;
+                            *tone = tone_from_name(record.tone.as_deref());
+                            *pending = false;
+                        }
+                    } else {
+                        entries.push(line_entry(record));
+                    }
+                }
+                TimelineRole::Line => {
+                    flush_flow(&mut pending_flow, &mut entries);
                     entries.push(line_entry(record));
                 }
             }
-            TimelineRole::Line => {
-                flush_flow(&mut pending_flow, &mut entries);
-                entries.push(line_entry(record));
-            }
         }
+        indents.resize(entries.len(), d);
     }
     flush_flow(&mut pending_flow, &mut entries);
-    entries
+    indents.resize(entries.len(), depth);
+    (entries, indents)
 }
 
 /// Append the transient live cognition stream as a trailing block, if the
@@ -514,8 +567,17 @@ fn execution_entry(
         FeedEventType::ThreadTimedOut => {
             (terminal_reason("timed out", payload), None, StudioTone::Warn)
         }
+        // A dispatch fork: the parent stepped into a child execution (a
+        // directive/sub-graph node running as a child thread). Name the node
+        // being stepped into (`↘ study`) so the entry reads as a call into a
+        // named cognition, not an anonymous fork. Falls back to "forked
+        // subthread" when the producer carries no `node`. The child id (meta)
+        // is the drill target the `DrillThread` action below steps into.
         FeedEventType::ChildThreadSpawned => (
-            "forked subthread".to_string(),
+            payload
+                .and_then(|p| payload_text(p, "node"))
+                .map(|node| format!("↘ {node}"))
+                .unwrap_or_else(|| "forked subthread".to_string()),
             payload.and_then(child_thread_ref),
             StudioTone::Accent,
         ),
@@ -601,15 +663,23 @@ fn execution_entry(
         _ => return None,
     };
     // What activating this entry does, and its launcher-secondary affordance:
-    // - a forked subthread is navigable (Enter aims the route at the child);
+    // - a forked subthread is a step-in (Enter drills into the child braid,
+    //   pushing a return frame so Backspace walks back up);
     // - an error-like terminal (failed / timed out / killed) is inspectable
     //   (Enter opens its full structured error), and a *recoverable* failed
     //   turn additionally offers retry — re-submitting its own stimulus as a
     //   continuation. timed_out / killed are inspectable but NOT retryable:
     //   the daemon refuses continuation for those settled statuses (v1).
     let (action, secondary_action) = match event {
+        // Step INTO the spawned child (the dispatch edge): a child is a fresh
+        // root, so its chain_root equals its own id. DrillThread pushes a return
+        // frame, so Backspace walks back to this parent braid.
         FeedEventType::ChildThreadSpawned => (
-            meta.clone().map(|thread_id| StudioAction::AimThread { thread_id }),
+            meta.clone().map(|id| StudioAction::DrillThread {
+                thread_id: id.clone(),
+                chain_root_id: id,
+                label: payload.and_then(|p| payload_text(p, "node")),
+            }),
             None,
         ),
         FeedEventType::ThreadFailed => (
@@ -1375,7 +1445,7 @@ mod tests {
         // Both turns are headed by separators → both foldable.
         let mut collapsed = std::collections::BTreeSet::new();
         collapsed.insert(1);
-        let folded = fold_timeline(full, &collapsed);
+        let folded = fold_timeline(full, Vec::new(), &collapsed);
 
         assert!(folded.collapsible.contains(&0) && folded.collapsible.contains(&1));
         // turn 1 stays open (header + body); turn 2 keeps only its marked header.
@@ -1393,7 +1463,7 @@ mod tests {
         let full = vec![block("a"), block("b")];
         let mut collapsed = std::collections::BTreeSet::new();
         collapsed.insert(0);
-        let folded = fold_timeline(full, &collapsed);
+        let folded = fold_timeline(full, Vec::new(), &collapsed);
         assert!(folded.collapsible.is_empty());
         assert_eq!(
             folded.entries.len(),
@@ -1403,20 +1473,70 @@ mod tests {
     }
 
     #[test]
-    fn child_thread_entry_is_actionable_aims_the_route() {
-        // A forked subthread is a navigable feed entry: activating it aims
-        // the route at the child so the feed re-projects to its braid.
+    fn child_thread_entry_steps_into_the_child_braid() {
+        // A dispatch fork is a step-in feed entry: it names the node being
+        // stepped into and activating it drills into the child (DrillThread),
+        // pushing a return frame. A child is a fresh root, so both route
+        // coordinates are the child id.
+        let entry = exec(json!({
+            "event_type": "child_thread_spawned",
+            "payload": { "child_thread_id": "T-child", "node": "study" }
+        }));
+        let Some(StudioTimelineEntryVm::Line { primary, meta, action, .. }) = entry else {
+            panic!("expected a forked-subthread line");
+        };
+        assert_eq!(primary, "↘ study", "the entry names the node stepped into");
+        assert_eq!(meta.as_deref(), Some("T-child"));
+        assert!(
+            matches!(
+                action,
+                Some(StudioAction::DrillThread { thread_id, chain_root_id, label })
+                    if thread_id == "T-child" && chain_root_id == "T-child"
+                        && label.as_deref() == Some("study")
+            ),
+            "the entry steps into the child braid, labelled by its node"
+        );
+    }
+
+    #[test]
+    fn child_thread_entry_without_a_node_falls_back() {
+        // No `node` in the payload → the generic label, but still drillable.
         let entry = exec(json!({
             "event_type": "child_thread_spawned",
             "payload": { "child_thread_id": "T-child" }
         }));
-        let Some(StudioTimelineEntryVm::Line { meta, action, .. }) = entry else {
+        let Some(StudioTimelineEntryVm::Line { primary, action, .. }) = entry else {
             panic!("expected a forked-subthread line");
         };
-        assert_eq!(meta.as_deref(), Some("T-child"));
-        assert!(
-            matches!(action, Some(StudioAction::AimThread { thread_id }) if thread_id == "T-child"),
-            "the entry aims the route at the child thread"
+        assert_eq!(primary, "forked subthread");
+        assert!(matches!(action, Some(StudioAction::DrillThread { .. })));
+    }
+
+    #[test]
+    fn nesting_indents_tool_calls_under_their_graph_node() {
+        // A graph braid reads as a call tree: a tool call between a node's start
+        // and completed nests one level under that node; sibling nodes stay at
+        // the root. The indent vector stays parallel to the coalesced entries.
+        let (entries, indents) = timeline_entries_indented(vec![
+            raw_record(json!({ "event_type": "graph_step_started",
+                "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
+            raw_record(json!({ "event_type": "tool_call_start",
+                "payload": { "tool": "explore", "call_id": "c1" } })),
+            raw_record(json!({ "event_type": "tool_call_result",
+                "payload": { "tool": "explore", "call_id": "c1" } })),
+            raw_record(json!({ "event_type": "graph_step_completed",
+                "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
+            raw_record(json!({ "event_type": "graph_step_started",
+                "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
+            raw_record(json!({ "event_type": "graph_step_completed",
+                "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
+        ]);
+        assert_eq!(entries.len(), 3, "study + explore + options, pairs coalesced");
+        assert_eq!(indents.len(), entries.len(), "indents parallel to entries");
+        assert_eq!(
+            indents,
+            vec![0, 1, 0],
+            "explore nests under study (depth 1); the two nodes sit at the root"
         );
     }
 

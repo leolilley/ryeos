@@ -70,6 +70,21 @@ projections:
       primary: payload.node
       meta: payload.item_id
       role: boundary
+    # Generic domain milestone — the runtime-on-behalf-of-tool channel. Surface
+    # the namespaced `kind` (e.g. arc's level_up / cases_emitted / board) with
+    # the graph node that produced it, accent-toned so the meaningful moments
+    # stand out. This is the legible default so a milestone never renders as a
+    # bare event line; an arc-tuned view can refine per-kind (e.g. render a
+    # board) on top of it.
+    milestone:
+      primary: payload.kind
+      meta: payload.node
+      role: line
+      tone:
+        field: event_type
+        map:
+          milestone: accent
+        default: accent
   default:
     primary: event_type
     meta: ts

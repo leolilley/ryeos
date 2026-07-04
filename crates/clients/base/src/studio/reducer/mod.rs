@@ -405,6 +405,7 @@ impl StudioCore {
             }
             StudioUiEvent::ActivateFocused => action_for_focused_row(self)
                 .map_or_else(Vec::new, |action| self.dispatch_action(action)),
+            StudioUiEvent::PopLens => self.pop_view(),
         }
     }
 
@@ -553,7 +554,31 @@ impl StudioCore {
                 None,
                 Some(serde_json::json!({ "thread": thread_id })),
                 None,
+                false,
             ),
+            // Step into a child execution: retarget the route at the child AND
+            // push a return frame (drill = true), so Backspace walks back to the
+            // parent braid. No `open_view` — the braid lens re-projects onto the
+            // child via the route facet, keeping view refs out of code.
+            StudioAction::DrillThread {
+                thread_id,
+                chain_root_id,
+                label,
+            } => {
+                let effects = self.apply_ui_affordance(
+                    super::seat::KEY_INPUT_ROUTE.to_string(),
+                    None,
+                    Some(serde_json::json!({ "thread": thread_id, "chain_root": chain_root_id })),
+                    None,
+                    true,
+                );
+                // Prefer the node name (e.g. `study`) over the default child-id
+                // label the drill just set, so the breadcrumb reads the cognition.
+                if let Some(label) = label {
+                    self.workspace.lens_label = Some(label);
+                }
+                effects
+            }
             StudioAction::PrefillRetryTurn {
                 thread_id,
                 chain_root_id,
@@ -572,6 +597,7 @@ impl StudioCore {
                     None,
                     Some(serde_json::json!({ "thread": thread_id, "chain_root": chain_root_id })),
                     None,
+                    false,
                 );
                 // Stage the failed turn's stimulus for review; the operator
                 // presses Enter to resubmit through the normal submit path. No

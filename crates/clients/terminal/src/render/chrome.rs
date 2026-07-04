@@ -14,10 +14,25 @@ use super::text::{display_width, letterspace, truncate};
 use super::theme::{border_for, style_muted, tone_style, ACCENT, BG, FG, MUTED};
 
 pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+    // Breadcrumb: when a drill is open, prefix the return trail (root-first)
+    // onto the current level so the operator sees the execution path they
+    // stepped down and that Backspace walks back up. The current level reads its
+    // own label (the cognition stepped into, e.g. `study`) when known, else the
+    // focused view's title.
+    let current = vm
+        .workspace
+        .lens_label
+        .clone()
+        .unwrap_or_else(|| vm.presentation.chrome.top_bar.focused_title.clone());
+    let crumb = if vm.workspace.lens_trail.is_empty() {
+        current
+    } else {
+        format!("{} ▸ {}", vm.workspace.lens_trail.join(" ▸ "), current)
+    };
     let text = format!(
         " {}  {}  {} ",
         vm.presentation.chrome.version_label,
-        vm.presentation.chrome.top_bar.focused_title,
+        crumb,
         vm.presentation.chrome.top_bar.layout_symbol
     );
     draw_bar(surface, 0, &text, ACCENT);

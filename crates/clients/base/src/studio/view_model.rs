@@ -216,6 +216,20 @@ pub struct StudioWorkspaceVm {
     pub tile_count: usize,
     #[serde(default)]
     pub docks: StudioDockPlaneVm,
+    /// Labels of the levels on the step-in return stack, root-first (the
+    /// deepest drill last). Empty at the top of the tree. Renderers draw it as
+    /// a breadcrumb — `threads ▸ ar25 ▸ …` — so the operator sees how deep the
+    /// execution drill is and that Backspace returns. Each is the level's own
+    /// label (the cognition/thread it showed) when known, else the view title.
+    /// The current (focused) level is NOT included; it is `lens_label` (or the
+    /// focused view's title) as the tail beyond this trail.
+    #[serde(default)]
+    pub lens_trail: Vec<String>,
+    /// Label of the CURRENT focused level (the cognition stepped into, e.g.
+    /// `study`), the breadcrumb tail. `None` at the top of the tree, where the
+    /// focused view's own title stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -313,6 +327,12 @@ pub enum StudioViewVm {
         #[serde(default)]
         affordance_hints: Vec<String>,
         entries: Vec<StudioTimelineEntryVm>,
+        /// Call-tree indent depth per entry (parallel to `entries`): a graph
+        /// node's tool calls and its directive/sub-graph fork nest one level
+        /// under the node. Empty or shorter than `entries` renders flat (depth
+        /// 0) — the renderer never trusts the index.
+        #[serde(default)]
+        entry_indents: Vec<u8>,
         /// The entry under the point (absolute index into `entries`), for
         /// highlight + scroll. Derived from the tile cursor, which the feed
         /// reads as distance-from-bottom (0 = newest), so the point sits at
@@ -844,6 +864,18 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
         backdrop: center_is_empty.then(|| backdrop_scene(core)).flatten(),
         tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
+        lens_trail: core
+            .workspace
+            .lens_stack
+            .iter()
+            .map(|frame| {
+                frame
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| tile_title(core, &frame.view))
+            })
+            .collect(),
+        lens_label: core.workspace.lens_label.clone(),
     }
 }
 
@@ -1132,18 +1164,24 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let mut full = timeline_entries(super::content::project_records(binding, response));
+            let (mut full, mut full_indents) =
+                timeline_entries_indented(super::content::project_records(binding, response));
             // Deep-watch header: a chain execution summary line at the top of the
             // braid, from the source's `summary` (chain_replay). Absent for any
             // timeline whose source carries no `summary`, so it never intrudes.
+            // Header + live tail sit at the root (depth 0); keep `full_indents`
+            // parallel to `full` across both mutations.
             if let Some(summary) = timeline_summary_entry(response) {
                 full.insert(0, summary);
+                full_indents.insert(0, 0);
             }
             append_live_delta(core, &mut full);
+            full_indents.resize(full.len(), 0);
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
-            let folded = super::timeline::fold_timeline(full, collapsed.unwrap_or(&empty));
+            let folded =
+                super::timeline::fold_timeline(full, full_indents, collapsed.unwrap_or(&empty));
             // The feed reads the tile cursor as distance-from-bottom: 0 keeps
             // the point on the newest entry (so it follows the live tail),
             // larger values walk back into history. Empty feed → no point.
@@ -1161,6 +1199,7 @@ fn bound_view_vm_keyed(
                 provenance: Some(view_ref.to_string()),
                 affordance_hints: affordance_hints(binding),
                 entries: folded.entries,
+                entry_indents: folded.indents,
                 selected,
                 fold_section,
             }
@@ -1280,7 +1319,9 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
 // Timeline entry building + the live cognition buffer render live in
 // `super::timeline`; re-exported crate-wide so the timeline arm above and the
 // tests below call them unqualified (via `use super::*`).
-pub(crate) use super::timeline::{append_live_delta, timeline_entries};
+pub(crate) use super::timeline::{append_live_delta, timeline_entries_indented};
+#[cfg(test)]
+pub(crate) use super::timeline::timeline_entries;
 
 pub(crate) fn tone_from_name(name: Option<&str>) -> StudioTone {
     match name {

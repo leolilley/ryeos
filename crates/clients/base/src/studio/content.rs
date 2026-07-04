@@ -958,6 +958,13 @@ pub enum AffordanceInvoke {
         /// compose. Applied post-write so the opened view's fetch resolves
         /// against the just-written facet. Single-lens: replaces the center.
         open_view: Option<String>,
+        /// Step INTO the opened view rather than swap to it: the leaving view
+        /// and the facet context it read are pushed onto the lens stack so a
+        /// later pop restores them. This is the debugger step-in — walking the
+        /// execution tree down a level with a return path — vs the flat swap a
+        /// bare `open_view` performs. Only meaningful with `open_view` set on a
+        /// single-lens surface.
+        drill: bool,
     },
     Rye {
         tokens: Vec<String>,
@@ -1008,6 +1015,10 @@ pub fn resolve_affordance_invoke(
                 .get("open_view")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            drill: invoke
+                .get("drill")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
         "rye" => {
             // A `ref:` selects the service-invocation form (args → `/execute`
@@ -1716,6 +1727,7 @@ mod tests {
                 value: Some(json!({ "thread": "T-1" })),
                 merge: None,
                 open_view: None,
+                drill: false,
             }
         );
     }
@@ -1745,6 +1757,7 @@ mod tests {
                 value: None,
                 merge: Some(json!({ "thread": "T-9", "chain_root": "T-root" })),
                 open_view: Some("view:ryeos/chain/timeline".into()),
+                drill: false,
             }
         );
     }

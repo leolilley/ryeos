@@ -161,6 +161,41 @@ impl StudioCore {
         effects
     }
 
+    /// Return one level up the step-in stack: restore the view a drill left and
+    /// the facet context it read, then refetch so the restored trace re-resolves
+    /// and re-subscribes its tail. No-op at the top of the tree (empty stack).
+    pub(crate) fn pop_view(&mut self) -> Vec<StudioEffect> {
+        let Some(frame) = self.workspace.pop_lens_frame() else {
+            return Vec::new();
+        };
+        // Restore the captured facet context by re-appending any facet whose
+        // current value differs — last-writer-wins over the seat log, so the
+        // fold returns to the pre-drill value without rewriting history.
+        let current = self.seat.fold();
+        let mut restored_facets: Vec<String> = Vec::new();
+        for (key, value) in &frame.facets {
+            if current.get(key) != Some(value) {
+                self.seat.append_facet(key.clone(), value.clone());
+                restored_facets.push(key.clone());
+            }
+        }
+        // Restore the view into the focused center tile, and the breadcrumb
+        // label of the level being returned to.
+        self.workspace.replace_focused_view(frame.view.clone());
+        self.workspace.lens_label = frame.label.clone();
+        self.push_motion(StudioMotionEventVm::FocusChanged {
+            tile_id: self.workspace.focused_tile.0.to_string(),
+        });
+        self.bump_generation();
+        // Refetch: the restored view resolves against the restored facets and
+        // re-subscribes its tail; facet subscribers (docks/slots) refresh too.
+        let mut effects = self.effects_for_view(&frame.view);
+        for key in restored_facets {
+            effects.extend(self.effects_for_facet(&key));
+        }
+        effects
+    }
+
     pub(crate) fn close_tile_or_empty(&mut self, tile_id: TileId) -> bool {
         if self.workspace.tile_ids().len() <= 1 {
             if self.workspace.center_is_empty() || !self.workspace.tiles.contains_key(&tile_id) {
