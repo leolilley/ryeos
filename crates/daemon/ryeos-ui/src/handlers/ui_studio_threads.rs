@@ -65,6 +65,8 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         status: string_filter(&params, "status"),
         kind: string_filter(&params, "kind"),
         requested_by: string_filter(&params, "requested_by"),
+        facet: string_filter(&params, "facet_key")
+            .zip(string_filter(&params, "facet_value")),
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
