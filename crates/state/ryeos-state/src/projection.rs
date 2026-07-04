@@ -276,15 +276,73 @@ use crate::sqlite_schema;
 /// RYPJ = 0x5259504a ("RY" + "PJ" for "projection").
 const PROJECTION_APP_ID: i32 = 0x5259_504a;
 
-/// Current projection schema epoch. This is stored in SQLite's
-/// `PRAGMA user_version` slot, but RyeOS treats it as the projection
-/// schema epoch. Bump this for incompatible projection schema changes.
+/// Manual projection DERIVATION version. Bump this ONLY when the derivation
+/// logic changes — when `project_event` / `project_thread_snapshot` produce
+/// DIFFERENT rows for the SAME CAS input (e.g. changing how an already-emitted
+/// event type projects), so previously-derived rows are stale and must be
+/// rebuilt.
 ///
-/// Epoch 4: added the `idx_facets_key_value` index for cohort/fleet reverse
-/// lookups. An existing epoch-3 DB lacks the index, so a bump forces the
-/// reset-and-rebuild-from-CAS that recreates the schema (rather than failing the
-/// `assert_owned` schema self-check on the missing index).
-const PROJECTION_SCHEMA_EPOCH: i32 = 4;
+/// You do NOT bump this for a schema change (a new table/column/index) — those
+/// are detected automatically by the spec fingerprint in
+/// [`projection_schema_epoch`]. Adding derivation for a brand-new event type
+/// also needs no bump (there are no past events of that type to re-derive).
+const PROJECTION_DERIVATION_VERSION: u64 = 1;
+
+/// The projection schema epoch, stored in SQLite's `PRAGMA user_version`.
+///
+/// DERIVED, not hand-maintained: a fingerprint of the schema spec folded with
+/// the manual derivation version. Any schema change (add/drop/rename a
+/// table/column/index) changes the fingerprint and auto-triggers the
+/// reset-and-rebuild-from-CAS on the next open — a schema change can never be
+/// silently forgotten (the old failure mode was: the spec expects an index the
+/// DB lacks, `assert_owned` fails, the daemon won't start). `assert_owned` stays
+/// the hard backstop on a freshly-built DB.
+fn projection_schema_epoch() -> i32 {
+    let fingerprint = schema_spec_fingerprint(&projection_schema_spec());
+    let combined = fingerprint ^ PROJECTION_DERIVATION_VERSION.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    // Fold the 64-bit value into the i32 `user_version` slot.
+    (combined ^ (combined >> 32)) as i32
+}
+
+/// Deterministic, order-independent fingerprint of a schema spec — its tables
+/// (with columns) and indexes. Canonicalized (sorted) so cosmetic reordering in
+/// the spec does not churn the epoch. FNV-1a keeps it dependency-free and stable
+/// across builds (a std hasher is not).
+fn schema_spec_fingerprint(spec: &sqlite_schema::SchemaSpec) -> u64 {
+    let mut parts: Vec<String> = vec![format!("app={}", spec.application_id)];
+    let mut tables: Vec<String> = spec
+        .tables
+        .iter()
+        .map(|t| {
+            let mut cols: Vec<String> = t
+                .columns
+                .iter()
+                .map(|c| format!("{}:{}:{}:{}", c.name, c.col_type, c.pk, c.not_null))
+                .collect();
+            cols.sort();
+            format!("T:{}[{}]", t.name, cols.join(","))
+        })
+        .collect();
+    tables.sort();
+    let mut indexes: Vec<String> = spec
+        .indexes
+        .iter()
+        .map(|i| format!("I:{}:{}:{}:{}", i.name, i.table, i.columns.join(","), i.unique))
+        .collect();
+    indexes.sort();
+    parts.extend(tables);
+    parts.extend(indexes);
+    fnv1a_64(parts.join(";").as_bytes())
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
 
 /// Schema spec for projection.db — the single source of truth for
 /// what tables/columns/indexes this database must contain.
@@ -1370,14 +1428,12 @@ fn stored_projection_schema_epoch(conn: &Connection) -> anyhow::Result<i32> {
 }
 
 fn stamp_projection_schema_epoch(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch(&format!("PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};"))
+    let epoch = projection_schema_epoch();
+    conn.execute_batch(&format!("PRAGMA user_version = {epoch};"))
         .context("failed to stamp projection schema epoch")?;
     let stored = stored_projection_schema_epoch(conn)?;
-    if stored != PROJECTION_SCHEMA_EPOCH {
-        bail!(
-            "failed to verify projection schema epoch stamp: stored={stored}, expected={}",
-            PROJECTION_SCHEMA_EPOCH
-        );
+    if stored != epoch {
+        bail!("failed to verify projection schema epoch stamp: stored={stored}, expected={epoch}");
     }
     Ok(())
 }
@@ -1781,15 +1837,16 @@ impl ProjectionDb {
         }
 
         let stored_epoch = stored_projection_schema_epoch(&conn)?;
-        if stored_epoch != PROJECTION_SCHEMA_EPOCH {
+        let current_epoch = projection_schema_epoch();
+        if stored_epoch != current_epoch {
             tracing::warn!(
                 path = %path.display(),
                 stored_epoch,
-                current_epoch = PROJECTION_SCHEMA_EPOCH,
+                current_epoch,
                 "owned projection schema epoch mismatch; resetting projection database"
             );
             close_connection(conn)?;
-            reset_projection_files(path, stored_epoch, PROJECTION_SCHEMA_EPOCH)?;
+            reset_projection_files(path, stored_epoch, current_epoch)?;
 
             let conn = Connection::open(path).context("failed to reopen projection database")?;
             init_current_projection_schema(&conn, &spec, path)?;
@@ -3272,7 +3329,43 @@ mod tests {
 
         assert_eq!(
             stored_projection_schema_epoch(db.connection()).unwrap(),
-            PROJECTION_SCHEMA_EPOCH
+            projection_schema_epoch()
+        );
+    }
+
+    #[test]
+    fn epoch_is_deterministic_and_schema_change_sensitive() {
+        // Deterministic across calls — the stored/computed comparison is stable.
+        assert_eq!(projection_schema_epoch(), projection_schema_epoch());
+        // Adding an index changes the fingerprint — the property that makes any
+        // schema change auto-trigger the reset+rebuild, so a bump can't be
+        // forgotten (the old failure mode).
+        let base = sqlite_schema::SchemaSpec {
+            application_id: 7,
+            tables: &[sqlite_schema::TableSpec {
+                name: "t",
+                columns: &[sqlite_schema::ColumnSpec {
+                    name: "a",
+                    col_type: "TEXT",
+                    pk: true,
+                    not_null: true,
+                }],
+            }],
+            indexes: &[],
+        };
+        let with_index = sqlite_schema::SchemaSpec {
+            application_id: 7,
+            tables: base.tables,
+            indexes: &[sqlite_schema::IndexSpec {
+                name: "ix",
+                table: "t",
+                columns: &["a"],
+                unique: false,
+            }],
+        };
+        assert_ne!(
+            schema_spec_fingerprint(&base),
+            schema_spec_fingerprint(&with_index)
         );
     }
 
@@ -3286,7 +3379,7 @@ mod tests {
         assert!(!opened.reset);
         assert_eq!(
             stored_projection_schema_epoch(opened.db.connection()).unwrap(),
-            PROJECTION_SCHEMA_EPOCH
+            projection_schema_epoch()
         );
         assert!(reset_backups(&path).is_empty());
     }
@@ -3308,7 +3401,7 @@ mod tests {
         assert!(opened.reset);
         assert_eq!(
             stored_projection_schema_epoch(opened.db.connection()).unwrap(),
-            PROJECTION_SCHEMA_EPOCH
+            projection_schema_epoch()
         );
         assert!(table_exists(
             opened.db.connection(),
@@ -3330,7 +3423,7 @@ mod tests {
         std::fs::write(&shm, b"shm").unwrap();
         std::fs::write(&journal, b"journal").unwrap();
 
-        reset_projection_files(&path, 0, PROJECTION_SCHEMA_EPOCH).unwrap();
+        reset_projection_files(&path, 0, projection_schema_epoch()).unwrap();
 
         let backups = reset_backups(&path);
         assert_eq!(backups.len(), 4);
@@ -3350,9 +3443,10 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("projection.db");
         let conn = Connection::open(&path).unwrap();
+        let epoch = projection_schema_epoch();
         conn.execute_batch(&format!(
             "PRAGMA application_id = {PROJECTION_APP_ID};
-             PRAGMA user_version = {PROJECTION_SCHEMA_EPOCH};
+             PRAGMA user_version = {epoch};
              CREATE TABLE sentinel (id INTEGER PRIMARY KEY);"
         ))
         .unwrap();
