@@ -1877,6 +1877,7 @@ async fn run_claimed_thread_row_inner(
                     output_tokens: cost.output_tokens as i64,
                     spend: cost.total_usd,
                     provider: None,
+                    basis: cost.basis.clone(),
                     metadata: None,
                 });
         // Build the canonical managed envelope from the parsed RuntimeResult
@@ -1918,6 +1919,7 @@ async fn run_claimed_thread_row_inner(
         // (abnormal exit, no self-finalize over the callback) still flips its waiter
         // to `ready`, so wake the parent now instead of waiting for a restart.
         kick_follow_resume_if_ready(state, &finalized.chain_root_id);
+        kick_launch_window_for_terminal(state, &finalized.chain_root_id);
         thread_detail = finalized;
     }
 
@@ -2636,6 +2638,167 @@ pub fn finalize_failed_and_kick_follow(
 ) {
     crate::dispatch::finalize_method_thread_if_needed(state, thread_id, "failed", Some(error));
     kick_follow_resume_if_ready(state, child_chain_root_id);
+    kick_launch_window_for_terminal(state, child_chain_root_id);
+}
+
+/// Daemon-global ceiling on launched-and-live window members across ALL
+/// fanouts — the cross-project load valve. Read once from
+/// `RYEOSD_MAX_LIVE_FANOUT`; absent, unparsable, or 0 means no ceiling.
+pub(crate) fn global_live_fanout_limit() -> Option<u32> {
+    static LIMIT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("RYEOSD_MAX_LIVE_FANOUT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| *n > 0)
+    })
+}
+
+/// Launch a window-admitted child on the reconcile-parity path: identity
+/// reconstructed from its seeded launch metadata (`launch_follow_child`
+/// with no provenance override / parent clamp), detached from the caller
+/// so no finalize path blocks on a launch.
+pub(crate) fn launch_admitted_window_member(state: &AppState, child_thread_id: &str) {
+    let launch_state = state.clone();
+    let id = child_thread_id.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = launch_follow_child(launch_state, &id, None, None).await {
+            tracing::error!(
+                child_thread_id = %id,
+                error = %e,
+                "window-admitted child launch failed",
+            );
+        }
+    });
+}
+
+/// Whether a chain has settled for good: walk `continued` links to the tip
+/// and report a HARD terminal there. `continued` itself never counts — the
+/// chain lives on in its successor — and a `continued` tip with no recorded
+/// successor is a handoff in flight, not an end.
+fn chain_tip_hard_terminal(state: &AppState, chain_root_id: &str) -> anyhow::Result<bool> {
+    use ryeos_state::objects::ThreadStatus;
+    let mut cursor = chain_root_id.to_string();
+    for _ in 0..1024 {
+        let Some(t) = state.state_store.get_thread(&cursor)? else {
+            return Ok(false);
+        };
+        if t.status == ThreadStatus::Continued.as_str() {
+            match t.successor_thread_id {
+                Some(next) => {
+                    cursor = next;
+                    continue;
+                }
+                None => return Ok(false),
+            }
+        }
+        return Ok(ThreadStatus::from_str_lossy(&t.status).is_some_and(|s| s.is_terminal()));
+    }
+    Ok(false)
+}
+
+/// Release a launch-window slot when a member CHAIN reaches a hard terminal
+/// and launch the queued members admitted in its place. `thread_continued`
+/// keeps the slot. Called from every live finalize seam (alongside
+/// `kick_follow_resume_if_ready`); a chain holding no window row is the
+/// common case and returns immediately.
+pub fn kick_launch_window_for_terminal(state: &AppState, chain_root_id: &str) {
+    match state.state_store.launch_window_is_member(chain_root_id) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            tracing::warn!(chain_root_id, error = %e, "launch-window membership check failed");
+            return;
+        }
+    }
+    match chain_tip_hard_terminal(state, chain_root_id) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            tracing::warn!(chain_root_id, error = %e, "launch-window terminal check failed");
+            return;
+        }
+    }
+    match state.state_store.launch_window_release(
+        chain_root_id,
+        global_live_fanout_limit(),
+        lillux::time::timestamp_millis(),
+    ) {
+        Ok(admitted) => {
+            for id in admitted {
+                tracing::info!(
+                    child_thread_id = %id,
+                    freed_by = %chain_root_id,
+                    "launch-window slot freed — launching queued member",
+                );
+                launch_admitted_window_member(state, &id);
+            }
+        }
+        Err(e) => {
+            tracing::warn!(chain_root_id, error = %e, "launch-window release failed");
+        }
+    }
+}
+
+/// Startup/maintenance sweep for launch windows: release members whose
+/// chain settled without a kick landing (the crash window), then admit and
+/// launch queued members up to each window's width and the global ceiling.
+/// Idempotent — every launch is claim-guarded, so a double-drive is a
+/// benign skip. Run post-listener (launched runtimes call back immediately).
+pub fn sweep_launch_windows(state: &AppState) {
+    let now_ms = lillux::time::timestamp_millis();
+    match state.state_store.launch_window_launched_members() {
+        Ok(members) => {
+            for chain in members {
+                match chain_tip_hard_terminal(state, &chain) {
+                    Ok(true) => match state.state_store.launch_window_release(
+                        &chain,
+                        global_live_fanout_limit(),
+                        now_ms,
+                    ) {
+                        Ok(admitted) => {
+                            for id in admitted {
+                                launch_admitted_window_member(state, &id);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep release failed")
+                        }
+                    },
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep terminal check failed")
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "launch-window sweep member listing failed"),
+    }
+    match state.state_store.launch_window_keys_with_queue() {
+        Ok(keys) => {
+            for key in keys {
+                match state
+                    .state_store
+                    .launch_window_admit(&key, global_live_fanout_limit(), now_ms)
+                {
+                    Ok(admitted) => {
+                        for id in admitted {
+                            tracing::info!(
+                                child_thread_id = %id,
+                                window_key = %key,
+                                "launch-window sweep admission — launching queued member",
+                            );
+                            launch_admitted_window_member(state, &id);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(window_key = %key, error = %e, "launch-window sweep admission failed")
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "launch-window sweep queue listing failed"),
+    }
 }
 
 /// If `child_chain_root_id`'s just-recorded terminal flipped a follow waiter to

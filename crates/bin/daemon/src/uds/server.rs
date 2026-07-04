@@ -253,6 +253,10 @@ pub async fn dispatch_runtime_method(
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
                 ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, chain_root_id);
+                ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+                    state,
+                    chain_root_id,
+                );
             }
             Ok(result)
         }

@@ -412,6 +412,24 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
             continue;
         }
 
+        // A launch-window QUEUED detached child is deliberately unlaunched —
+        // its admission comes from the window kick/sweep, so it must not be
+        // finalized as an interrupted spawn. (A launched-then-dead window
+        // member falls through and finalizes; that terminal releases its
+        // slot via the post-reconcile sweep.)
+        if thread.status == ThreadStatus::Created.as_str()
+            && state
+                .state_store
+                .launch_window_is_queued(&thread.chain_root_id)
+                .unwrap_or(false)
+        {
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                "launch-window queued child — leaving for window admission"
+            );
+            continue;
+        }
+
         let attempts = match state.state_store.get_resume_attempts(&thread.thread_id) {
             Ok(n) => n,
             Err(err) => {

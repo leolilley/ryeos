@@ -95,8 +95,10 @@ fn hook_action_payload(action: &Value) -> Result<ActionPayload, CallbackError> {
         params,
         thread,
         call,
-        // Hooks dispatch inline (observers); no detached-child facets.
+        // Hooks dispatch inline (observers); no detached-child facets or
+        // launch window.
         facets: None,
+        launch_window: None,
     })
 }
 

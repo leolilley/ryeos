@@ -55,6 +55,7 @@ pub async fn spawn_detached_child(
     child_item_ref: &str,
     child_parameters: &Value,
     facets: Option<&Value>,
+    launch_window: Option<&ryeos_runtime::callback::LaunchWindow>,
 ) -> Result<Value> {
     let parent_thread_id = cap.thread_id.clone();
 
@@ -203,6 +204,34 @@ pub async fn spawn_detached_child(
         }
     }
 
+    // ── Launch admission (bounded fanout) ───────────────────────────────────
+    // A windowed spawn minted its row / identity / facets above
+    // unconditionally — the launch table and cohort are complete the moment
+    // the parent's dispatch returns — but the LAUNCH itself is admitted
+    // through the window: at most `width` member chains launched-and-live at
+    // once (plus the daemon-global live-fanout ceiling). A member that is
+    // not admitted stays `created`; a live member's hard terminal admits it
+    // (`kick_launch_window_for_terminal`), with the startup sweep as the
+    // crash backstop. The window key is namespaced under the parent thread
+    // id so a caller can only pace its own children.
+    let mut queued = false;
+    let mut co_admitted: Vec<String> = Vec::new();
+    if let Some(w) = launch_window {
+        let window_key = format!("{parent_thread_id}:{}", w.key);
+        let admitted = state.state_store.launch_window_enqueue(
+            &child_thread_id,
+            &window_key,
+            w.width,
+            crate::execution::launch::global_live_fanout_limit(),
+            lillux::time::timestamp_millis(),
+        )?;
+        queued = !admitted.iter().any(|c| c == &child_thread_id);
+        co_admitted = admitted
+            .into_iter()
+            .filter(|c| c != &child_thread_id)
+            .collect();
+    }
+
     // ── Launch detached ─────────────────────────────────────────────────────
     // Fire-and-forget: `launch_follow_child` is claim-guarded, so a lost spawn is
     // safe for the reconcile sweep to re-drive. The launch uses the parent's
@@ -210,35 +239,43 @@ pub async fn spawn_detached_child(
     // request engine preserved. Parent execution ceiling from the VALIDATED cap
     // (never `child_parameters`): the child launches clamped to the parent's hard
     // limits at parent depth + 1, recording the `dispatch` child-link edge.
-    let launch_state = state.clone();
-    let launch_child_id = child_thread_id.clone();
-    let launch_parent_context = crate::dispatch::ParentExecutionContext {
-        parent_thread_id: cap.thread_id.clone(),
-        hard_limits: cap.hard_limits.clone(),
-        depth: cap.depth,
-    };
-    tokio::spawn(async move {
-        if let Err(e) = crate::execution::launch::launch_follow_child(
-            launch_state,
-            &launch_child_id,
-            Some(child_provenance),
-            Some(launch_parent_context),
-        )
-        .await
-        {
-            tracing::error!(
-                child_thread_id = %launch_child_id,
-                error = %e,
-                "detached child launch failed",
-            );
-        }
-    });
+    if !queued {
+        let launch_state = state.clone();
+        let launch_child_id = child_thread_id.clone();
+        let launch_parent_context = crate::dispatch::ParentExecutionContext {
+            parent_thread_id: cap.thread_id.clone(),
+            hard_limits: cap.hard_limits.clone(),
+            depth: cap.depth,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = crate::execution::launch::launch_follow_child(
+                launch_state,
+                &launch_child_id,
+                Some(child_provenance),
+                Some(launch_parent_context),
+            )
+            .await
+            {
+                tracing::error!(
+                    child_thread_id = %launch_child_id,
+                    error = %e,
+                    "detached child launch failed",
+                );
+            }
+        });
+    }
+    // Members of the same window that this enqueue admitted alongside (slots
+    // opened without a kick landing) launch on the reconcile-parity path.
+    for other in &co_admitted {
+        crate::execution::launch::launch_admitted_window_member(state, other);
+    }
 
     tracing::info!(
         parent_thread_id = %parent_thread_id,
         child_thread_id = %child_thread_id,
         child_item_ref = %child_item_ref,
         server_principal = %thread_auth.acting_principal,
+        queued,
         "detached child spawned; parent continues",
     );
 
@@ -251,12 +288,13 @@ pub async fn spawn_detached_child(
     Ok(json!({
         "thread": {
             "thread_id": child_thread_id,
-            "status": "running",
+            "status": if queued { "created" } else { "running" },
             "detached": true,
         },
         "result": {
             "detached": true,
             "child_thread_id": child_thread_id,
+            "queued": queued,
         },
     }))
 }

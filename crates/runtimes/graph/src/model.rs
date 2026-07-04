@@ -102,6 +102,11 @@ pub struct GraphNode {
     pub collect: Option<String>,
     #[serde(default)]
     pub parallel: bool,
+    /// Fanout width. On a plain foreach this bounds concurrent dispatch
+    /// tasks. On a `detach: true` foreach it is the LAUNCH WINDOW: detached
+    /// spawns return immediately, so the daemon keeps at most this many
+    /// child chains launched-and-live at once and admits the next queued
+    /// child when a live one reaches a hard terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     /// Return-node output template. A YAML scalar deserializes to a

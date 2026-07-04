@@ -699,6 +699,12 @@ async fn main() -> Result<()> {
     // guarded, so a duplicate with a live path is a benign `Skipped`. `Resume`
     // wakes a suspended parent; `RelaunchChild` re-fires a child stranded in the
     // pre-launch window.
+    // Launch-window recovery: release slots whose member chain settled while
+    // no kick could land (crash window), then admit and launch queued
+    // members. Post-listener for the same reason as the intents above —
+    // launched runtimes call back immediately.
+    ryeos_executor::execution::launch::sweep_launch_windows(&app_state);
+
     for action in follow_actions {
         let st = app_state.clone();
         tokio::spawn(async move {

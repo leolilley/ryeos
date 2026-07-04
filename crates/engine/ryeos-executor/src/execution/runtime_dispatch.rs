@@ -138,6 +138,7 @@ async fn handle_execute(
             &params.action.item_id,
             &params.action.params,
             params.action.facets.as_ref(),
+            params.action.launch_window.as_ref(),
         )
         .await;
     }
