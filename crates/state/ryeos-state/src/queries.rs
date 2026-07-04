@@ -359,13 +359,16 @@ pub fn list_threads(db: &ProjectionDb, limit: usize) -> anyhow::Result<Vec<Threa
 ///
 /// When `filter_principal` is `Some(fp)`, only threads with
 /// `requested_by = fp` are returned. `None` returns all threads.
-/// Row ordering for a thread listing. `Default` is the historical
-/// oldest-first order (public `threads.list`, CLI); `Watch` is the operator
-/// watch-console order: active threads (non-terminal status) first, then newest.
+/// Row ordering for a thread listing. `Default` is the oldest-first order
+/// (public `threads.list`, CLI); `Newest` is newest-first — the "what just
+/// ran" order, which matters because the limit truncates (oldest-first +
+/// limit returns the OLDEST rows); `Watch` is the operator watch-console
+/// order: active threads (non-terminal status) first, then newest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThreadSort {
     #[default]
     Default,
+    Newest,
     Watch,
 }
 
@@ -425,6 +428,7 @@ pub fn list_threads_query(
     // vocabulary, not user input), so `active` = status NOT terminal.
     let order = match sort {
         ThreadSort::Default => "ORDER BY created_at".to_string(),
+        ThreadSort::Newest => "ORDER BY created_at DESC".to_string(),
         ThreadSort::Watch => {
             let terminal_in = TERMINAL_STATUSES
                 .iter()

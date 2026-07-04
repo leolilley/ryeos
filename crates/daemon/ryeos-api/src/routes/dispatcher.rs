@@ -159,21 +159,37 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
             Err(e) => e.into_response(),
         }
     } else {
-        let result = tokio::time::timeout(
-            limiter.timeout,
+        // The timeout bounds the CLIENT's wait, never the work: the handler
+        // runs in its own task, so hitting the route timeout (or the client
+        // disconnecting) abandons only the response. Cancelling the handler
+        // future itself would drop it mid-execution and fire finalize-on-drop
+        // guards — failing threads whose runtime children were still running
+        // toward success, leaving contradictory terminal events in one braid.
+        // Execution work is bounded by its own limits (thread duration,
+        // runtime timeouts), not by how long an HTTP caller waited.
+        let task = tokio::spawn(async move {
             route_ref
                 .response_mode
-                .handle(&route_ref, route_dispatch_ctx),
-        )
-        .await;
+                .handle(&route_ref, route_dispatch_ctx)
+                .await
+        });
 
-        match result {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => e.into_response(),
+        match tokio::time::timeout(limiter.timeout, task).await {
+            Ok(Ok(Ok(resp))) => resp,
+            Ok(Ok(Err(e))) => e.into_response(),
+            Ok(Err(join_error)) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "error": format!("route handler task failed: {join_error}"),
+                })),
+            )
+                .into_response(),
             Err(_) => (
                 StatusCode::GATEWAY_TIMEOUT,
                 axum::Json(serde_json::json!({
-                    "error": "request timed out",
+                    "error": "request timed out waiting for a response; the request \
+                              continues server-side — check the thread's status for \
+                              its real outcome",
                 })),
             )
                 .into_response(),
