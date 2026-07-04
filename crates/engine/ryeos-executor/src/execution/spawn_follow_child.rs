@@ -248,6 +248,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     path: project_path.clone(),
                 },
                 original_snapshot_hash: None,
+                // A follow child borrows the parent's workspace; it never
+                // owns snapshot lineage, so no pushed-head identity is
+                // seeded (rebuilding one would take over pin/foldback the
+                // parent owns).
+                original_pushed_head_ref: None,
                 current_site_id: parent.current_site_id.clone(),
                 origin_site_id: parent.origin_site_id.clone(),
                 requested_by: requested_by.clone(),

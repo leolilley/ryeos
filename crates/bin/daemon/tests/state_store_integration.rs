@@ -177,6 +177,7 @@ mod integration_tests {
                         path: std::path::PathBuf::from("/tmp/p"),
                     },
                     original_snapshot_hash: None,
+                    original_pushed_head_ref: None,
                     current_site_id: "site:test".into(),
                     origin_site_id: "site:test".into(),
                     requested_by: EffectivePrincipal::Local(Principal {
@@ -917,6 +918,7 @@ mod integration_tests {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
             original_snapshot_hash: None,
+            original_pushed_head_ref: None,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             requested_by: EffectivePrincipal::Local(Principal {
@@ -1014,6 +1016,7 @@ mod integration_tests {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
             original_snapshot_hash: None,
+            original_pushed_head_ref: None,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             requested_by: EffectivePrincipal::Local(Principal {

@@ -1928,6 +1928,10 @@ pub struct SpawnItemParams<'a> {
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
+    /// Pushed-head identity of the spawn's root provenance (see
+    /// `launch_metadata::OriginalPushedHeadRef::from_provenance`).
+    /// `None` for live-fs spawns and borrowed children.
+    pub original_pushed_head_ref: Option<&'a crate::launch_metadata::OriginalPushedHeadRef>,
 }
 
 #[tracing::instrument(
@@ -1953,6 +1957,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
+        original_pushed_head_ref,
     } = params;
     // vault_bindings: user-provided secret/capability env vars.
     // daemon_callback_env: daemon infrastructure env (socket path, callback
@@ -2150,6 +2155,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 parameters: resolved.parameters.clone(),
                 project_context: resolved.plan_context.project_context.clone(),
                 original_snapshot_hash: original_snapshot_hash.map(str::to_string),
+                original_pushed_head_ref: original_pushed_head_ref.cloned(),
                 current_site_id: resolved.plan_context.current_site_id.clone(),
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),

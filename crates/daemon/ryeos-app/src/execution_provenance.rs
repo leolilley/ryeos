@@ -46,6 +46,12 @@ pub enum ExecutionProvenance {
         /// Live project root. Doubles as effective_path and
         /// original_project_path.
         project_path: PathBuf,
+        /// Deliberate runtime state-root override (`/execute` `state_root`):
+        /// item resolution stays anchored at `project_path` while the
+        /// runtime-state project path advertised to the child (callback
+        /// token + `RYEOSD_PROJECT_PATH`) points here. `None` = state
+        /// lives under the project as usual.
+        state_root: Option<PathBuf>,
         __seal: ProvenanceSeal,
     },
 
@@ -69,6 +75,9 @@ pub enum ExecutionProvenance {
     BorrowedChildLiveFs {
         request_engine: Arc<Engine>,
         project_path: PathBuf,
+        /// Inherited runtime state-root override; children of a run whose
+        /// state was redirected keep writing state to the same place.
+        state_root: Option<PathBuf>,
         __seal: ProvenanceSeal,
     },
 
@@ -90,7 +99,47 @@ impl ExecutionProvenance {
         Self::RootLiveFs {
             request_engine,
             project_path,
+            state_root: None,
             __seal: ProvenanceSeal(()),
+        }
+    }
+
+    /// Attach a runtime state-root override to a live-fs provenance.
+    ///
+    /// Only meaningful on the live-fs variants — a pushed-head execution
+    /// already runs against an ephemeral checkout, so the caller must have
+    /// rejected the combination before constructing provenance.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a pushed-head variant: reaching here means the entry-point
+    /// validation was bypassed, which is a programmer error.
+    pub fn with_state_root(mut self, override_root: Option<PathBuf>) -> Self {
+        match &mut self {
+            Self::RootLiveFs { state_root, .. } | Self::BorrowedChildLiveFs { state_root, .. } => {
+                *state_root = override_root;
+            }
+            Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => {
+                if override_root.is_some() {
+                    panic!(
+                        "ExecutionProvenance::with_state_root: state_root is a \
+                         live-fs control; pushed-head executions already run in \
+                         an ephemeral checkout"
+                    );
+                }
+            }
+        }
+        self
+    }
+
+    /// The deliberate runtime state-root override, when one was requested.
+    /// `None` = runtime state lives under the (effective) project path.
+    pub fn state_root_override(&self) -> Option<&Path> {
+        match self {
+            Self::RootLiveFs { state_root, .. } | Self::BorrowedChildLiveFs { state_root, .. } => {
+                state_root.as_deref()
+            }
+            Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => None,
         }
     }
 
@@ -140,15 +189,18 @@ impl ExecutionProvenance {
             Self::RootLiveFs {
                 request_engine,
                 project_path,
+                state_root,
                 ..
             }
             | Self::BorrowedChildLiveFs {
                 request_engine,
                 project_path,
+                state_root,
                 ..
             } => Self::BorrowedChildLiveFs {
                 request_engine: request_engine.clone(),
                 project_path: project_path.clone(),
+                state_root: state_root.clone(),
                 __seal: ProvenanceSeal(()),
             },
             Self::RootPushedHead {
@@ -266,6 +318,7 @@ impl std::fmt::Debug for ExecutionProvenance {
                     | Self::BorrowedChildPushedHead { .. } => None,
                 },
             )
+            .field("state_root", &self.state_root_override())
             .field(
                 "engine_arc_strong_count",
                 &Arc::strong_count(self.request_engine()),
@@ -430,6 +483,47 @@ mod tests {
         assert!(Arc::ptr_eq(&l_root, &l_child));
         assert!(Arc::ptr_eq(&l_child, &l_grand));
         assert!(Arc::ptr_eq(&l_root, &lifeline));
+    }
+
+    #[test]
+    fn state_root_override_defaults_to_none_and_round_trips() {
+        let p = ExecutionProvenance::root_live_fs(PathBuf::from("/live"), engine());
+        assert_eq!(p.state_root_override(), None);
+
+        let p = p.with_state_root(Some(PathBuf::from("/tmp/smoke")));
+        assert_eq!(p.state_root_override(), Some(Path::new("/tmp/smoke")));
+        // Resolution anchors are unchanged by the override.
+        assert_eq!(p.effective_path(), Path::new("/live"));
+        assert_eq!(p.original_project_path(), Path::new("/live"));
+    }
+
+    #[test]
+    fn state_root_override_is_inherited_by_borrowed_children() {
+        let parent = ExecutionProvenance::root_live_fs(PathBuf::from("/live"), engine())
+            .with_state_root(Some(PathBuf::from("/tmp/smoke")));
+        let child = parent.clone_for_borrowed_child();
+        let grandchild = child.clone_for_borrowed_child();
+
+        assert_eq!(child.state_root_override(), Some(Path::new("/tmp/smoke")));
+        assert_eq!(
+            grandchild.state_root_override(),
+            Some(Path::new("/tmp/smoke"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "live-fs control")]
+    fn with_state_root_panics_on_pushed_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let lifeline = Arc::new(TempDirGuard::new(dir.path().to_path_buf()));
+        let root = ExecutionProvenance::root_pushed_head(
+            dir.path().to_path_buf(),
+            PathBuf::from("/laptop"),
+            engine(),
+            lifeline,
+            "snap".into(),
+        );
+        let _ = root.with_state_root(Some(PathBuf::from("/tmp/smoke")));
     }
 
     #[test]
