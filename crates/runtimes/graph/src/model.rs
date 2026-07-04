@@ -77,6 +77,23 @@ pub struct GraphNode {
     /// suspend time). Validated in `validation.rs`.
     #[serde(default)]
     pub follow: bool,
+    /// DETACH node: launch the action as a detached, lineage-linked child
+    /// (fire-and-forget) and CONTINUE — unlike `follow`, the graph does not
+    /// suspend or wait for the child's result. The node's result is the spawned
+    /// `{child_thread_id}`. The child is lineage-linked (a cancel/kill cascade
+    /// reaches it, it appears in `threads.children`) and inherits the parent's
+    /// depth+1 and hard limits. With `over:`, this is a lineage-preserving fanout
+    /// — the fleet fix. Only valid on an action node; mutually exclusive with
+    /// `follow`; never cacheable. Validated in `validation.rs`.
+    #[serde(default)]
+    pub detach: bool,
+    /// Cohort/fleet tags stamped on a `detach` child at spawn — a map of
+    /// `key: "<template>"` interpolated per iteration
+    /// (e.g. `{fleet: "${graph_run_id}", game: "${item}"}`), so a detached child
+    /// is tagged by construction with no post-launch race. Ignored without
+    /// `detach`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facets: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub over: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

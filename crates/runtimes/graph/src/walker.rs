@@ -3242,6 +3242,8 @@ mod tests {
             cache_result: false,
             cache: false,
             follow: false,
+            detach: false,
+            facets: None,
             over: None,
             r#as: None,
             collect: None,
