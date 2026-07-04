@@ -21,6 +21,7 @@ pub mod bundle_export;
 pub mod bundle_install;
 pub mod bundle_list;
 pub mod bundle_remove;
+pub mod bundle_smoke;
 pub mod commands_dispatch;
 pub mod commands_list;
 pub mod commands_submit;
@@ -140,6 +141,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     bundle_export::DESCRIPTOR,
     bundle_list::DESCRIPTOR,
     bundle_remove::DESCRIPTOR,
+    bundle_smoke::DESCRIPTOR,
     maintenance_gc::DESCRIPTOR,
     rebuild::DESCRIPTOR,
     node_sign::DESCRIPTOR,

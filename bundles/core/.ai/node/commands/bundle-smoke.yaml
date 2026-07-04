@@ -1,0 +1,11 @@
+tokens:
+- bundle
+- smoke
+description: "Run the bundle's declared smoke executions (manifest.source.yaml `smoke:`) against its source tree; runtime state is isolated under a temporary state root so smoke runs never write into the authored tree. The bundle source is the discovered project (or --project <path>)."
+dispatch:
+  kind: execute_ref
+  execute: service:bundle/smoke
+project:
+  resolution: required
+  default: discover_upward_ai
+  bind_parameter: source

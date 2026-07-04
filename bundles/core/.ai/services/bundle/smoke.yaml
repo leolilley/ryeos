@@ -1,0 +1,7 @@
+kind: service
+endpoint: bundle.smoke
+required_caps: []
+schema:
+  source: string
+  keep_state: boolean?
+description: "Execute the bundle's declared smoke list (manifest.source.yaml `smoke:`) against its source tree. Runs bundle preflight first, then dispatches each entry as a normal inline thread with runtime state isolated under a temporary state root; the report carries per-entry status, thread ids, and the state root (kept on failure or with keep_state)."
