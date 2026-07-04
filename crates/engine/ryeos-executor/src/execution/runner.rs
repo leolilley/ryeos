@@ -778,6 +778,10 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     let inline_snapshot = base_snapshot_hash.clone();
     let inline_pushed_head_ref =
         ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let inline_state_root = params
+        .provenance
+        .state_root_override()
+        .map(std::path::Path::to_path_buf);
     let inline_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
@@ -795,6 +799,7 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
             is_resume: false,
             original_snapshot_hash: inline_snapshot.as_deref(),
             original_pushed_head_ref: inline_pushed_head_ref.as_ref(),
+            state_root: inline_state_root.as_deref(),
         })
     })
     .await
@@ -1037,6 +1042,10 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
     let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
     let bg_pushed_head_ref =
         ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let bg_state_root = params
+        .provenance
+        .state_root_override()
+        .map(std::path::Path::to_path_buf);
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1052,6 +1061,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_base_snapshot_hash,
         bg_project_path,
         bg_pushed_head_ref,
+        bg_state_root,
         bg_temp_dir,
         bg_skip_snapshot_lifecycle,
         bg_runtime_state_dir,
@@ -1093,7 +1103,7 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_state, bg_chain_root_id, bg_resolved, bg_engine, bg_vault,
         bg_cb_bindings, bg_acting_principal, bg_pre_manifest_hash,
         bg_base_snapshot_hash,
-        bg_project_path, bg_original_pushed_head_ref, bg_temp_dir,
+        bg_project_path, bg_original_pushed_head_ref, bg_state_root, bg_temp_dir,
         bg_skip_snapshot_lifecycle, bg_runtime_state_dir,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token
@@ -1118,6 +1128,7 @@ async fn dispatch_detached_bg_task(
     mut bg_base_snapshot_hash: Option<String>,
     bg_project_path: Option<PathBuf>,
     bg_original_pushed_head_ref: Option<ryeos_app::launch_metadata::OriginalPushedHeadRef>,
+    bg_state_root: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_skip_snapshot_lifecycle: bool,
     bg_runtime_state_dir: PathBuf,
@@ -1152,6 +1163,7 @@ async fn dispatch_detached_bg_task(
     let cb_for_spawn = bg_cb_bindings;
     let snap_for_spawn = bg_base_snapshot_hash.clone();
     let pushed_head_ref_for_spawn = bg_original_pushed_head_ref;
+    let state_root_for_spawn = bg_state_root;
 
     let spawn_result = task::spawn_blocking(move || {
         let project_root = match &res_for_spawn.plan_context.project_context {
@@ -1174,6 +1186,7 @@ async fn dispatch_detached_bg_task(
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),
             original_pushed_head_ref: pushed_head_ref_for_spawn.as_ref(),
+            state_root: state_root_for_spawn.as_deref(),
         })
     })
     .await;
@@ -1513,8 +1526,12 @@ pub fn execution_params_from_resume_context(
         // then-current live engine. Accepted residual drift: an install-
         // generation change between spawn and resume means item/bundle
         // resolution here can differ from what the pre-crash run saw.
+        // The persisted state-root override is re-applied so a resumed
+        // overridden run keeps its state/callback anchor (the freshly
+        // minted token must match what the runtime advertises).
         ResumeProvenanceDecision::LiveFs(path) => (
-            ExecutionProvenance::root_live_fs(path.to_path_buf(), state.engine.clone()),
+            ExecutionProvenance::root_live_fs(path.to_path_buf(), state.engine.clone())
+                .with_state_root(resume.state_root.clone()),
             resume.project_context.clone(),
         ),
         ResumeProvenanceDecision::MissingPushedHeadRef(other) => {
@@ -1804,10 +1821,10 @@ pub async fn run_existing_detached(
     // the prior process exited via the bg task's CbTokenGuard /
     // TatTokenGuard drops).
     let child_provenance = params.provenance.clone_for_borrowed_child();
-    // Same runtime-state root selection as `run_inline`. Resume provenance is
-    // reconstructed without a `state_root` override (the override is not
-    // persisted in the resume context), so this is the effective path unless
-    // a daemon-internal caller reconstructed one.
+    // Same runtime-state root selection as `run_inline`. The override is
+    // persisted on the resume context and re-applied by
+    // `execution_params_from_resume_context`, so a resumed overridden run
+    // keeps its state/callback anchor.
     let runtime_state_root = params
         .provenance
         .state_root_override()
@@ -1849,6 +1866,10 @@ pub async fn run_existing_detached(
     let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
     let bg_pushed_head_ref =
         ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let bg_state_root = params
+        .provenance
+        .state_root_override()
+        .map(std::path::Path::to_path_buf);
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1864,6 +1885,7 @@ pub async fn run_existing_detached(
         bg_base_snapshot_hash,
         bg_project_path,
         bg_pushed_head_ref,
+        bg_state_root,
         bg_temp_dir,
         bg_skip_snapshot_lifecycle,
         bg_runtime_state_dir,
@@ -1894,6 +1916,7 @@ mod tests {
             project_context,
             original_snapshot_hash: None,
             original_pushed_head_ref: pushed,
+            state_root: None,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             requested_by: EffectivePrincipal::Local(Principal {

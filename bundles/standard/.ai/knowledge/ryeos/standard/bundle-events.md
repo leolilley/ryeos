@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T01:05:59Z:9811b00f1420b865f563eda2de07fa2eefea081285b113b9a37fcbcf07230959:3KLiykGzqjLUhoiHgXRyQpnF0WSmtKP6b4UnNZaX5O0L9U4qsRDn/tunHgUEwIczioab1XC0VsakfUBCXIfoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-04T03:34:02Z:8edf607cabcf7778c8e0278d42aea3a6cf934a4b55c5825597688580fff92c2f:8wbA2oI8BmSw/LeKBzCP0NinxG9xHJyOzv24Dod7HQw2ZodvwdSW/wCFnu6j60xb7VUrWqaCaXAtZBH1gtHuCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -55,11 +55,11 @@ tool that does **create-or-append** — read the current chain, then append — 
 **both** capabilities granted: `scan` (to read) and `append` (to write).
 Declaring only `append` produces a confusing `scan` denial on the read.
 
-Event-kind patterns follow the shared runtime-authority wildcard rule —
-concrete requests glob-match a declared pattern, but a wildcard request is
-backed only by an *identical* declaration (glob-vs-glob fails closed, at mint
-and compose time alike). The full rule is stated in
-`knowledge:ryeos/standard/item-authoring` § "Wildcard semantics".
+Event kinds are **concrete-only, on both sides**: manifest validation rejects
+`*`/`?` in `event_kind` (and in `runtime_vault.namespace`), and a request is
+matched by exact id at mint and compose time — spell every event kind out.
+Pattern grammar exists only for item-authoring namespaces; that rule is
+stated in `knowledge:ryeos/standard/item-authoring` § "Wildcard semantics".
 
 ## Declaring authority in the manifest
 

@@ -1364,6 +1364,9 @@ async fn run_claimed_thread_row(
             // live-fs spawns and borrowed children.
             original_pushed_head_ref:
                 ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(provenance),
+            state_root: provenance
+                .state_root_override()
+                .map(std::path::Path::to_path_buf),
             current_site_id: resolved.current_site_id.clone(),
             origin_site_id: resolved.origin_site_id.clone(),
             requested_by: resolved.plan_context.requested_by.clone(),
@@ -1450,9 +1453,18 @@ async fn run_claimed_thread_row(
     // a `duration > 3600s` run does not lose callback authority mid-run.
     let ttl = launch_token_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
+    // The token's project identity is the run's state/callback anchor: the
+    // deliberate state-root override when one is in play, else the project.
+    // The runtime advertises exactly `envelope.roots.state_root()` on every
+    // callback and validation is equality — minting the source root here
+    // would reject every dispatch of an overridden run.
+    let token_project = provenance
+        .state_root_override()
+        .unwrap_or(project_path)
+        .to_path_buf();
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,
-        project_path.to_path_buf(),
+        token_project,
         ttl,
         effective_caps.clone(),
         child_provenance,

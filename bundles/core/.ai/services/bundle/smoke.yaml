@@ -1,6 +1,11 @@
+# ryeos:signed:2026-07-04T03:34:00Z:53df706a935d60b1571153151dd575d9a65da7110fb12c2d6463051bb432cb7e:Ou5+WIw4gWj407WyuYWZuTPR7zBUxbbmzH0Zb1H81OQRvoeQTry4M+6AO4gUH+dchNzRWYerPdgADlyeK99AAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: bundle.smoke
-required_caps: []
+# Cap enforcement reads the VERIFIED YAML, not the Rust descriptor — this
+# service dispatches arbitrary manifest-declared items, so it must be gated
+# here.
+required_caps:
+  - ryeos.execute.service.bundle/smoke
 schema:
   source: string
   keep_state: boolean?

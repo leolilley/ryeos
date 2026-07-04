@@ -549,7 +549,13 @@ fn dispatch_service(
         // A descriptor that names an offline tool while staying daemon-only
         // is contradicting itself; routing to the daemon here would silently
         // ignore the declared offline dispatch. Fail at the source instead.
-        if item.composed_value.get("offline_execute").is_some() {
+        // (An explicit null is "absent", matching the resolution below.)
+        if item
+            .composed_value
+            .get("offline_execute")
+            .and_then(Value::as_str)
+            .is_some()
+        {
             return Err(CliError::Local {
                 detail: format!(
                     "service '{}' declares offline_execute but availability is \

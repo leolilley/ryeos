@@ -1932,6 +1932,10 @@ pub struct SpawnItemParams<'a> {
     /// `launch_metadata::OriginalPushedHeadRef::from_provenance`).
     /// `None` for live-fs spawns and borrowed children.
     pub original_pushed_head_ref: Option<&'a crate::launch_metadata::OriginalPushedHeadRef>,
+    /// The spawn's deliberate state-root override
+    /// (`provenance.state_root_override()`), persisted on the resume
+    /// context so a resumed run keeps the same state/callback anchor.
+    pub state_root: Option<&'a std::path::Path>,
 }
 
 #[tracing::instrument(
@@ -1958,6 +1962,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         is_resume,
         original_snapshot_hash,
         original_pushed_head_ref,
+        state_root,
     } = params;
     // vault_bindings: user-provided secret/capability env vars.
     // daemon_callback_env: daemon infrastructure env (socket path, callback
@@ -2156,6 +2161,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 project_context: resolved.plan_context.project_context.clone(),
                 original_snapshot_hash: original_snapshot_hash.map(str::to_string),
                 original_pushed_head_ref: original_pushed_head_ref.cloned(),
+                state_root: state_root.map(std::path::Path::to_path_buf),
                 current_site_id: resolved.plan_context.current_site_id.clone(),
                 origin_site_id: resolved.plan_context.origin_site_id.clone(),
                 requested_by: resolved.plan_context.requested_by.clone(),

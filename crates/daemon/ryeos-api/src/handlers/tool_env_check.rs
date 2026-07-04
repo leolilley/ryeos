@@ -177,8 +177,26 @@ fn provider_auth_report(
         .resolve_for_launch(None, &verified.resolved.kind)
     {
         Ok(runtime) => runtime.yaml.required_envelope_fields.clone(),
-        // No registered runtime for this kind — nothing resolves a provider.
-        Err(_) => Vec::new(),
+        Err(e) => {
+            // No registered runtime for this kind → nothing resolves a
+            // provider. But a kind that HAS runtimes and still fails here
+            // (ambiguous defaults, broken registration) would fail a real
+            // launch the same way — that failure is the finding, not
+            // "nothing to check".
+            let kind_has_runtimes = state
+                .engine
+                .runtimes
+                .all()
+                .any(|r| r.yaml.serves == verified.resolved.kind);
+            if kind_has_runtimes {
+                return serde_json::json!({
+                    "checked": false,
+                    "error": format!("runtime resolution for kind '{}': {e}", verified.resolved.kind),
+                    "note": "a real launch fails the same way — fix the runtime registration",
+                });
+            }
+            Vec::new()
+        }
     };
     if !ryeos_executor::execution::launch::requires_provider_snapshot(&required_envelope_fields) {
         return serde_json::json!({ "checked": true, "required": false });

@@ -4,7 +4,7 @@
 //! for now (weighted/right-aligned columns are a later refinement).
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::StudioTableRowVm;
+use ryeos_client_base::studio::view_model::{StudioTableRowVm, StudioTone};
 use ryeos_client_base::text_surface::TextSurface;
 
 use super::super::primitives::fill_line;
@@ -76,8 +76,16 @@ pub fn draw_table(surface: &mut TextSurface, rect: Rect, columns: &[String], row
         for (i, cell) in row.cells.iter().enumerate().take(ncols) {
             // First column is the identifier (foreground); later columns are
             // secondary detail (muted) — unless the whole row is selected or
-            // the column projected its own tone for this cell.
-            let cell_tone = row.cell_tones.get(i).copied().flatten();
+            // the column projected its own tone for this cell. Neutral is
+            // "no override", not a color: both renderers fall back to their
+            // default cell styling for it, so an authored `default: neutral`
+            // (or a typoed tone name) can't diverge between them.
+            let cell_tone = row
+                .cell_tones
+                .get(i)
+                .copied()
+                .flatten()
+                .filter(|tone| *tone != StudioTone::Neutral);
             let cell_style = if row.selected {
                 style
             } else if let Some(tone) = cell_tone {
