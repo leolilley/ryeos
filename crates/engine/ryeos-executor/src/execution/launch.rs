@@ -965,6 +965,28 @@ async fn run_claimed_thread_row(
     // the callback cap's chain root.
     let chain_root_id = thread.chain_root_id.clone();
 
+    // Record operational lineage the instant we commit to launching a child, so a
+    // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
+    // execution context is a child — inline-dispatched and follow children both
+    // flow through here; a fresh root launch and a continuation successor carry no
+    // parent context and are (correctly) not linked. Best-effort: a lineage-row
+    // failure degrades cascade coverage but must not fail an otherwise-launchable
+    // child (the child's own runtime row already exists).
+    if let Some(parent_ctx) = parent_execution_context {
+        if let Err(e) =
+            state
+                .state_store
+                .record_child_link(&parent_ctx.parent_thread_id, &thread_id, "dispatch")
+        {
+            tracing::warn!(
+                parent_thread_id = %parent_ctx.parent_thread_id,
+                child_thread_id = %thread_id,
+                error = %e,
+                "failed to record child link; cancel/kill cascade will not reach this child"
+            );
+        }
+    }
+
     // Arm the persistence-first guard: any post-create failure below finalizes
     // the thread `failed` instead of leaving it stuck at `created` (no-op once
     // the thread is terminal).
