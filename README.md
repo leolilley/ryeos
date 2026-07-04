@@ -2,49 +2,62 @@
 
 > _In Linux, everything is a file. In RyeOS, everything is data._
 
-RyeOS is an operating substrate for AI agents: a local node, signed execution
-engine, durable state layer, and bundle system that let agents carry tools,
-workflows, knowledge, and authority across projects and machines.
+RyeOS is portable verified execution.
 
-It is not another prompt library. It is the layer underneath an agent session:
-identity, trust, execution, state, orchestration, scheduling, remotes, and an MCP
-bridge over one CLI.
+(_RYE Your Execution_.)
 
-## Why RyeOS exists
+Work in RyeOS — a tool run, a multi-step workflow, a scheduled job — is
+data: signed, content-addressed, durable. Because it is data, it can prove
+what it is, who authorized it, and what it actually did. And because it is
+data, it can move: to another machine, across a restart, into the future.
+A run whose process dies resumes from its own record. Work pushed to
+another node carries its trust with it instead of borrowing the machine's.
 
-Most agent setups are ephemeral. A model is connected to a bag of tools, the
-session runs, and the useful state is scattered across chat history, local files,
-and one-off scripts. RyeOS gives that work a persistent substrate:
+That is the whole idea. Everything in this repository is that one property
+at a different layer:
 
-- **Signed items** — tools, directives, knowledge, graphs, and config are
-  tamper-evident data.
-- **Bundles** — installable collections of signed items, binaries, schemas, and
-  CLI verbs.
-- **A local node** — `ryeosd` owns execution, state, vault material, threads,
-  scheduling, and remote APIs.
-- **Content-addressed state** — events, snapshots, manifests, and project state
-  are written to CAS first; SQLite is only a rebuildable projection.
-- **Threads** — every execution has an ID, event log, lifecycle, cancellation,
-  and replay path.
-- **MCP integration** — agents call one `cli` tool; RyeOS routes to whatever
-  signed verbs the installed bundles provide.
+- **Signed items and bundles** — behavior you can install and trust,
+  because what runs is exactly what was signed.
+- **Threads** — every execution has an identity and a durable event log.
+  The log _is_ the run: tail it live, replay it, resume it, cancel it.
+- **Keys** — the only actors. An operator, a node, an agent: each is a
+  signing key, and anything that acts, acts by signing. Every piece of
+  work traces back to the key that stands behind it, and trust is always
+  a decision about a key, never about a machine.
+- **Remotes** — push work to another node with signed requests and scoped
+  grants. Trust travels as data, never as ambient machine access.
+- **Content-addressed state** — history is the source of truth; databases
+  and even running processes are rebuildable projections of it.
 
-The result is a system where the model can change, the client can change, and
-the machine can change, while the signed execution substrate remains.
+None of this is AI-specific — remove every LLM runtime and the property
+stands. But an execution substrate that doesn't care what the executor is
+turns out to be exactly what LLM work needs: directives make an LLM call
+into a signed, durable, resumable execution like any other, and an agent
+is simply a signing key with a body of signed work — not a process, not a
+session.
 
 ## Mental model
 
 ```text
-╭──────────────╮      ╭──────────────╮      ╭──────────────╮
-│ AI client    │ MCP  │ ryeos CLI    │ HTTP │ ryeosd node  │
-│ Amp/Claude…  │─────▶│ bundle verbs │─────▶│ execution +  │
-╰──────────────╯      ╰──────────────╯      │ state        │
-                                            ╰──────┬───────╯
-                                                   │
-                         ╭─────────────────────────┴─────────────────────────╮
-                         │ signed bundles, CAS objects, refs, threads, vault │
-                         ╰───────────────────────────────────────────────────╯
+╭──────────────╮  MCP: one cli tool
+│ AI client    │──────╮
+╰──────────────╯      ▼
+╭──────────────╮  ╭──────────────╮       ╭──────────────╮                 ╭─────────────╮
+│ operator     │─▶│ ryeos CLI    │ HTTP  │ ryeosd node  │ signed requests │ other nodes │
+╰──────────────╯  │ bundle verbs │──────▶│ execution +  │◀───────────────▶│             │
+                  ╰──────────────╯       │ state        │    CAS sync     ╰─────────────╯
+                                         ╰──────┬───────╯
+                                                │
+                      ╭─────────────────────────┴─────────────────────────╮
+                      │ signed bundles, CAS objects, refs, threads, vault │
+                      ╰───────────────────────────────────────────────────╯
 ```
+
+The node, `ryeosd`, is where data becomes act: it holds keys, checks
+signatures, executes at the frontier, and owns durable state. It is
+deliberately the least special part of the system — any node with the right
+trust can be the site of an execution, because everything that matters is in
+the data.
 
 RyeOS is built around a few primitives:
 
@@ -53,7 +66,7 @@ RyeOS is built around a few primitives:
 | **Item**       | A signed unit of behavior or context: `tool:`, `directive:`, `knowledge:`, graph, service, config, runtime, schema. |
 | **Bundle**     | A signed distribution unit containing items, schemas, binaries, CLI descriptors, and publisher trust metadata.      |
 | **Node**       | The local daemon and system space. It verifies bundles, executes items, owns state, and exposes HTTP services.      |
-| **Thread**     | A tracked execution with lifecycle, events, result, parent/child relationships, cancellation, and replay.           |
+| **Thread**     | A tracked execution: event log, lifecycle, lineage, continuation chain, receipts, cancellation, and replay.         |
 | **CAS**        | The authoritative append-only state store. Hashes identify events, snapshots, manifests, and project objects.       |
 | **Ref**        | A signed mutable pointer into CAS, such as a project head, chain head, or bundle registration.                      |
 | **MCP bridge** | A local single-user adapter exposing one `cli` tool that shells out to the `ryeos` binary.                          |
@@ -64,32 +77,38 @@ RyeOS is built around a few primitives:
 
 ```bash
 ryeos execute tool:ryeos/core/identity/public_key
-ryeos execute directive:apps/demo/chat --message "Summarize this project"
+ryeos execute directive:ryeos/examples/continuing_research
 ```
 
-Tools are executable programs. Directives are LLM-facing workflows with
+Tools are executable programs. Directives are LLM-evaluated programs with
 permissions, limits, context, and inheritance. Both are resolved from signed
 bundle or project data before execution.
 
-### Inspect and replay work
+### Trace, steer, and replay executions
 
 ```bash
 ryeos thread list
 ryeos thread get <thread-id>
-ryeos thread tail <thread-id>
+ryeos thread tail <thread-id>        # live event stream
+ryeos thread children <thread-id>    # lineage-linked child threads
+ryeos thread chain <thread-id>       # continuation chain
+ryeos thread cancel <thread-id>
 ryeos events replay <thread-id>
 ```
 
-Every execution runs as a thread. Threads make agent work observable instead of
-being trapped inside a chat transcript.
+The event log is the execution, so tailing a thread is watching the execution
+object grow at its frontier, and replay is reading it back. Steering and
+cancellation act on the same control plane the node uses internally.
 
 ### Run declarative workflows
 
-State graphs describe multi-step workflows as YAML DAGs with conditional edges,
+State graphs describe multi-step programs as YAML DAGs with conditional edges,
 foreach execution, hooks, caching, and persisted state. Graphs run through the
-same signed execution and thread machinery as tools and directives.
+same signed execution and thread machinery as tools and directives: long runs
+continue across segment cuts as chained threads, and work fans out into
+detached, lineage-linked child threads.
 
-### Schedule recurring jobs
+### Schedule recurring work
 
 ```bash
 ryeos scheduler register <spec>
@@ -125,11 +144,13 @@ authority lives in the target node's authorized-key store.
 
 ### Arch Linux / AUR
 
+AUR packages (`ryeos`, `ryeos-mcp`) are coming soon. Once published:
+
 ```bash
 yay -S ryeos ryeos-mcp
 ryeos init
 ryeos start
-ryeos status
+ryeos node status
 ```
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
@@ -139,10 +160,11 @@ vault material, and writes node configuration. `ryeos start` launches `ryeosd`.
 The user lifecycle surface is intentionally small:
 
 ```bash
-ryeos init
-ryeos start
-ryeos stop
-ryeos status
+ryeos init          # bootstrap operator keys, trust, and bundles
+ryeos start         # bring the local node online
+ryeos stop          # stop it
+ryeos node status   # local node lifecycle status
+ryeos node doctor   # offline "why won't it start" checklist
 ```
 
 ### Docker image
@@ -150,11 +172,13 @@ ryeos status
 The release workflow publishes a composed daemon image:
 
 ```bash
-docker pull ghcr.io/leolilley/ryeosd-full:latest
+docker pull ghcr.io/leolilley/ryeos-standard:latest
 ```
 
-The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. It
-uses `/data/user` and `/data/core` for persistent operator and system state.
+The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
+entrypoint runs `ryeos init` on every boot (idempotent) before starting
+`ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
+so keys, trust, and runtime state survive redeploys.
 
 ### From source
 
@@ -205,7 +229,8 @@ the network without a separate authentication boundary.
 
 ## Bundles and trust
 
-RyeOS behavior is shipped as bundles. A bundle may contain:
+RyeOS behavior is shipped as bundles — installable signed `.ai/` trees. A
+bundle may contain:
 
 - item YAML and Markdown;
 - schemas and composer rules;
@@ -221,14 +246,15 @@ copied onto `PATH`.
 
 The repository currently includes bundles such as:
 
-| Bundle         | Purpose                                                                                     |
-| -------------- | ------------------------------------------------------------------------------------------- |
-| `core`         | Node, trust, identity, signing, state, service, and bundle primitives.                      |
-| `standard`     | Agent-facing workflows: directives, tools, graphs, threads, scheduler, and common runtimes. |
-| `web`          | Web-oriented tools and runtimes.                                                            |
-| `studio`       | UI/operator-facing bundle assets.                                                           |
-| `hosted-node`  | Policy for exposing a node as a hosted remote target.                                       |
-| `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                               |
+| Bundle         | Purpose                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| `core`         | Node, trust, identity, signing, state, service, and bundle primitives.                   |
+| `standard`     | Execution-facing workflows: directives, tools, graphs, threads, scheduler, and runtimes. |
+| `web`          | Web-oriented tools and runtimes.                                                         |
+| `browser`      | Browser automation tools.                                                                |
+| `studio`       | UI/operator-facing bundle assets.                                                        |
+| `hosted-node`  | Policy for exposing a node as a hosted remote target.                                    |
+| `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                            |
 
 ## State model
 
@@ -243,6 +269,8 @@ RyeOS state follows a three-tier truth model:
 Writes are CAS-first. If a projection update fails after the CAS write succeeds,
 the daemon can rebuild the projection later by walking signed heads through CAS.
 That makes the event graph the source of truth, not an incidental database file.
+The same tiering applies one level up: a running process is a rebuildable
+projection of its thread's durable state.
 
 ## Repository map
 
@@ -251,9 +279,10 @@ That makes the event graph the source of truth, not an incidental database file.
 | `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support.    |
 | `crates/engine/ryeos-engine`   | Item resolution, composition, policy facts, and execution planning.                 |
 | `crates/engine/ryeos-executor` | Execution dispatch and runtime integration.                                         |
-| `crates/daemon/ryeos-app`      | The daemon application: HTTP services, state, remotes, lifecycle, and node runtime. |
+| `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, and UI assets.   |
 | `crates/bin/cli`               | `ryeos`, the operator CLI and MCP target.                                           |
 | `crates/bin/daemon`            | `ryeosd`, the local node daemon.                                                    |
+| `crates/clients/*`             | Client surfaces: shared studio base, terminal, and web.                             |
 | `crates/runtimes/*`            | Directive, graph, and knowledge runtimes.                                           |
 | `crates/state/*`               | Durable state, scheduler, and vault crates.                                         |
 | `crates/tools/*`               | Bundle-owned tool binaries and handler protocols.                                   |
@@ -275,14 +304,14 @@ Use the repository scripts rather than hand-editing derived bundle state.
 
 Common loops:
 
-| Change type                                | Recommended loop                                         |
-| ------------------------------------------ | -------------------------------------------------------- |
-| Rust-only compile feedback                 | `cargo build` or targeted `cargo test -p <crate>`        |
-| Rust affecting bundled binaries            | Targeted `cargo build --release -p <owner>`, then explicit bundle refresh only if needed. |
+| Change type                                | Recommended loop                                                                                      |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| Rust-only compile feedback                 | `cargo build` or targeted `cargo test -p <crate>`                                                     |
+| Rust affecting bundled binaries            | Targeted `cargo build --release -p <owner>`, then explicit bundle refresh only if needed.             |
 | Bundle YAML, schemas, tools, or runtimes   | Targeted signing/publish flow; use `./scripts/gate.sh --refresh-bundles` only for release validation. |
-| Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh. |
-| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh` after building touched user-facing binaries. |
-| Packaged layout repair                     | `./scripts/pkg/install-local-direct.sh --populate` only when artifacts must be regenerated. |
+| Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh.                                  |
+| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh` after building touched user-facing binaries.                  |
+| Packaged layout repair                     | `./scripts/pkg/install-local-direct.sh --populate` only when artifacts must be regenerated.           |
 
 Hard rules for contributors and agents:
 
