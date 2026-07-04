@@ -291,13 +291,25 @@ fn main() -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
 
+    // Cooperative cancel: SIGTERM sets a flag the walker checks at each node
+    // boundary, finalizing `cancelled` cleanly — mirroring the directive
+    // runtime's SIGTERM handling. Without this a daemon graceful-cancel SIGTERM
+    // would kill the graph process mid-node. `signal_hook::flag::register` sets
+    // the atomic at signal-delivery time (async-signal-safe) and replaces the
+    // default terminate action; an uncatchable SIGKILL remains the hard-kill
+    // backstop when the grace period expires.
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, cancel_flag.clone())
+        .map_err(|e| anyhow::anyhow!("failed to install SIGTERM cooperative-cancel handler: {e}"))?;
+
     let w = walker::Walker::new(
         graph,
         resolved.project_root.to_string_lossy().to_string(),
         resolved.thread_id.clone(),
         callback,
         checkpoint,
-    );
+    )
+    .with_cancel_flag(cancel_flag);
 
     let graph_result = rt.block_on(w.execute(params, resolved.graph_run_id));
     // V5.5 P0 #3: pull non-fatal callback drift the walker

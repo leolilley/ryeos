@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -282,6 +283,12 @@ pub struct Walker {
     /// of re-suspending. Taken once, at the follow node. Interior-mutable for the
     /// same `&self` reason as `accounting`.
     follow_resume: Mutex<Option<FollowResumeState>>,
+    /// Signal-driven cooperative cancel. Set by the graph process's `SIGTERM`
+    /// handler (mirroring the directive runtime's `cancelled_flag`); the run loop
+    /// checks it at each node boundary and finalizes `cancelled` cleanly, so a
+    /// daemon graceful-cancel signal stops a graph at a checkpoint boundary
+    /// instead of the process dying mid-node. `None` in tests / when unset.
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// A pending follow result armed at resume, consumed at its follow node.
@@ -364,7 +371,16 @@ impl Walker {
             warnings: Mutex::new(Vec::new()),
             accounting: Mutex::new(GraphAccounting::default()),
             follow_resume: Mutex::new(None),
+            cancel_flag: None,
         }
+    }
+
+    /// Arm a signal-driven cooperative cancel flag (set by the process `SIGTERM`
+    /// handler). When set, the run loop finalizes `cancelled` at the next node
+    /// boundary.
+    pub fn with_cancel_flag(mut self, cancel_flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(cancel_flag);
+        self
     }
 
     /// If a follow result is armed for `node`, take it (consumed once). The
@@ -683,12 +699,28 @@ impl Walker {
         let mut steps_this_segment: u32 = 0;
         while step < cfg.max_steps && steps_this_segment < segment_limit {
             // Cooperative control: between every node, drain any operator commands
-            // (cancel/kill/…) queued for this thread and settle each. A cancel or
-            // kill routes a terminal outcome through commit_step exactly like any
-            // other terminal — full lifecycle, checkpoint semantics, the thread
-            // settles cancelled/killed — rather than a hard process signal landing
-            // mid-node.
-            if let Some(control) = self.drain_control_commands().await {
+            // (cancel/kill/…) queued for this thread and settle each, then fall
+            // back to the signal-driven cancel flag (daemon graceful cancel via
+            // SIGTERM). A cancel or kill routes a terminal outcome through
+            // commit_step exactly like any other terminal — full lifecycle,
+            // checkpoint semantics, the thread settles cancelled/killed — rather
+            // than a hard process signal landing mid-node. Draining first means a
+            // queued command is still settled even when a SIGTERM also arrived.
+            let control = match self.drain_control_commands().await {
+                Some(control) => Some(control),
+                None if self
+                    .cancel_flag
+                    .as_ref()
+                    .is_some_and(|f| f.load(Ordering::Relaxed)) =>
+                {
+                    Some(ControlDirective {
+                        action: ControlAction::Cancel,
+                        reason: Some("cooperative cancel by signal".to_string()),
+                    })
+                }
+                None => None,
+            };
+            if let Some(control) = control {
                 let outcome = StepOutcome::Terminal {
                     status: control.action.terminal_status(),
                     error: control.reason,
@@ -3257,6 +3289,55 @@ config:
         let completed = mock.completed.lock().unwrap().clone();
         assert!(completed.contains(&(1, "completed".to_string())));
         assert!(completed.contains(&(2, "completed".to_string())));
+    }
+
+    /// A signal-driven cancel flag (SIGTERM) already set finalizes the run
+    /// cancelled at the first node boundary, without executing a node — the same
+    /// cooperative terminal a claimed cancel command produces, but with no
+    /// command to settle.
+    #[tokio::test]
+    async fn signal_cancel_flag_settles_cancelled_between_nodes() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  nodes:
+    step1:
+      action: {item_id: "tool:test/echo", params: {msg: hello}}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let mock = Arc::new(MockClient::new(vec![json!({"msg": "hello"})]));
+        let client = CallbackClient::from_inner(
+            mock.clone(),
+            "thread-test",
+            "/tmp/test-project",
+            "tat-test",
+        );
+        // Flag pre-set, as if SIGTERM already arrived before the first node.
+        let flag = Arc::new(AtomicBool::new(true));
+        let w = Walker::new(
+            graph,
+            "/tmp/test-project".to_string(),
+            "thread-test".to_string(),
+            client,
+            None,
+        )
+        .with_cancel_flag(flag);
+        let result = w.execute(json!({}), None).await;
+
+        assert_eq!(result.status, "cancelled");
+        assert!(!result.success);
+        assert_eq!(result.steps, 0);
+        assert_eq!(
+            mock.finalized_status.lock().unwrap().as_deref(),
+            Some("cancelled")
+        );
     }
 
     #[tokio::test]
