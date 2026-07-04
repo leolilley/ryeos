@@ -1,12 +1,13 @@
 //! `ui.session.current` — return the authenticated session's context.
 //!
 //! The browser calls this once on load to discover its session_id,
-//! surface_ref, project_path, read_only, and events URL. The browser
-//! then calls `items.effective` for the surface and opens the SSE
-//! stream at `events_url`.
+//! surface_ref, project_path, read_only, and events URL — plus the
+//! effective surface with its bound views already embedded, so the
+//! whole boot is this one call before opening the SSE stream at
+//! `events_url`.
 //!
-//! Requires `browser_session` auth (cookie). No surface resolution,
-//! no cap intersection, no extra round trips.
+//! Requires `browser_session` auth (cookie). No cap intersection, no
+//! extra round trips.
 
 use std::sync::Arc;
 
@@ -76,7 +77,20 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
                 })
                 .ok()
         })
-        .map(|effective| effective.composed_value);
+        .map(|effective| {
+            // Embed each bound view server-side (views-as-content): the
+            // browser receives the surface with `views` already resolved,
+            // keyed by ref. A view that fails to resolve arrives as a
+            // degraded entry the tile renders as a placeholder carrying
+            // the reason — never a missing binding.
+            let mut composed = effective.composed_value;
+            ryeos_api::surface_views::embed_surface_views(
+                &state.engine,
+                project_path.as_deref().map(std::path::Path::new),
+                &mut composed,
+            );
+            composed
+        });
 
     let response = Response {
         session_id: session.session_id.clone(),

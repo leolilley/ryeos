@@ -1242,6 +1242,21 @@ mod tests {
     }
 
     #[test]
+    fn daemon_embedded_degraded_entry_carries_reason() {
+        // A view the daemon could not resolve server-side arrives as
+        // `{"degraded": <reason>}` in the embedded views map. It must
+        // become a placeholder binding carrying that reason verbatim —
+        // the same degrade path as a client-side parse failure.
+        let surface = json!({ "views": {
+            "view:ryeos/gone": { "degraded": "item not found" }
+        }});
+        let out = views_from_surface(Some(&surface));
+        let binding = out.get("view:ryeos/gone").expect("present");
+        assert_eq!(binding.degraded.as_deref(), Some("item not found"));
+        assert_eq!(binding.view_ref.as_deref(), Some("view:ryeos/gone"));
+    }
+
+    #[test]
     fn valid_input_target_parses() {
         let surface = json!({ "views": {
             "view:ryeos/ok": { "widget": "text",

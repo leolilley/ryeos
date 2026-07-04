@@ -16,6 +16,7 @@ pub mod registry;
 pub mod remote;
 pub mod route_error;
 pub mod routes;
+pub mod surface_views;
 
 pub use api_state::ApiState;
 pub use registry::{build_service_registry, RawHandlerFn, ServiceAvailability, ServiceDescriptor};

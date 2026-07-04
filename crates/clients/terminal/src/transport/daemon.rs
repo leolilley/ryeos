@@ -323,9 +323,9 @@ impl DaemonClient {
         Ok(SseStream::new(resp))
     }
 
-    /// Resolve an effective surface via the daemon's items.effective service.
     /// Resolve any effective item by canonical ref (kind-agnostic; the
-    /// engine decides what the ref is).
+    /// engine decides what the ref is). Used by the `--surface-file`
+    /// local-preview path to fetch views for a spec only this client has.
     pub async fn resolve_effective_item(
         &self,
         canonical_ref: &str,
@@ -350,6 +350,10 @@ impl DaemonClient {
         Ok(response.get("result").cloned().unwrap_or(response))
     }
 
+    /// Resolve an effective surface via the daemon's items.effective
+    /// service. The response arrives with every bound view already
+    /// embedded in `composed_value.views` (failures as degraded entries),
+    /// so no per-view follow-up calls are needed.
     pub async fn resolve_effective_surface(
         &self,
         canonical_ref: &str,
