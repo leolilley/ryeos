@@ -1,6 +1,6 @@
 [package]
 name = "ryeosd"
-version = "0.5.25"
+version = "0.5.26"
 edition = "2021"
 description = "ryeosd daemon - Rust control plane for Rye OS"
 license = "MIT"

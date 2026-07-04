@@ -934,7 +934,9 @@ mod tests {
         );
         assert_eq!(
             studio_key_command(key(StudioKey::Backspace), context(false, false)),
-            StudioKeyCommand::Ignore,
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::PopLens
+            },
         );
         assert_eq!(
             studio_key_command(shift_enter(), context(false, false)),

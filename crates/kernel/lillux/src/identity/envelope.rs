@@ -806,12 +806,15 @@ mod tests {
     #[test]
     fn open_rejects_truncated_ciphertext() {
         // The AEAD tag lives at the tail of the ciphertext, so a truncated
-        // envelope must fail authenticated decryption. Dropping a multiple
-        // of four base64 chars keeps the string decodable but short.
+        // envelope must fail authenticated decryption. Truncate decoded bytes
+        // and re-encode so the test remains valid base64url regardless of the
+        // encoded length modulo.
         let (pk, sk) = keypair(3);
         let mut sealed = seal_envelope(&sample_env(), &pk).expect("seal");
-        let len = sealed.ciphertext.len();
-        sealed.ciphertext.truncate(len - 8);
+        let mut ciphertext = b64url_decode(&sealed.ciphertext).expect("decode ciphertext");
+        let len = ciphertext.len();
+        ciphertext.truncate(len - 8);
+        sealed.ciphertext = b64url_encode(&ciphertext);
         let err = open_envelope(&sealed, &sk).expect_err("truncated must fail");
         assert!(err.contains("decryption failed"), "got: {err}");
     }

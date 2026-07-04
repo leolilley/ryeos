@@ -1,0 +1,9 @@
+# ryeos:signed:2026-07-04T09:12:40Z:daeb0d2b381a74bae78ff93ec749550b5870e8bcf638e62127ef38011e691147:Jx8uPC/dvVB6nYRSNKDbDi0RjPTT2k7CvND6dtWjdIUm/dXr8CwfHyF1UM391UdGn4lgD2sV/OiiyQfgz1v3BQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+category: "commands"
+name: "get"
+kind: service
+endpoint: commands.get
+required_caps: ["ryeos.execute.service.commands/get"]
+schema:
+  command_id: integer
+description: "Read one command record by id, scoped to a thread owned by the caller"
