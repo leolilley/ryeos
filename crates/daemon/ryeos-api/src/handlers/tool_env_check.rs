@@ -9,10 +9,11 @@
 //! DaemonOnly: the authoritative host-env source is the daemon's process
 //! environment, so the report must come from the daemon, not an offline CLI.
 //!
-//! Scope (v1): item `required_secrets`. Runtime-derived launch envelope
-//! requirements such as provider auth are resolved separately at launch and
-//! are not yet enumerated here — a follow-up will add them via the same
-//! resolver.
+//! Scope: item `required_secrets` PLUS runtime-derived provider auth. When
+//! the target's runtime declares the `provider_snapshot` envelope field
+//! (directives), the provider is resolved through the same preflight the
+//! launch path uses and its `auth.env_var` joins the checked set — so
+//! env-check enumerates exactly what a real launch would demand.
 
 use std::sync::Arc;
 
@@ -94,7 +95,10 @@ pub async fn handle(
     )
     .map_err(|e| HandlerError::BadRequest(format!("could not verify `{}`: {e:#}", req.item_ref)))?;
 
-    let names = verified.resolved.metadata.required_secrets.clone();
+    let mut names = verified.resolved.metadata.required_secrets.clone();
+    // Provider auth: resolved via the launch path's own preflight machinery
+    // (never injected), with the env var folded into the checked set.
+    let provider_auth = provider_auth_report(&state, &project_path, &verified, &mut names);
     let dotenv_dirs =
         ryeos_app::vault::dotenv_search_dirs(Some(std::path::Path::new(&project_path)));
     let report = ryeos_app::vault::resolve_secret_sources(
@@ -146,10 +150,7 @@ pub async fn handle(
         "kind": canonical.kind,
         "secrets": secrets,
         "missing": missing,
-        // v1 reports declared `required_secrets` only. A directive's provider
-        // `auth.env_var` is resolved at launch (preflight) and is not yet
-        // enumerated here — surfaced so clients don't assume it was checked.
-        "provider_auth_checked": false,
+        "provider_auth": provider_auth,
     });
     if let (Some(obj), Some(extra)) = (response.as_object_mut(), import_report.as_object()) {
         for (k, v) in extra {
@@ -157,6 +158,109 @@ pub async fn handle(
         }
     }
     Ok(response)
+}
+
+/// Resolve the provider the target would launch with and fold its auth env
+/// var into `names`. Returns the `provider_auth` report block:
+/// `required: false` when the target's runtime never resolves a provider;
+/// `checked: false` (with the error) when provider resolution fails — a real
+/// launch would fail identically, so the failure IS the finding.
+fn provider_auth_report(
+    state: &Arc<AppState>,
+    project_path: &str,
+    verified: &ryeos_engine::contracts::VerifiedItem,
+    names: &mut Vec<String>,
+) -> Value {
+    let required_envelope_fields = match state
+        .engine
+        .runtimes
+        .resolve_for_launch(None, &verified.resolved.kind)
+    {
+        Ok(runtime) => runtime.yaml.required_envelope_fields.clone(),
+        Err(e) => {
+            // No registered runtime for this kind → nothing resolves a
+            // provider. But a kind that HAS runtimes and still fails here
+            // (ambiguous defaults, broken registration) would fail a real
+            // launch the same way — that failure is the finding, not
+            // "nothing to check".
+            let kind_has_runtimes = state
+                .engine
+                .runtimes
+                .all()
+                .any(|r| r.yaml.serves == verified.resolved.kind);
+            if kind_has_runtimes {
+                return serde_json::json!({
+                    "checked": false,
+                    "error": format!("runtime resolution for kind '{}': {e}", verified.resolved.kind),
+                    "note": "a real launch fails the same way — fix the runtime registration",
+                });
+            }
+            Vec::new()
+        }
+    };
+    if !ryeos_executor::execution::launch::requires_provider_snapshot(&required_envelope_fields) {
+        return serde_json::json!({ "checked": true, "required": false });
+    }
+
+    let project_root = std::path::PathBuf::from(project_path);
+    let engine_roots = state.engine.resolution_roots(Some(project_root.clone()));
+    let effective_parsers = match state.engine.effective_parser_dispatcher(Some(&project_root)) {
+        Ok(parsers) => parsers,
+        Err(e) => {
+            return serde_json::json!({
+                "checked": false,
+                "error": format!("effective parser dispatcher: {e}"),
+            });
+        }
+    };
+    let resolution = match ryeos_engine::resolution::run_resolution_pipeline(
+        &verified.resolved.canonical_ref,
+        &state.engine.kinds,
+        &effective_parsers,
+        &engine_roots,
+        &state.engine.trust_store,
+        &state.engine.composers,
+    ) {
+        Ok(resolution) => resolution,
+        Err(e) => {
+            return serde_json::json!({
+                "checked": false,
+                "error": format!("resolution pipeline: {e}"),
+            });
+        }
+    };
+    let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    match ryeos_executor::execution::launch::resolve_provider_preflight(
+        &resolution.composed,
+        &engine_roots,
+        &operator_trusted_keys_dir,
+    ) {
+        Ok(preflight) => match &preflight.env_var {
+            Some(env_var) => {
+                if !names.contains(env_var) {
+                    names.push(env_var.clone());
+                }
+                serde_json::json!({
+                    "checked": true,
+                    "required": true,
+                    "provider_id": preflight.provider_id,
+                    "env_var": env_var,
+                })
+            }
+            None => serde_json::json!({
+                "checked": true,
+                "required": true,
+                "provider_id": preflight.provider_id,
+                "env_var": null,
+                "note": "provider declares no auth env var",
+            }),
+        },
+        Err(e) => serde_json::json!({
+            "checked": false,
+            "error": format!("{e}"),
+            "note": "a real launch fails the same way — fix the model/provider config",
+        }),
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

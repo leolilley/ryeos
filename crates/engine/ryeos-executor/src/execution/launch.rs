@@ -116,7 +116,11 @@ pub struct ProviderPreflight {
 
 const ENVELOPE_FIELD_PROVIDER_SNAPSHOT: &str = "provider_snapshot";
 
-pub(crate) fn requires_provider_snapshot(required_envelope_fields: &[String]) -> bool {
+/// Whether a runtime's declared envelope fields include the provider
+/// snapshot — i.e. launching this kind resolves a provider (and possibly its
+/// auth secret). Public so read-only preflight surfaces (env-check) apply
+/// the same gate the launch path does.
+pub fn requires_provider_snapshot(required_envelope_fields: &[String]) -> bool {
     required_envelope_fields
         .iter()
         .any(|field| field == ENVELOPE_FIELD_PROVIDER_SNAPSHOT)
@@ -600,7 +604,11 @@ fn build_verified_loader_for_thread(
     ))
 }
 
-pub(crate) fn resolve_provider_preflight(
+/// Resolve the provider a composed item would launch with (model header →
+/// provider config → auth env var), WITHOUT injecting anything. Shared by
+/// the launch/resume paths and read-only preflight surfaces (env-check),
+/// so enumeration can never diverge from what a real launch resolves.
+pub fn resolve_provider_preflight(
     composed: &ryeos_engine::resolution::KindComposedView,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     operator_trusted_keys_dir: &Path,
@@ -951,12 +959,19 @@ async fn run_claimed_thread_row(
         checkpoint_resume_mode,
     } = params;
     let engine = provenance.request_engine();
+    // Runtime-state root: the deliberate `state_root` override when one was
+    // requested, otherwise the project path. Resolution stays anchored at
+    // `project_path`; only state writes (thread.json here, and the runtime's
+    // own writes via `envelope.roots.state_root`) move.
+    let runtime_state_root = provenance.state_root_override().unwrap_or(project_path);
     tracing::info!(
         executor_ref,
         acting_principal,
         item_ref = %resolved.item_ref,
         kind = %resolved.resolved_item.kind,
         required_secret_count = metadata_required_secrets.len(),
+        source_root = %project_path.display(),
+        state_root = %runtime_state_root.display(),
         "launching native runtime"
     );
     let thread_id = thread.thread_id.clone();
@@ -1309,12 +1324,8 @@ async fn run_claimed_thread_row(
     // FAIL the launch rather than spawn a replay-aware process with no checkpoint
     // env (the finalize-on-drop guard records a failed thread).
     let checkpoint_dir: Option<std::path::PathBuf> = if native_resume.is_some() {
-        let dir = state
-            .config
-            .app_root
-            .join("threads")
-            .join(&thread_id)
-            .join("checkpoints");
+        let dir =
+            ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, &thread_id);
         std::fs::create_dir_all(&dir).map_err(|e| {
             BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "failed to allocate checkpoint dir for replay-aware runtime `{}`: {e}",
@@ -1351,12 +1362,8 @@ async fn run_claimed_thread_row(
                 resolved.item_ref
             ))
         })?;
-        let prev_dir = state
-            .config
-            .app_root
-            .join("threads")
-            .join(prev)
-            .join("checkpoints");
+        let prev_dir =
+            ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, prev);
         let copied = ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir)
             .map_err(|e| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
@@ -1396,6 +1403,14 @@ async fn run_claimed_thread_row(
             parameters: parameters.clone(),
             project_context: resolved.plan_context.project_context.clone(),
             original_snapshot_hash: None,
+            // Pushed-head spawns record their snapshot identity so a resume
+            // can rebuild the pinned overlay engine + checkout; `None` for
+            // live-fs spawns and borrowed children.
+            original_pushed_head_ref:
+                ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(provenance),
+            state_root: provenance
+                .state_root_override()
+                .map(std::path::Path::to_path_buf),
             current_site_id: resolved.current_site_id.clone(),
             origin_site_id: resolved.origin_site_id.clone(),
             requested_by: resolved.plan_context.requested_by.clone(),
@@ -1482,9 +1497,18 @@ async fn run_claimed_thread_row(
     // a `duration > 3600s` run does not lose callback authority mid-run.
     let ttl = launch_token_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
+    // The token's project identity is the run's state/callback anchor: the
+    // deliberate state-root override when one is in play, else the project.
+    // The runtime advertises exactly `envelope.roots.state_root()` on every
+    // callback and validation is equality — minting the source root here
+    // would reject every dispatch of an overridden run.
+    let token_project = provenance
+        .state_root_override()
+        .unwrap_or(project_path)
+        .to_path_buf();
     let cap = state.callback_tokens.generate_with_context(
         &thread_id,
-        project_path.to_path_buf(),
+        token_project,
         ttl,
         effective_caps.clone(),
         child_provenance,
@@ -1581,6 +1605,10 @@ async fn run_claimed_thread_row(
             project_root: project_path.to_path_buf(),
             bundle_roots,
             operator_trusted_keys_dir,
+            // Deliberate runtime state-root override, carried so the runtime
+            // can target its state writes (thread state, transcripts, thread
+            // knowledge) away from the source project.
+            state_root: provenance.state_root_override().map(Path::to_path_buf),
         },
         EnvelopeRequest {
             // Strip runtime-control fields from prompt inputs. Parent
@@ -1629,7 +1657,7 @@ async fn run_claimed_thread_row(
         effective_trust_class: Some(effective_trust_class),
     };
     let identity = &state.identity;
-    super::thread_meta::write_thread_meta(project_path, &thread_id, &meta, identity)?;
+    super::thread_meta::write_thread_meta(runtime_state_root, &thread_id, &meta, identity)?;
 
     // 9. Spawn runtime (env vars + stdin envelope)
     //
@@ -1745,7 +1773,7 @@ async fn run_claimed_thread_row(
                 ..meta
             };
             let _ = super::thread_meta::write_thread_meta(
-                project_path,
+                runtime_state_root,
                 &thread_id,
                 &failed_meta,
                 identity,
@@ -2104,30 +2132,25 @@ async fn launch_claimed_successor(
             anyhow::anyhow!("launch_successor: {successor_id} has no captured ResumeContext")
         })?;
 
-    // Snapshot guard FIRST — before reconstruction — so a snapshot-pinned source
-    // fails with an explicit unsupported error rather than a generic resolution
-    // error downstream. This slice folds against a live working tree; a
-    // `SnapshotHash` source needs a CAS checkout that is out of scope here.
-    let project_path = match &resume.project_context {
-        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
-        other => {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "launch_successor: snapshot-pinned continuation not supported yet \
-                 (project_context = {other:?})"
-            )));
-        }
-    };
-
     // Rebuild ExecutionParams from the captured identity (re-resolves the item as
-    // its own kind, restores principal / hints / sites verbatim).
+    // its own kind, restores principal / hints / sites verbatim). Provenance
+    // selection happens inside — a pushed-head record rebuilds the pinned
+    // checkout + overlay engine, a snapshot-scoped record without a pushed-head
+    // ref fails loudly before any resolution runs.
     let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
+    // The managed run path takes the working dir separately from the provenance;
+    // derive it FROM the provenance so a pushed-head successor runs in its
+    // re-materialised checkout, never the (ephemeral) spawn-time path.
+    let project_path = params.provenance.effective_path().to_path_buf();
 
-    // Envelope-field requirements come from the runtime entry. Prefer the
-    // predecessor's captured `runtime_ref` (by-ref) so a continued thread keeps
-    // the exact runtime it launched under; a captured-but-bad ref is an error,
-    // never a silent switch to the kind default.
-    let required_envelope_fields = state
-        .engine
+    // Envelope-field requirements come from the runtime entry of the
+    // provenance-selected engine. Prefer the predecessor's captured
+    // `runtime_ref` (by-ref) so a continued thread keeps the exact runtime it
+    // launched under; a captured-but-bad ref is an error, never a silent
+    // switch to the kind default.
+    let required_envelope_fields = params
+        .provenance
+        .request_engine()
         .runtimes
         .resolve_for_launch(
             resume.runtime_ref.as_deref(),
@@ -2206,20 +2229,16 @@ async fn launch_claimed_native_resume(
             anyhow::anyhow!("native resume: {thread_id} has no captured ResumeContext")
         })?;
 
-    let project_path = match &resume.project_context {
-        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
-        other => {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "native resume: snapshot-pinned resume not supported yet \
-                 (project_context = {other:?})"
-            )));
-        }
-    };
-
+    // Provenance selection (pushed-head rebuild / live-fs / loud refusal)
+    // happens inside; working dir + runtime registry then follow the
+    // provenance so the resumed run resolves against the pinned overlay
+    // engine when the original spawn was pushed-head.
     let params = crate::execution::runner::execution_params_from_resume_context(state, &resume)?;
+    let project_path = params.provenance.effective_path().to_path_buf();
 
-    let required_envelope_fields = state
-        .engine
+    let required_envelope_fields = params
+        .provenance
+        .request_engine()
         .runtimes
         .resolve_for_launch(
             resume.runtime_ref.as_deref(),
@@ -2388,16 +2407,6 @@ async fn launch_claimed_follow_child(
         .and_then(|m| m.resume_context)
         .ok_or_else(|| anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity"))?;
 
-    let project_path = match &identity.project_context {
-        ryeos_engine::contracts::ProjectContext::LocalPath { path } => path.clone(),
-        other => {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "follow child: snapshot-pinned launch not supported yet \
-                 (project_context = {other:?})"
-            )));
-        }
-    };
-
     let mut params =
         crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
 
@@ -2410,9 +2419,14 @@ async fn launch_claimed_follow_child(
     if let Some(provenance) = provenance_override {
         params.provenance = provenance;
     }
+    // Working dir + runtime registry follow the FINAL provenance (post-
+    // override), so the hot path runs in the parent's workspace with the
+    // parent's request engine.
+    let project_path = params.provenance.effective_path().to_path_buf();
 
-    let required_envelope_fields = state
-        .engine
+    let required_envelope_fields = params
+        .provenance
+        .request_engine()
         .runtimes
         .resolve_for_launch(identity.runtime_ref.as_deref(), &params.resolved.resolved_item.kind)
         .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
@@ -2810,18 +2824,12 @@ async fn launch_follow_resume_claimed(
     // Seed the successor's checkpoint = parent's checkpoint + the child's canonical
     // envelope spliced under `follow_result`. The successor is `created` (not yet
     // running), so writing its checkpoint here races nothing.
-    let prev_dir = state
-        .config
-        .app_root
-        .join("threads")
-        .join(&waiter.parent_thread_id)
-        .join("checkpoints");
-    let succ_dir = state
-        .config
-        .app_root
-        .join("threads")
-        .join(successor_id)
-        .join("checkpoints");
+    let prev_dir = ryeos_app::launch_metadata::daemon_checkpoint_dir(
+        &state.config.app_root,
+        &waiter.parent_thread_id,
+    );
+    let succ_dir =
+        ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, successor_id);
     let spliced = ryeos_runtime::checkpoint::CheckpointWriter::copy_latest_with_splice(
         &prev_dir,
         &succ_dir,

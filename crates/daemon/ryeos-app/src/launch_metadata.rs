@@ -19,6 +19,8 @@ use ryeos_engine::contracts::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::execution_provenance::ExecutionProvenance;
+
 /// Version tag for the JSON payload persisted into
 /// `runtime_db.thread_runtime.launch_metadata`. Bump when an
 /// incompatible shape change ships; readers MUST decode loudly so a
@@ -49,6 +51,20 @@ pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 /// runtime decisions) that have no CAS source to project from.
 pub fn daemon_thread_state_dir(app_root: &std::path::Path, thread_id: &str) -> std::path::PathBuf {
     app_root.join("threads").join(thread_id)
+}
+
+/// Subdirectory of [`daemon_thread_state_dir`] holding a replay-aware
+/// runtime's checkpoints. For call sites that already hold the thread state
+/// dir; everyone else goes through [`daemon_checkpoint_dir`].
+pub const CHECKPOINTS_SUBDIR: &str = "checkpoints";
+
+/// Per-thread checkpoint directory for replay-aware runtimes, under
+/// [`daemon_thread_state_dir`]. Every reader/writer of checkpoints
+/// (allocation, machine-continuation copy-forward, follow-resume splice,
+/// GC) must derive the path through here — scattered hand-joined spellings
+/// of the same location are how state roots silently diverge.
+pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std::path::PathBuf {
+    daemon_thread_state_dir(app_root, thread_id).join(CHECKPOINTS_SUBDIR)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +118,44 @@ impl Default for RuntimeLaunchMetadata {
     }
 }
 
+/// Snapshot identity of a pushed-head original spawn — exactly what the
+/// resume path needs to rebuild `ExecutionProvenance::root_pushed_head`
+/// (re-materialize the pinned checkout, look up/build the per-snapshot
+/// overlay engine, and key HEAD fold-back) without consulting the
+/// principal's current HEAD, which may have advanced since spawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalPushedHeadRef {
+    /// CAS `ProjectSnapshot` hash the original spawn ran against.
+    pub snapshot_hash: String,
+    /// Operator-side absolute project path (the HEAD-ref key) captured
+    /// from the root provenance at spawn.
+    pub original_project_path: PathBuf,
+}
+
+impl OriginalPushedHeadRef {
+    /// Derive the persistable pushed-head identity from a launch's
+    /// provenance. `Some` only for a root pushed-head spawn: borrowed
+    /// children never own snapshot lineage (rebuilding them as pushed
+    /// roots would turn on pin/foldback/HEAD-advance their parent owns),
+    /// and live-fs spawns have no snapshot to pin.
+    pub fn from_provenance(provenance: &ExecutionProvenance) -> Option<Self> {
+        match provenance {
+            ExecutionProvenance::RootPushedHead {
+                original_project_path,
+                snapshot_hash,
+                ..
+            } => Some(Self {
+                snapshot_hash: snapshot_hash.clone(),
+                original_project_path: original_project_path.clone(),
+            }),
+            ExecutionProvenance::RootLiveFs { .. }
+            | ExecutionProvenance::BorrowedChildLiveFs { .. }
+            | ExecutionProvenance::BorrowedChildPushedHead { .. } => None,
+        }
+    }
+}
+
 /// Minimum data the daemon needs to reconstruct an `ExecutionParams`
 /// for an existing thread.
 ///
@@ -133,6 +187,21 @@ pub struct ResumeContext {
     /// went through the live-FS path with no allocated snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_snapshot_hash: Option<String>,
+    /// Pushed-head identity captured at original spawn time — set iff the
+    /// spawn's provenance was `RootPushedHead`. The resume path uses it to
+    /// rebuild the snapshot-scoped overlay engine + checkout instead of
+    /// resolving against the daemon's live engine. `None` for LocalPath
+    /// spawns. NOT interchangeable with `original_snapshot_hash`, which is
+    /// the LocalPath native-resume pin allocated by the runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_pushed_head_ref: Option<OriginalPushedHeadRef>,
+    /// Deliberate runtime state-root override captured at original spawn
+    /// time (`/execute` `state_root`). Re-applied to the rebuilt provenance
+    /// on resume so a crashed overridden run keeps writing its state — and
+    /// advertising its callback identity — under the override instead of
+    /// silently reverting into the source project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_root: Option<std::path::PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
     /// Full engine principal from the original `PlanContext`.
@@ -376,6 +445,52 @@ mod tests {
     }
 
     #[test]
+    fn original_pushed_head_ref_derived_only_from_pushed_root_provenance() {
+        use std::sync::Arc;
+
+        let engine = || {
+            Arc::new(ryeos_engine::engine::Engine::new(
+                ryeos_engine::kind_registry::KindRegistry::empty(),
+                ryeos_engine::parsers::dispatcher::ParserDispatcher::new(
+                    ryeos_engine::parsers::registry::ParserRegistry::empty(),
+                    Arc::new(ryeos_engine::handlers::registry::HandlerRegistry::empty()),
+                ),
+                vec![],
+            ))
+        };
+
+        let live_root = ExecutionProvenance::root_live_fs(PathBuf::from("/live"), engine());
+        assert!(OriginalPushedHeadRef::from_provenance(&live_root).is_none());
+        assert!(
+            OriginalPushedHeadRef::from_provenance(&live_root.clone_for_borrowed_child()).is_none()
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let lifeline = Arc::new(crate::temp_dir_guard::TempDirGuard::new(
+            dir.path().to_path_buf(),
+        ));
+        let pushed_root = ExecutionProvenance::root_pushed_head(
+            dir.path().to_path_buf(),
+            PathBuf::from("/laptop/proj"),
+            engine(),
+            lifeline,
+            "snap-abc".into(),
+        );
+        assert_eq!(
+            OriginalPushedHeadRef::from_provenance(&pushed_root),
+            Some(OriginalPushedHeadRef {
+                snapshot_hash: "snap-abc".to_string(),
+                original_project_path: PathBuf::from("/laptop/proj"),
+            })
+        );
+        // A borrowed pushed child never owns the snapshot lineage.
+        assert!(
+            OriginalPushedHeadRef::from_provenance(&pushed_root.clone_for_borrowed_child())
+                .is_none()
+        );
+    }
+
+    #[test]
     fn daemon_thread_state_dir_is_under_app_root() {
         let dir = daemon_thread_state_dir(std::path::Path::new("/var/lib/ryeosd"), "T-abc");
         assert_eq!(dir, PathBuf::from("/var/lib/ryeosd/threads/T-abc"));
@@ -390,6 +505,11 @@ mod tests {
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),
             original_snapshot_hash: Some("abc123".to_string()),
+            original_pushed_head_ref: Some(OriginalPushedHeadRef {
+                snapshot_hash: "snap-ph".to_string(),
+                original_project_path: PathBuf::from("/tmp/orig"),
+            }),
+            state_root: Some(PathBuf::from("/tmp/smoke-state")),
             current_site_id: "site:a".to_string(),
             origin_site_id: "site:a".to_string(),
             requested_by: local_principal(),
@@ -409,6 +529,13 @@ mod tests {
         assert_eq!(back_ctx.kind, "tool_run");
         assert_eq!(back_ctx.item_ref, "ns/foo");
         assert_eq!(back_ctx.original_snapshot_hash.as_deref(), Some("abc123"));
+        assert_eq!(
+            back_ctx.original_pushed_head_ref,
+            Some(OriginalPushedHeadRef {
+                snapshot_hash: "snap-ph".to_string(),
+                original_project_path: PathBuf::from("/tmp/orig"),
+            })
+        );
         match back_ctx.requested_by {
             EffectivePrincipal::Local(p) => {
                 assert_eq!(p.fingerprint, "fp:test");

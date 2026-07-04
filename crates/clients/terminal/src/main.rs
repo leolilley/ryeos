@@ -9,9 +9,13 @@ mod render_text;
 mod terminal;
 mod transport;
 
-/// Collect every `view:`-prefixed ref anywhere in the resolved surface
-/// value so each can be embedded. Skips the `views` map itself (it holds
-/// already-resolved bindings keyed by ref, not refs to resolve).
+/// Collect every `view:`-prefixed ref anywhere in a surface value so each
+/// can be embedded. Skips the `views` map itself (it holds already-resolved
+/// bindings keyed by ref, not refs to resolve).
+///
+/// Only the `--surface-file` local-preview path uses this: that spec exists
+/// solely client-side, so its views must still be fetched here. A
+/// daemon-resolved surface arrives with views already embedded.
 fn collect_view_refs(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(s) if s.starts_with("view:") => out.push(s.clone()),
@@ -140,63 +144,16 @@ fn main() {
                         .resolve_effective_surface(ref_str, Some(&project_path))
                         .await
                     {
-                        Ok(mut value) => {
-                            // Views-as-content: resolve every `view:` ref
-                            // appearing ANYWHERE in the surface — center
-                            // `tiles`, edge `slots`, `backdrop`, `library` —
-                            // through the same effective-item machinery and
-                            // embed the bindings. Surfaces reference views;
-                            // they never define them. Walking the whole value
-                            // keeps this correct as the surface schema grows.
-                            let mut view_refs: Vec<String> = Vec::new();
-                            collect_view_refs(&value, &mut view_refs);
-                            view_refs.sort();
-                            view_refs.dedup();
-                            // Resolve all view refs CONCURRENTLY. A surface's
-                            // library holds ~20 views, and sequential daemon
-                            // round-trips here dominated TUI startup latency.
-                            let resolved = futures_util::future::join_all(
-                                view_refs.into_iter().map(|view_ref| {
-                                    let client = &client;
-                                    let project_path = project_path.as_str();
-                                    async move {
-                                        let result = client
-                                            .resolve_effective_item(
-                                                &view_ref,
-                                                "view",
-                                                Some(project_path),
-                                            )
-                                            .await;
-                                        (view_ref, result)
-                                    }
-                                }),
-                            )
-                            .await;
-                            for (view_ref, result) in resolved {
-                                match result {
-                                    Ok(binding) => {
-                                        // Unwrap the effective-item
-                                        // envelope to the composed value.
-                                        let composed = binding
-                                            .get("composed_value")
-                                            .cloned()
-                                            .unwrap_or(binding);
-                                        // Embed INTO the composed surface:
-                                        // `from_daemon` parses the SurfaceSpec
-                                        // from `composed_value`, so the views
-                                        // map must live there, not as a
-                                        // sibling of it.
-                                        value["composed_value"]["views"][&view_ref] = composed;
-                                    }
-                                    Err(e) => {
-                                        // Degrade: the pane renders the
-                                        // missing-binding placeholder, and the
-                                        // TUI shows why as a notice.
-                                        diagnostics
-                                            .push(format!("view {view_ref} unavailable: {e}"));
-                                    }
-                                }
-                            }
+                        Ok(value) => {
+                            // Views arrive embedded by the daemon
+                            // (`composed_value.views`, keyed by ref) — no
+                            // per-view round-trips here. A view that failed
+                            // to resolve server-side arrives as a degraded
+                            // entry the pane renders as a placeholder
+                            // carrying the reason; the daemon also reports
+                            // each failure as a warn diagnostic, which
+                            // `from_daemon` folds into the surface
+                            // diagnostics surfaced as notices below.
                             match ryeos_client_base::surface::LoadedSurface::from_daemon(
                                 ref_str, value,
                             ) {

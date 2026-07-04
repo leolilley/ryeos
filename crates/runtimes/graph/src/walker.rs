@@ -2700,11 +2700,18 @@ impl Walker {
         current: &str,
         item_id: &str,
     ) {
+        // `tool` + `call_id` are the shared tool-event contract every
+        // producer satisfies (the timeline projection pairs on `call_id`);
+        // the graph coordinates stay as additive context. The call id is
+        // deterministic from the walk coordinates — one dispatch per
+        // (run, step, node).
         let r = self
             .client
             .append_runtime_event(
                 RuntimeEventType::ToolCallStart,
                 json!({
+                    "tool": item_id,
+                    "call_id": graph_call_id(graph_run_id, step, current),
                     "graph_run_id": graph_run_id,
                     "definition_ref": &self.graph.definition_ref,
                     "definition_hash": &self.graph.definition_hash,
@@ -2731,6 +2738,8 @@ impl Walker {
             .append_runtime_event(
                 RuntimeEventType::ToolCallResult,
                 json!({
+                    "tool": item_id,
+                    "call_id": graph_call_id(graph_run_id, step, current),
                     "graph_run_id": graph_run_id,
                     "definition_ref": &self.graph.definition_ref,
                     "definition_hash": &self.graph.definition_hash,
@@ -2974,6 +2983,15 @@ fn strip_none_values(val: &Value) -> Value {
 
 fn node_ref(definition_ref: &str, node: &str) -> String {
     format!("{definition_ref}#node:{node}")
+}
+
+/// Deterministic call id for a node's action dispatch, satisfying the shared
+/// tool-event contract (`tool` + `call_id`) so start/result pair without
+/// producer-specific knowledge. One dispatch per (run, step, node) makes the
+/// coordinates a natural identity; a retried node re-dispatches under a new
+/// step, so attempts pair independently.
+fn graph_call_id(graph_run_id: &str, step: u32, node: &str) -> String {
+    format!("{graph_run_id}:{step}:{node}")
 }
 
 fn hash_json_value(value: &Value) -> String {

@@ -5,7 +5,6 @@
 !.ai/directives/**
 !.ai/knowledge/
 !.ai/knowledge/**
-.ai/knowledge/state/
 !.ai/tools/
 !.ai/tools/**
 __pycache__/

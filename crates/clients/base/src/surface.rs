@@ -667,12 +667,35 @@ impl LoadedSurface {
             }
         };
 
+        // Daemon-side resolution diagnostics (e.g. a bound view that
+        // failed to embed) ride the payload as `{level, message}` entries;
+        // fold them into item diagnostics so warnings surface as notices
+        // and info stays on stderr.
+        let item_diagnostics = value
+            .get("diagnostics")
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let message = entry.get("message")?.as_str()?.to_string();
+                        let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("info");
+                        Some(if level == "info" {
+                            SurfaceDiagnostic::Info { message }
+                        } else {
+                            SurfaceDiagnostic::ValidationError { message }
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(LoadedSurface::RyeResolved {
             requested_ref: requested_ref.to_string(),
             spec,
             trusted,
             provenance,
-            item_diagnostics: Vec::new(),
+            item_diagnostics,
             tui_diagnostics: Vec::new(),
         })
     }
@@ -1507,6 +1530,61 @@ id = "test"
                 std::mem::discriminant(other)
             ),
         }
+    }
+
+    #[test]
+    fn from_daemon_embedded_views_and_diagnostics() {
+        // The daemon embeds bound views into `composed_value.views` and
+        // reports per-view failures as warn diagnostics; both must survive
+        // into the loaded surface (warn → ValidationError notice, info →
+        // Info on stderr).
+        let response = serde_json::json!({
+            "requested_ref": "surface:ryeos/studio/base",
+            "canonical_ref": "surface:ryeos/studio/base",
+            "kind": "surface",
+            "trusted": true,
+            "trust_class": "trusted_bundle",
+            "root_trust_class": "trusted_bundle",
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/base.yaml" },
+            "provenance": provenance_json("surface:ryeos/studio/base", []),
+            "composed_value": {
+                "name": "base",
+                "tiles": ["view:ryeos/chain/timeline", "view:ryeos/gone"],
+                "views": {
+                    "view:ryeos/chain/timeline": { "widget": "timeline" },
+                    "view:ryeos/gone": { "degraded": "item not found" }
+                }
+            },
+            "derived": {},
+            "policy_facts": {},
+            "diagnostics": [
+                { "level": "warn", "message": "view view:ryeos/gone unavailable: item not found" },
+                { "level": "info", "message": "extends chain: base" }
+            ]
+        });
+
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/studio/base", response).unwrap();
+
+        let views = loaded.spec().views.as_ref().expect("views embedded");
+        assert_eq!(views["view:ryeos/chain/timeline"]["widget"], "timeline");
+        assert_eq!(views["view:ryeos/gone"]["degraded"], "item not found");
+
+        let diags = loaded.all_diagnostics();
+        assert!(
+            diags.iter().any(|d| matches!(
+                d,
+                SurfaceDiagnostic::ValidationError { message }
+                    if message.contains("view:ryeos/gone unavailable")
+            )),
+            "warn diagnostic folds into a visible notice: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| matches!(
+                d,
+                SurfaceDiagnostic::Info { message } if message.contains("extends chain")
+            )),
+            "info diagnostic stays informational: {diags:?}"
+        );
     }
 
     #[test]

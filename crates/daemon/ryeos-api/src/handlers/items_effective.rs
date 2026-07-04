@@ -2,7 +2,9 @@
 //!
 //! Works for any item kind (executable or not). The engine owns the
 //! resolution/trust/composition semantics; this handler is intentionally
-//! only a typed service wrapper.
+//! only a typed service wrapper — plus, for surfaces, the server-side
+//! view embedding (`crate::surface_views`) so clients receive surfaces
+//! with their bound views already resolved.
 //!
 //! ## Error codes
 //!
@@ -52,7 +54,7 @@ use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
-use ryeos_engine::engine::EffectiveItemRequest;
+use ryeos_engine::engine::{EffectiveItemDiagnostic, EffectiveItemRequest};
 use ryeos_engine::error::EngineError;
 use ryeos_executor::executor::ServiceAvailability;
 
@@ -80,14 +82,36 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
         ))
     })?;
 
-    let effective = state
+    let project_root = req.project_path.map(std::path::PathBuf::from);
+
+    let mut effective = state
         .engine
         .effective_item(EffectiveItemRequest {
             item_ref,
             expected_kind: req.expected_kind,
-            project_root: req.project_path.map(std::path::PathBuf::from),
+            project_root: project_root.clone(),
         })
         .map_err(map_engine_error)?;
+
+    // A surface binds views by ref and never defines them. Embed each
+    // bound view's composed value server-side so renderers receive one
+    // complete payload — no per-view follow-up round-trips. A view that
+    // fails to resolve embeds a degraded entry (the pane renders the
+    // reason) and additionally surfaces as a warn diagnostic; per-view
+    // failures never fail the whole surface.
+    if effective.kind == "surface" {
+        let failures = crate::surface_views::embed_surface_views(
+            &state.engine,
+            project_root.as_deref(),
+            &mut effective.composed_value,
+        );
+        for (view_ref, reason) in failures {
+            effective.diagnostics.push(EffectiveItemDiagnostic {
+                level: "warn".to_string(),
+                message: format!("view {view_ref} unavailable: {reason}"),
+            });
+        }
+    }
 
     serde_json::to_value(effective).map_err(Into::into)
 }

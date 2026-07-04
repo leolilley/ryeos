@@ -151,6 +151,3 @@ bundles/*/PUBLISHER_TRUST.toml
 
 # Local daemon state from dev/test runs
 .local/
-
-.ai/knowledge/state
-

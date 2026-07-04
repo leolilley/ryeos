@@ -161,6 +161,9 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     if resolved.debug_raw {
         body["debug_raw"] = Value::Bool(true);
     }
+    if let Some(state_root) = &resolved.state_root {
+        body["state_root"] = Value::String(state_root.to_string_lossy().into_owned());
+    }
     // Method dispatch: a `--method`/`--args` selector lands in `call`, the
     // control-plane block distinct from data-plane `parameters`.
     if resolved.call_method.is_some() || resolved.call_args.is_some() {
@@ -181,12 +184,24 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     // back to the app root), so fall back to the buffered path when none was
     // resolved (`--no-project` / outside a project). `--stream`/`--no-stream`
     // force the choice; otherwise auto-detect a terminal.
+    // A state-root override is carried only by the buffered `/execute` route
+    // (whose response also echoes both roots as execution diagnostics), so it
+    // forces the buffered path; forcing the stream on alongside it is a
+    // contradiction worth failing loudly.
+    if resolved.state_root.is_some() && resolved.stream == Some(true) {
+        return Err(CliError::Local {
+            detail: "--state-root is not supported with --stream (the override rides the \
+                     buffered /execute route)"
+                .into(),
+        });
+    }
     let want_stream = resolved
         .stream
         .unwrap_or_else(|| std::io::IsTerminal::is_terminal(&std::io::stdout()));
     let stream_live = resolved.direct_execute
         && !resolved.async_launch
         && resolved.project_path.is_some()
+        && resolved.state_root.is_none()
         && want_stream;
     if stream_live {
         return post_to_daemon_streaming(&app_root, &body).await;
@@ -369,6 +384,9 @@ struct CliResolvedExecute {
     call_method: Option<String>,
     /// Method args (parsed JSON) → request `call.args`.
     call_args: Option<Value>,
+    /// `--state-root <path>`: runtime state-root override → request
+    /// `state_root` (absolutized against the CLI's cwd).
+    state_root: Option<PathBuf>,
 }
 
 /// Outcome of stripping a command's declared control flags from its tail.
@@ -381,6 +399,7 @@ struct ResolvedControlFlags {
     debug_raw: bool,
     call_method: Option<String>,
     call_args: Option<Value>,
+    state_root: Option<String>,
 }
 
 fn resolve_command_for_daemon(
@@ -461,6 +480,20 @@ fn resolve_command_for_daemon_with_commands(
     };
     let mut parameters = bind_command_parameters_for_daemon(parameter_tail, &matched.command)?;
     let project_path = apply_project_policy(&matched.command, &mut parameters, default_project)?;
+    // Absolutize (not canonicalize — the daemon creates it on demand) the
+    // state-root override against the CLI's cwd, which the daemon cannot see.
+    let state_root = control
+        .state_root
+        .map(|raw| -> Result<PathBuf, CliError> {
+            let path = PathBuf::from(&raw);
+            if path.is_absolute() {
+                return Ok(path);
+            }
+            let cwd = std::env::current_dir()
+                .map_err(|e| CliError::ProjectResolution(format!("cwd: {e}")))?;
+            Ok(cwd.join(path))
+        })
+        .transpose()?;
     Ok(CliResolvedExecute {
         item_ref,
         parameters,
@@ -471,6 +504,7 @@ fn resolve_command_for_daemon_with_commands(
         debug_raw: control.debug_raw,
         call_method: control.call_method,
         call_args: control.call_args,
+        state_root,
     })
 }
 
@@ -524,6 +558,7 @@ fn strip_declared_control_flags(
                             detail: format!("--{name} must be a JSON value: {e}"),
                         })?);
                 }
+                Bind::StateRoot => flags.state_root = Some(value),
                 _ => {}
             }
         } else {
@@ -1062,6 +1097,18 @@ async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError>
 }
 
 fn print_result(payload: serde_json::Value) {
+    // A state-root override echoes both roots as top-level `execution`
+    // diagnostics; surface them on stderr so stdout stays the bare result
+    // for scripts.
+    if let Some(execution) = payload.get("execution") {
+        if let (Some(source), Some(state)) = (
+            execution.get("source_root").and_then(|v| v.as_str()),
+            execution.get("state_root").and_then(|v| v.as_str()),
+        ) {
+            eprintln!("source_root: {source}");
+            eprintln!("state_root:  {state}");
+        }
+    }
     let result = payload.get("result").cloned().unwrap_or(payload);
     let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     println!("{pretty}");

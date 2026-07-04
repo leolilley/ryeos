@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T01:05:59Z:9811b00f1420b865f563eda2de07fa2eefea081285b113b9a37fcbcf07230959:3KLiykGzqjLUhoiHgXRyQpnF0WSmtKP6b4UnNZaX5O0L9U4qsRDn/tunHgUEwIczioab1XC0VsakfUBCXIfoBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-04T03:59:54Z:83db9611f757faee8503e75cff9e1f2ed0764679adf43646999542f04f77393b:7eH77Gw737q2GvaCpSi9UqnEAj6lILEJX1BYvXUtzfZZjeO6rMFBHTT5vfTc9AvKwGnJO6lDTN+GC/bgidvTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -54,6 +54,12 @@ ryeos.<verb>.bundle-events.<bundle-id>/<event-kind>
 tool that does **create-or-append** — read the current chain, then append — needs
 **both** capabilities granted: `scan` (to read) and `append` (to write).
 Declaring only `append` produces a confusing `scan` denial on the read.
+
+Event kinds are **concrete-only, on both sides**: manifest validation rejects
+`*`/`?` in `event_kind` (and in `runtime_vault.namespace`), and a request is
+matched by exact id at mint and compose time — spell every event kind out.
+Pattern grammar exists only for item-authoring namespaces; that rule is
+stated in `knowledge:ryeos/standard/item-authoring` § "Wildcard semantics".
 
 ## Declaring authority in the manifest
 

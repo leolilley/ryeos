@@ -1372,6 +1372,8 @@ mod tests {
                         path: std::path::PathBuf::from("/tmp/p"),
                     },
                     original_snapshot_hash: None,
+                    original_pushed_head_ref: None,
+            state_root: None,
                     current_site_id: "site:test".into(),
                     origin_site_id: "site:test".into(),
                     requested_by: EffectivePrincipal::Local(Principal {

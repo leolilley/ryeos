@@ -740,10 +740,24 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     // a synchronous panic in run_inline itself between mint and the
     // explicit cleanup call would leak both tokens until TTL expiry.
     let child_provenance = params.provenance.clone_for_borrowed_child();
+    // Runtime-state project path: the deliberate `state_root` override when
+    // one was requested, otherwise the effective project path. Resolution
+    // stays anchored at `effective_path`; only the child's advertised
+    // state/callback project (`RYEOSD_PROJECT_PATH` + token) moves.
+    let runtime_state_root = params
+        .provenance
+        .state_root_override()
+        .unwrap_or(effective_path.as_path())
+        .to_path_buf();
+    tracing::info!(
+        source_root = %effective_path.display(),
+        state_root = %runtime_state_root.display(),
+        "execution roots resolved"
+    );
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state,
         &tid,
-        Some(&effective_path),
+        Some(&runtime_state_root),
         None,
         params.effective_caps.clone(),
         &params.acting_principal,
@@ -762,6 +776,12 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
     let thread_state_dir =
         ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, &tid);
     let inline_snapshot = base_snapshot_hash.clone();
+    let inline_pushed_head_ref =
+        ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let inline_state_root = params
+        .provenance
+        .state_root_override()
+        .map(std::path::Path::to_path_buf);
     let inline_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
@@ -778,6 +798,8 @@ pub async fn run_inline(state: AppState, mut params: ExecutionParams) -> Result<
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
             original_snapshot_hash: inline_snapshot.as_deref(),
+            original_pushed_head_ref: inline_pushed_head_ref.as_ref(),
+            state_root: inline_state_root.as_deref(),
         })
     })
     .await
@@ -974,10 +996,21 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
     // Token lifetimes are owned by the background task (revoked via
     // CbTokenGuard / TatTokenGuard on wait completion, error, or panic).
     let child_provenance = params.provenance.clone_for_borrowed_child();
+    // Same runtime-state root selection as `run_inline` (see comment there).
+    let runtime_state_root = params
+        .provenance
+        .state_root_override()
+        .unwrap_or(effective_path.as_path())
+        .to_path_buf();
+    tracing::info!(
+        source_root = %effective_path.display(),
+        state_root = %runtime_state_root.display(),
+        "execution roots resolved"
+    );
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state,
         &running.thread_id,
-        Some(effective_path.as_path()),
+        Some(&runtime_state_root),
         None,
         params.effective_caps.clone(),
         &params.acting_principal,
@@ -1007,6 +1040,12 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
     let bg_base_snapshot_hash = base_snapshot_hash;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
+    let bg_pushed_head_ref =
+        ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let bg_state_root = params
+        .provenance
+        .state_root_override()
+        .map(std::path::Path::to_path_buf);
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1021,6 +1060,8 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_pre_manifest_hash,
         bg_base_snapshot_hash,
         bg_project_path,
+        bg_pushed_head_ref,
+        bg_state_root,
         bg_temp_dir,
         bg_skip_snapshot_lifecycle,
         bg_runtime_state_dir,
@@ -1062,7 +1103,8 @@ pub async fn run_detached(state: AppState, mut params: ExecutionParams) -> Resul
         bg_state, bg_chain_root_id, bg_resolved, bg_engine, bg_vault,
         bg_cb_bindings, bg_acting_principal, bg_pre_manifest_hash,
         bg_base_snapshot_hash,
-        bg_project_path, bg_temp_dir, bg_skip_snapshot_lifecycle, bg_runtime_state_dir,
+        bg_project_path, bg_original_pushed_head_ref, bg_state_root, bg_temp_dir,
+        bg_skip_snapshot_lifecycle, bg_runtime_state_dir,
         prior_status_for_mark_running,
         bg_cb_token, bg_tat_token
     ),
@@ -1085,6 +1127,8 @@ async fn dispatch_detached_bg_task(
     bg_pre_manifest_hash: Option<String>,
     mut bg_base_snapshot_hash: Option<String>,
     bg_project_path: Option<PathBuf>,
+    bg_original_pushed_head_ref: Option<ryeos_app::launch_metadata::OriginalPushedHeadRef>,
+    bg_state_root: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_skip_snapshot_lifecycle: bool,
     bg_runtime_state_dir: PathBuf,
@@ -1118,6 +1162,8 @@ async fn dispatch_detached_bg_task(
     let vault_for_spawn = bg_vault;
     let cb_for_spawn = bg_cb_bindings;
     let snap_for_spawn = bg_base_snapshot_hash.clone();
+    let pushed_head_ref_for_spawn = bg_original_pushed_head_ref;
+    let state_root_for_spawn = bg_state_root;
 
     let spawn_result = task::spawn_blocking(move || {
         let project_root = match &res_for_spawn.plan_context.project_context {
@@ -1139,6 +1185,8 @@ async fn dispatch_detached_bg_task(
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),
+            original_pushed_head_ref: pushed_head_ref_for_spawn.as_ref(),
+            state_root: state_root_for_spawn.as_deref(),
         })
     })
     .await;
@@ -1375,14 +1423,38 @@ fn defer_tat_token_revocation(
     TatTokenGuard::new(state.clone(), thread_id.to_string(), token.clone())
 }
 
+/// Provenance policy for a resume, decided purely from the persisted
+/// record so it is unit-testable without an `AppState`.
+#[derive(Debug)]
+enum ResumeProvenanceDecision<'a> {
+    /// Original spawn was a pushed-head root: rebuild the pinned
+    /// checkout + snapshot-scoped overlay engine and resume under
+    /// `root_pushed_head`.
+    PinnedPushedHead(&'a ryeos_app::launch_metadata::OriginalPushedHeadRef),
+    /// Original spawn ran against the live tree: resume against the
+    /// live tree and the daemon's current engine.
+    LiveFs(&'a std::path::Path),
+    /// The record's project_context carries no working tree and no
+    /// pushed-head identity was captured: the overlay engine cannot be
+    /// rebuilt. Refuse — never silently fall back to the live tree.
+    MissingPushedHeadRef(&'a ProjectContext),
+}
+
+fn decide_resume_provenance(resume: &ResumeContext) -> ResumeProvenanceDecision<'_> {
+    match (&resume.original_pushed_head_ref, &resume.project_context) {
+        (Some(pinned), _) => ResumeProvenanceDecision::PinnedPushedHead(pinned),
+        (None, ProjectContext::LocalPath { path }) => ResumeProvenanceDecision::LiveFs(path),
+        (None, other) => ResumeProvenanceDecision::MissingPushedHeadRef(other),
+    }
+}
+
 /// Build `ExecutionParams` from a captured `ResumeContext`.
 ///
-/// Re-runs the engine resolver against the **original**
-/// `ProjectContext`. When `original_snapshot_hash` is set, the
-/// resolver runs against the pinned snapshot (via
-/// `ProjectContext::SnapshotHash`), so the resumed plan matches the
-/// project version captured at the original spawn — not the current
-/// working-dir head. See `docs/future/native-resume-snapshot-pinning.md`.
+/// Provenance is selected by original spawn type BEFORE resolution, so
+/// a pushed-head resume resolves items/bundles against the pinned
+/// snapshot's overlay engine — not the daemon's live engine. See
+/// `decide_resume_provenance` and
+/// `docs/future/native-resume-snapshot-pinning.md`.
 #[tracing::instrument(
     name = "thread:resume_params",
     skip(state, resume),
@@ -1390,38 +1462,106 @@ fn defer_tat_token_revocation(
         item_ref = %resume.item_ref,
         kind = %resume.kind,
         snapshot_pinned = resume.original_snapshot_hash.is_some(),
+        pushed_head_pinned = resume.original_pushed_head_ref.is_some(),
     )
 )]
 pub fn execution_params_from_resume_context(
     state: &AppState,
     resume: &ResumeContext,
 ) -> Result<ExecutionParams> {
-    // Always use the original project_context (LocalPath) for item
-    // resolution. The engine's resolve() only searches project space
-    // when project_context is LocalPath; SnapshotHash has no filesystem
-    // path for the engine to walk.
-    //
-    // The snapshot hash is carried separately via
-    // `ExecutionParams::snapshot_hash` and used by
-    // `prepare_cas_context` inside `run_existing_detached` to check
-    // out the pinned snapshot. After checkout the plan_context is
-    // updated to point at the materialized checkout directory, so the
-    // effective runtime sees the exact project version captured at
-    // spawn time.
+    let (provenance, project_context) = match decide_resume_provenance(resume) {
+        ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
+            // Rebuild what the original pushed-head spawn had: a fresh
+            // request-owned checkout of the PINNED snapshot (never the
+            // principal's current HEAD) plus the overlay engine from the
+            // cache keyed `(install_generation, snapshot_hash)`. The
+            // checkout guard doubles as the `root_pushed_head` lifeline;
+            // helper construction guarantees lifeline path ==
+            // effective_path, satisfying the constructor preconditions.
+            let checkout_id = format!(
+                "resume-{}-{:08x}",
+                lillux::time::timestamp_millis(),
+                rand::random::<u32>()
+            );
+            let ctx = super::project_source::resolve_pinned_snapshot_context(
+                state,
+                &pinned.snapshot_hash,
+                pinned.original_project_path.clone(),
+                &checkout_id,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "resume: pinned snapshot {} could not be rebuilt for {}: {e}",
+                    pinned.snapshot_hash,
+                    resume.item_ref,
+                )
+            })?;
+            let lifeline = ctx.temp_dir.clone().expect(
+                "resolve_pinned_snapshot_context must return a request-owned checkout guard",
+            );
+            let effective_path = ctx.effective_path.clone();
+            let provenance = ExecutionProvenance::root_pushed_head(
+                effective_path.clone(),
+                pinned.original_project_path.clone(),
+                ctx.request_engine,
+                lifeline,
+                pinned.snapshot_hash.clone(),
+            );
+            tracing::info!(
+                snapshot_hash = %pinned.snapshot_hash,
+                effective_path = %effective_path.display(),
+                "resume: rebuilt pushed-head checkout + overlay engine"
+            );
+            // Mirror the spawn path: the plan context points at the
+            // materialized checkout so the resolver walks it.
+            (
+                provenance,
+                ProjectContext::LocalPath {
+                    path: effective_path,
+                },
+            )
+        }
+        // LocalPath resume: live tree + the daemon's CURRENT engine, by
+        // intent — the original spawn also resolved against the
+        // then-current live engine. Accepted residual drift: an install-
+        // generation change between spawn and resume means item/bundle
+        // resolution here can differ from what the pre-crash run saw.
+        // The persisted state-root override is re-applied so a resumed
+        // overridden run keeps its state/callback anchor (the freshly
+        // minted token must match what the runtime advertises).
+        ResumeProvenanceDecision::LiveFs(path) => (
+            ExecutionProvenance::root_live_fs(path.to_path_buf(), state.engine.clone())
+                .with_state_root(resume.state_root.clone()),
+            resume.project_context.clone(),
+        ),
+        ResumeProvenanceDecision::MissingPushedHeadRef(other) => {
+            anyhow::bail!(
+                "resume: record for {} has project_context {other:?} but no \
+                 original_pushed_head_ref, so the snapshot-scoped overlay engine \
+                 cannot be rebuilt; refusing to resume against the live tree. \
+                 Re-spawn the thread from its original pushed head instead.",
+                resume.item_ref,
+            );
+        }
+    };
+
     let plan_ctx = PlanContext {
         requested_by: resume.requested_by.clone(),
-        project_context: resume.project_context.clone(),
+        project_context,
         current_site_id: resume.current_site_id.clone(),
         origin_site_id: resume.origin_site_id.clone(),
         execution_hints: resume.execution_hints.clone(),
         validate_only: false,
     };
 
+    // All resolution below goes through the provenance-selected engine
+    // (overlay for pushed-head, daemon engine for live-fs).
+    let engine = provenance.request_engine();
+
     let canonical = CanonicalRef::parse(&resume.item_ref)
         .map_err(|e| anyhow::anyhow!("resume: invalid item ref {}: {e}", resume.item_ref))?;
 
-    let resolved_item = state
-        .engine
+    let resolved_item = engine
         .resolve(&plan_ctx, &canonical)
         .map_err(|e| anyhow::anyhow!("resume: resolve failed: {e}"))?;
 
@@ -1436,8 +1576,7 @@ pub fn execution_params_from_resume_context(
     let executor_ref = if let Some(er) = resume.executor_ref.clone() {
         er
     } else if let Some(rr) = resume.runtime_ref.as_deref() {
-        let runtime = state
-            .engine
+        let runtime = engine
             .runtimes
             .resolve_for_launch(Some(rr), &resolved_item.kind)
             .map_err(|e| anyhow::anyhow!("resume: {e}"))?;
@@ -1446,8 +1585,7 @@ pub fn execution_params_from_resume_context(
     } else if let Some(eid) = resolved_item.metadata.executor_id.clone() {
         eid
     } else {
-        let runtime = state
-            .engine
+        let runtime = engine
             .runtimes
             .resolve_for_launch(None, &resolved_item.kind)
             .map_err(|e| {
@@ -1478,55 +1616,9 @@ pub fn execution_params_from_resume_context(
         plan_context: plan_ctx,
     };
 
-    // Project path is only meaningful when the original spawn was a
-    // `LocalPath`. For non-`LocalPath` resumes the snapshot pin
-    // carries project identity and there is no working dir to
-    // reference; HEAD fold-back will be skipped (see
-    // `post_execution_foldback`).
-    let project_path = match &resume.project_context {
-        ProjectContext::LocalPath { path } => Some(path.clone()),
-        _ => None,
-    };
-
     let acting_principal = resume
         .requested_by_name()
         .unwrap_or_else(|| "fp:resume".to_string());
-
-    // Resume runs against the live filesystem and the daemon's current
-    // engine. This is correct for LocalPath resumes by intent — the
-    // original spawn also resolved against the then-current live engine
-    // (the residual drift is an install-generation change between spawn
-    // and resume; accepted here, not pinned).
-    //
-    // TODO(resume-overlay): a genuinely snapshot-pinned (pushed-head)
-    // resume should instead rebuild the per-snapshot overlay engine +
-    // temp-dir lifeline that `execute_mode.rs` builds at spawn (via the
-    // engine cache keyed `(install_generation, snapshot_hash)`) and pass
-    // `root_pushed_head`. That is NOT wired here because the prerequisites
-    // live outside this crate and are not yet met:
-    //   1. `ResumeContext` (ryeos-app `launch_metadata.rs`) records
-    //      `project_context` as `LocalPath` for EVERY spawn — pushed-head
-    //      runs are rewritten to `LocalPath{checkout}` by `execute_mode`,
-    //      and the checkout dir is ephemeral. The pin identity lives
-    //      orthogonally in `original_snapshot_hash`; there is no carried
-    //      `original_project_path` (HEAD-ref key) that `root_pushed_head`
-    //      needs for foldback.
-    //   2. The managed resume launchers (`launch_claimed_successor`,
-    //      `launch_claimed_native_resume` in `execution/launch.rs`)
-    //      hard-reject a non-`LocalPath` `project_context`, and the
-    //      managed run path passes a `project_path` decoupled from the
-    //      provenance (so an overlay engine would not govern resolution).
-    //   3. Switching a LocalPath-origin resume to `root_pushed_head`
-    //      would turn on the snapshot pin + foldback + HEAD advance that
-    //      the original LiveFs spawn never performed — a HEAD-corruption
-    //      hazard. Pinning must therefore ride a spawn-side change that
-    //      records the pushed-head ref, not a resume-side reinterpretation.
-    // The fix spans launch.rs + launch_metadata.rs; see
-    // `docs/future/native-resume-snapshot-pinning.md`.
-    let provenance = ExecutionProvenance::root_live_fs(
-        project_path.clone().unwrap_or_else(|| PathBuf::from(".")),
-        state.engine.clone(),
-    );
 
     // NOTE: read_required_secrets and envelope-field preflight are NOT
     // called here. They run later, inside run_existing_detached(), AFTER
@@ -1729,10 +1821,19 @@ pub async fn run_existing_detached(
     // the prior process exited via the bg task's CbTokenGuard /
     // TatTokenGuard drops).
     let child_provenance = params.provenance.clone_for_borrowed_child();
+    // Same runtime-state root selection as `run_inline`. The override is
+    // persisted on the resume context and re-applied by
+    // `execution_params_from_resume_context`, so a resumed overridden run
+    // keeps its state/callback anchor.
+    let runtime_state_root = params
+        .provenance
+        .state_root_override()
+        .unwrap_or(effective_path.as_path())
+        .to_path_buf();
     let (cb_bindings, cb_token, tat_token) = mint_callback_env(
         &state,
         &thread_id,
-        Some(effective_path.as_path()),
+        Some(&runtime_state_root),
         None,
         params.effective_caps.clone(),
         &params.acting_principal,
@@ -1752,7 +1853,8 @@ pub async fn run_existing_detached(
     let bg_thread_id = thread_id.clone();
     let bg_chain_root_id = chain_root_id.clone();
     let bg_resolved = params.resolved.clone();
-    // Per-request engine (resume path uses daemon engine via
+    // Per-request engine (overlay engine for a pushed-head resume,
+    // daemon engine for live-fs — selected in
     // execution_params_from_resume_context).
     let bg_engine = params.provenance.request_engine().clone();
     let bg_vault = params.vault_bindings.clone();
@@ -1762,6 +1864,12 @@ pub async fn run_existing_detached(
     let bg_base_snapshot_hash = base_snapshot_hash;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_snapshot_lifecycle = params.provenance.is_borrowed_child();
+    let bg_pushed_head_ref =
+        ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let bg_state_root = params
+        .provenance
+        .state_root_override()
+        .map(std::path::Path::to_path_buf);
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -1776,6 +1884,8 @@ pub async fn run_existing_detached(
         bg_pre_manifest_hash,
         bg_base_snapshot_hash,
         bg_project_path,
+        bg_pushed_head_ref,
+        bg_state_root,
         bg_temp_dir,
         bg_skip_snapshot_lifecycle,
         bg_runtime_state_dir,
@@ -1786,4 +1896,101 @@ pub async fn run_existing_detached(
     ));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_app::launch_metadata::OriginalPushedHeadRef;
+    use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
+
+    fn resume_record(
+        project_context: ProjectContext,
+        pushed: Option<OriginalPushedHeadRef>,
+    ) -> ResumeContext {
+        ResumeContext {
+            kind: "graph".into(),
+            item_ref: "graph:test/item".into(),
+            launch_mode: "detached".into(),
+            parameters: json!({}),
+            project_context,
+            original_snapshot_hash: None,
+            original_pushed_head_ref: pushed,
+            state_root: None,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".into(),
+                scopes: vec!["execute".into()],
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            executor_ref: None,
+            runtime_ref: None,
+        }
+    }
+
+    #[test]
+    fn pushed_head_record_selects_pinned_rebuild_over_stale_checkout_path() {
+        // Realistic pushed-head record shape: project_context is the
+        // (ephemeral, long-gone) LocalPath checkout the spawn ran in,
+        // and the pin identity lives in `original_pushed_head_ref`. The
+        // pin must win — resolution must never target the stale path.
+        let resume = resume_record(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/var/cache/executions/pre-123"),
+            },
+            Some(OriginalPushedHeadRef {
+                snapshot_hash: "snap-abc".into(),
+                original_project_path: PathBuf::from("/laptop/proj"),
+            }),
+        );
+        match decide_resume_provenance(&resume) {
+            ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
+                assert_eq!(pinned.snapshot_hash, "snap-abc");
+                assert_eq!(pinned.original_project_path, PathBuf::from("/laptop/proj"));
+            }
+            other => panic!("expected PinnedPushedHead, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn localpath_record_without_pushed_ref_selects_live_fs() {
+        let resume = resume_record(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/home/op/proj"),
+            },
+            None,
+        );
+        match decide_resume_provenance(&resume) {
+            ResumeProvenanceDecision::LiveFs(path) => {
+                assert_eq!(path, std::path::Path::new("/home/op/proj"));
+            }
+            other => panic!("expected LiveFs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_scoped_record_without_pushed_ref_is_refused() {
+        // No working tree + no pushed-head identity ⇒ the overlay cannot
+        // be rebuilt; the decision must be a refusal, never a live-fs
+        // fallback.
+        let contexts = [
+            ProjectContext::SnapshotHash {
+                hash: "snap-xyz".into(),
+            },
+            ProjectContext::ProjectRef {
+                principal: "fp:test".into(),
+                ref_name: "head".into(),
+            },
+            ProjectContext::None,
+        ];
+        for pc in contexts {
+            let resume = resume_record(pc.clone(), None);
+            match decide_resume_provenance(&resume) {
+                ResumeProvenanceDecision::MissingPushedHeadRef(_) => {}
+                other => panic!("expected MissingPushedHeadRef for {pc:?}, got {other:?}"),
+            }
+        }
+    }
 }

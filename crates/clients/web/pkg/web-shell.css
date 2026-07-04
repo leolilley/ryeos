@@ -804,6 +804,12 @@ body {
 .studio-table-row.warn .studio-table-glyph { color: var(--studio-warn); }
 .studio-table-row.danger .studio-table-glyph { color: var(--studio-danger); }
 .studio-table-row.accent .studio-table-glyph { color: var(--studio-accent); }
+/* Per-column tone overrides (cell_tones): a toned cell reads distinctly from
+   the muted secondary default; row selection still wins below. */
+.studio-table-cell.tone-good { color: var(--studio-good); }
+.studio-table-cell.tone-warn { color: var(--studio-warn); }
+.studio-table-cell.tone-danger { color: var(--studio-danger); }
+.studio-table-cell.tone-accent { color: var(--studio-accent); }
 .studio-table-row.selected {
   border-color: var(--studio-accent);
   background: rgba(var(--studio-accent-rgb), 0.16);

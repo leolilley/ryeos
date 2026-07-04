@@ -10,11 +10,9 @@ pub fn write_thread_transcript(
     directive_ref: &str,
     messages: &[ProviderMessage],
 ) -> Result<()> {
-    let dir = project_path
-        .join(".ai/knowledge/state/threads")
-        .join(thread_id);
+    let dir = project_path.join(".ai/state/threads").join(thread_id);
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{thread_id}.md"));
+    let path = dir.join("transcript.md");
 
     let mut md = format!(
         "# Thread: {thread_id}\n\n\
@@ -82,9 +80,7 @@ pub fn write_capabilities(
     tools: &[ToolSchema],
     project_tree: Option<&str>,
 ) -> Result<()> {
-    let dir = project_path
-        .join(".ai/knowledge/state/threads")
-        .join(thread_id);
+    let dir = project_path.join(".ai/state/threads").join(thread_id);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("capabilities.md");
 
@@ -146,11 +142,9 @@ mod tests {
             },
         ];
         write_thread_transcript(dir.path(), "T-abc", "my/directive", &messages).unwrap();
-        let content = std::fs::read_to_string(
-            dir.path()
-                .join(".ai/knowledge/state/threads/T-abc/T-abc.md"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".ai/state/threads/T-abc/transcript.md"))
+                .unwrap();
         assert!(content.contains("T-abc"));
         assert!(content.contains("my/directive"));
         assert!(content.contains("hello"));
@@ -167,11 +161,9 @@ mod tests {
             input_schema: None,
         }];
         write_capabilities(dir.path(), "T-abc", &tools, None).unwrap();
-        let content = std::fs::read_to_string(
-            dir.path()
-                .join(".ai/knowledge/state/threads/T-abc/capabilities.md"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".ai/state/threads/T-abc/capabilities.md"))
+                .unwrap();
         assert!(content.contains("read_file"));
         assert!(content.contains("Read a file"));
     }
@@ -181,11 +173,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let tools = vec![];
         write_capabilities(dir.path(), "T-abc", &tools, Some("src/\n  main.rs")).unwrap();
-        let content = std::fs::read_to_string(
-            dir.path()
-                .join(".ai/knowledge/state/threads/T-abc/capabilities.md"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".ai/state/threads/T-abc/capabilities.md"))
+                .unwrap();
         assert!(content.contains("Project Tree"));
         assert!(content.contains("src/"));
     }

@@ -546,6 +546,25 @@ fn dispatch_service(
 
     let is_offline = availability == "offline" || availability == "both";
     if !is_offline {
+        // A descriptor that names an offline tool while staying daemon-only
+        // is contradicting itself; routing to the daemon here would silently
+        // ignore the declared offline dispatch. Fail at the source instead.
+        // (An explicit null is "absent", matching the resolution below.)
+        if item
+            .composed_value
+            .get("offline_execute")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            return Err(CliError::Local {
+                detail: format!(
+                    "service '{}' declares offline_execute but availability is \
+                     '{availability}'; set availability to offline|both or drop \
+                     offline_execute",
+                    item.canonical_ref
+                ),
+            });
+        }
         return Ok(None);
     }
 

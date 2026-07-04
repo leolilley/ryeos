@@ -67,6 +67,15 @@ pub struct ExecuteRequest {
     /// exit code and size-limited raw stdout/stderr) to the result.
     #[serde(default)]
     pub debug_raw: bool,
+    /// Deliberate runtime state-root override: run against the live
+    /// `project_path` source tree while runtime state (thread state,
+    /// transcripts, thread knowledge) is placed under this absolute path
+    /// instead of the project. Live-fs only (inline or detached; the
+    /// `accepted` launch mode rejects it) and requires an explicit
+    /// `project_path`. Both roots are echoed in the response's `execution`
+    /// diagnostics block.
+    #[serde(default)]
+    pub state_root: Option<String>,
 }
 
 impl ExecuteRequest {
@@ -277,6 +286,81 @@ impl CompiledResponseMode for CompiledExecuteMode {
             ).into_response());
         }
 
+        // ── Runtime state-root override ─────────────────────────────
+        // Validate the deliberate `state_root` control before it reaches
+        // provenance: live-fs + inline only, explicit project required,
+        // absolute path. The directory is created here so `/tmp/...` smoke
+        // roots work without a client-side mkdir.
+        let state_root: Option<std::path::PathBuf> = match &request.state_root {
+            None => None,
+            Some(raw) => {
+                let path = std::path::PathBuf::from(raw);
+                if !matches!(project_source, ProjectSource::LiveFs) {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": "state_root is a live-fs control; pushed_head executions already run in an ephemeral checkout" })),
+                    ).into_response());
+                }
+                if no_project_requested {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": "state_root requires an explicit project_path (the source root it redirects state away from)" })),
+                    ).into_response());
+                }
+                if request.launch_mode == "accepted" {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": "state_root is not supported with launch_mode='accepted'" })),
+                    ).into_response());
+                }
+                if !path.is_absolute() {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": format!("state_root must be an absolute path, got '{raw}'") })),
+                    ).into_response());
+                }
+                // The override's whole purpose is keeping runtime state OUT
+                // of the executed source tree; a state root inside (or equal
+                // to) the project recreates the pollution with extra
+                // indirection. Lexical check first (so a rejected path is
+                // never even created), then the canonical check below —
+                // after creation, when both paths exist — so symlinked
+                // spellings can't sneak one in.
+                if path.starts_with(&project_path) {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": format!(
+                            "state_root '{raw}' is inside the project source tree \
+                             '{}'; the override exists to keep runtime state out of \
+                             the executed source — pick a path outside the project",
+                            project_path.display()
+                        ) })),
+                    ).into_response());
+                }
+                if let Err(e) = std::fs::create_dir_all(&path) {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": format!("state_root '{raw}' could not be created: {e}") })),
+                    ).into_response());
+                }
+                let canonical_state = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                let canonical_project = std::fs::canonicalize(&project_path)
+                    .unwrap_or_else(|_| project_path.clone());
+                if canonical_state.starts_with(&canonical_project) {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        axum::Json(json!({ "error": format!(
+                            "state_root '{raw}' is inside the project source tree \
+                             '{}'; the override exists to keep runtime state out of \
+                             the executed source — pick a path outside the project",
+                            project_path.display()
+                        ) })),
+                    ).into_response());
+                }
+                Some(path)
+            }
+        };
+
         // Resolve project execution context.
         let checkout_id = format!(
             "pre-{}-{:08x}",
@@ -359,10 +443,19 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         let provenance = match project_source {
             ProjectSource::LiveFs => {
+                if let Some(sr) = &state_root {
+                    tracing::info!(
+                        item_ref = %item_ref,
+                        source_root = %project_ctx.effective_path.display(),
+                        state_root = %sr.display(),
+                        "execute with runtime state-root override"
+                    );
+                }
                 ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
                     project_ctx.effective_path.clone(),
                     project_ctx.request_engine.clone(),
                 )
+                .with_state_root(state_root.clone())
             }
             ProjectSource::PushedHead => {
                 ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
@@ -780,7 +873,23 @@ impl CompiledResponseMode for CompiledExecuteMode {
         };
 
         match ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await {
-            Ok(value) => Ok(axum::Json(value).into_response()),
+            Ok(mut value) => {
+                // Execution diagnostics: with a state-root override in play,
+                // both selected roots ride on the response so the caller can
+                // see exactly where source resolution and runtime state went.
+                if let Some(sr) = &state_root {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert(
+                            "execution".to_string(),
+                            json!({
+                                "source_root": project_ctx.effective_path,
+                                "state_root": sr,
+                            }),
+                        );
+                    }
+                }
+                Ok(axum::Json(value).into_response())
+            }
             Err(e) => {
                 let status = e.http_status();
                 let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);

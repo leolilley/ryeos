@@ -371,6 +371,11 @@ pub enum StudioViewVm {
 pub struct StudioTableRowVm {
     pub id: String,
     pub cells: Vec<String>,
+    /// Per-cell tone overrides, parallel to `cells` (`None` = inherit the row
+    /// tone). Present only when at least one column declares a `tone` block,
+    /// so tables without per-column tones pay nothing on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_tones: Vec<Option<StudioTone>>,
     pub tone: StudioTone,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<StudioAction>,
@@ -1174,6 +1179,15 @@ fn bound_view_vm_keyed(
                 .map(|(index, record)| StudioTableRowVm {
                     id: format!("{view_ref}#{index}"),
                     cells: record.cells,
+                    cell_tones: if record.cell_tones.iter().all(Option::is_none) {
+                        Vec::new()
+                    } else {
+                        record
+                            .cell_tones
+                            .iter()
+                            .map(|tone| tone.as_deref().map(|t| tone_from_name(Some(t))))
+                            .collect()
+                    },
                     tone: tone_from_name(record.tone.as_deref()),
                     action: activate_affordance.as_ref().map(|affordance_id| {
                         StudioAction::InvokeAffordance {

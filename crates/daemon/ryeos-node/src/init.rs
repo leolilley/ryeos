@@ -1070,6 +1070,17 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         } else {
             fs::copy(&from, &to)
                 .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
+            // Preserve the source mtime (best-effort): bundle verification
+            // includes an mtime-based manifest-freshness check
+            // (manifest.yaml must not be older than manifest.source.yaml),
+            // and a copy stamping fresh mtimes in directory-iteration order
+            // can invert that relationship on the installed tree — a
+            // millisecond of copy-order skew then reads as a stale manifest.
+            if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                if let Ok(file) = fs::File::options().write(true).open(&to) {
+                    let _ = file.set_modified(modified);
+                }
+            }
         }
     }
     Ok(())
@@ -1840,6 +1851,7 @@ typo_field: oops
             requires_kinds: vec![],
             uses_kinds: vec![],
             runtime_authority: Default::default(),
+            smoke: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);

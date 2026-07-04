@@ -307,12 +307,17 @@ pub enum ControlFlagBinding {
     CallMethod,
     /// Takes a value → request `call.args` (parsed JSON object).
     CallArgs,
+    /// Takes a value → request `state_root` (absolutized against the CLI's
+    /// cwd, not canonicalized — the daemon creates it on demand): run against
+    /// the resolved project source while runtime state is placed under this
+    /// path instead.
+    StateRoot,
 }
 
 impl ControlFlagBinding {
     /// Whether the flag consumes a following value (vs a presence boolean).
     pub fn takes_value(self) -> bool {
-        matches!(self, Self::CallMethod | Self::CallArgs)
+        matches!(self, Self::CallMethod | Self::CallArgs | Self::StateRoot)
     }
 }
 

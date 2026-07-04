@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T03:58:05Z:39782ad5143e81f8ed22e439197cb25bb87e121a4c333a8d952f9ec48be62c87:YvkvZhfS8CQmRLtdRm+1kyUEFjlMIiuB6eWJ9BS6lXjqhhKLktr3BVkCxa50MXMPUl5Egf3wy0z4t2ySoPHcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-04T03:59:54Z:8dc2bd1e73eb3f9683e045cef60f340b88efe130175a9c114203722fbe3edac0:3wgvmx1D3/QBnmrLgpQPPK1EkF+OfaOZfkfTtgd6rIhLMgYlNmQ3lXcTB3KTbQN60S4JPlL2baNTr4iGZjkiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -69,6 +69,41 @@ requires:
 A concrete request must fall under a declared pattern. A request that itself
 carries a `*`/`?` wildcard must exactly match a declared pattern — it cannot
 widen it.
+
+## Wildcard semantics: fails closed, at mint and compose time
+
+The pattern rule is subtle enough to state precisely. **Pattern grammar
+exists only for `item_authoring` namespaces** — manifest validation rejects
+`*`/`?` outright in `bundle_events.event_kind` and `runtime_vault.namespace`
+(those two families are concrete-only on both sides, matched by exact id at
+mint and compose time alike). For item-authoring namespaces, the same rule
+applies in both places it matters — when the daemon mints a token from the
+manifest, and when an `extends` chain composes a child's `requires` against
+its parent's:
+
+- **Concrete vs pattern — glob match.** A concrete request (no `*`/`?`) is
+  backed by any declared pattern that matches it:
+  `namespace: runtime-authored/foo` is backed by a declared
+  `runtime-authored/*`.
+- **Pattern vs pattern — identity only.** A request that itself carries a
+  wildcard is backed **only** by an *identical* declaration. There is no
+  containment analysis between two patterns: deciding whether one glob's
+  match-set falls inside another's is exactly the kind of cleverness that
+  ships an escalation, so the check refuses to try. `runtime-authored/*`
+  requested against a declared `runtime-*/*` **fails**, even though every
+  string the first matches, the second also matches.
+- **Compose time is the same check.** In an `extends` chain, a child may
+  *narrow* a parent's item-authoring pattern with a concrete value
+  (`runtime-authored/foo` under a parent's `runtime-authored/*` composes
+  fine). A child carrying a wildcard composes only when the parent declares
+  the identical pattern; anything else is treated as widening and fails the
+  composition — loudly, at signing/resolution, not at run time.
+
+Practical consequence for authors: declare patterns in the manifest, request
+**concrete** values in items wherever you can, and reuse the manifest's exact
+spelling on the rare occasion an item genuinely needs the whole pattern. For
+bundle events and the runtime vault, spell every event kind and namespace
+out — a wildcard there is a validation error, not a shorthand.
 
 ## The `runtime.author_item` callback
 
