@@ -2202,16 +2202,23 @@ impl StateStore {
         g.runtime_db.get_command(command_id)
     }
 
-    /// Reject every still-open command for a finalized thread, returning the
-    /// affected records so waiters can be woken. See
-    /// [`RuntimeDb::reject_open_commands`].
-    pub fn reject_open_commands(
+    /// Whether a `kill` command was ever submitted for `thread_id` (the launcher's
+    /// kill-intent marker). See [`RuntimeDb::thread_has_kill_command`].
+    pub fn thread_has_kill_command(&self, thread_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.thread_has_kill_command(thread_id)
+    }
+
+    /// Settle every still-open command for a finalized thread (fulfilled →
+    /// `completed`, else `rejected`), returning the affected records so waiters
+    /// can be woken. See [`RuntimeDb::settle_open_commands`].
+    pub fn settle_open_commands(
         &self,
         thread_id: &str,
         terminal_status: &str,
     ) -> Result<Vec<CommandRecord>> {
         let g = self.lock()?;
-        g.runtime_db.reject_open_commands(thread_id, terminal_status)
+        g.runtime_db.settle_open_commands(thread_id, terminal_status)
     }
 
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational

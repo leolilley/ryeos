@@ -1003,17 +1003,17 @@ impl ThreadLifecycleService {
     fn settle_open_commands(&self, thread_id: &str, terminal_status: &str) {
         match self
             .state_store
-            .reject_open_commands(thread_id, terminal_status)
+            .settle_open_commands(thread_id, terminal_status)
         {
-            Ok(rejected) => {
-                for record in &rejected {
+            Ok(settled) => {
+                for record in &settled {
                     crate::command_hub::global().publish(record);
                 }
-                if !rejected.is_empty() {
+                if !settled.is_empty() {
                     tracing::debug!(
                         thread_id,
-                        count = rejected.len(),
-                        "rejected open commands on thread finalize"
+                        count = settled.len(),
+                        "settled open commands on thread finalize"
                     );
                 }
             }

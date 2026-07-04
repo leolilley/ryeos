@@ -1761,7 +1761,15 @@ async fn run_claimed_thread_row(
     // misleading `thread_not_terminal` error.
     let mut thread_detail = state.threads.get_thread(&thread_id)?.unwrap_or(thread);
     if !is_runtime_terminal_status(&thread_detail.status) {
-        let terminal_status = normalize_runtime_terminal_status(&runtime_result.status);
+        let mut terminal_status = normalize_runtime_terminal_status(&runtime_result.status);
+        // Kill-intent: a subprocess SIGKILLed by a daemon-issued `kill` exits
+        // abnormally with no self-finalization, which normalizes to `failed`. If
+        // a kill was requested for this thread, that stop was intentional —
+        // settle `killed`, not `failed`, so the terminal reflects the operator's
+        // action instead of looking like a crash.
+        if terminal_status == "failed" && state.state_store.thread_has_kill_command(&thread_id)? {
+            terminal_status = "killed";
+        }
         let terminal_error = if terminal_status == "completed" {
             None
         } else {
