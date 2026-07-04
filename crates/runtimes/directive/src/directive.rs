@@ -54,11 +54,14 @@ pub struct DirectiveHeader {
     pub continuation: ContinuationConfig,
     /// Opt-in corrective turn: when the directive declares `outputs` and a
     /// run is about to settle without a successful `directive_return`, grant
-    /// ONE extra turn that names the missing call before settling with empty
-    /// outputs. Default off — a directive that does not opt in settles
-    /// exactly as its final turn left it.
+    /// ONE extra turn before settling with empty outputs. Default off — a
+    /// directive that does not opt in settles exactly as its final turn left
+    /// it. `true` uses the built-in message (which names the declared
+    /// outputs); a string is the nudge stimulus verbatim — the prompt is the
+    /// directive author's to word. Untagged so `return_nudge: true` and
+    /// `return_nudge: "<text>"` both parse from the header.
     #[serde(default)]
-    pub return_nudge: bool,
+    pub return_nudge: ReturnNudge,
 }
 
 /// Allow-list of composed-view top-level keys the runtime decodes
@@ -77,6 +80,47 @@ pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
     "continuation",
     "return_nudge",
 ];
+
+/// The `return_nudge` header value: off, on with the built-in message, or on
+/// with an author-worded stimulus.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ReturnNudge {
+    Flag(bool),
+    Message(String),
+}
+
+impl Default for ReturnNudge {
+    fn default() -> Self {
+        ReturnNudge::Flag(false)
+    }
+}
+
+impl ReturnNudge {
+    pub fn enabled(&self) -> bool {
+        match self {
+            ReturnNudge::Flag(on) => *on,
+            ReturnNudge::Message(_) => true,
+        }
+    }
+
+    /// The corrective stimulus to inject: the author's wording when the
+    /// header carries a non-empty string, else the built-in message naming
+    /// the declared outputs.
+    pub fn message(&self, declared_outputs: &[String]) -> String {
+        if let ReturnNudge::Message(text) = self {
+            if !text.trim().is_empty() {
+                return text.clone();
+            }
+        }
+        format!(
+            "This directive declares structured outputs ({}) that have not been \
+             emitted. Call the `directive_return` tool now with every declared \
+             output. This is the final turn.",
+            declared_outputs.join(", ")
+        )
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -305,7 +349,7 @@ pub struct BootstrapConfig {
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(default)]
-    pub return_nudge: bool,
+    pub return_nudge: ReturnNudge,
     #[serde(default)]
     pub continuation: ContinuationConfig,
     #[serde(default)]
@@ -453,6 +497,36 @@ pub fn normalize_finish_reason(raw: Option<&str>) -> FinishReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_nudge_parses_flag_and_custom_message_forms() {
+        // Absent → off; `true` → on with the built-in message (which names
+        // the declared outputs); a string → on with the author's wording.
+        let off: DirectiveHeader = serde_yaml::from_str("name: t").unwrap();
+        assert!(!off.return_nudge.enabled());
+
+        let flag: DirectiveHeader = serde_yaml::from_str("return_nudge: true").unwrap();
+        assert!(flag.return_nudge.enabled());
+        let outs = vec!["model_body".to_string(), "notes".to_string()];
+        let built_in = flag.return_nudge.message(&outs);
+        assert!(built_in.contains("model_body, notes"), "{built_in}");
+        assert!(built_in.contains("directive_return"), "{built_in}");
+
+        let custom: DirectiveHeader =
+            serde_yaml::from_str("return_nudge: \"Call directive_return with the model.\"")
+                .unwrap();
+        assert!(custom.return_nudge.enabled());
+        assert_eq!(
+            custom.return_nudge.message(&outs),
+            "Call directive_return with the model."
+        );
+
+        // A blank string is still an opt-in — it falls back to the built-in
+        // message rather than injecting an empty stimulus.
+        let blank: DirectiveHeader = serde_yaml::from_str("return_nudge: \"  \"").unwrap();
+        assert!(blank.return_nudge.enabled());
+        assert!(blank.return_nudge.message(&outs).contains("directive_return"));
+    }
 
     // A config that omits the retry knobs must inherit the same sane values
     // as a fully-absent config — never 0 retries, an empty retryable-status
