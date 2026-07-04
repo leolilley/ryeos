@@ -2,55 +2,24 @@
 
 ## Status
 
-Partially complete; only the remaining DX follow-ups are listed here.
+COMPLETE — every item on this list has landed; the doc remains as a pointer.
 
-Already landed:
-
-- command descriptors and local command help no longer route through daemon
-  alias parsing;
-- project-aware command tails can auto-detect a cwd ancestor containing `.ai/`;
-- `RYEOS_PROJECT_ROOT` / `RYEOS_PROJECT_PATH` are part of the runtime/env
-  contract;
-- bundle build/publish smoke coverage exists in core tool tests.
-
-## Deferred work
-
-### 1. Explicit runtime state-root override
-
-Source-local execution currently treats the selected project path as the
-materialized project root. Bundle authors sometimes need to run a bundle from a
-source root while placing runtime state under a temporary smoke directory.
-
-Add a deliberate runtime state-root control instead of relying on ad hoc env
-vars such as `PROJECT_ROOT`.
-
-Desired shape, exact flag TBD:
-
-```bash
-ryeos execute tool:example/system/health \
-  --state-root /tmp/example-smoke \
-  --input params.json
-```
-
-The selected source/project root and selected runtime state root must both be
-visible in execution diagnostics.
-
-### 2. Multi-item signing UX — LANDED
-
-`ryeos sign` accepts a bounded set of changed bundle refs/paths in one
-invocation (`753d758e`), with the input hardened against escape (`c1751747`).
-The trust boundaries below hold in the shipped implementation: no signing
-through symlinks, none outside the selected `.ai` root, clear dry-run output,
-deterministic file ordering.
-
-### 3. First-class bundle smoke command
-
-Add a user-facing smoke command that combines:
-
-- source-local project detection;
-- optional temporary runtime state root;
-- bundle verification/preflight;
-- one or more declared smoke executions;
-- cleanup/reporting.
-
-This should be a RyeOS command/service, not a one-off direct Python harness.
+- Command descriptors / local command help: routed without daemon alias
+  parsing; project-aware tails auto-detect a cwd ancestor containing `.ai/`;
+  `RYEOS_PROJECT_ROOT` / `RYEOS_PROJECT_PATH` are part of the runtime/env
+  contract.
+- **Runtime state-root override**: `ryeos execute <ref> --state-root /tmp/...`
+  runs against the resolved project source while runtime state anchors under
+  the override; both roots appear in the response's `execution` diagnostics.
+  Live-fs only; a state root inside the project source is rejected.
+- **Multi-item signing**: `ryeos sign` accepts a bounded set of changed
+  bundle refs/paths in one invocation (`753d758e`), input hardened against
+  escape (`c1751747`).
+- **Bundle smoke command**: `ryeos bundle smoke` (service:bundle/smoke +
+  command descriptor). Bundles declare a `smoke:` list in
+  manifest.source.yaml; the service runs bundle preflight, then dispatches
+  each entry as a normal inline thread against the bundle source with state
+  isolated under a temporary state root, and reports per-entry status,
+  thread ids, and the state root (kept on failure or `keep_state`). See
+  `crates/daemon/ryeos-api/src/handlers/bundle_smoke.rs` and
+  `ryeos_bundle::manifest::SmokeDecl`.
