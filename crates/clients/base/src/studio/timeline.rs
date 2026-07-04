@@ -1513,6 +1513,34 @@ mod tests {
     }
 
     #[test]
+    fn nesting_indents_tool_calls_under_their_graph_node() {
+        // A graph braid reads as a call tree: a tool call between a node's start
+        // and completed nests one level under that node; sibling nodes stay at
+        // the root. The indent vector stays parallel to the coalesced entries.
+        let (entries, indents) = timeline_entries_indented(vec![
+            raw_record(json!({ "event_type": "graph_step_started",
+                "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
+            raw_record(json!({ "event_type": "tool_call_start",
+                "payload": { "tool": "explore", "call_id": "c1" } })),
+            raw_record(json!({ "event_type": "tool_call_result",
+                "payload": { "tool": "explore", "call_id": "c1" } })),
+            raw_record(json!({ "event_type": "graph_step_completed",
+                "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
+            raw_record(json!({ "event_type": "graph_step_started",
+                "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
+            raw_record(json!({ "event_type": "graph_step_completed",
+                "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
+        ]);
+        assert_eq!(entries.len(), 3, "study + explore + options, pairs coalesced");
+        assert_eq!(indents.len(), entries.len(), "indents parallel to entries");
+        assert_eq!(
+            indents,
+            vec![0, 1, 0],
+            "explore nests under study (depth 1); the two nodes sit at the root"
+        );
+    }
+
+    #[test]
     fn graph_follow_suspend_renders_a_boundary_milestone_without_a_drill_in() {
         // The suspend event names only the local follow node (the child chain is
         // dispatched after the checkpoint), so it renders as an accent milestone
