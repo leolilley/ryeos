@@ -795,7 +795,16 @@ impl RuntimeDb {
     }
 
     fn load_command(&self, command_id: i64) -> Result<CommandRecord> {
-        self.conn
+        self.get_command(command_id)?
+            .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
+    }
+
+    /// Read one command by id, or `None` if it does not exist. Unlike
+    /// [`Self::load_command`] this is not an error on absence — `commands.get`
+    /// and `commands.wait` distinguish "no such command" from a real row.
+    pub fn get_command(&self, command_id: i64) -> Result<Option<CommandRecord>> {
+        Ok(self
+            .conn
             .query_row(
                 "SELECT command_id, thread_id, command_type, status, requested_by, params,
                         result, created_at, claimed_at, completed_at
@@ -804,8 +813,7 @@ impl RuntimeDb {
                 params![command_id],
                 read_command_row,
             )
-            .optional()?
-            .ok_or_else(|| anyhow::anyhow!("command missing from runtime db: {command_id}"))
+            .optional()?)
     }
 
     // ── Child links ──────────────────────────────────────────────────────

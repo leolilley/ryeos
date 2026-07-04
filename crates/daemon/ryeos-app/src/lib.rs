@@ -7,6 +7,7 @@ pub mod build_info;
 pub mod bundle_event_service;
 pub mod callback_token;
 pub mod cascade;
+pub mod command_hub;
 pub mod command_service;
 pub mod config;
 pub mod engine_cache;

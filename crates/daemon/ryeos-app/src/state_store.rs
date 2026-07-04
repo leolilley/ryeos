@@ -2196,6 +2196,12 @@ impl StateStore {
         g.runtime_db.complete_command(command_id, status, result)
     }
 
+    /// Read one command by id, or `None` if it does not exist.
+    pub fn get_command(&self, command_id: i64) -> Result<Option<CommandRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.get_command(command_id)
+    }
+
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
     /// lineage for cancel/kill cascade). Idempotent on the child.
     pub fn record_child_link(

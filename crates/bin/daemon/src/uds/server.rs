@@ -813,8 +813,12 @@ fn handle_complete_command(
         status: rt.status,
         result: rt.result,
     };
-    serde_json::to_value(state.commands.complete(&complete)?)
-        .context("failed to encode runtime.complete_command result")
+    let record = state.commands.complete(&complete)?;
+    // Wake any `commands.wait` blocked on this command's settlement. Publish
+    // after the row is durably updated so a woken waiter reads a consistent
+    // terminal row.
+    ryeos_app::command_hub::global().publish(&record);
+    serde_json::to_value(record).context("failed to encode runtime.complete_command result")
 }
 
 fn handle_publish_artifact(
