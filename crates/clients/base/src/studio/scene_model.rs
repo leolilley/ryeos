@@ -81,6 +81,11 @@ pub struct StudioSceneObjectVm {
     /// starting phase. Generic motion vocabulary; who orbits is content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orbit: Option<f32>,
+    /// Spin speed in degrees per generation (sign = direction) for a
+    /// fill shape rotating about its own vertical axis — facet seams
+    /// sweep across the face and each facet rolls through the light.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spin: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,6 +563,10 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioScene
             .get("orbit")
             .and_then(serde_json::Value::as_f64)
             .map(|speed| speed as f32);
+        object.spin = obj
+            .get("spin")
+            .and_then(serde_json::Value::as_f64)
+            .map(|speed| speed as f32);
         scene.objects.push(object);
     }
     scene
@@ -629,6 +638,7 @@ fn scene_object(
         end: None,
         shape: None,
         orbit: None,
+        spin: None,
     }
 }
 

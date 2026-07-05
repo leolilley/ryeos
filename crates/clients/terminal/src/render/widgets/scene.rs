@@ -84,10 +84,15 @@ const RAMP_DIAMOND: [char; 7] = ['˙', '.', '·', '⋄', '◇', '◈', '◆'];
 /// spark, not just a brighter dot.
 const GLINT: char = '✦';
 
-/// Eight-step breathing curve — the per-particle intensity cycle. Smooth
-/// rise and fall (not a square pulse): with intensity expressed as a
-/// colour blend, this reads as organic breathing even at a slow tick.
-const BREATHE: [f32; 8] = [0.30, 0.45, 0.62, 0.80, 0.92, 0.80, 0.62, 0.45];
+/// Sixteen-step breathing curve — the per-particle intensity cycle.
+/// Smooth rise and fall (not a square pulse): with intensity expressed
+/// as a colour blend, this reads as organic breathing even at a slow
+/// tick. Sixteen steps ≈ a 2s cycle at the backdrop tick — unhurried,
+/// while still changing every frame.
+const BREATHE: [f32; 16] = [
+    0.30, 0.36, 0.45, 0.54, 0.62, 0.71, 0.80, 0.87, 0.92, 0.87, 0.80, 0.71, 0.62, 0.54, 0.45,
+    0.36,
+];
 
 pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneModel) {
     let w = rect.w as usize;
@@ -366,8 +371,16 @@ fn draw_fill(
     // The light oscillates across the front arc rather than orbiting
     // behind (a fully dark solid reads as a hole, not drama).
     let light_phase =
-        (scene.generation.wrapping_mul(pace) % 160) as f32 / 160.0 * std::f32::consts::TAU;
+        (scene.generation.wrapping_mul(pace) % 224) as f32 / 224.0 * std::f32::consts::TAU;
     let light_az = 1.55 * light_phase.sin();
+    // The shape's own rotation about its vertical axis (content-declared
+    // `spin:`): facet seams sweep across the face and each facet rolls
+    // through the light. Accumulated in f64 modulo a full turn so
+    // precision holds over long sessions.
+    let spin = ((object.spin.unwrap_or(0.0) as f64
+        * scene.generation.wrapping_mul(pace) as f64)
+        .rem_euclid(360.0) as f32)
+        .to_radians();
     // One cell's width in scene units: the anti-alias band.
     let soft = 1.0 / (scale * cell_aspect * zoom).max(0.001);
     let ramp = ramp_for(object);
@@ -395,6 +408,7 @@ fn draw_fill(
                     lx,
                     ly,
                     light_az,
+                    spin,
                 ),
             };
             let coverage = (0.5 - sd / soft).clamp(0.0, 1.0);
@@ -406,7 +420,7 @@ fn draw_fill(
                     (1.0 - (((x + y) - band).abs() / width.max(0.001))).max(0.0)
                 })
                 .unwrap_or(0.0);
-            let noise = hash_noise(col, row, scene.generation / 2);
+            let noise = hash_noise(col, row, scene.generation / 3);
             // TASTE KNOBS — tune these before touching anything else:
             // 0.24 = ambient floor (how visible the dark faces stay),
             // 0.62 = facet weight (how hard lit/unlit faces contrast),
@@ -444,7 +458,15 @@ fn draw_fill(
 /// width quantizes to hex faces; each face is one flat brightness
 /// against the light — crisp internal facet seams come from the shading
 /// discontinuities, no drawn lines.
-fn prism_sample(r: f32, bh: f32, tip: f32, lx: f32, ly: f32, light_az: f32) -> (f32, f32) {
+fn prism_sample(
+    r: f32,
+    bh: f32,
+    tip: f32,
+    lx: f32,
+    ly: f32,
+    light_az: f32,
+    spin: f32,
+) -> (f32, f32) {
     use std::f32::consts::{FRAC_PI_2, PI};
     // Silhouette half-width at this height: the column, tapering to a
     // point across the termination at each end.
@@ -455,9 +477,13 @@ fn prism_sample(r: f32, bh: f32, tip: f32, lx: f32, ly: f32, light_az: f32) -> (
     };
     let sd = (lx.abs() - rw).max(ly.abs() - (bh + tip));
 
+    // Facet lookup happens in the CRYSTAL's frame (viewer azimuth +
+    // spin), but the face normal shades in the VIEWER's frame — so as
+    // the crystal spins, seams sweep across the face and each face's
+    // brightness rolls continuously through the light.
     let az = (lx / rw.max(0.15)).clamp(-1.0, 1.0).asin();
-    let sector = ((az + FRAC_PI_2) / (PI / 3.0)).floor();
-    let face_az = sector * (PI / 3.0) + PI / 6.0 - FRAC_PI_2;
+    let sector = ((az + spin + FRAC_PI_2) / (PI / 3.0)).floor();
+    let face_az = sector * (PI / 3.0) + PI / 6.0 - FRAC_PI_2 - spin;
     let mut shade = (face_az - light_az).cos().max(0.0);
     if ly > bh {
         // The upper termination's faces tilt skyward: the point catches
@@ -491,7 +517,7 @@ fn sphere_sample(r: f32, lx: f32, ly: f32, light_az: f32) -> (f32, f32) {
 }
 
 /// Deterministic per-cell noise in `[0, 1]` — the simmer texture. Seeded
-/// by generation (halved: ~4Hz at the backdrop tick) so the surface
+/// by generation (a third: ~2.7Hz at the backdrop tick) so the surface
 /// grains without strobing.
 fn hash_noise(col: usize, row: usize, seed: u64) -> f32 {
     let mut h = (col as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
