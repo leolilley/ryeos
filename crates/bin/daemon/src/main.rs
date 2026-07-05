@@ -485,6 +485,18 @@ async fn main() -> Result<()> {
     // making its first daemon callback before the UDS / HTTP server is
     // bound would fail. We collect intents here and dispatch them
     // below, after the listeners are accepting connections.
+    // Node-scoped execution limits ride the SAME signed, layered config
+    // family as every other execution limit: `config/execution/execution.yaml`,
+    // `node:` section. Bundle layers carry defaults; the node's own tree
+    // (`<app_root>/.ai/config/...`) is the top overlay — the operator's
+    // surface, which no project layer can touch (per-launch policy reads use
+    // the project as overlay instead and never read `node:`).
+    let node_fanout = load_node_max_live_fanout(&app_state, &config.app_root);
+    ryeos_executor::execution::launch::arm_global_live_fanout_limit(node_fanout);
+    if let Some(n) = node_fanout {
+        tracing::info!(max_live_fanout = n, "node execution limits armed");
+    }
+
     let resume_intents = reconcile::reconcile(&app_state).await?;
     // Follow reconcile actions collected here, dispatched post-listener too: a
     // resumed parent's (or relaunched child's) first callback must not precede a
@@ -785,6 +797,58 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Read `node.max_live_fanout` from the layered signed execution config,
+/// bundle defaults first and the node's own `.ai` tree last (last layer
+/// wins, matching execution-policy layering). A layer that fails signature
+/// verification is skipped loudly rather than trusted.
+fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Option<u32> {
+    let engine = &state.engine;
+    let roots = engine.resolution_roots(Some(app_root.to_path_buf()));
+    let parsers = match engine.effective_parser_dispatcher(Some(app_root)) {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(error = %err, "node execution limits: parser dispatcher unavailable");
+            return None;
+        }
+    };
+    let ctx = ryeos_engine::config_loading::ConfigLoadContext {
+        roots: &roots,
+        parsers: &parsers,
+        kinds: &engine.kinds,
+        trust_store: &engine.trust_store,
+    };
+    let mut limit: Option<u32> = None;
+    for root in &roots.ordered {
+        let candidate = root
+            .ai_root
+            .join("config")
+            .join("execution")
+            .join("execution.yaml");
+        if !candidate.exists() {
+            continue;
+        }
+        match ryeos_engine::config_loading::load_and_verify_config_file(&candidate, &ctx) {
+            Ok(value) => {
+                if let Some(n) = value
+                    .get("node")
+                    .and_then(|n| n.get("max_live_fanout"))
+                    .and_then(|v| v.as_u64())
+                {
+                    limit = Some(n as u32);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %candidate.display(),
+                    error = %err,
+                    "node execution limits: config layer failed verification — ignoring"
+                );
+            }
+        }
+    }
+    limit.filter(|n| *n > 0)
 }
 
 /// Drive follow reconcile actions as detached tasks. Shared by the boot

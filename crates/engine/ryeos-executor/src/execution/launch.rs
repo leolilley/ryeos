@@ -2641,17 +2641,18 @@ pub fn finalize_failed_and_kick_follow(
     kick_launch_window_for_terminal(state, child_chain_root_id);
 }
 
-/// Daemon-global ceiling on launched-and-live window members across ALL
-/// fanouts — the cross-project load valve. Read once from
-/// `RYEOSD_MAX_LIVE_FANOUT`; absent, unparsable, or 0 means no ceiling.
+static GLOBAL_LIVE_FANOUT_LIMIT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+
+/// Arm the node-wide ceiling on launched-and-live window members across ALL
+/// fanouts — the cross-project load valve. The daemon arms it once at boot
+/// from the node-scoped execution config (`config/execution/execution.yaml`,
+/// `node.max_live_fanout`); unarmed or 0 means no ceiling.
+pub fn arm_global_live_fanout_limit(limit: Option<u32>) {
+    let _ = GLOBAL_LIVE_FANOUT_LIMIT.set(limit.filter(|n| *n > 0));
+}
+
 pub(crate) fn global_live_fanout_limit() -> Option<u32> {
-    static LIMIT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        std::env::var("RYEOSD_MAX_LIVE_FANOUT")
-            .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .filter(|n| *n > 0)
-    })
+    GLOBAL_LIVE_FANOUT_LIMIT.get().copied().flatten()
 }
 
 /// Launch a window-admitted child on the reconcile-parity path: identity

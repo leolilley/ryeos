@@ -346,6 +346,7 @@ mod tests {
             thread: "inline".to_string(),
             call: None,
             facets: None,
+            launch_window: None,
         };
         let v = serde_json::to_value(&payload).unwrap();
         assert!(

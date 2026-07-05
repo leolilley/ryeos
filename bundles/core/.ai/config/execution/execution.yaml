@@ -24,3 +24,14 @@ defaults:
 #   "my/scraper/tool":
 #     timeout: 600
 #     cancellation_grace_secs: 30
+
+# Node-scoped valves — read by the daemon at boot from bundle layers plus
+# the node's own tree (<app_root>/.ai/config/execution/execution.yaml),
+# which is the operator's overlay. Per-launch policy reads use the project
+# as overlay and never read this section, so a project cannot set
+# node-wide limits.
+# node:
+#   # Ceiling on launched-and-live launch-window members across ALL
+#   # fanouts on this node (a member is a child chain; see the graph
+#   # foreach `max_concurrency` launch window). Absent or 0 = unbounded.
+#   max_live_fanout: 16
