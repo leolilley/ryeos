@@ -139,9 +139,15 @@ fn interpolate_string(template: &str, context: &Value) -> anyhow::Result<Value> 
                 Some(val) => match stringify_value(&val) {
                     Some(s) => result.push_str(&s),
                     None => {
+                        // Structured values embed in text only via the
+                        // explicit `|json` pipe — name the fix so a template
+                        // author (or a directive body referencing an
+                        // object-valued input) gets an actionable error
+                        // instead of an opaque bootstrap failure.
                         anyhow::bail!(
-                            "interpolation: ${{{}}} resolved to {} which cannot be stringified",
-                            expr,
+                            "interpolation: ${{{expr}}} resolved to a structured value ({}); \
+                             embedding an object/array in text requires the explicit json \
+                             pipe: ${{{expr}|json}}",
                             val
                         );
                     }
@@ -349,10 +355,13 @@ pub fn interpolate_action(action: &Value, context: &Value) -> anyhow::Result<Val
         Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (k, v) in map {
-                // `call` (method selector + args) is interpolated like params so
-                // `call.args` templates such as `${state.hint}` resolve; the
-                // literal `call.method` has no template and is passed through.
-                if k == "item_id" || k == "params" || k == "call" {
+                // The template-bearing key set is owned by
+                // `callback::action_keys` next to the `ActionPayload` wire
+                // shape. `facets` values are templates by design
+                // (`fleet: "${inputs.fleet}"`) and MUST resolve here, with
+                // the foreach item variable in scope, or the daemon stamps
+                // the raw template strings on the child.
+                if crate::callback::action_keys::INTERPOLATED.contains(&k.as_str()) {
                     result.insert(k.clone(), interpolate(v, context)?);
                 } else {
                     result.insert(k.clone(), v.clone());
@@ -368,6 +377,24 @@ pub fn interpolate_action(action: &Value, context: &Value) -> anyhow::Result<Val
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn interpolate_action_resolves_facets_with_item_var() {
+        // Cohort facets on a detach action are templates that must resolve
+        // per iteration — a raw `${item}` reaching the daemon gets stamped
+        // verbatim on the child and breaks every facet query for the cohort.
+        let action = json!({
+            "item_id": "graph:t/leaf",
+            "params": {"x": "${item}"},
+            "thread": "detached",
+            "facets": {"fleet": "${inputs.fleet}", "member": "${item}"},
+        });
+        let ctx = json!({"inputs": {"fleet": "f-1"}, "item": "alpha"});
+        let out = interpolate_action(&action, &ctx).unwrap();
+        assert_eq!(out["facets"], json!({"fleet": "f-1", "member": "alpha"}));
+        assert_eq!(out["params"], json!({"x": "alpha"}));
+        assert_eq!(out["thread"], json!("detached"));
+    }
 
     #[test]
     fn whole_expression_preserves_type() {
@@ -616,14 +643,17 @@ mod tests {
     #[test]
     fn embedded_object_without_json_pipe_errors() {
         // Embedding an object in text WITHOUT `|json` must still error —
-        // authors must opt into serialization explicitly.
+        // authors must opt into serialization explicitly. The error must
+        // name the expression AND the `|json` fix, so a directive body
+        // referencing an object-valued input fails legibly at bootstrap
+        // instead of surfacing as an opaque child-runtime failure.
         let ctx = json!({"state": {"stats": {"hp": 7}}});
         let result = interpolate(&json!("Stats: ${state.stats}"), &ctx);
         assert!(result.is_err());
         let msg = format!("{:#}", result.unwrap_err());
         assert!(
-            msg.contains("cannot be stringified"),
-            "error should explain the object cannot be stringified: {msg}"
+            msg.contains("${state.stats|json}"),
+            "error should name the expression and the |json fix: {msg}"
         );
     }
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T09:54:36Z:b447ef90f12c67f527c099be59d4856898cd69cdd815189ab6c5d182d03a1e37:cxzwtXodF1N66NklgtpsaRi4ZiOclom0obEozT57rU4fvJlwdOs2WU81InGr/nzH4ucAz1SB6/aNbpXSWT7mDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-05T01:09:36Z:533b7161ec50b4c015d606d460a7c1ab956d6b734aeac65f917d40e04386f237:aIDN+YwtEfYcQK7aJaqoKfpm+MHFG0QXdoWVVMfB7vBaLV9Rdiq3+v12XAGKnqHFM9d1fuEVkySUbw+u97uCDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -20,11 +20,12 @@ slots:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/shard
+backdrop: view:ryeos/backdrop/prism
 
 library:
-  - view:ryeos/backdrop/shard
+  - view:ryeos/backdrop/prism
   - view:ryeos/input
+  - view:ryeos/node/activity
   - view:ryeos/threads/list
   - view:ryeos/item/inspector
   - view:ryeos/chain/timeline

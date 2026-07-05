@@ -699,32 +699,36 @@ async fn main() -> Result<()> {
     // guarded, so a duplicate with a live path is a benign `Skipped`. `Resume`
     // wakes a suspended parent; `RelaunchChild` re-fires a child stranded in the
     // pre-launch window.
-    for action in follow_actions {
+    // Launch-window recovery: release slots whose member chain settled while
+    // no kick could land (crash window), then admit and launch queued
+    // members. Post-listener for the same reason as the intents above —
+    // launched runtimes call back immediately.
+    ryeos_executor::execution::launch::sweep_launch_windows(&app_state);
+
+    dispatch_follow_actions(&app_state, follow_actions);
+
+    // Periodic recovery sweep: a follow-resume kick that fails LIVE (e.g. a
+    // content re-sign racing a resume) must not strand a suspended run until
+    // the next daemon restart — reconcile_follow's stale-waiter re-drive and
+    // the launch-window sweep both need a mid-life cadence, not just boot.
+    // Everything driven here is idempotent and claim-guarded, so overlap
+    // with live kicks is a benign skip.
+    {
         let st = app_state.clone();
         tokio::spawn(async move {
-            use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
-            let (label, outcome) = match action {
-                reconcile::FollowReconcileAction::Resume { follow_key } => {
-                    let outcome = ryeos_executor::execution::launch::launch_follow_resume_successor(
-                        st, &follow_key,
-                    )
-                    .await;
-                    (format!("parent-resume {follow_key}"), outcome)
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(120));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; boot already swept.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                match reconcile::reconcile_follow(&st) {
+                    Ok(actions) => dispatch_follow_actions(&st, actions),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "periodic follow sweep failed")
+                    }
                 }
-                reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
-                    // Reconcile parity: a fresh relaunch, no parent clamp/depth.
-                    let outcome = launch_follow_child(st, &child_thread_id, None, None).await;
-                    (format!("child-relaunch {child_thread_id}"), outcome)
-                }
-            };
-            match outcome {
-                Ok(SuccessorLaunchOutcome::Launched(_)) => {}
-                Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
-                    tracing::debug!(action = %label, reason, "reconcile: follow action skipped");
-                }
-                Err(err) => {
-                    tracing::error!(action = %label, error = %err, "reconcile: follow action failed");
-                }
+                ryeos_executor::execution::launch::sweep_launch_windows(&st);
             }
         });
     }
@@ -783,6 +787,44 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Drive follow reconcile actions as detached tasks. Shared by the boot
+/// pass and the periodic recovery sweep; every launch is claim-guarded, so
+/// concurrent drives are benign skips.
+fn dispatch_follow_actions(
+    state: &AppState,
+    actions: Vec<reconcile::FollowReconcileAction>,
+) {
+    for action in actions {
+        let st = state.clone();
+        tokio::spawn(async move {
+            use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
+            let (label, outcome) = match action {
+                reconcile::FollowReconcileAction::Resume { follow_key } => {
+                    let outcome = ryeos_executor::execution::launch::launch_follow_resume_successor(
+                        st, &follow_key,
+                    )
+                    .await;
+                    (format!("parent-resume {follow_key}"), outcome)
+                }
+                reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
+                    // Reconcile parity: a fresh relaunch, no parent clamp/depth.
+                    let outcome = launch_follow_child(st, &child_thread_id, None, None).await;
+                    (format!("child-relaunch {child_thread_id}"), outcome)
+                }
+            };
+            match outcome {
+                Ok(SuccessorLaunchOutcome::Launched(_)) => {}
+                Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
+                    tracing::debug!(action = %label, reason, "reconcile: follow action skipped");
+                }
+                Err(err) => {
+                    tracing::error!(action = %label, error = %err, "reconcile: follow action failed");
+                }
+            }
+        });
+    }
+}
+
 fn drain_running_threads(state: &AppState) {
     // Include `created`: a runtime registers its pgid (attach_process) BEFORE
     // it marks running, so there is a brief `created` + live-pgid window. The
@@ -823,6 +865,17 @@ fn drain_running_threads(state: &AppState) {
                     pgid,
                     method = %result.method,
                     "failed to kill process group"
+                );
+            }
+            // This death is the shutdown's doing, not the thread's — re-arm
+            // its auto-resume budget so the next boot's reconcile resumes it
+            // instead of exhausting `max_auto_resume_attempts` across
+            // deploys. Crashes skip the drain, so crash loops still exhaust.
+            if let Err(err) = state.state_store.reset_resume_attempts(&thread.thread_id) {
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    error = %err,
+                    "failed to re-arm resume budget during drain"
                 );
             }
         }

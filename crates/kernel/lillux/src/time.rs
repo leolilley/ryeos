@@ -7,7 +7,12 @@ pub fn iso8601_now() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = now.as_secs();
+    iso8601_from_unix_secs(now.as_secs())
+}
+
+/// Format an absolute Unix timestamp (seconds) as ISO-8601 UTC — same
+/// encoding `iso8601_now` emits, for computing comparable cutoffs.
+pub fn iso8601_from_unix_secs(secs: u64) -> String {
     let days = secs / 86400;
     let day_secs = secs % 86400;
     let hours = day_secs / 3600;

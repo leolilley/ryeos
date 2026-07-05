@@ -79,16 +79,35 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
         // kind default). The daemon deserializes this back into `ActionPayload`.
         let action = serde_json::to_value(&request.action)
             .map_err(|e| CallbackError::Transport(anyhow::anyhow!("serialize action: {e}")))?;
+        let inline = request.action.thread == "inline";
         let mut params = json!({
             "thread_id": request.thread_id,
             "project_path": request.project_path,
             "action": action,
         });
         self.inject_callback_token(&mut params);
-        self.rpc
-            .request("runtime.dispatch_action", params)
-            .await
-            .map_err(Self::map_rpc_error)
+        if inline {
+            // An inline dispatch's response arrives only after the leaf
+            // settles — legitimately unbounded, and it holds the wire the
+            // whole time. Run it on a DEDICATED connection so it neither
+            // serializes other callbacks behind the shared connection's
+            // mutex nor serializes against sibling inline dispatches on the
+            // daemon's per-connection loop (parallel foreach over tools is
+            // only parallel if each iteration gets its own connection).
+            self.rpc
+                .request_dedicated("runtime.dispatch_action", params, None)
+                .await
+                .map_err(Self::map_rpc_error)
+        } else {
+            // A detached fanout spawn is a prompt daemon-side mint: shared
+            // connection, default roundtrip bound — a spawn the daemon never
+            // answers must surface as an error, not park the connection (and
+            // everything queued behind it) forever.
+            self.rpc
+                .request_with_timeout("runtime.dispatch_action", params, Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT))
+                .await
+                .map_err(Self::map_rpc_error)
+        }
     }
 
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError> {

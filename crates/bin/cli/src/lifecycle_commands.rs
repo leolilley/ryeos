@@ -286,6 +286,21 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 }),
             ));
         }
+        Ok(LifecycleStatus::Unresponsive {
+            metadata,
+            diagnostics,
+        }) => {
+            checks.push(check(
+                "daemon",
+                WARN,
+                serde_json::json!({
+                    "state": "unresponsive",
+                    "pid": metadata.pid,
+                    "message": diagnostics.message,
+                    "note": "control probe timed out against a live socket — likely busy, not dead",
+                }),
+            ));
+        }
         Ok(LifecycleStatus::NotInitialized { .. }) => {
             // Covered by the init check; don't double-report.
             checks.push(check("daemon", NA, serde_json::json!({ "state": "not initialized" })));
@@ -666,6 +681,13 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
         }
         LifecycleStatus::Stale { diagnostics, .. } => {
             println!("stale daemon metadata — {}", diagnostics.message);
+        }
+        LifecycleStatus::Unresponsive { metadata, diagnostics } => {
+            println!("running but not answering — {}", diagnostics.message);
+            if let Some(pid) = metadata.pid {
+                println!("pid: {pid}");
+            }
+            println!("likely busy; retry shortly (do not start a second daemon)");
         }
     }
 }

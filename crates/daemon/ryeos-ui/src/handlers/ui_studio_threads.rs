@@ -60,21 +60,15 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     // widens the list rather than emptying it. Seat auth is unchanged: a
     // browser session is admin context, so there is no owner (`principal`)
     // scope — these are operator-chosen facets, not an authorization boundary.
-    let facet_key = string_filter(&params, "facet_key");
-    let facet_value = string_filter(&params, "facet_value");
     let filter = ryeos_app::thread_lifecycle::ThreadListFilter {
         principal: None,
         status: string_filter(&params, "status"),
         kind: string_filter(&params, "kind"),
         requested_by: string_filter(&params, "requested_by"),
-        facet: facet_key.clone().zip(facet_value.clone()),
-        // A facet KEY with no value is cohort PRESENCE — every thread in some
-        // fleet run, across runs — the generic whole-run landing's filter. A
-        // key+value pair stays exact cohort membership (one specific run).
-        facet_key_present: match (&facet_key, &facet_value) {
-            (Some(key), None) => Some(key.clone()),
-            _ => None,
-        },
+        facet: string_filter(&params, "facet_key").zip(string_filter(&params, "facet_value")),
+        // `active: true` narrows to the agent's live (non-terminal) threads —
+        // the activity view's landing filter.
+        active_only: params.get("active").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
@@ -132,13 +126,39 @@ pub async fn handle_inspect(
     let totals = state
         .state_store
         .chain_usage_totals(&thread.thread.chain_root_id)?;
-    let usage = serde_json::json!([
-        { "label": "input tokens", "value": totals.input_tokens.to_string() },
-        { "label": "output tokens", "value": totals.output_tokens.to_string() },
-        { "label": "cost", "value": format!("${:.4}", totals.spend_usd) },
-        { "label": "turns", "value": totals.completed_turns.to_string() },
-        { "label": "threads in chain", "value": totals.thread_count.to_string() },
-    ]);
+    let chain_has_usage = totals.input_tokens != 0
+        || totals.output_tokens != 0
+        || totals.spend_usd != 0.0
+        || totals.completed_turns != 0;
+    // A rollup-basis final cost (a graph aggregating its dispatched children)
+    // lives in the `cost.*` facets, never in `thread_usage` — dispatched
+    // children are fresh chain roots, so the chain totals read zero for such
+    // a thread. Project the rollup as explicitly-derived rows, and drop the
+    // bare-zero chain rows when the rollup is the only usage there is.
+    let is_rollup = facets_map.get("cost.basis").map(String::as_str) == Some("rollup");
+    let mut usage_rows: Vec<Value> = Vec::new();
+    if chain_has_usage || !is_rollup {
+        usage_rows.extend([
+            serde_json::json!({ "label": "input tokens", "value": totals.input_tokens.to_string() }),
+            serde_json::json!({ "label": "output tokens", "value": totals.output_tokens.to_string() }),
+            serde_json::json!({ "label": "cost", "value": format!("${:.4}", totals.spend_usd) }),
+            serde_json::json!({ "label": "turns", "value": totals.completed_turns.to_string() }),
+            serde_json::json!({ "label": "threads in chain", "value": totals.thread_count.to_string() }),
+        ]);
+    }
+    if is_rollup {
+        let facet = |key: &str| facets_map.get(key).cloned().unwrap_or_else(|| "0".to_string());
+        let spend = facets_map
+            .get("cost.spend")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        usage_rows.extend([
+            serde_json::json!({ "label": "children input tokens", "value": facet("cost.input_tokens") }),
+            serde_json::json!({ "label": "children output tokens", "value": facet("cost.output_tokens") }),
+            serde_json::json!({ "label": "children cost (rollup)", "value": format!("${spend:.4}") }),
+        ]);
+    }
+    let usage = Value::Array(usage_rows);
 
     // Staged operator-input depth (05c.1): lets the input area show an "N staged"
     // chip without a separate service call.

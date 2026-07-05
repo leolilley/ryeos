@@ -695,32 +695,27 @@ fn presentation_activity_level(
         .clamp(0.0, 1.0)
 }
 
-/// Cumulative token usage for the loaded conversation: the sum of
-/// `thread_usage` input/output tokens across the braid events in any fetched
-/// source. Only the chain-replay (timeline) source carries `thread_usage`, so
-/// summing across sources yields the conversation total; `(0, 0)` when none.
+/// Cumulative token usage for the loaded conversation, read from the
+/// chain-replay source's `summary` block — the daemon's continuation-aware
+/// chain totals. Summing the braid's `thread_usage` events instead would
+/// over-count: each event carries the thread's cumulative-so-far totals
+/// (reseeded across continuations), not a per-turn delta. `(0, 0)` when no
+/// fetched source carries a usage summary.
 fn conversation_usage(core: &StudioCore) -> (u64, u64) {
     let mut input = 0u64;
     let mut output = 0u64;
     for source in core.data.sources.values() {
-        let Some(events) = source.get("events").and_then(serde_json::Value::as_array) else {
+        let Some(summary) = source.get("summary") else {
             continue;
         };
-        for event in events {
-            if event.get("event_type").and_then(serde_json::Value::as_str) != Some("thread_usage") {
-                continue;
-            }
-            if let Some(payload) = event.get("payload") {
-                input += payload
-                    .get("input_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                output += payload
-                    .get("output_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-            }
-        }
+        input += summary
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        output += summary
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
     }
     (input, output)
 }
@@ -858,9 +853,9 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
         focused_tile: tile_id_text(core.workspace.focused_tile),
         center_is_empty,
         // The backdrop scene resolves only on an empty center. The
-        // surface's `backdrop` ref selects the scene content; v1 ships the
-        // client-side shard builder (the renderer stays generic, so a
-        // data/service source later is invisible to it).
+        // surface's `backdrop` ref selects the scene content (the
+        // renderer stays generic, so a data/service source later is
+        // invisible to it).
         backdrop: center_is_empty.then(|| backdrop_scene(core)).flatten(),
         tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
@@ -880,9 +875,7 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
 }
 
 /// Resolve the backdrop scene from the surface's `backdrop` view ref.
-/// For v1 the only backdrop content is the client-side shard scene; the
-/// ref selects it. Absent `backdrop` → no scene (the background fill
-/// stands).
+/// Absent `backdrop` → no scene (the background fill stands).
 fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
     let backdrop_ref = core
         .data
@@ -898,10 +891,18 @@ fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
     if binding.widget != "scene" {
         return None;
     }
-    Some(super::scene_model::scene_from_body(
-        &binding.body,
-        core.generation,
-    ))
+    let mut scene = super::scene_model::scene_from_body(&binding.body, core.generation);
+    // The backdrop breathes with the node: live threads lift the scene's
+    // energy, so the empty center visibly quickens while cognition runs
+    // and settles back to calm when the node idles.
+    let active_threads = core
+        .data
+        .dimension
+        .as_ref()
+        .map(|dimension| dimension.threads.active_count)
+        .unwrap_or_default();
+    scene.energy = ((active_threads.max(0) as f32) * 0.25).clamp(0.0, 1.0);
+    Some(scene)
 }
 
 fn dock_plane_vm(core: &StudioCore) -> StudioDockPlaneVm {
@@ -2184,11 +2185,11 @@ mod tests {
             effective_surface: Some(json!({
                 "name": "studio-base",
                 "version": "1.0.0",
-                "backdrop": "view:ryeos/backdrop/shard",
+                "backdrop": "view:test/backdrop",
                 // The backdrop is content: its scene objects live in the
                 // embedded view's body, not in Rust.
                 "views": {
-                    "view:ryeos/backdrop/shard": {
+                    "view:test/backdrop": {
                         "widget": "scene",
                         "body": { "objects": [
                             { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
@@ -2981,21 +2982,27 @@ mod tests {
     }
 
     #[test]
-    fn conversation_usage_sums_thread_usage_across_braid_sources() {
+    fn conversation_usage_reads_chain_summary_not_event_sums() {
+        // `thread_usage` payloads are cumulative-so-far (100 → 105), so the
+        // conversation total is the daemon's continuation-aware `summary`
+        // block, never the events summed (that would read 205).
         let mut core = StudioCore::default();
         core.data.sources.insert(
             "timeline".to_string(),
-            json!({ "events": [
-                { "event_type": "thread_usage", "payload": { "input_tokens": 100, "output_tokens": 20 } },
-                { "event_type": "cognition_out", "payload": { "content": "hi" } },
-                { "event_type": "thread_usage", "payload": { "input_tokens": 5, "output_tokens": 3 } },
-            ]}),
+            json!({
+                "events": [
+                    { "event_type": "thread_usage", "payload": { "input_tokens": 100, "output_tokens": 20 } },
+                    { "event_type": "cognition_out", "payload": { "content": "hi" } },
+                    { "event_type": "thread_usage", "payload": { "input_tokens": 105, "output_tokens": 23 } },
+                ],
+                "summary": { "status": "completed", "input_tokens": 105, "output_tokens": 23 },
+            }),
         );
         assert_eq!(conversation_usage(&core), (105, 23));
     }
 
     #[test]
-    fn conversation_usage_is_zero_without_usage_events() {
+    fn conversation_usage_is_zero_without_usage_summary() {
         assert_eq!(conversation_usage(&StudioCore::default()), (0, 0));
     }
 

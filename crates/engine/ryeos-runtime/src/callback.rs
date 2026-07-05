@@ -122,6 +122,44 @@ pub struct ActionPayload {
     /// Absent for inline dispatches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub facets: Option<Value>,
+    /// Bounded-fanout launch window for a `thread: "detached"` dispatch: the
+    /// daemon mints the child immediately but keeps at most `width` window
+    /// members launched-and-live at once (a member is the child CHAIN — the
+    /// slot survives `thread_continued` and frees on a hard terminal). The
+    /// daemon namespaces `key` under the parent thread id, so a caller can
+    /// only pace its own children. Absent for inline dispatches and
+    /// unbounded spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_window: Option<LaunchWindow>,
+}
+
+/// See [`ActionPayload::launch_window`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchWindow {
+    pub key: String,
+    pub width: u32,
+}
+
+/// Wire keys of [`ActionPayload`], for code that handles an action as a raw
+/// `Value` map (the graph walker builds/folds/interpolates actions untyped
+/// before dispatch). One source of truth: adding a field to `ActionPayload`
+/// means adding its key here and deciding whether `interpolate_action`
+/// resolves templates inside it — a literal that drifts from the struct is
+/// how `facets` shipped uninterpolated.
+pub mod action_keys {
+    pub const ITEM_ID: &str = "item_id";
+    pub const PARAMS: &str = "params";
+    pub const THREAD: &str = "thread";
+    pub const CALL: &str = "call";
+    pub const FACETS: &str = "facets";
+    pub const LAUNCH_WINDOW: &str = "launch_window";
+
+    /// Keys whose values may carry `${…}` templates and are resolved by
+    /// `interpolate_action`. `THREAD` stays literal (a dispatch mode, never
+    /// a template); `CALL.method` is literal but `CALL.args` interpolates,
+    /// so the whole block is included.
+    pub const INTERPOLATED: &[&str] = &[ITEM_ID, PARAMS, CALL, FACETS];
 }
 
 /// Runtime-owned control keys carried in dispatch/launch params — parent budget,

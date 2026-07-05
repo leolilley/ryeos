@@ -49,7 +49,7 @@ impl SubscriberConfig {
     /// Config suitable for the ryeosd daemon.
     pub fn for_daemon() -> Self {
         Self {
-            default_filter: "ryeosd=info,ryeos_engine=info,ryeos_state=info".into(),
+            default_filter: "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info".into(),
             ..Self::default()
         }
     }
@@ -86,7 +86,7 @@ impl SubscriberConfig {
 
         // Build the registry: stderr (human) + file (ndjson).
         let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("ryeosd=info,ryeos_engine=info,ryeos_state=info"));
+            .unwrap_or_else(|_| EnvFilter::new("ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info"));
 
         let writer = Arc::new(Mutex::new(file));
 
@@ -113,7 +113,7 @@ impl SubscriberConfig {
             .try_init();
 
         Self {
-            default_filter: "ryeosd=info,ryeos_engine=info,ryeos_state=info".into(),
+            default_filter: "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info".into(),
             ..Self::default()
         }
     }

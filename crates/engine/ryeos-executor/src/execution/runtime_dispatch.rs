@@ -138,6 +138,7 @@ async fn handle_execute(
             &params.action.item_id,
             &params.action.params,
             params.action.facets.as_ref(),
+            params.action.launch_window.as_ref(),
         )
         .await;
     }
@@ -147,6 +148,36 @@ async fn handle_execute(
              fanout launch; got thread={:?}",
             params.action.thread
         );
+    }
+
+    // Inline is the LEAF contract: terminator kinds (tool/service) and
+    // method-dispatch kinds (e.g. a knowledge query) return a value and
+    // settle. A delegate-via-runtime-registry kind (directive/graph) is a
+    // native THREAD RUN — awaiting it inline holds the callback wire for the
+    // child's entire lifetime, leaves the run invisible in the parent's braid
+    // until commit, and cannot checkpoint across the wait. Those semantics
+    // belong to the daemon's suspend/fanout machinery, so fail closed with
+    // the fix: `follow: true` (await via durable suspend) or `detach: true`
+    // (lineage-linked fire-and-forget).
+    if let Ok(child_ref) =
+        ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
+    {
+        let is_thread_run_kind = state
+            .engine
+            .kinds
+            .get(&child_ref.kind)
+            .and_then(|schema| schema.execution())
+            .is_some_and(|exec| exec.delegate.is_some());
+        if is_thread_run_kind {
+            anyhow::bail!(
+                "inline callback dispatch of `{}` is not supported: kind `{}` executes as \
+                 a native thread run. Mark the node `follow: true` to await its result via \
+                 durable suspend, or `detach: true` for a lineage-linked fire-and-forget \
+                 child",
+                params.action.item_id,
+                child_ref.kind
+            );
+        }
     }
 
     let caller_principal_id = thread_auth.acting_principal.clone();

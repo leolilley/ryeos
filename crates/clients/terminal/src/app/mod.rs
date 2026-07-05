@@ -21,23 +21,26 @@ use crate::transport::daemon::DaemonClient;
 
 use effects::dispatch_effects;
 use keys::{handle_key, should_quit};
-use seat::{open_seat_thread, reattach_seat_thread, sync_seat_braid};
+use seat::sync_seat_braid;
 
 pub async fn run(
     project_path: &str,
     read_only: bool,
     loaded_surface: LoadedSurface,
     diagnostics: Vec<String>,
+    client: Option<DaemonClient>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = DaemonClient::try_connect().await?;
+    // Reuse the connection the surface was resolved over (discovery and
+    // audience already settled there); connect fresh only without one.
+    let mut client = match client {
+        Some(client) => client,
+        None => DaemonClient::try_connect().await?,
+    };
     let surface_ref = loaded_surface
         .requested_ref()
         .map(str::to_string)
         .unwrap_or_else(|| loaded_surface.spec().name.clone());
-    client
-        .mint_ui_session(&surface_ref, Some(project_path), read_only)
-        .await?;
-    let client = std::sync::Arc::new(client);
+
     let mut term = TerminalGuard::init()?;
     let (width, height) = term.size();
     let mut stdout = std::io::stdout();
@@ -57,7 +60,10 @@ pub async fn run(
         viewport: viewport(width, height),
         now_ms: now_ms(),
     });
-    dispatch_effects(&mut core, &client, start_effects).await;
+    // The seed count marks the surface-declared seat facets; the deferred
+    // reattach below compares against it to detect a lost race with live
+    // local writes.
+    let seeded_events = core.seat.events().len();
 
     // Surface startup diagnostics (surface/view resolution warnings) as in-TUI
     // notices. Otherwise they print to stderr BEFORE the alternate screen is
@@ -66,20 +72,36 @@ pub async fn run(
         core.notice(message, ryeos_client_base::studio::view_model::StudioTone::Warn);
     }
 
+    // First frame before any daemon round trip: chrome, docks, and the
+    // backdrop paint immediately; bound views fill in as sources land.
+    {
+        let vm = core.envelope(Vec::new()).view_model;
+        renderer.render(&mut stdout, &vm, width, height)?;
+    }
+
+    client
+        .mint_ui_session(&surface_ref, Some(project_path), read_only)
+        .await?;
+    let client = std::sync::Arc::new(client);
+
+    dispatch_effects(&mut core, &client, start_effects).await;
+
     // The seat is itself a thread: braided, owned, replayable. Reattach
     // to the latest running owned seat for this surface when possible;
-    // otherwise open one. Mirror every new local seat event into its
-    // braid and settle it on clean exit.
-    let seeded_events = core.seat.events().len();
-    let reattached = reattach_seat_thread(&client, &mut core).await;
-    let replayed_events = (reattached.is_some() && core.seat.events().len() > seeded_events)
-        .then(|| core.seat.events().len());
-    let mut seat_thread = reattached;
-    if seat_thread.is_none() {
-        seat_thread = open_seat_thread(&client, &core).await;
+    // otherwise open one. The round trips run off the loop; the result
+    // folds in on arrival. Local seat events mirror into the braid as
+    // they append, and the thread settles on clean exit.
+    let (seat_tx, mut seat_rx) = tokio::sync::mpsc::unbounded_channel::<seat::SeatBootstrap>();
+    {
+        let client = client.clone();
+        let surface_ref = surface_ref.clone();
+        let seat_tx = seat_tx.clone();
+        tokio::spawn(async move {
+            let _ = seat_tx.send(seat::bootstrap_seat(&client, &surface_ref).await);
+        });
     }
-    let mut seat_synced: usize = replayed_events.unwrap_or(0);
-    sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
+    let mut seat_thread: Option<String> = None;
+    let mut seat_synced: usize = 0;
 
     // Session hints: transient "look" signals; bound views declaring
     // `refresh.on_hint` refetch their sources. This replaces polling —
@@ -88,7 +110,15 @@ pub async fn run(
     hints::spawn_hint_listener(client.clone(), hint_tx.clone());
 
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    // Adaptive frame clock: the backdrop's breathe/sweep animation reads
+    // fluid at ~8fps, so the tick quickens while the center is empty (the
+    // diff renderer repaints only the handful of changed cells). With
+    // tiles up nothing animates per-tick, so 4fps keeps the debounce and
+    // seat sync cadence without burning cycles.
+    const TICK_BACKDROP_MS: u64 = 120;
+    const TICK_TILES_MS: u64 = 250;
+    let mut tick_ms = TICK_TILES_MS;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
     // A live-filter edit defers its list refetch to the tick (debounce), so
     // typing a filter never blocks on a per-keystroke daemon round-trip.
     let mut feed_dirty = false;
@@ -98,6 +128,16 @@ pub async fn run(
             let vm = core.envelope(Vec::new()).view_model;
             renderer.render(&mut stdout, &vm, term.size().0, term.size().1)?;
             dirty = false;
+        }
+
+        let want_tick_ms = if core.workspace.center_is_empty() {
+            TICK_BACKDROP_MS
+        } else {
+            TICK_TILES_MS
+        };
+        if want_tick_ms != tick_ms {
+            tick_ms = want_tick_ms;
+            tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
         }
 
         // Reconcile the SSE tail with the route facet.
@@ -169,6 +209,33 @@ pub async fn run(
                 if !effects.is_empty() {
                     dispatch_effects(&mut core, &client, effects).await;
                     dirty = true;
+                }
+            }
+            Some(bootstrap) = seat_rx.recv() => {
+                if bootstrap.replayed.is_empty() {
+                    // Fresh (or facet-less) braid: adopt it and mirror the
+                    // local log from the top, seeds included.
+                    seat_thread = bootstrap.thread_id;
+                    sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
+                } else if core.seat.events().len() == seeded_events {
+                    for event in bootstrap.replayed {
+                        core.seat.append_replayed(event);
+                    }
+                    seat_thread = bootstrap.thread_id;
+                    seat_synced = core.seat.events().len();
+                    dirty = true;
+                } else {
+                    // The reattach lost the race with live local writes. The
+                    // fold is position-ordered, so replaying history now would
+                    // fold stale facets over fresher ones — leave that braid
+                    // alone and open a new seat for this session instead.
+                    let client = client.clone();
+                    let surface_ref = surface_ref.clone();
+                    let seat_tx = seat_tx.clone();
+                    tokio::spawn(async move {
+                        let thread_id = seat::open_seat_thread(&client, &surface_ref).await;
+                        let _ = seat_tx.send(seat::SeatBootstrap { thread_id, replayed: Vec::new() });
+                    });
                 }
             }
             _ = tick.tick() => {

@@ -1140,6 +1140,7 @@ mod tests {
                 thread: "inline".to_string(),
                 call: None,
                 facets: None,
+                launch_window: None,
             },
         };
         let err = client.dispatch_action(req).await.unwrap_err();

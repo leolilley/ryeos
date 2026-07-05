@@ -129,6 +129,12 @@ pub enum RuntimeEventType {
     GraphStepStarted,
     GraphStepCompleted,
     GraphBranchTaken,
+    /// A foreach node began its iteration set. Emitted BEFORE the iterations
+    /// run — the step lifecycle events land only when the node body commits,
+    /// so this is the braid's only signal that a (possibly long) fanout is in
+    /// flight rather than the walk being stalled. Carries the item total and
+    /// concurrency shape.
+    GraphForeachStarted,
     GraphForeachIteration,
     GraphFollowSuspended,
     GraphNodeRetry,
@@ -186,6 +192,7 @@ impl RuntimeEventType {
             Self::GraphStepStarted => wire::GRAPH_STEP_STARTED,
             Self::GraphStepCompleted => wire::GRAPH_STEP_COMPLETED,
             Self::GraphBranchTaken => wire::GRAPH_BRANCH_TAKEN,
+            Self::GraphForeachStarted => wire::GRAPH_FOREACH_STARTED,
             Self::GraphForeachIteration => wire::GRAPH_FOREACH_ITERATION,
             Self::GraphFollowSuspended => wire::GRAPH_FOLLOW_SUSPENDED,
             Self::GraphNodeRetry => wire::GRAPH_NODE_RETRY,
@@ -234,6 +241,7 @@ impl RuntimeEventType {
             wire::GRAPH_STEP_STARTED => Ok(Self::GraphStepStarted),
             wire::GRAPH_STEP_COMPLETED => Ok(Self::GraphStepCompleted),
             wire::GRAPH_BRANCH_TAKEN => Ok(Self::GraphBranchTaken),
+            wire::GRAPH_FOREACH_STARTED => Ok(Self::GraphForeachStarted),
             wire::GRAPH_FOREACH_ITERATION => Ok(Self::GraphForeachIteration),
             wire::GRAPH_FOLLOW_SUSPENDED => Ok(Self::GraphFollowSuspended),
             wire::GRAPH_NODE_RETRY => Ok(Self::GraphNodeRetry),
@@ -327,6 +335,7 @@ impl RuntimeEventType {
             | Self::GraphStepStarted
             | Self::GraphStepCompleted
             | Self::GraphBranchTaken
+            | Self::GraphForeachStarted
             | Self::GraphFollowSuspended
             | Self::GraphNodeRetry
             | Self::ProviderRetry
@@ -382,6 +391,7 @@ mod tests {
             RuntimeEventType::GraphStepStarted,
             RuntimeEventType::GraphStepCompleted,
             RuntimeEventType::GraphBranchTaken,
+            RuntimeEventType::GraphForeachStarted,
             RuntimeEventType::GraphForeachIteration,
             RuntimeEventType::GraphFollowSuspended,
             RuntimeEventType::GraphNodeRetry,

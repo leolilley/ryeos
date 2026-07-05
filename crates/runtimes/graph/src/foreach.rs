@@ -18,10 +18,39 @@ fn add_cost(acc: &mut Option<RuntimeCost>, cost: Option<RuntimeCost>) {
         input_tokens: 0,
         output_tokens: 0,
         total_usd: 0.0,
+        basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
     });
     total.input_tokens += c.input_tokens;
     total.output_tokens += c.output_tokens;
     total.total_usd += c.total_usd;
+}
+
+/// Stamp the bounded-fanout launch window onto a detach action. A foreach
+/// with `detach: true` spawns children whose dispatch returns immediately,
+/// so `max_concurrency` bounds LIVE children daemon-side (the launch
+/// window), not merely concurrent dispatch tasks. Keyed per fanout
+/// (`graph_run_id:node`); the daemon namespaces it under the parent thread.
+fn fold_launch_window(
+    node: &GraphNode,
+    action: &mut Value,
+    graph_run_id: &str,
+    current_node: &str,
+) {
+    if !node.detach {
+        return;
+    }
+    let Some(width) = node.max_concurrency else {
+        return;
+    };
+    if let Some(obj) = action.as_object_mut() {
+        obj.insert(
+            ryeos_runtime::callback::action_keys::LAUNCH_WINDOW.to_string(),
+            serde_json::json!({
+                "key": format!("{graph_run_id}:{current_node}"),
+                "width": width,
+            }),
+        );
+    }
 }
 
 /// Outcome of running every iteration of a foreach node.
@@ -190,10 +219,14 @@ pub async fn run_foreach_sequential(
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
 
-        let action = match &node.action {
+        let mut action = match &node.action {
             Some(a) => a.clone(),
             None => continue,
         };
+        // Fold BEFORE interpolation so per-item facet templates resolve with
+        // the iteration variable in scope.
+        node.fold_detach_into_action(&mut action);
+        fold_launch_window(node, &mut action, graph_run_id, current_node);
 
         let interpolated = match ryeos_runtime::interpolate_action(&action, &item_ctx_val) {
             Ok(v) => v,
@@ -229,7 +262,27 @@ pub async fn run_foreach_sequential(
         .await
         {
             Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
+                let crate::dispatch::ActionSuccess {
+                    result: val,
+                    cost,
+                    child_thread_id,
+                } = success;
+                // Same portable dispatch-lineage contract as the plain action
+                // path — see the parallel runner for the rationale.
+                if let Some(ref child_id) = child_thread_id {
+                    let _ = client
+                        .append_runtime_event(
+                            RuntimeEventType::ChildThreadSpawned,
+                            serde_json::json!({
+                                "child_thread_id": child_id,
+                                "node": retry_ev.node,
+                                "step": retry_ev.step,
+                                "item_id": item_dispatch_id,
+                                "spawn_reason": "dispatch",
+                            }),
+                        )
+                        .await;
+                }
                 add_cost(&mut total_cost, cost);
                 // Interpolate assign BEFORE committing the result, so an
                 // assign failure makes this item a Null/error — matching
@@ -340,13 +393,17 @@ pub async fn run_foreach_parallel(
             execution: Some(exec_ctx.as_context_value()),
         };
         let item_ctx_val = walk_ctx.with_foreach_item(var, item);
-        let action = match &node.action {
+        let mut action = match &node.action {
             Some(a) => a.clone(),
             None => {
                 drop(permit);
                 continue;
             }
         };
+        // Fold BEFORE interpolation so per-item facet templates resolve with
+        // the iteration variable in scope.
+        node.fold_detach_into_action(&mut action);
+        fold_launch_window(node, &mut action, graph_run_id, current_node);
 
         // Interpolate before spawning. On failure, push an immediate-error
         // task (NOT a raw-template dispatch) so handle ordering — and thus
@@ -396,7 +453,30 @@ pub async fn run_foreach_parallel(
             .await
             {
                 Ok(crate::dispatch::ActionOutcome::Success(success)) => {
-                    let crate::dispatch::ActionSuccess { result: val, cost, .. } = success;
+                    let crate::dispatch::ActionSuccess {
+                        result: val,
+                        cost,
+                        child_thread_id,
+                    } = success;
+                    // Same portable dispatch-lineage contract as the plain
+                    // action path: a spawned native child lands in the parent's
+                    // braid as `child_thread_spawned`, so the fanout cohort is
+                    // drillable from the parent (fire-and-forget append — a
+                    // callback failure must not fail the iteration).
+                    if let Some(ref child_id) = child_thread_id {
+                        let _ = client
+                            .append_runtime_event(
+                                RuntimeEventType::ChildThreadSpawned,
+                                serde_json::json!({
+                                    "child_thread_id": child_id,
+                                    "node": retry_ev.node,
+                                    "step": retry_ev.step,
+                                    "item_id": item_dispatch_id,
+                                    "spawn_reason": "dispatch",
+                                }),
+                            )
+                            .await;
+                    }
                     let assign_val = if let Some(ref assign_expr) = assign {
                         let mut assign_ctx_map =
                             assign_ctx_base.as_object().cloned().unwrap_or_default();
@@ -505,5 +585,49 @@ fn strip_none_values(val: &Value) -> Value {
         }
         Value::Array(arr) => Value::Array(arr.iter().map(strip_none_values).collect()),
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn detach_node(max_concurrency: Option<usize>) -> GraphNode {
+        let mut node: GraphNode = serde_yaml::from_str(
+            "node_type: foreach\nover: \"${state.items}\"\ndetach: true\nparallel: true\naction: {item_id: \"graph:t/leaf\"}\n",
+        )
+        .unwrap();
+        node.max_concurrency = max_concurrency;
+        node
+    }
+
+    #[test]
+    fn launch_window_stamped_for_detach_with_max_concurrency() {
+        let node = detach_node(Some(12));
+        let mut action = node.action.clone().unwrap();
+        node.fold_detach_into_action(&mut action);
+        fold_launch_window(&node, &mut action, "gr-1", "fan");
+        assert_eq!(
+            action["launch_window"],
+            json!({ "key": "gr-1:fan", "width": 12 })
+        );
+        assert_eq!(action["thread"], json!("detached"));
+    }
+
+    #[test]
+    fn no_window_without_max_concurrency_or_detach() {
+        let node = detach_node(None);
+        let mut action = node.action.clone().unwrap();
+        node.fold_detach_into_action(&mut action);
+        fold_launch_window(&node, &mut action, "gr-1", "fan");
+        assert!(action.get("launch_window").is_none());
+
+        let mut inline_node = detach_node(Some(12));
+        inline_node.detach = false;
+        let mut action = inline_node.action.clone().unwrap();
+        inline_node.fold_detach_into_action(&mut action);
+        fold_launch_window(&inline_node, &mut action, "gr-1", "fan");
+        assert!(action.get("launch_window").is_none());
     }
 }

@@ -229,6 +229,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 20,
                 total_usd: 0.001,
+                basis: None,
             }),
         };
         let (callback, mock) = make_callback();

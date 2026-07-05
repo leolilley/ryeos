@@ -170,3 +170,68 @@ jobs:
         run: |
           cosign sign --yes \
             ghcr.io/leolilley/ryeos-standard@${{ steps.push-standard.outputs.digest }}
+
+      # ── central-host image: standard + central-auth + web ──
+      # Base for app-hosting nodes (e.g. tv-tracker) that host their own
+      # central-auth realm and use rye/web/search. Same build/verify/push/sign
+      # flow as the standard image above.
+      - name: Build central-host image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.central-host
+          # linux/amd64 only for now — bundle bin/ trees only contain
+          # x86_64-unknown-linux-gnu binaries. Add arm64 once we ship arm64
+          # binaries in the bundles.
+          platforms: linux/amd64
+          load: true
+          push: false
+          pull: true
+          no-cache: true
+          build-args: |
+            VCS_REF=${{ steps.source.outputs.sha }}
+            BUILD_DATE=${{ steps.ver.outputs.build_date }}
+            RELEASE_BUILD=1
+          tags: |
+            ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
+          secrets: |
+            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
+
+      - name: Verify central-host image provenance
+        run: |
+          IMG="ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}"
+          EXPECTED="${{ steps.source.outputs.sha }}"
+
+          ACTUAL="$(docker run --rm --entrypoint /usr/local/bin/ryeosd "$IMG" build-info --revision)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::stale ryeosd binary: binary=$ACTUAL expected=$EXPECTED"
+            exit 1
+          fi
+
+          LABEL_REV="$(docker image inspect "$IMG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
+          if [ "$LABEL_REV" != "$EXPECTED" ]; then
+            echo "::error::image revision label mismatch: label=$LABEL_REV expected=$EXPECTED"
+            exit 1
+          fi
+
+      - name: Tag and push verified central-host image
+        id: push-central-host
+        run: |
+          SRC="ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}"
+          VERSION_TAG="ghcr.io/leolilley/ryeos-central-host:${{ steps.ver.outputs.version }}"
+          LATEST_TAG="ghcr.io/leolilley/ryeos-central-host:latest"
+
+          docker tag "$SRC" "$VERSION_TAG"
+          docker tag "$SRC" "$LATEST_TAG"
+          docker push "$VERSION_TAG"
+          docker push "$LATEST_TAG"
+
+          DIGEST="$(docker buildx imagetools inspect "$VERSION_TAG" --format '{{ json .Manifest.Digest }}' | tr -d '"')"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Cosign sign central-host image (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign --yes \
+            ghcr.io/leolilley/ryeos-central-host@${{ steps.push-central-host.outputs.digest }}

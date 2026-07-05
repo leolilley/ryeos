@@ -48,6 +48,7 @@ pub const GRAPH_COMPLETED: &str = "graph_completed";
 pub const GRAPH_STEP_STARTED: &str = "graph_step_started";
 pub const GRAPH_STEP_COMPLETED: &str = "graph_step_completed";
 pub const GRAPH_BRANCH_TAKEN: &str = "graph_branch_taken";
+pub const GRAPH_FOREACH_STARTED: &str = "graph_foreach_started";
 pub const GRAPH_FOREACH_ITERATION: &str = "graph_foreach_iteration";
 pub const GRAPH_FOLLOW_SUSPENDED: &str = "graph_follow_suspended";
 pub const GRAPH_NODE_RETRY: &str = "graph_node_retry";

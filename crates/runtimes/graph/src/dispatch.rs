@@ -127,6 +127,18 @@ pub async fn dispatch_action(
     // node's interpolated `facets:`); the daemon stamps them on a detached child.
     let facets = action.get("facets").cloned();
 
+    // Bounded-fanout window (the foreach runners set it for a `detach` node
+    // with `max_concurrency`); malformed is an authoring/plumbing error,
+    // surfaced loudly.
+    let launch_window = match action.get("launch_window") {
+        None => None,
+        Some(v) if v.is_null() => None,
+        Some(v) => Some(
+            serde_json::from_value::<ryeos_runtime::callback::LaunchWindow>(v.clone())
+                .map_err(|e| anyhow::anyhow!("invalid `launch_window` for `{item_id}`: {e}"))?,
+        ),
+    };
+
     let request = ryeos_runtime::callback::DispatchActionRequest {
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
@@ -136,6 +148,7 @@ pub async fn dispatch_action(
             thread: thread.to_string(),
             call,
             facets,
+            launch_window,
         },
     };
 
@@ -648,6 +661,46 @@ mod tests {
         let call = forwarded.call.expect("call forwarded");
         assert_eq!(call.method(), Some("query"));
         assert_eq!(call.args().unwrap()["limit"], 5);
+    }
+
+    #[tokio::test]
+    async fn forwards_launch_window_to_callback() {
+        let last = Arc::new(Mutex::new(None));
+        let inner: Arc<dyn ryeos_runtime::callback::RuntimeCallbackAPI> =
+            Arc::new(CapturingClient { last: last.clone() });
+        let client = CallbackClient::from_inner(inner, "T-test", "/project", "tat-test");
+
+        let action = json!({
+            "item_id": "graph:t/leaf",
+            "params": {},
+            "thread": "detached",
+            "launch_window": { "key": "gr-1:fan", "width": 12 },
+        });
+        dispatch_action(&client, &action, "T-test", "/project", None)
+            .await
+            .expect("dispatch ok");
+
+        let forwarded = last.lock().unwrap().take().expect("action captured");
+        let window = forwarded.launch_window.expect("launch_window forwarded");
+        assert_eq!(window.key, "gr-1:fan");
+        assert_eq!(window.width, 12);
+    }
+
+    #[tokio::test]
+    async fn malformed_launch_window_fails_loudly() {
+        let client = make_mock_client(vec![]);
+        let action = json!({
+            "item_id": "graph:t/leaf",
+            "thread": "detached",
+            "launch_window": { "width": "twelve" },
+        });
+        let err = dispatch_action(&client, &action, "T-test", "/project", None)
+            .await
+            .expect_err("malformed launch_window must fail");
+        assert!(
+            err.to_string().contains("launch_window"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

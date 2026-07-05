@@ -187,6 +187,17 @@ CREATE TABLE IF NOT EXISTS thread_child_link (
 
 CREATE INDEX IF NOT EXISTS idx_thread_child_link_parent
     ON thread_child_link(parent_thread_id);
+
+CREATE TABLE IF NOT EXISTS launch_window (
+    child_chain_root_id TEXT PRIMARY KEY,
+    window_key TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    launched_at_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_launch_window_key
+    ON launch_window(window_key);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -378,6 +389,41 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "launch_window",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "child_chain_root_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "window_key",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "width",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launched_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -408,6 +454,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_thread_child_link_parent",
                 table: "thread_child_link",
                 columns: &["parent_thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_launch_window_key",
+                table: "launch_window",
+                columns: &["window_key"],
                 unique: false,
             },
         ],
@@ -1256,6 +1308,190 @@ impl RuntimeDb {
             .execute("DELETE FROM follow_waiter WHERE follow_key = ?1", params![follow_key])?;
         Ok(())
     }
+
+    /// Re-arm the auto-resume budget. A graceful daemon shutdown kills a
+    /// thread's process deliberately — that death is the operator's, not the
+    /// thread's, so it must not consume `max_auto_resume_attempts`. Daemon
+    /// CRASHES never run the drain, so a crash loop still exhausts the
+    /// budget.
+    pub fn reset_resume_attempts(&self, thread_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE thread_runtime SET resume_attempts = 0 WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
+    // ── Launch windows (bounded detached fanout) ────────────────────────
+    //
+    // A window member is a detached child CHAIN: the row is keyed by the
+    // child's chain_root_id so a slot survives `thread_continued`
+    // transitions (a suspending agent stays one live member) and is
+    // released only when the chain reaches a hard terminal. Rows with
+    // `launched_at_ms` NULL are queued; the row is deleted at release, so
+    // live-slot count == launched rows present. All access is serialized
+    // by the state-store lock; a crash between insert and admit leaves a
+    // queued row the sweep admits later.
+
+    pub fn launch_window_insert(
+        &self,
+        child_chain_root_id: &str,
+        window_key: &str,
+        width: u32,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO launch_window
+                 (child_chain_root_id, window_key, width, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![child_chain_root_id, window_key, width, now_ms],
+        )?;
+        Ok(())
+    }
+
+    fn launch_window_live_count(&self, window_key: &str) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM launch_window
+             WHERE window_key = ?1 AND launched_at_ms IS NOT NULL",
+            params![window_key],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn launch_window_live_total(&self) -> Result<u32> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM launch_window WHERE launched_at_ms IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Admit queued members of one window, oldest first, up to the window
+    /// width and the optional daemon-global live ceiling. Marks admitted
+    /// rows launched and returns their chain roots — the caller owns
+    /// actually launching them.
+    pub fn launch_window_admit(
+        &self,
+        window_key: &str,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let mut admitted = Vec::new();
+        loop {
+            let candidate: Option<(String, u32)> = self
+                .conn
+                .query_row(
+                    "SELECT child_chain_root_id, width FROM launch_window
+                     WHERE window_key = ?1 AND launched_at_ms IS NULL
+                     ORDER BY rowid ASC LIMIT 1",
+                    params![window_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((chain_root, width)) = candidate else {
+                break;
+            };
+            if self.launch_window_live_count(window_key)? >= width {
+                break;
+            }
+            if let Some(cap) = global_live_limit {
+                if self.launch_window_live_total()? >= cap {
+                    break;
+                }
+            }
+            self.conn.execute(
+                "UPDATE launch_window SET launched_at_ms = ?2 WHERE child_chain_root_id = ?1",
+                params![chain_root, now_ms],
+            )?;
+            admitted.push(chain_root);
+        }
+        Ok(admitted)
+    }
+
+    /// Release a finished window member (its chain reached a hard terminal)
+    /// and admit the window's next queued members. Empty for a chain that
+    /// holds no window row.
+    pub fn launch_window_release(
+        &self,
+        child_chain_root_id: &str,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let key: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT window_key FROM launch_window WHERE child_chain_root_id = ?1",
+                params![child_chain_root_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(key) = key else {
+            return Ok(Vec::new());
+        };
+        self.conn.execute(
+            "DELETE FROM launch_window WHERE child_chain_root_id = ?1",
+            params![child_chain_root_id],
+        )?;
+        self.launch_window_admit(&key, global_live_limit, now_ms)
+    }
+
+    /// Whether this chain is a window member deliberately awaiting admission
+    /// — reconcile must leave such a `created` row alone rather than
+    /// finalize it as an interrupted spawn.
+    pub fn launch_window_is_queued(&self, child_chain_root_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM launch_window
+                 WHERE child_chain_root_id = ?1 AND launched_at_ms IS NULL",
+                params![child_chain_root_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Whether this chain holds ANY window row (queued or launched) — the
+    /// cheap pre-check every finalize seam runs before chain-walking.
+    pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM launch_window WHERE child_chain_root_id = ?1",
+                params![child_chain_root_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Every slot-holding (launched, unreleased) member — drift-repair input
+    /// for the sweep, which releases any whose chain died without a kick.
+    pub fn launch_window_launched_members(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT child_chain_root_id FROM launch_window
+             WHERE launched_at_ms IS NOT NULL ORDER BY rowid ASC",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Every window key with queued members — sweep admission input.
+    pub fn launch_window_keys_with_queue(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT window_key FROM launch_window WHERE launched_at_ms IS NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 const FOLLOW_WAITER_COLUMNS: &str = "follow_key, parent_thread_id, parent_chain_root_id, \
@@ -1521,6 +1757,57 @@ mod tests {
         let path = tmp.path().join("runtime.db");
         let _ = RuntimeDb::open(&path).unwrap();
         let _ = RuntimeDb::open(&path).unwrap();
+    }
+
+    #[test]
+    fn launch_window_admits_to_width_then_queues_fifo() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("c1", "P:gr:fan", 2, 1).unwrap();
+        assert_eq!(db.launch_window_admit("P:gr:fan", None, 1).unwrap(), vec!["c1"]);
+        db.launch_window_insert("c2", "P:gr:fan", 2, 2).unwrap();
+        assert_eq!(db.launch_window_admit("P:gr:fan", None, 2).unwrap(), vec!["c2"]);
+        // Width 2 reached — the third member queues.
+        db.launch_window_insert("c3", "P:gr:fan", 2, 3).unwrap();
+        assert!(db.launch_window_admit("P:gr:fan", None, 3).unwrap().is_empty());
+        assert!(db.launch_window_is_queued("c3").unwrap());
+        assert!(db.launch_window_is_member("c3").unwrap());
+        assert!(!db.launch_window_is_queued("c1").unwrap());
+
+        // A hard terminal releases the slot and admits the oldest queued.
+        assert_eq!(
+            db.launch_window_release("c1", None, 4).unwrap(),
+            vec!["c3"]
+        );
+        assert!(!db.launch_window_is_member("c1").unwrap());
+        assert!(!db.launch_window_is_queued("c3").unwrap());
+
+        // Releasing a non-member is a no-op.
+        assert!(db.launch_window_release("nope", None, 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn launch_window_global_ceiling_caps_across_windows() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("a1", "P:one", 5, 1).unwrap();
+        db.launch_window_insert("b1", "Q:two", 5, 2).unwrap();
+        // Global ceiling of 1: only the first window admits.
+        assert_eq!(db.launch_window_admit("P:one", Some(1), 3).unwrap(), vec!["a1"]);
+        assert!(db.launch_window_admit("Q:two", Some(1), 4).unwrap().is_empty());
+        // The release under the same ceiling hands the slot across windows
+        // only via that window's own admit — the sweep drives other keys.
+        assert_eq!(db.launch_window_release("a1", Some(1), 5).unwrap(), Vec::<String>::new());
+        assert_eq!(db.launch_window_admit("Q:two", Some(1), 6).unwrap(), vec!["b1"]);
+        assert_eq!(db.launch_window_keys_with_queue().unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn launch_window_sweep_inputs_expose_launched_and_queued() {
+        let (_tmp, db) = fresh_db();
+        db.launch_window_insert("c1", "K", 1, 1).unwrap();
+        db.launch_window_insert("c2", "K", 1, 2).unwrap();
+        db.launch_window_admit("K", None, 3).unwrap();
+        assert_eq!(db.launch_window_launched_members().unwrap(), vec!["c1"]);
+        assert_eq!(db.launch_window_keys_with_queue().unwrap(), vec!["K"]);
     }
 
     /// An owned runtime.db stamped by an earlier daemon that predates the

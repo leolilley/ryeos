@@ -1,0 +1,10 @@
+# ryeos:signed:2026-07-04T23:37:53Z:5d65b3484dac19c7b6e54d5a1a1b38d46c5f6ad2802581f70728ff1a0e7477b0:HNYunazwCTIu3MTYn5oYm5YuRMZODdO1udZAeYCpqd3bMtMN1/yMdyDks4Gk/ZwUPvmsOJgtXAKemQ/7J9DzAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: studio/node/activity
+version: "1.0.0"
+description: >-
+  Node-wide execution pulse — running and window-settled thread counts,
+  continuation-deduped usage totals, and the latest durable events across
+  every thread on the node.
+endpoint: ui.studio.node.activity
+availability: daemon_only

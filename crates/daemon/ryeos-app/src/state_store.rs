@@ -643,6 +643,11 @@ impl StateStore {
             if let Some(ref provider) = cost.provider {
                 facets.insert("cost.provider".to_string(), provider.clone());
             }
+            // Derived-vs-incurred marker (e.g. a graph's child rollup): kept
+            // beside the figures so no reader mistakes a rollup for own-spend.
+            if let Some(ref basis) = cost.basis {
+                facets.insert("cost.basis".to_string(), basis.clone());
+            }
             if let Some(ref metadata) = cost.metadata {
                 if let Ok(s) = serde_json::to_string(metadata) {
                     facets.insert("cost.metadata_json".to_string(), s);
@@ -1598,6 +1603,20 @@ impl StateStore {
         queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
     }
 
+    /// Node-wide usage settled since `since_iso` (inclusive), continuation-
+    /// deduped — what cognition on this node cost inside the window.
+    pub fn node_usage_totals_since(&self, since_iso: &str) -> Result<queries::ThreadUsageTotals> {
+        let g = self.lock()?;
+        queries::sum_thread_usage_latest_since(g.state_db.projection(), since_iso)
+    }
+
+    /// Per-status thread counts for the node pulse: non-terminal statuses
+    /// count unconditionally, terminal ones only inside the window.
+    pub fn thread_status_counts(&self, since_iso: &str) -> Result<Vec<(String, i64)>> {
+        let g = self.lock()?;
+        queries::thread_status_counts(g.state_db.projection(), since_iso)
+    }
+
     /// As [`Self::list_threads_sorted`] but with the full optional filter set
     /// (status / kind / requested_by) the operator dashboard narrows by.
     pub fn list_threads_query(
@@ -2114,6 +2133,43 @@ impl StateStore {
             .collect::<Result<Vec<_>>>()
     }
 
+    /// Latest durable events across every thread on the node — the feed
+    /// behind the node activity lens. `exclude_types` is caller-declared
+    /// (content decides what counts as noise), never a baked-in vocabulary.
+    pub fn latest_node_events(
+        &self,
+        limit: usize,
+        exclude_types: &[String],
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let g = self.lock()?;
+        let event_rows =
+            queries::latest_node_events(g.state_db.projection(), limit, exclude_types)?;
+        event_rows
+            .into_iter()
+            .map(|row| {
+                let payload: Value = serde_json::from_slice(&row.payload).with_context(|| {
+                    format!(
+                        "malformed JSON payload for event {} (chain_seq {})",
+                        row.event_id, row.chain_seq
+                    )
+                })?;
+                Ok(PersistedEventRecord {
+                    event_id: row.event_id,
+                    chain_root_id: row.chain_root_id,
+                    chain_seq: row.chain_seq,
+                    thread_id: row.thread_id,
+                    thread_seq: row.thread_seq,
+                    event_type: row.event_type,
+                    storage_class: row.durability,
+                    ts: row.ts,
+                    prev_chain_event_hash: row.prev_chain_event_hash,
+                    prev_thread_event_hash: row.prev_thread_event_hash,
+                    payload,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+    }
+
     pub fn latest_thread_events(
         &self,
         thread_id: &str,
@@ -2184,6 +2240,74 @@ impl StateStore {
     pub fn claim_commands(&self, thread_id: &str) -> Result<Vec<CommandRecord>> {
         let g = self.lock()?;
         g.runtime_db.claim_commands(thread_id)
+    }
+
+    pub fn reset_resume_attempts(&self, thread_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.reset_resume_attempts(thread_id)
+    }
+
+    /// Enqueue a detached child chain into a launch window and admit as many
+    /// queued members as the window width (and optional global live ceiling)
+    /// allow. Returns the chain roots admitted NOW — the caller launches
+    /// them; the enqueued child is queued iff its id is absent.
+    pub fn launch_window_enqueue(
+        &self,
+        child_chain_root_id: &str,
+        window_key: &str,
+        width: u32,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .launch_window_insert(child_chain_root_id, window_key, width, now_ms)?;
+        g.runtime_db
+            .launch_window_admit(window_key, global_live_limit, now_ms)
+    }
+
+    /// Release a window slot for a chain that reached a hard terminal and
+    /// admit the window's next queued members (returned for launching).
+    pub fn launch_window_release(
+        &self,
+        child_chain_root_id: &str,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .launch_window_release(child_chain_root_id, global_live_limit, now_ms)
+    }
+
+    pub fn launch_window_is_queued(&self, child_chain_root_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.launch_window_is_queued(child_chain_root_id)
+    }
+
+    pub fn launch_window_is_member(&self, child_chain_root_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        g.runtime_db.launch_window_is_member(child_chain_root_id)
+    }
+
+    pub fn launch_window_launched_members(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.launch_window_launched_members()
+    }
+
+    pub fn launch_window_keys_with_queue(&self) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db.launch_window_keys_with_queue()
+    }
+
+    pub fn launch_window_admit(
+        &self,
+        window_key: &str,
+        global_live_limit: Option<u32>,
+        now_ms: i64,
+    ) -> Result<Vec<String>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .launch_window_admit(window_key, global_live_limit, now_ms)
     }
 
     pub fn complete_command(

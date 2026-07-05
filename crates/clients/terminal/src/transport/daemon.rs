@@ -75,6 +75,10 @@ pub struct DaemonClient {
     audience: String,
     signer: Option<Signer>,
     ui_session_id: Option<String>,
+    /// One pooled connection for the client's lifetime. Every signed call
+    /// rides this handle so requests reuse the kept-alive TCP/TLS session
+    /// instead of paying a fresh connect per round trip.
+    http: reqwest::Client,
 }
 
 impl DaemonClient {
@@ -106,6 +110,7 @@ impl DaemonClient {
             audience,
             signer,
             ui_session_id: None,
+            http: signed_client()?,
         })
     }
 
@@ -159,7 +164,8 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let headers = self.sign("GET", path, b"")?;
 
-        let mut req = signed_client()?
+        let mut req = self
+            .http
             .get(&url)
             .header("accept", "application/json")
             .header("x-ryeos-key-id", &headers.key_id)
@@ -208,7 +214,8 @@ impl DaemonClient {
         let body_bytes = serde_json::to_vec(body)?;
         let headers = self.sign("POST", path, &body_bytes)?;
 
-        let mut req = signed_client()?
+        let mut req = self
+            .http
             .post(&url)
             .header("content-type", "application/json")
             .header("accept", "application/json")
@@ -268,7 +275,8 @@ impl DaemonClient {
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
         let headers = self.sign("GET", path, b"")?;
 
-        let resp = signed_client()?
+        let resp = self
+            .http
             .get(&url)
             .header("accept", "text/event-stream")
             .header("x-ryeos-key-id", &headers.key_id)
@@ -304,7 +312,8 @@ impl DaemonClient {
         let body_bytes = serde_json::to_vec(&body)?;
         let headers = self.sign("POST", "/execute", &body_bytes)?;
 
-        let resp = signed_client()?
+        let resp = self
+            .http
             .post(&url)
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")

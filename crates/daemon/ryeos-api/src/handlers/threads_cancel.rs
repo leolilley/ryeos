@@ -160,6 +160,10 @@ pub async fn handle(
         &state,
         &finalized.chain_root_id,
     );
+    ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+        &state,
+        &finalized.chain_root_id,
+    );
 
     Ok(json!({
         "thread_id": req.thread_id,

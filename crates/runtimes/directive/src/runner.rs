@@ -5,8 +5,8 @@ use serde_json::{json, Value};
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
 use crate::directive::{
-    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, SamplingConfig,
-    StreamEvent, ToolSchema,
+    ContinuationConfig, ExecutionConfig, FinishReason, OutputSpec, ProviderMessage, ReturnNudge,
+    SamplingConfig, StreamEvent, ToolSchema,
 };
 use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
@@ -99,6 +99,14 @@ pub struct Runner {
     /// arguments before finalization. `None` = no outputs declared,
     /// any arguments accepted.
     directive_outputs: Option<Vec<OutputSpec>>,
+    /// Opt-in (`return_nudge` in the header): grant one corrective turn
+    /// when a run with declared outputs is about to settle without a
+    /// successful `directive_return`. Carries the author-worded stimulus
+    /// when the header sets a string.
+    return_nudge: ReturnNudge,
+    /// Whether the corrective turn has been granted in this segment —
+    /// bounds the nudge to exactly one extra turn.
+    return_nudge_sent: bool,
     /// What to do at the context-window continuation boundary: disabled
     /// (default) → stop with current state; enabled → self-continue.
     continuation_config: ContinuationConfig,
@@ -310,6 +318,7 @@ pub struct RunnerConfig {
     pub thread_id: String,
     pub hooks: Vec<ryeos_runtime::HookDefinition>,
     pub outputs: Option<Vec<OutputSpec>>,
+    pub return_nudge: ReturnNudge,
     pub continuation: ContinuationConfig,
     pub sampling: Option<SamplingConfig>,
 }
@@ -332,6 +341,7 @@ impl Runner {
             thread_id,
             hooks,
             outputs,
+            return_nudge,
             continuation,
             sampling,
             matched_profile,
@@ -373,6 +383,8 @@ impl Runner {
             initial_turn: 0,
             hooks,
             directive_outputs: outputs,
+            return_nudge,
+            return_nudge_sent: false,
             continuation_config: continuation,
             sampling,
             http_client: reqwest::Client::builder()
@@ -1160,6 +1172,7 @@ impl Runner {
                                                 // method; no method selector.
                                                 call: None,
                                                 facets: None,
+                                                launch_window: None,
                                             },
                                         },
                                     )
@@ -1580,6 +1593,51 @@ impl Runner {
                 }
 
                 State::Finalizing { result } => {
+                    // Reaching Finalizing means no successful `directive_return`
+                    // this segment (success finalizes inside
+                    // ProcessingDirectiveReturn). When outputs are declared:
+                    // with `return_nudge: true`, grant ONE corrective turn
+                    // naming the missing call; otherwise (or after the nudge)
+                    // settle with empty outputs and a recorded warning.
+                    let declared_outputs: Vec<String> = self
+                        .directive_outputs
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|o| o.name.clone())
+                        .collect();
+                    if !declared_outputs.is_empty() {
+                        if self.return_nudge.enabled()
+                            && !self.return_nudge_sent
+                            && self.can_start_another_turn()
+                        {
+                            self.return_nudge_sent = true;
+                            let nudge = self.return_nudge.message(&declared_outputs);
+                            // Durable stimulus so the corrective turn is
+                            // braid-visible; a failed append degrades to an
+                            // unrecorded nudge rather than failing the run.
+                            if let Err(e) = self.callback.emit_stimulus(&nudge).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "return_nudge stimulus append failed; nudge turn proceeds unrecorded"
+                                );
+                            }
+                            self.messages.push(ProviderMessage {
+                                role: "user".to_string(),
+                                content: Some(json!(nudge)),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                            });
+                            state = State::CheckingLimits;
+                            continue;
+                        }
+                        warnings.push(format!(
+                            "declared outputs ({}) were never emitted via directive_return; \
+                             settling with empty outputs",
+                            declared_outputs.join(", ")
+                        ));
+                    }
                     let completion = TerminalCompletion {
                         status: "completed".to_string(),
                         outcome_code: Some("success".to_string()),
@@ -1858,6 +1916,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -1902,6 +1961,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -1952,6 +2012,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -2000,6 +2061,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -2049,6 +2111,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -2180,6 +2243,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: Some(SamplingConfig {
                 temperature: Some(0.3),
                 seed: Some(42),
@@ -2238,6 +2302,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -2290,6 +2355,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 
@@ -2338,6 +2404,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             hooks: vec![],
             outputs: None,
+            return_nudge: ReturnNudge::default(),
             sampling: None,
         });
 

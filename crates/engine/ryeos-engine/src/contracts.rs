@@ -3346,6 +3346,12 @@ pub struct FinalCost {
     pub spend: f64,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Mirrors `RuntimeCost::basis`: `None` = spend this thread itself
+    /// incurred; `"rollup"` = aggregated from dispatched children, each of
+    /// which is also finalized with its own cost — a display figure that
+    /// must never be summed across a thread tree.
+    #[serde(default)]
+    pub basis: Option<String>,
     #[serde(default)]
     pub metadata: Option<Value>,
 }

@@ -15,15 +15,27 @@ pub async fn dispatch_effects(
     client: &DaemonClient,
     effects: Vec<StudioEffect>,
 ) {
+    // Each generation of effects runs as one concurrent batch — a startup
+    // burst of independent fetches costs one round trip, not one per view.
+    // Results fold back sequentially in emission order, and any effects
+    // those folds emit form the next batch.
     let mut pending = effects;
-    while let Some(effect) = pending.pop() {
+    while !pending.is_empty() {
         let project_path = core
             .data
             .session
             .as_ref()
             .and_then(|session| session.project_path.clone());
-        let result = run_effect(client, &effect, project_path.as_deref()).await;
-        pending.extend(core.dispatch(StudioEvent::EffectResult { result }));
+        let batch = std::mem::take(&mut pending);
+        let results = futures_util::future::join_all(
+            batch
+                .iter()
+                .map(|effect| run_effect(client, effect, project_path.as_deref())),
+        )
+        .await;
+        for result in results {
+            pending.extend(core.dispatch(StudioEvent::EffectResult { result }));
+        }
     }
 }
 

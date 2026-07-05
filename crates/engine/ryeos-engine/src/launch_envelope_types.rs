@@ -313,6 +313,12 @@ pub struct RuntimeResult {
     pub warnings: Vec<String>,
 }
 
+/// `RuntimeCost::basis` value for an aggregate of child threads' costs.
+/// Each child is also finalized with its own cost, so a rollup is a
+/// display figure — summing `final_cost` across a thread tree
+/// double-counts. Absent basis = cost this thread itself incurred.
+pub const COST_BASIS_ROLLUP: &str = "rollup";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCost {
@@ -322,6 +328,11 @@ pub struct RuntimeCost {
     pub output_tokens: u64,
     #[serde(default)]
     pub total_usd: f64,
+    /// How this figure relates to the thread: `None` = incurred by the
+    /// thread's own provider calls; [`COST_BASIS_ROLLUP`] = aggregated
+    /// from children it dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
 }
 
 #[cfg(test)]
@@ -402,6 +413,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 50,
                 total_usd: 0.01,
+                basis: None,
             }),
             warnings: Vec::new(),
         };

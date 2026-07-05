@@ -16,6 +16,26 @@ pub struct StudioSceneModel {
     pub objects: Vec<StudioSceneObjectVm>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atlas: Option<NamespaceAtlasVm>,
+    /// Ambient animation energy in `[0, 1]` — how alive the scene reads.
+    /// The builder maps a real signal into it (the backdrop uses the
+    /// node's live-thread count); renderers quicken pacing and lift
+    /// brightness with it. `0.0` = idle calm.
+    #[serde(default)]
+    pub energy: f32,
+    /// Optional light sweep declared by the scene content: a diagonal
+    /// brightness band that traverses the objects by `generation`. The
+    /// renderer implements the traversal generically; content only opts
+    /// in and shapes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<SceneSweep>,
+}
+
+/// A scene-level light sweep: a band of brightness `width` wide (scene
+/// units, along x+y) crossing the scene once every `period` generations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneSweep {
+    pub period: u64,
+    pub width: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +58,23 @@ pub struct StudioSceneObjectVm {
     pub tone: StudioTone,
     pub selected: bool,
     pub action: Option<StudioAction>,
+    /// Named glyph ramp the renderer draws this object's cells from
+    /// (`"diamond"` for facet geometry; absent = the default dot ramp).
+    /// A ramp NAME is generic widget vocabulary like a tone — which
+    /// objects use which ramp stays content's choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph: Option<String>,
+    /// Segment end (`to:` in scene content). Present → the object is an
+    /// EDGE from `position` to here: the renderer rasterizes contiguous
+    /// cells along it at cell resolution, so declared line-art stays a
+    /// line at any terminal size instead of decomposing into sparse dots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<[f32; 3]>,
+    /// SDF shape name for a [`StudioSceneObjectKind::Fill`] object
+    /// (`"prism"`, `"sphere"`). Shape vocabulary is generic renderer
+    /// capability; which shape a scene uses is content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +97,11 @@ pub enum StudioSceneObjectKind {
     /// projected position. The backdrop's "RYE OS"/welcome/hint lines are
     /// text objects, not a hardcoded welcome block.
     Text,
+    /// A FILLED solid: the renderer rasterizes every interior cell from a
+    /// signed-distance shape (`shape:` names it; `scale` carries its
+    /// dimensions) through the density ramp, lit and animated. The
+    /// backdrop prism is a fill; which shape stays content's choice.
+    Fill,
 }
 
 impl Default for StudioSceneModel {
@@ -74,6 +116,8 @@ impl Default for StudioSceneModel {
             },
             objects: Vec::new(),
             atlas: None,
+            energy: 0.0,
+            sweep: None,
         }
     }
 }
@@ -431,32 +475,42 @@ pub fn build_scene_model(
     scene
 }
 
-/// Build the v1 backdrop "shard" scene: a faceted silhouette traced in
-/// particles, a cloud of orbiting motes, and the brand/welcome/hint text
-/// as text objects. This is *scene content* — the generic renderer draws
-/// it with no knowledge that it is "the shard". A surface selects it via
-/// `backdrop: view:ryeos/backdrop/shard`; new backgrounds are new
-/// content (new builders / data sources), never renderer cases.
-///
-/// Scene space: x ∈ roughly [-16, 16], y ∈ roughly [-7, 7], origin at the
-/// shard's centre. The renderer fits this to the target rect; +y is up.
 /// Build a scene from a `widget: scene` view's body — the generic,
 /// content-driven path. The body declares `objects: [...]`, each a
-/// particle or text object with a position, scale, color, tone, opacity,
-/// and (for text) a label. The renderer draws them generically, so the
-/// background is content with no per-art Rust; `generation` carries the
-/// frame clock so the renderer can animate (the backdrop twinkle).
+/// particle, edge (`to:`), filled solid (`kind: fill` + `shape:`), or
+/// text object with a position, scale, color, tone, opacity, and (for
+/// text) a label. The renderer draws them generically, so the background
+/// is content with no per-art Rust; `generation` carries the frame clock
+/// so the renderer can animate. +y is up; the renderer fits and centres
+/// the declared extent proportionally.
 pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioSceneModel {
     let mut scene = StudioSceneModel {
         generation,
         ..StudioSceneModel::default()
     };
+    // Optional content-declared light sweep: `sweep: {period, width}` —
+    // an empty block opts in with the defaults.
+    if let Some(sweep) = body.get("sweep") {
+        let period = sweep
+            .get("period")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|p| *p > 0)
+            .unwrap_or(24);
+        let width = sweep
+            .get("width")
+            .and_then(serde_json::Value::as_f64)
+            .map(|w| w as f32)
+            .filter(|w| *w > 0.0)
+            .unwrap_or(4.0);
+        scene.sweep = Some(SceneSweep { period, width });
+    }
     let Some(objects) = body.get("objects").and_then(serde_json::Value::as_array) else {
         return scene;
     };
     for (index, obj) in objects.iter().enumerate() {
         let kind = match obj.get("kind").and_then(serde_json::Value::as_str) {
             Some("text") => StudioSceneObjectKind::Text,
+            Some("fill") => StudioSceneObjectKind::Fill,
             _ => StudioSceneObjectKind::Particle,
         };
         let position = read_position(obj.get("position"));
@@ -483,6 +537,17 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioScene
             .unwrap_or_else(|| format!("backdrop:{index}"));
         let mut object = scene_object(&id, kind, position, scale, &color, label, tone);
         object.opacity = opacity;
+        object.glyph = obj
+            .get("glyph")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if let Some(to) = obj.get("to") {
+            object.end = Some(read_position(Some(to)));
+        }
+        object.shape = obj
+            .get("shape")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         scene.objects.push(object);
     }
     scene
@@ -500,8 +565,18 @@ fn read_position(v: Option<&serde_json::Value>) -> [f32; 3] {
     [get(0), get(1), get(2)]
 }
 
-/// A scalar scale -> uniform `[s, s, s]`.
+/// A scalar scale -> uniform `[s, s, s]`; an array `[sx, sy, sz]` passes
+/// through (a fill shape's dimensions).
 fn read_scale(v: Option<&serde_json::Value>) -> [f32; 3] {
+    if let Some(arr) = v.and_then(serde_json::Value::as_array) {
+        let get = |i: usize| {
+            arr.get(i)
+                .and_then(serde_json::Value::as_f64)
+                .map(|f| f as f32)
+                .unwrap_or(0.0)
+        };
+        return [get(0), get(1), get(2)];
+    }
     let s = v
         .and_then(serde_json::Value::as_f64)
         .map(|f| f as f32)
@@ -540,6 +615,9 @@ fn scene_object(
         tone,
         selected: false,
         action: None,
+        glyph: None,
+        end: None,
+        shape: None,
     }
 }
 

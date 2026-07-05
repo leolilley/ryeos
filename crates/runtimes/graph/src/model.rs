@@ -102,6 +102,11 @@ pub struct GraphNode {
     pub collect: Option<String>,
     #[serde(default)]
     pub parallel: bool,
+    /// Fanout width. On a plain foreach this bounds concurrent dispatch
+    /// tasks. On a `detach: true` foreach it is the LAUNCH WINDOW: detached
+    /// spawns return immediately, so the daemon keeps at most this many
+    /// child chains launched-and-live at once and admits the next queued
+    /// child when a live one reaches a hard terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     /// Return-node output template. A YAML scalar deserializes to a
@@ -128,6 +133,35 @@ impl GraphNode {
 
     pub fn foreach_var(&self) -> &str {
         self.r#as.as_deref().unwrap_or("item")
+    }
+
+    /// Fold the node's `detach` dispatch mode into a cloned action: set
+    /// `thread: "detached"` and carry the node's `facets:` templates so they
+    /// interpolate alongside the action (per iteration under `over:`, with the
+    /// item variable in scope) and the daemon stamps them on the child at
+    /// spawn. No-op unless `detach: true`.
+    ///
+    /// Every action clone site that dispatches (plain action node, sequential
+    /// foreach, parallel foreach) must route through this fold BEFORE
+    /// interpolation — `dispatch_action` defaults a missing `thread` to
+    /// `"inline"`, and the callback boundary rejects an inline dispatch of a
+    /// thread-run kind, so a site that skips the fold fails the node.
+    pub fn fold_detach_into_action(&self, action: &mut Value) {
+        if !self.detach {
+            return;
+        }
+        if let Some(obj) = action.as_object_mut() {
+            obj.insert(
+                ryeos_runtime::callback::action_keys::THREAD.to_string(),
+                Value::String("detached".to_string()),
+            );
+            if let Some(facets) = &self.facets {
+                obj.insert(
+                    ryeos_runtime::callback::action_keys::FACETS.to_string(),
+                    facets.clone(),
+                );
+            }
+        }
     }
 }
 

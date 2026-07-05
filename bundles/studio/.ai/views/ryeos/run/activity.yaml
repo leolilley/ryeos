@@ -1,0 +1,62 @@
+# ryeos:signed:2026-07-04T10:13:48Z:fb26cc7c05ab9a2469853ddcea6736cd3bbb6a7906a017bea2f31502beb19da4:Uf6eO/EccfVVBwuxzsfGuE/FiHA6p1mg/1178I4KFP9CQXlSscaryORUU661Xx1HhlvMon/XYw6HOKxwJaobCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: run-activity
+version: "1.0.0"
+description: >-
+  The agent's live activity: its active (non-terminal) threads, newest first —
+  what the one signing key is running right now. Enter steps into a thread's
+  braid (which in turn shows that thread's own children as drill-ins). The
+  landing lens, in place of the flat thread list. Nothing project- or
+  fanout-specific: it is simply what is alive under this key.
+
+widget: table
+source:
+  ref: service:ui/studio/threads/list
+  params:
+    # Only live threads — the settled history is not activity. Newest first.
+    active: true
+    sort: newest
+    limit: 60
+  collection: threads
+projections:
+  columns:
+    - label: item
+      field: item_ref
+    - label: stage
+      field: current_node.node
+    - label: status
+      field: status
+    - label: started
+      field: created_at
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      accepted: accent
+      failed: danger
+      cancelled: warn
+      killed: danger
+      timed_out: warn
+      completed: good
+      continued: good
+    default: neutral
+# Enter steps into the thread's braid: aim the route at the thread (both thread +
+# chain_root so the braid resolves) and swap the single center lens to its
+# timeline, which renders the thread's own children as drill-ins.
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/chain/timeline
+      # Step INTO the braid (returnable via Backspace), pushing activity onto the
+      # drill stack so the operator can walk back up to the live view.
+      drill: true
+refresh:
+  on_hint: thread

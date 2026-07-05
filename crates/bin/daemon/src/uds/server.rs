@@ -43,7 +43,12 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
 
         let request: RpcRequest = rmp_serde::from_slice(&frame).context("invalid rpc frame")?;
 
-        let span = tracing::debug_span!(
+        // INFO so the ndjson sink records span NEW/CLOSE per request — a
+        // request that arrives and never closes is then attributable by
+        // method + request_id + thread_id from the trace alone. Entered via
+        // `instrument` (not a held `enter()` guard, which detaches from the
+        // task across `.await`).
+        let span = tracing::info_span!(
             "uds:request",
             method = %request.method,
             request_id = %request.request_id,
@@ -53,9 +58,8 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AppState>) -> Resu
         if let Some(tid) = request.params.get("thread_id").and_then(|v| v.as_str()) {
             span.record("thread_id", tid);
         }
-        let _enter = span.enter();
 
-        let response = dispatch(request, &state).await;
+        let response = tracing::Instrument::instrument(dispatch(request, &state), span).await;
 
         let encoded = rmp_serde::to_vec_named(&response).context("failed to encode response")?;
         write_frame(&mut stream, &encoded).await?;
@@ -249,6 +253,10 @@ pub async fn dispatch_runtime_method(
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
                 ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, chain_root_id);
+                ryeos_executor::execution::launch::kick_launch_window_for_terminal(
+                    state,
+                    chain_root_id,
+                );
             }
             Ok(result)
         }
@@ -407,6 +415,10 @@ fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contr
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
         provider: None,
+        basis: cost
+            .get("basis")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         metadata: None,
     }
 }

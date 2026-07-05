@@ -8,5 +8,5 @@
 
 pub use ryeos_engine::launch_envelope_types::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, ItemDescriptor,
-    LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost, RuntimeResult,
+    LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost, RuntimeResult, COST_BASIS_ROLLUP,
 };

@@ -10,10 +10,13 @@
 # Idempotent. Safe to re-run.
 #
 # Usage:
-#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|standard|hosted-node|hosted-workflow]
+#   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow]
 #
 # Bundle sets:
 #   full            core + standard + web + browser + studio + hosted-node (default)
+#   central-host    core + standard + web — standard node plus the rye/web/search
+#                   tool; the app-hosting image (e.g. tv-tracker) that also serves
+#                   its own central-auth realm
 #   standard        core + standard — scheduler/graph/directive standard node
 #   hosted-node     core + hosted-node — lean remote-admission control plane
 #   hosted-workflow core + standard + hosted-node — hosted node that also
@@ -68,8 +71,8 @@ if ! command -v openssl >/dev/null 2>&1; then echo "populate-bundles.sh: openssl
 if ! command -v sha256sum >/dev/null 2>&1; then echo "populate-bundles.sh: sha256sum is required" >&2; exit 2; fi
 if ! command -v base64 >/dev/null 2>&1; then echo "populate-bundles.sh: base64 is required" >&2; exit 2; fi
 case "$BUNDLE_SET" in
-  full|standard|hosted-node|hosted-workflow) ;;
-  *) echo "populate-bundles.sh: --bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $BUNDLE_SET" >&2; exit 2 ;;
+  full|central-host|standard|hosted-node|hosted-workflow) ;;
+  *) echo "populate-bundles.sh: --bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $BUNDLE_SET" >&2; exit 2 ;;
 esac
 
 base64_one_line() {
@@ -224,6 +227,10 @@ case "$BUNDLE_SET" in
           ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools ryeos-browser-tools \
           ryeos-ui-terminal ryeos-ui-web)
     ;;
+  central-host)
+    pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
+          ryeos-handler-bins ryeos-cli ryeos-core-tools ryeos-web-tools)
+    ;;
   standard|hosted-workflow)
     pkgs=(ryeosd ryeos-directive-runtime ryeos-graph-runtime ryeos-knowledge-runtime \
           ryeos-handler-bins ryeos-cli ryeos-core-tools)
@@ -259,13 +266,14 @@ staged_release_bins_for_set() {
     rye-parser-yaml-document rye-parser-yaml-header-document rye-parser-regex-kv \
     rye-composer-identity ryeos-core-tools
   case "$BUNDLE_SET" in
-    full|standard|hosted-workflow)
+    full|central-host|standard|hosted-workflow)
       printf '%s\n' ryeos-directive-runtime ryeos-graph-runtime \
         ryeos-knowledge-runtime rye-composer-extends-chain rye-composer-graph-permissions
       ;;
   esac
   case "$BUNDLE_SET" in
     full) printf '%s\n' ryeos-tui web ryeos-web-tools ryeos-browser-tools ;;
+    central-host) printf '%s\n' ryeos-web-tools ;;
   esac
 }
 
@@ -317,7 +325,7 @@ install -m 0755 \
   "$TARGET/release/ryeos-core-tools" \
   "$CORE_BIN/"
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   echo "[populate-bundles] installing standard bundle binaries → $STD_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-directive-runtime" \
@@ -328,17 +336,19 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" ==
     "$STD_BIN/"
 fi
 
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
+  echo "[populate-bundles] installing web bundle binaries → $WEB_BIN"
+  install -m 0755 \
+    "$TARGET/release/ryeos-web-tools" \
+    "$WEB_BIN/"
+fi
+
 if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] installing studio bundle binaries → $STUDIO_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
     "$TARGET/release/web" \
     "$STUDIO_BIN/"
-
-  echo "[populate-bundles] installing web bundle binaries → $WEB_BIN"
-  install -m 0755 \
-    "$TARGET/release/ryeos-web-tools" \
-    "$WEB_BIN/"
 
   echo "[populate-bundles] installing browser bundle binaries → $BROWSER_BIN"
   install -m 0755 \
@@ -385,7 +395,7 @@ RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$ROOT/
   --registry-root "$CORE" \
   --owner "$OWNER" >/dev/null
 
-if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" == "hosted-workflow" ]]; then
   echo "[populate-bundles] publishing standard bundle…"
   # Standard contains its own kind schemas (directive, graph, knowledge) now.
   # Core kinds are needed for verifying handlers/tools, so we pass core as registry-root.
@@ -404,12 +414,14 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "standard" || "$BUNDLE_SET" ==
     --owner "$OWNER" >/dev/null
 fi
 
-if [[ "$BUNDLE_SET" == "full" ]]; then
+if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
   echo "[populate-bundles] publishing web bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$WEB" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
+fi
 
+if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] publishing browser bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
