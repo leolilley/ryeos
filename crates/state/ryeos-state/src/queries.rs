@@ -912,6 +912,68 @@ pub fn latest_thread_events(
     Ok(events)
 }
 
+/// Latest durable events across every thread on the node — the node-wide
+/// activity feed. Append order (`event_id` is the autoincrement insert
+/// order), returned oldest-first after the reverse so feeds read
+/// top-to-bottom like a replay. `exclude_types` drops kinds the caller
+/// declares as noise (e.g. seat facet writes); the query itself carries
+/// no event vocabulary.
+pub fn latest_node_events(
+    db: &ProjectionDb,
+    limit: usize,
+    exclude_types: &[String],
+) -> anyhow::Result<Vec<EventRow>> {
+    let mut sql = String::from(
+        "SELECT event_id, chain_root_id, chain_seq, thread_id, thread_seq, \
+            event_type, durability, ts, prev_chain_event_hash, \
+            prev_thread_event_hash, payload \
+         FROM events",
+    );
+    if !exclude_types.is_empty() {
+        sql.push_str(" WHERE event_type NOT IN (");
+        sql.push_str(&vec!["?"; exclude_types.len()].join(","));
+        sql.push(')');
+    }
+    sql.push_str(" ORDER BY event_id DESC LIMIT ?");
+    let mut stmt = db
+        .connection()
+        .prepare(&sql)
+        .context("prepare latest_node_events")?;
+    let mut params: Vec<rusqlite::types::Value> = exclude_types
+        .iter()
+        .map(|t| rusqlite::types::Value::Text(t.clone()))
+        .collect();
+    params.push(rusqlite::types::Value::Integer(limit as i64));
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), EventRow::from_row)
+        .context("query latest_node_events")?;
+    let mut events: Vec<EventRow> = rows.filter_map(|r| r.ok()).collect();
+    events.reverse();
+    Ok(events)
+}
+
+/// Per-status thread counts for the node pulse: non-terminal statuses
+/// always count (they are "now"), terminal statuses count only when the
+/// thread was last touched inside the window (`since_iso`, inclusive —
+/// ISO-8601 strings compare lexically).
+pub fn thread_status_counts(
+    db: &ProjectionDb,
+    since_iso: &str,
+) -> anyhow::Result<Vec<(String, i64)>> {
+    let mut stmt = db
+        .connection()
+        .prepare(
+            "SELECT status, COUNT(*) AS n FROM threads \
+             WHERE status IN ('created', 'running') OR updated_at >= ? \
+             GROUP BY status ORDER BY status",
+        )
+        .context("prepare thread_status_counts")?;
+    let rows = stmt
+        .query_map([since_iso], |row| Ok((row.get(0)?, row.get(1)?)))
+        .context("query thread_status_counts")?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 pub fn get_facets(db: &ProjectionDb, thread_id: &str) -> anyhow::Result<Vec<FacetRow>> {
     let mut stmt = db
         .connection()
@@ -1067,6 +1129,39 @@ pub fn sum_thread_usage_latest_by_chain(
             })
         })
         .context("query sum_thread_usage_latest_by_chain")
+}
+
+/// Node-wide usage settled inside the window (`since_iso`, inclusive) —
+/// the pulse's "what did cognition cost lately". Same continuation-aware
+/// dedup as the per-chain totals: a settled successor's cumulative row
+/// supersedes its predecessors, so reseeded continuations never
+/// double-count.
+pub fn sum_thread_usage_latest_since(
+    db: &ProjectionDb,
+    since_iso: &str,
+) -> anyhow::Result<ThreadUsageTotals> {
+    let sql = format!(
+        "{EFFECTIVE_USAGE_CTE}
+         SELECT
+            COUNT(DISTINCT u.thread_id) AS thread_count,
+            COALESCE(SUM(u.completed_turns), 0) AS completed_turns,
+            COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(u.spend_usd), 0.0) AS spend_usd
+         FROM effective_usage u
+         WHERE u.settled_at >= ?"
+    );
+    db.connection()
+        .query_row(&sql, [since_iso], |row| {
+            Ok(ThreadUsageTotals {
+                thread_count: row.get("thread_count")?,
+                completed_turns: row.get("completed_turns")?,
+                input_tokens: row.get("input_tokens")?,
+                output_tokens: row.get("output_tokens")?,
+                spend_usd: row.get("spend_usd")?,
+            })
+        })
+        .context("query sum_thread_usage_latest_since")
 }
 
 pub fn get_thread_usage_subject(

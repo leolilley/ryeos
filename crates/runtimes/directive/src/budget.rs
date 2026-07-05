@@ -46,6 +46,7 @@ impl BudgetTracker {
             input_tokens: self.total_input,
             output_tokens: self.total_output,
             total_usd: self.total_usd,
+            basis: None,
         }
     }
 }

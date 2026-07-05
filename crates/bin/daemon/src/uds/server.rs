@@ -415,6 +415,10 @@ fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contr
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
         provider: None,
+        basis: cost
+            .get("basis")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         metadata: None,
     }
 }

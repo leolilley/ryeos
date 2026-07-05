@@ -11,6 +11,7 @@ pub mod ui_studio_dimension;
 pub mod ui_studio_files;
 pub mod ui_studio_gc;
 pub mod ui_studio_items;
+pub mod ui_studio_node;
 pub mod ui_studio_projects;
 pub mod ui_studio_remotes;
 pub mod ui_studio_schedules;
@@ -28,6 +29,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     ui_studio_items::ITEM_INSPECT_DESCRIPTOR,
     ui_studio_threads::DESCRIPTOR,
     ui_studio_threads::INSPECT_DESCRIPTOR,
+    ui_studio_node::ACTIVITY_DESCRIPTOR,
     ui_studio_schedules::DESCRIPTOR,
     ui_studio_gc::DESCRIPTOR,
     ui_studio_seat::OPEN_DESCRIPTOR,

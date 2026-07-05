@@ -74,6 +74,9 @@ impl GraphAccounting {
             input_tokens: 0,
             output_tokens: 0,
             total_usd: 0.0,
+            // The aggregate is marked as a rollup on the wire so downstream
+            // consumers can render it as derived, never as own-spend.
+            basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
         });
         total.input_tokens += cost.input_tokens;
         total.output_tokens += cost.output_tokens;

@@ -1447,6 +1447,7 @@ mod integration_tests {
                 output_tokens: 500,
                 spend: 0.05,
                 provider: None,
+                basis: None,
                 metadata: None,
             }),
         };
