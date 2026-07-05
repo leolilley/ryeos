@@ -133,6 +133,11 @@ fn main() {
         // shows them as notices — stderr scrolls off above the alternate screen.
         let mut diagnostics: Vec<String> = Vec::new();
 
+        // The connection that resolves the surface is handed on to the app —
+        // discovery and audience settle once, and every later call reuses the
+        // same kept-alive client.
+        let mut daemon_client: Option<transport::daemon::DaemonClient> = None;
+
         // If --surface was given, resolve through daemon.
         // --surface always means daemon resolution, not local preview.
         let loaded: ryeos_client_base::surface::LoadedSurface = if surface_name.is_some() {
@@ -140,10 +145,11 @@ fn main() {
                 Ok(client) => {
                     let ref_str = surface_name.as_deref().unwrap();
                     eprintln!("info: resolving {} via daemon...", ref_str);
-                    match client
+                    let resolved = client
                         .resolve_effective_surface(ref_str, Some(&project_path))
-                        .await
-                    {
+                        .await;
+                    daemon_client = Some(client);
+                    match resolved {
                         Ok(value) => {
                             // Views arrive embedded by the daemon
                             // (`composed_value.views`, keyed by ref) — no
@@ -218,6 +224,7 @@ fn main() {
                         }
                     }
                     loaded.set_views(serde_json::Value::Object(views));
+                    daemon_client = Some(client);
                 }
                 Err(_) => {
                     eprintln!(
@@ -247,7 +254,7 @@ fn main() {
             }
         }
 
-        let result = app::run(&project_path, read_only, loaded, diagnostics).await;
+        let result = app::run(&project_path, read_only, loaded, diagnostics, daemon_client).await;
 
         if let Err(e) = result {
             eprintln!("ryeos-tui error: {}", e);

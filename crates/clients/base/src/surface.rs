@@ -1012,8 +1012,8 @@ mod tests {
     #[test]
     fn surface_declares_backdrop_scene_view() {
         let spec: SurfaceSpec =
-            serde_yaml::from_str("name: x\nbackdrop: \"view:ryeos/backdrop/shard\"\n").unwrap();
-        assert_eq!(spec.backdrop.as_deref(), Some("view:ryeos/backdrop/shard"));
+            serde_yaml::from_str("name: x\nbackdrop: \"view:test/backdrop\"\n").unwrap();
+        assert_eq!(spec.backdrop.as_deref(), Some("view:test/backdrop"));
     }
 
     #[test]

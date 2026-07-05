@@ -7,14 +7,33 @@ use ryeos_client_base::studio::{SeatEvent, SeatEventKind, StudioCore};
 
 use crate::transport::daemon::DaemonClient;
 
-/// Open the seat session thread (best effort: an unreachable seat
-/// service degrades to a local-only seat, never a crash).
-pub async fn open_seat_thread(client: &DaemonClient, core: &StudioCore) -> Option<String> {
-    let surface_ref = core
-        .data
-        .session
-        .as_ref()
-        .map(|session| session.surface_ref.clone())?;
+/// The transport half of seat startup: which thread carries this seat's
+/// braid, and any facet history replayed off it. Pure data — the loop
+/// folds it into the core when it arrives, so the daemon round trips
+/// never gate the first frame.
+pub struct SeatBootstrap {
+    pub thread_id: Option<String>,
+    pub replayed: Vec<SeatEvent>,
+}
+
+/// Reattach to the freshest owned seat for this surface, or open a new
+/// one (best effort: an unreachable seat service degrades to a
+/// local-only seat, never a crash).
+pub async fn bootstrap_seat(client: &DaemonClient, surface_ref: &str) -> SeatBootstrap {
+    if let Some((thread_id, replayed)) = reattach_seat_thread(client, surface_ref).await {
+        return SeatBootstrap {
+            thread_id: Some(thread_id),
+            replayed,
+        };
+    }
+    SeatBootstrap {
+        thread_id: open_seat_thread(client, surface_ref).await,
+        replayed: Vec::new(),
+    }
+}
+
+/// Open the seat session thread.
+pub async fn open_seat_thread(client: &DaemonClient, surface_ref: &str) -> Option<String> {
     let body = serde_json::json!({
         "item_ref": "service:seat/open",
         "parameters": { "surface_ref": surface_ref, "client_ref": "client:ryeos/tui" },
@@ -27,12 +46,10 @@ pub async fn open_seat_thread(client: &DaemonClient, core: &StudioCore) -> Optio
         .map(str::to_string)
 }
 
-pub async fn reattach_seat_thread(client: &DaemonClient, core: &mut StudioCore) -> Option<String> {
-    let surface_ref = core
-        .data
-        .session
-        .as_ref()
-        .map(|session| session.surface_ref.clone())?;
+async fn reattach_seat_thread(
+    client: &DaemonClient,
+    surface_ref: &str,
+) -> Option<(String, Vec<SeatEvent>)> {
     // Discovery via `service:seat/list`: the daemon filters by the
     // `seat_session` kind, running status, and surface, and sorts freshest
     // first — the client just takes the most recent. The kind name stays
@@ -51,30 +68,26 @@ pub async fn reattach_seat_thread(client: &DaemonClient, core: &mut StudioCore) 
         .and_then(serde_json::Value::as_str)?
         .to_string();
 
-    replay_seat_thread(client, core, &thread_id).await;
-    Some(thread_id)
+    let replayed = replay_seat_thread(client, &thread_id).await;
+    Some((thread_id, replayed))
 }
 
-async fn replay_seat_thread(client: &DaemonClient, core: &mut StudioCore, thread_id: &str) {
+async fn replay_seat_thread(client: &DaemonClient, thread_id: &str) -> Vec<SeatEvent> {
     let body = serde_json::json!({
         "item_ref": "service:events/chain_replay",
         "parameters": { "chain_root_id": thread_id },
     });
     let Ok(envelope) = client.signed_post("/execute", &body).await else {
-        return;
+        return Vec::new();
     };
     let Some(events) = envelope
         .get("result")
         .and_then(|result| result.get("events"))
         .and_then(serde_json::Value::as_array)
     else {
-        return;
+        return Vec::new();
     };
-    for event in events {
-        if let Some(seat_event) = seat_event_from_replay(event) {
-            core.seat.append_replayed(seat_event);
-        }
-    }
+    events.iter().filter_map(seat_event_from_replay).collect()
 }
 
 fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {

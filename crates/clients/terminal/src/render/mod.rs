@@ -315,7 +315,7 @@ mod tests {
             effective_surface: Some(json!({
                 "name": "studio-base",
                 "version": "1.0.0",
-                "backdrop": "view:ryeos/backdrop/shard",
+                "backdrop": "view:test/backdrop",
                 "slots": {
                     "bottom": { "content": "view:ryeos/input", "open": true, "size": 7 }
                 },
@@ -324,7 +324,7 @@ mod tests {
                         "widget": "text",
                         "input": { "id": "line", "placeholder": "Ask or run a command", "submit": "route" }
                     },
-                    "view:ryeos/backdrop/shard": {
+                    "view:test/backdrop": {
                         "widget": "scene",
                         "body": { "objects": [
                             { "kind": "particle", "position": [0.0, 6.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent" },
@@ -387,13 +387,24 @@ mod tests {
     #[test]
     fn backdrop_twinkle_differs_across_generations() {
         // End-to-end animation proof: stepping `generation` repaints the
-        // backdrop with different particle cells (the twinkle). This is
-        // the generation → scene → render pipeline working.
+        // backdrop with different particle cells. The breathe is primarily
+        // a colour blend, so cells compare as (glyph, fg) pairs — text
+        // alone may coincide between adjacent frames.
+        let styled = |surface: &ryeos_client_base::text_surface::TextSurface| {
+            let mut cells = Vec::new();
+            for y in 0..surface.height {
+                for x in 0..surface.width {
+                    let cell = surface.get(x, y);
+                    cells.push((cell.rune, cell.fg));
+                }
+            }
+            cells
+        };
         let mut core = empty_center_core();
         core.generation = 0;
-        let a = surface_text(&build_surface(&build_view_model(&core), 96, 28));
+        let a = styled(&build_surface(&build_view_model(&core), 96, 28));
         core.generation = 1;
-        let b = surface_text(&build_surface(&build_view_model(&core), 96, 28));
+        let b = styled(&build_surface(&build_view_model(&core), 96, 28));
         assert_ne!(a, b, "the backdrop renders differently across generations");
     }
 }
