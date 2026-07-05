@@ -33,6 +33,13 @@ Arguments:
   SURFACE_REF       Surface to open (default: surface:ryeos/studio/lens)
 
 Options:
+  --local           Load the surface AND its views from THIS CHECKOUT's
+                    bundles/studio tree instead of the daemon's installed
+                    items — the content-iteration path: edit a view/surface
+                    YAML, rerun, see it. No populate, no install, no
+                    re-sign needed (the preview reads files directly).
+                    Live data (sources, input routing) still needs a
+                    running daemon and only knows its installed services.
   --release         Build and run the release profile (default: debug)
   --project PATH    Project root for daemon-backed resolution (default: $PWD)
   --read-only       Open a read-only seat
@@ -41,6 +48,8 @@ Options:
 
 Examples:
   scripts/dev-tui.sh
+  scripts/dev-tui.sh --local                 # iterate on backdrop/view content
+  scripts/dev-tui.sh --local --no-build      # content-only loop, instant
   scripts/dev-tui.sh surface:ryeos/studio/workbench --release
 EOF
 }
@@ -54,9 +63,11 @@ PROFILE="debug"
 PROJECT="$PWD"
 READ_ONLY=0
 BUILD=1
+LOCAL=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --local) LOCAL=1; shift ;;
         --release) PROFILE="release"; shift ;;
         --project) PROJECT="$2"; shift 2 ;;
         --read-only) READ_ONLY=1; shift ;;
@@ -86,7 +97,17 @@ if [[ ! -x "$BIN" ]]; then
     exit 1
 fi
 
-ARGS=(--surface "$SURFACE" --project "$PROJECT")
+if [[ "$LOCAL" -eq 1 ]]; then
+    # Map `surface:ryeos/studio/<name>` onto this checkout's surface file
+    # and point view resolution at the checkout's view tree. The daemon
+    # (if running) still serves whatever the tree doesn't carry, plus all
+    # live data.
+    SURFACE_FILE="$REPO_ROOT/bundles/studio/.ai/surfaces/${SURFACE#surface:}.yaml"
+    [[ -f "$SURFACE_FILE" ]] || { echo "dev-tui.sh: no local surface file at $SURFACE_FILE" >&2; exit 1; }
+    ARGS=(--surface-file "$SURFACE_FILE" --views-root "$REPO_ROOT/bundles/studio/.ai/views" --project "$PROJECT")
+else
+    ARGS=(--surface "$SURFACE" --project "$PROJECT")
+fi
 if [[ "$READ_ONLY" -eq 1 ]]; then
     ARGS+=(--read-only)
 fi
