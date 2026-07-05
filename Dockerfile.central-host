@@ -1,0 +1,81 @@
+# syntax=docker/dockerfile:1.7
+#
+# ryeos-central-host — standard node that hosts its own central-auth realm
+# and can search the web.
+#
+# Bakes core + central-auth + standard + web: everything the `standard` image
+# ships, plus the central-auth bundle (login/verify/revoke, policy) so the node
+# is its own auth authority, and the web bundle (rye/web/search). Studio,
+# browser, and hosted-node are intentionally excluded.
+#
+# This is the base for app-hosting images such as tv-tracker's ryeos-node,
+# which layer their project tree and a project-aware entrypoint on top.
+
+FROM rust:1.95-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config libssl-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+# Build provenance: baked into the binary at compile time (ryeos-app/build.rs
+# reads RYEOS_VCS_REF / RYEOS_BUILD_DATE) and onto the image as OCI labels in
+# the runtime stage. Pass via `--build-arg VCS_REF=$(git rev-parse HEAD)` and
+# `--build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`.
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ARG RELEASE_BUILD=0
+ENV RYEOS_VCS_REF=$VCS_REF
+ENV RYEOS_BUILD_DATE=$BUILD_DATE
+
+RUN if [ "$RELEASE_BUILD" = "1" ]; then rm -rf /build/target; fi
+
+RUN --mount=type=secret,id=publisher-key \
+    test -s /run/secrets/publisher-key && \
+    ./scripts/populate-bundles.sh \
+      --key /run/secrets/publisher-key \
+      --owner ryeos-official \
+      --bundle-set central-host \
+      --all
+
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg python3 python3-venv python3-pip && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    apt-get purge -y curl gnupg && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=builder /build/target/release/ryeosd           /usr/local/bin/ryeosd
+COPY --from=builder /build/target/release/ryeos            /usr/local/bin/ryeos
+COPY --from=builder /build/target/release/ryeos-core-tools /usr/local/bin/ryeos-core-tools
+
+COPY --from=builder /build/bundles/.ai           /opt/ryeos/.ai
+COPY --from=builder /build/bundles/core          /opt/ryeos/core
+COPY --from=builder /build/bundles/central-auth  /opt/ryeos/central-auth
+COPY --from=builder /build/bundles/standard      /opt/ryeos/standard
+COPY --from=builder /build/bundles/web           /opt/ryeos/web
+
+COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENV HOME=/data/app
+ENV RYEOS_APP_ROOT=/data/app
+EXPOSE 8000
+
+# Re-declared here: build-stage ARGs do not carry across FROM boundaries.
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+RUN test "$(/usr/local/bin/ryeosd build-info --revision)" = "$VCS_REF"
+LABEL org.opencontainers.image.source="https://github.com/leolilley/ryeos"
+LABEL org.opencontainers.image.revision="$VCS_REF"
+LABEL org.opencontainers.image.created="$BUILD_DATE"
+LABEL io.ryeos.image="central-host"
+LABEL io.ryeos.bundle-protocol="1.0"
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -16,6 +16,7 @@
 ryeos_bundle_set_names() {
   case "$1" in
     full)            printf '%s\n' core central-auth standard web browser studio hosted-node ;;
+    central-host)    printf '%s\n' core central-auth standard web ;;
     standard)        printf '%s\n' core central-auth standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
     hosted-workflow) printf '%s\n' core central-auth standard hosted-node ;;

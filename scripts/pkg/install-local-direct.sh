@@ -381,7 +381,7 @@ while IFS= read -r _bundle_name; do
     bundle_names+=("$_bundle_name")
 done < <(ryeos_bundle_set_names "$bundle_set") || true
 if [[ ${#bundle_names[@]} -eq 0 ]]; then
-    die "--bundle-set must be 'full', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
+    die "--bundle-set must be 'full', 'central-host', 'standard', 'hosted-node', or 'hosted-workflow', got: $bundle_set"
 fi
 bundle_names_csv=$(IFS=,; echo "${bundle_names[*]}")
 
@@ -640,6 +640,16 @@ if [[ $run_init -eq 1 ]]; then
                 die "initialized standard state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
                 die "initialized standard state unexpectedly contains $name registration"
+        done
+    fi
+    if [[ "$bundle_set" == "central-host" ]]; then
+        # central-host is standard + web; it must NOT drag in the studio/browser
+        # UI bundles or the hosted-node control plane.
+        for name in hosted-node studio browser; do
+            test ! -e "$state_root/.ai/bundles/$name" || \
+                die "initialized central-host state unexpectedly contains $name bundle"
+            test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
+                die "initialized central-host state unexpectedly contains $name registration"
         done
     fi
     if [[ "$bundle_set" == "full" ]]; then
