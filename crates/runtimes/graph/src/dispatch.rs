@@ -364,10 +364,15 @@ fn describe_subprocess_failure(obj: &serde_json::Map<String, Value>) -> String {
         msg.push_str(&format!(", exit_code: {ec}"));
     }
     msg.push(')');
+    // Keep the TAIL of the process streams: a traceback's actual error is
+    // its last lines, and the daemon already tail-caps `error.stderr`, so a
+    // head excerpt here would cut exactly the part an autopsy needs. (The
+    // full daemon-capped tail stays durable on the tool child's own
+    // `thread_failed` event.)
     if let Some(se) = stderr {
-        msg.push_str(&format!("; stderr: {}", excerpt(se, 800)));
+        msg.push_str(&format!("; stderr: {}", tail_excerpt(se, 800)));
     } else if let Some(so) = stdout {
-        msg.push_str(&format!("; stdout: {}", excerpt(so, 800)));
+        msg.push_str(&format!("; stdout: {}", tail_excerpt(so, 800)));
     }
     msg
 }
@@ -425,6 +430,18 @@ fn excerpt(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}… [truncated]")
+    }
+}
+
+/// Tail-preserving excerpt for process streams, where the cause lands at
+/// the END (tracebacks, final `logger.error` lines).
+fn tail_excerpt(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        s.to_string()
+    } else {
+        let tail: String = s.chars().skip(total - max).collect();
+        format!("[truncated …]{tail}")
     }
 }
 
@@ -976,6 +993,25 @@ mod tests {
         let diagnostic = classify_failure(envelope);
         assert!(diagnostic.contains("exit:1"), "got: {diagnostic}");
         assert!(diagnostic.contains("boom"), "got: {diagnostic}");
+    }
+
+    #[test]
+    fn classify_subprocess_failure_keeps_the_stderr_tail() {
+        // A long traceback's cause is its LAST lines — the diagnostic must
+        // keep the tail, not the head, or every autopsy loses the exception.
+        let noise = "frame line\n".repeat(200);
+        let envelope = json!({
+            "outcome_code": "exit:1",
+            "result": null,
+            "error": {"exit_code": 1, "stderr": format!("{noise}ValueError: the actual cause")},
+            "artifacts": []
+        });
+        let diagnostic = classify_failure(envelope);
+        assert!(
+            diagnostic.contains("ValueError: the actual cause"),
+            "tail must survive: {diagnostic}"
+        );
+        assert!(diagnostic.contains("[truncated"), "{diagnostic}");
     }
 
     #[test]
