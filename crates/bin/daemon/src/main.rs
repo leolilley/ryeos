@@ -831,6 +831,17 @@ fn drain_running_threads(state: &AppState) {
                     "failed to kill process group"
                 );
             }
+            // This death is the shutdown's doing, not the thread's — re-arm
+            // its auto-resume budget so the next boot's reconcile resumes it
+            // instead of exhausting `max_auto_resume_attempts` across
+            // deploys. Crashes skip the drain, so crash loops still exhaust.
+            if let Err(err) = state.state_store.reset_resume_attempts(&thread.thread_id) {
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    error = %err,
+                    "failed to re-arm resume budget during drain"
+                );
+            }
         }
     }
 }

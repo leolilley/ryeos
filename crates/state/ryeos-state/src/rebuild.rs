@@ -384,9 +384,14 @@ fn rebuild_chain_delta(
         events: 0,
     };
 
-    // Project thread snapshots from new chain states
+    // Project thread snapshots from new chain states. Walk NEWEST state
+    // first: with the per-thread dedup below, the first snapshot projected
+    // per thread must be its latest — walking oldest-first here regresses a
+    // row to the delta's earliest state (a thread that went
+    // running → completed inside one delta reads back `running`, and the
+    // startup reconciler then finalizes a finished thread as failed).
     let mut seen_threads: HashSet<String> = HashSet::new();
-    for state_hash in &state_hashes {
+    for state_hash in state_hashes.iter().rev() {
         let cs_path = lillux::shard_path(cas_root, "objects", state_hash, ".json");
         let cs_json = match std::fs::read_to_string(&cs_path) {
             Ok(j) => j,
@@ -898,6 +903,87 @@ mod tests {
             .unwrap();
         assert_eq!(status, "running");
     }
+
+    #[test]
+    fn catch_up_delta_with_multiple_states_projects_the_newest_snapshot() {
+        // A thread that changes state more than once inside one catch-up
+        // delta (running -> completed between two boots) must read back at
+        // its NEWEST snapshot. Projecting the delta's earliest snapshot
+        // regresses a finished thread to `running`, and the startup
+        // reconciler then finalizes it failed against its own record.
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let refs_root = tmp.path().join("refs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&refs_root).unwrap();
+
+        let snap1_hash = make_hash("m-snap1");
+        let snap2_hash = make_hash("m-snap2");
+        let snap3_hash = make_hash("m-snap3");
+        let cs1_hash = make_hash("m-cs1");
+        let cs2_hash = make_hash("m-cs2");
+        let cs3_hash = make_hash("m-cs3");
+
+        let snap1 = make_snapshot_json("T-multi", "T-multi", "created");
+        let snap2 = make_snapshot_json("T-multi", "T-multi", "running");
+        let snap3 = make_snapshot_json("T-multi", "T-multi", "completed");
+
+        let cs1 = make_chain_state(
+            "T-multi",
+            None,
+            vec![("T-multi", &snap1_hash, None, 0, "created")],
+            None,
+            0,
+        );
+        let cs2 = make_chain_state(
+            "T-multi",
+            Some(&cs1_hash),
+            vec![("T-multi", &snap2_hash, None, 0, "running")],
+            None,
+            1,
+        );
+        let cs3 = make_chain_state(
+            "T-multi",
+            Some(&cs2_hash),
+            vec![("T-multi", &snap3_hash, None, 0, "completed")],
+            None,
+            2,
+        );
+
+        write_object(&cas_root, &snap1_hash, &snap1);
+        write_object(&cas_root, &snap2_hash, &snap2);
+        write_object(&cas_root, &snap3_hash, &snap3);
+        write_object(&cas_root, &cs1_hash, &cs1);
+        write_object(&cas_root, &cs2_hash, &cs2);
+        write_object(&cas_root, &cs3_hash, &cs3);
+        write_signed_head(&refs_root, "T-multi", &cs3_hash);
+
+        let proj_path = tmp.path().join("projection.db");
+        let proj = ProjectionDb::open(&proj_path).unwrap();
+        let meta = crate::projection::ProjectionMeta {
+            chain_root_id: "T-multi".to_string(),
+            indexed_chain_state_hash: cs1_hash.clone(),
+            updated_at: "2026-04-22T00:00:00Z".to_string(),
+        };
+        proj.update_projection_meta(&meta).unwrap();
+
+        let report = catch_up_projection(&proj, &cas_root, &refs_root).unwrap();
+        assert_eq!(report.chains_updated, 1);
+
+        let conn = proj.connection();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM threads WHERE thread_id = 'T-multi'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "completed",
+            "the delta's newest snapshot must win, never its earliest"
+        );
+    }
+
 
     #[test]
     fn rebuild_projection_empty_no_panic() {

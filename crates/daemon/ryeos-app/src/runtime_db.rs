@@ -1309,6 +1309,19 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Re-arm the auto-resume budget. A graceful daemon shutdown kills a
+    /// thread's process deliberately — that death is the operator's, not the
+    /// thread's, so it must not consume `max_auto_resume_attempts`. Daemon
+    /// CRASHES never run the drain, so a crash loop still exhausts the
+    /// budget.
+    pub fn reset_resume_attempts(&self, thread_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE thread_runtime SET resume_attempts = 0 WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
     // ── Launch windows (bounded detached fanout) ────────────────────────
     //
     // A window member is a detached child CHAIN: the row is keyed by the

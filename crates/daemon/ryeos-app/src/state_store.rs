@@ -2242,6 +2242,11 @@ impl StateStore {
         g.runtime_db.claim_commands(thread_id)
     }
 
+    pub fn reset_resume_attempts(&self, thread_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.reset_resume_attempts(thread_id)
+    }
+
     /// Enqueue a detached child chain into a launch window and admit as many
     /// queued members as the window width (and optional global live ceiling)
     /// allow. Returns the chain roots admitted NOW — the caller launches
