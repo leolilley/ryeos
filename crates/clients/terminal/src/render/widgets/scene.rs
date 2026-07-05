@@ -14,6 +14,10 @@
 //! - an object with `end` (`to:` in content) is an EDGE: contiguous
 //!   cells rasterized along the segment, each sample with its own
 //!   breathe phase so light ripples along declared line-art;
+//! - an object with `orbit:` (degrees per generation, sign = direction)
+//!   revolves around the scene origin on a vertically squashed ring,
+//!   dimming through the back half — motes circle a standing solid like
+//!   a ring plane, glowing faintly through it when they pass behind;
 //! - a `fill` object is a FILLED solid: every cell inside its SDF shape
 //!   (`shape: prism|sphere`, dimensions in `scale`) gets a density from
 //!   flat-faceted lighting under a slowly sweeping light, per-cell noise
@@ -161,7 +165,11 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
     }
 
     for (index, object) in scene.objects.iter().enumerate() {
-        let Some((col, row)) = project(object.position) else {
+        // Orbiting objects revolve on the squashed ring; everything else
+        // sits where declared. `depth` is the ring front-ness (1 = front,
+        // 0 = passing behind the scene's mass).
+        let (position, depth) = orbited_position(object, scene.generation, pace);
+        let Some((col, row)) = project(position) else {
             continue;
         };
         match object.kind {
@@ -188,6 +196,10 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
                     (ramp_for(object)[steady_level(object.scale[0])], style)
                 };
                 if let Some(end) = object.end {
+                    let end = match object.orbit {
+                        Some(speed) => orbit_point(end, speed, scene.generation, pace).0,
+                        None => end,
+                    };
                     let Some((end_col, end_row)) = project(end) else {
                         continue;
                     };
@@ -202,8 +214,8 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
                         let cell_row =
                             (row as f32 + (end_row as f32 - row as f32) * t).round() as usize;
                         let pos = [
-                            object.position[0] + (end[0] - object.position[0]) * t,
-                            object.position[1] + (end[1] - object.position[1]) * t,
+                            position[0] + (end[0] - position[0]) * t,
+                            position[1] + (end[1] - position[1]) * t,
                             0.0,
                         ];
                         let (glyph, style) = if breathes {
@@ -214,6 +226,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
                                 pace,
                                 sweep_band,
                                 pos,
+                                depth,
                             )
                         } else {
                             steady_cell()
@@ -228,7 +241,8 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
                             base_phase,
                             pace,
                             sweep_band,
-                            object.position,
+                            position,
+                            depth,
                         )
                     } else {
                         steady_cell()
@@ -238,6 +252,35 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
             }
         }
     }
+}
+
+/// The ring plane's vertical squash: orbits are circles in scene space
+/// flattened to read as a plane seen edge-on around a standing solid.
+const ORBIT_SQUASH: f32 = 0.45;
+
+/// Where an orbiting object is this frame, plus its front-ness in
+/// `[0, 1]` (1 = nearest the viewer, 0 = passing behind). The declared
+/// position fixes the ring radius and starting phase, so generation 0
+/// renders the scene exactly as authored.
+fn orbited_position(object: &StudioSceneObjectVm, generation: u64, pace: u64) -> ([f32; 3], f32) {
+    match object.orbit {
+        Some(speed) => orbit_point(object.position, speed, generation, pace),
+        None => (object.position, 1.0),
+    }
+}
+
+fn orbit_point(point: [f32; 3], speed: f32, generation: u64, pace: u64) -> ([f32; 3], f32) {
+    let ring_y = point[1] / ORBIT_SQUASH;
+    let radius = (point[0] * point[0] + ring_y * ring_y).sqrt();
+    let start = ring_y.atan2(point[0]);
+    // Accumulate the angle in f64 modulo a full turn so precision holds
+    // over long sessions.
+    let swept = ((speed as f64) * (generation.wrapping_mul(pace) as f64)).rem_euclid(360.0) as f32;
+    let theta = start + swept.to_radians();
+    let (sin, cos) = theta.sin_cos();
+    // The ring's back half (positive sin) is farther from the viewer.
+    let depth = (1.0 - sin) / 2.0;
+    ([radius * cos, ORBIT_SQUASH * radius * sin, point[2]], depth)
 }
 
 /// One breathing particle's glyph + style for this frame.
@@ -255,6 +298,7 @@ fn particle_cell(
     pace: u64,
     sweep_band: Option<(f32, f32)>,
     position: [f32; 3],
+    depth: f32,
 ) -> (char, Style) {
     let energy = scene.energy.clamp(0.0, 1.0);
     let step = scene.generation.wrapping_mul(pace).wrapping_add(phase);
@@ -265,9 +309,12 @@ fn particle_cell(
             (1.0 - ((d - band).abs() / width.max(0.001))).max(0.0)
         })
         .unwrap_or(0.0);
+    // Ring depth dims the back half of an orbit — a mote passing behind
+    // the scene's mass glows faintly through it, never occludes it.
     let intensity = ((breathe * (0.55 + 0.25 * energy)) + boost * 0.65 + energy * 0.10)
         .clamp(0.0, 1.0)
-        * object.opacity.clamp(0.1, 1.0);
+        * object.opacity.clamp(0.1, 1.0)
+        * (0.55 + 0.45 * depth.clamp(0.0, 1.0));
 
     // Intensity walks the whole ramp; size biases the walk upward. A big
     // large body diamond breathes `◈` ↔ `◆`, a mid facet edge `⋄` ↔ `◇`,
@@ -567,7 +614,17 @@ impl Bounds {
             max_y = max_y.max(point[1]);
         };
         for object in objects {
-            consider(object.position);
+            if object.orbit.is_some() {
+                // An orbiting object sweeps its whole ring: bound the
+                // ring, not today's spot, so layout never jitters as it
+                // moves.
+                let ring_y = object.position[1] / ORBIT_SQUASH;
+                let radius = (object.position[0] * object.position[0] + ring_y * ring_y).sqrt();
+                consider([-radius, -ORBIT_SQUASH * radius, 0.0]);
+                consider([radius, ORBIT_SQUASH * radius, 0.0]);
+            } else {
+                consider(object.position);
+            }
             if let Some(end) = object.end {
                 consider(end);
             }
@@ -709,6 +766,37 @@ mod tests {
         assert!(
             filled >= 30,
             "a horizontal edge across a 40-cell rect fills most columns, got {filled}"
+        );
+    }
+
+    #[test]
+    fn orbiting_particle_moves_around_the_ring() {
+        // An `orbit:` object's drawn cell travels across generations
+        // (its declared position is only the starting phase), while the
+        // scene's bounds stay pinned to the whole ring so nothing else
+        // jitters as it moves.
+        let body = serde_json::json!({
+            "objects": [
+                { "kind": "particle", "position": [8.0, 0.0], "orbit": 3.0,
+                  "scale": 0.9, "tone": "accent" },
+            ],
+        });
+        let cells_at = |generation: u64| -> Vec<(usize, usize)> {
+            let mut surface = TextSurface::new(40, 16);
+            let scene = scene_from_body(&body, generation);
+            draw_scene(&mut surface, Rect::new(0, 0, 40, 16), &scene);
+            (0..surface.width)
+                .flat_map(|x| (0..surface.height).map(move |y| (x, y)))
+                .filter(|(x, y)| {
+                    let rune = surface.get(*x, *y).rune;
+                    rune != '\0' && rune != ' '
+                })
+                .collect()
+        };
+        assert_ne!(
+            cells_at(0),
+            cells_at(30),
+            "90° of orbit must relocate the particle's cell"
         );
     }
 

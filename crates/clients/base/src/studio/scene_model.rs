@@ -75,6 +75,12 @@ pub struct StudioSceneObjectVm {
     /// capability; which shape a scene uses is content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
+    /// Orbit speed in degrees per generation (sign = direction). Present
+    /// → the object revolves around the scene origin on a vertically
+    /// squashed ring, its declared `position` fixing the ring radius and
+    /// starting phase. Generic motion vocabulary; who orbits is content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orbit: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -548,6 +554,10 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioScene
             .get("shape")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        object.orbit = obj
+            .get("orbit")
+            .and_then(serde_json::Value::as_f64)
+            .map(|speed| speed as f32);
         scene.objects.push(object);
     }
     scene
@@ -618,6 +628,7 @@ fn scene_object(
         glyph: None,
         end: None,
         shape: None,
+        orbit: None,
     }
 }
 
