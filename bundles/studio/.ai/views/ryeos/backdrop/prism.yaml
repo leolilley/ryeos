@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-05T01:09:36Z:5a3f6ce01136ddb3e3d384021019c86c6ec67816f86f026808fe307c013d1cab:p+25nk8bgfySYIgb17YBzUs8vGynNi3dksdFEPe5u816ZTQIY8wCvjyx1TgmeQ/OzWoqp8E7mn3mZwF3LeTBAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-05T03:17:12Z:fd61e7e68afd602abf8c3b2367c92382c96033793baf27f122b556b43bb3e71a:Tf490WObiInJuH/ijRcucGvn7dpa4O/LC80cynr7b6/iXoJqvCirekGdzwpRDVw9e1hu4S9421qnrQ9tUyjhCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: backdrop-prism
 version: "1.0.0"
 description: >-
   The empty-center backdrop scene — the RyeOS prism: a filled hexagonal
-  crystal column with a pyramidal point, flat-shaded per facet under a
+  crystal column, double-terminated (a pyramidal point at both ends),
+  flat-shaded per facet under a
   light that sweeps across it, simmering with per-cell noise, ringed by
   orbiting motes, with the brand/welcome/hint text below. The background
   is content (a `scene`), drawn by the one generic scene renderer;
@@ -18,7 +19,8 @@ body:
   objects:
     # ── the prism: a FILLED solid (`kind: fill`) — the renderer shades
     # every interior cell from the shape's facets under an oscillating
-    # light. scale = [radius, body half-height, tip height].
+    # light. Double-terminated: a pyramidal point at BOTH ends.
+    # scale = [radius, body half-height, termination height per end].
     - { kind: fill, shape: prism, id: prism/body, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], color: "#d65d0e", tone: accent, opacity: 0.95 }
     # ── orbiting motes (breathe out of unison; the sweep kindles them) ──
     - { kind: particle, position: [-11.0, 4.0], scale: 0.4, color: "#a89984", tone: neutral, opacity: 0.7 }

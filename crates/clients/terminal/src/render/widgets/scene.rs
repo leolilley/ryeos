@@ -391,32 +391,38 @@ fn draw_fill(
 }
 
 /// Prism SDF + shading: a hexagonal crystal column (radius `r`, body
-/// half-height `bh`) with a pyramidal tip (`tip` tall). Returns (signed
-/// distance in scene units, facet shade). The front-half azimuth across
-/// the local width quantizes to hex faces; each face is one flat
-/// brightness against the light — crisp internal facet seams come from
-/// the shading discontinuities, no drawn lines.
+/// half-height `bh`) terminating in a pyramidal point (`tip` tall) at
+/// BOTH ends — a double-terminated crystal. Returns (signed distance in
+/// scene units, facet shade). The front-half azimuth across the local
+/// width quantizes to hex faces; each face is one flat brightness
+/// against the light — crisp internal facet seams come from the shading
+/// discontinuities, no drawn lines.
 fn prism_sample(r: f32, bh: f32, tip: f32, lx: f32, ly: f32, light_az: f32) -> (f32, f32) {
     use std::f32::consts::{FRAC_PI_2, PI};
-    // Silhouette half-width at this height: the column, tapering to the
-    // apex across the tip.
-    let rw = if ly <= bh {
+    // Silhouette half-width at this height: the column, tapering to a
+    // point across the termination at each end.
+    let rw = if ly.abs() <= bh {
         r
     } else {
-        r * (1.0 - ((ly - bh) / tip.max(0.001)).min(1.0))
+        r * (1.0 - ((ly.abs() - bh) / tip.max(0.001)).min(1.0))
     };
-    let sd = (lx.abs() - rw).max(-bh - ly).max(ly - (bh + tip));
+    let sd = (lx.abs() - rw).max(ly.abs() - (bh + tip));
 
     let az = (lx / rw.max(0.15)).clamp(-1.0, 1.0).asin();
     let sector = ((az + FRAC_PI_2) / (PI / 3.0)).floor();
     let face_az = sector * (PI / 3.0) + PI / 6.0 - FRAC_PI_2;
     let mut shade = (face_az - light_az).cos().max(0.0);
     if ly > bh {
-        // The tip's faces also tilt skyward: the point catches light.
+        // The upper termination's faces tilt skyward: the point catches
+        // light.
         shade = (shade + 0.25 * ((ly - bh) / tip.max(0.001))).min(1.2);
+    } else if ly < -bh {
+        // The lower termination turns away from the raised light.
+        shade *= 0.9;
     }
     // Grounding: slightly darker toward the base.
-    let vertical = 0.88 + 0.17 * ((ly + bh) / (2.0 * bh + tip).max(0.001)).clamp(0.0, 1.0);
+    let vertical =
+        0.88 + 0.17 * ((ly + bh + tip) / (2.0 * (bh + tip)).max(0.001)).clamp(0.0, 1.0);
     (sd, shade * vertical)
 }
 
@@ -567,15 +573,16 @@ impl Bounds {
             }
             if matches!(object.kind, StudioSceneObjectKind::Fill) {
                 // A fill's extent is its shape's, not its centre point:
-                // radius wide, body below, body + tip above.
+                // radius wide, body + termination each way vertically.
+                let reach = object.scale[1] + object.scale[2];
                 consider([
                     object.position[0] - object.scale[0],
-                    object.position[1] - object.scale[1],
+                    object.position[1] - reach,
                     0.0,
                 ]);
                 consider([
                     object.position[0] + object.scale[0],
-                    object.position[1] + object.scale[1] + object.scale[2],
+                    object.position[1] + reach,
                     0.0,
                 ]);
             }
