@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T10:13:48Z:67c45e3f1b453cc251e1b558de6e6f3f1ff02dd3c53dc2249df4e18371ef864f:MWjjaNZxyNVys2TS8WHMxGJG6Ot5+By6SEJSWyAEm5MHJxKeg819dU/1au/qsAzDREB8lJZox7p/PegHKKFgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-05T01:09:58Z:79441374673bedda1b4722437627b52a6762d87d6e6e40059048282c57b38633:yUDiWO/TWlqALltl62jdN0nba9EHKWx0k/XcQ/NaZZfy634Unvgh0PoYw775ZNv/9AC4Ono9IqMAseHggeZVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-lens
 version: "1.0.0"
 description: >-
@@ -16,13 +16,12 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Open on the agent's live activity: its active (non-terminal) threads, newest
-# first — what the one key is running now, not the settled history. Drilling
-# into a thread swaps the single center lens to its braid (chain/timeline),
-# which itself shows that thread's children as drill-ins. Breadth is swapping
+# Land on the empty center: the prism backdrop breathes until the operator
+# picks a lens (Ctrl+K) or speaks into the foot input. Every lens in the
+# library — the live activity table, a thread's braid, the item space — is
+# one launcher stroke away; nothing is presumed open. Breadth is swapping
 # the lens, never arranging panes.
-tiles:
-  - "view:ryeos/run/activity"
+tiles: []
 
 # Only the foot input and a thin top status strip — no edge panes.
 slots:
@@ -32,11 +31,12 @@ slots:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/shard
+backdrop: view:ryeos/backdrop/prism
 
 # The full lens set — swap the single center lens to reach any of these.
 library:
   - view:ryeos/run/activity
+  - view:ryeos/node/activity
   - view:ryeos/chain/timeline
   - view:ryeos/studio/status
   - view:ryeos/input
@@ -53,7 +53,7 @@ library:
   - view:ryeos/bundles/list
   - view:ryeos/node/status
   - view:ryeos/gc/status
-  - view:ryeos/backdrop/shard
+  - view:ryeos/backdrop/prism
 
 input:
   route:
