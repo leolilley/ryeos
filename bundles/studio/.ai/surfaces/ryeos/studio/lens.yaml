@@ -16,12 +16,12 @@ tiling:
   stack: { arrange: vertical }
   insert: end
 
-# Land on the empty center: the prism backdrop breathes until the operator
-# picks a lens (Ctrl+K) or speaks into the foot input. Every lens in the
-# library — the live activity table, a thread's braid, the item space — is
-# one launcher stroke away; nothing is presumed open. Breadth is swapping
-# the lens, never arranging panes.
-tiles: []
+# Land on a chrome-less splash text view over the prism backdrop until the
+# operator picks a lens (Ctrl+K) or speaks into the foot input. Every lens in
+# the library — the live activity table, a thread's braid, the item space — is
+# one launcher stroke away; breadth is swapping the lens, never arranging panes.
+tiles:
+  - "view:ryeos/backdrop/splash"
 
 # Only the foot input and a thin top status strip — no edge panes.
 slots:
@@ -69,6 +69,7 @@ library:
   - view:ryeos/node/status
   - view:ryeos/gc/status
   - view:ryeos/backdrop/prism
+  - view:ryeos/backdrop/splash
 
 input:
   route:
@@ -84,7 +85,7 @@ input:
 
 ambient:
   show_background: true
-  opacity: 1.0
+  opacity: 0.35
 
 affordances:
   - id: view.threads

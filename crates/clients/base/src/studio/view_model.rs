@@ -299,6 +299,8 @@ pub enum StudioLayoutNodeVm {
         title: String,
         actions: Vec<StudioTileActionVm>,
         view: StudioViewVm,
+        #[serde(default)]
+        chrome_hidden: bool,
         /// Present when the tile's view declares an `input` block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<StudioInputVm>,
@@ -315,6 +317,11 @@ pub enum StudioSplitAxisVm {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StudioViewVm {
+    Text {
+        title: String,
+        lines: Vec<StudioTextLineVm>,
+        position: StudioTextPositionVm,
+    },
     /// The generic content widget surface: every bound view renders
     /// through rows (typed widget variants arrive with the render pass).
     Rows {
@@ -402,6 +409,18 @@ pub enum StudioViewVm {
         title: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioTextLineVm {
+    pub text: String,
+    pub tone: StudioTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StudioTextPositionVm {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// One row of a `Table` view: a cell per declared column, plus the per-row
@@ -1205,6 +1224,15 @@ fn bound_view_vm_keyed(
         .as_ref()
         .or_else(|| core.data.sources.get(source_key));
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
+    if binding.widget == "text" {
+        if let Some(lines) = static_text_lines(binding) {
+            return StudioViewVm::Text {
+                title,
+                lines,
+                position: text_position(binding),
+            };
+        }
+    }
     match (binding.widget.as_str(), response) {
         // A feed with no chain root is empty, not loading — it would spin
         // forever on a fetch that never resolves (no chain root to replay).
@@ -1769,12 +1797,18 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
             let input = core.workspace.tiles.get(tile_id).and_then(|tile| {
                 instance_input_vm(core, &tile_id.0.to_string(), &tile.view.view_ref)
             });
+            let chrome_hidden = core
+                .workspace
+                .tiles
+                .get(tile_id)
+                .is_some_and(|tile| view_hides_tile_chrome(core, &tile.view.view_ref));
             StudioLayoutNodeVm::Tile {
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
                 title,
                 actions: tile_actions(core, *tile_id),
                 view,
+                chrome_hidden,
                 input,
             }
         }
@@ -1792,6 +1826,42 @@ fn layout_node_vm(node: &LayoutTree, core: &StudioCore) -> StudioLayoutNodeVm {
             first: Box::new(layout_node_vm(first, core)),
             second: Box::new(layout_node_vm(second, core)),
         },
+    }
+}
+
+fn static_text_lines(binding: &super::content::ViewBinding) -> Option<Vec<StudioTextLineVm>> {
+    let lines = binding.body.get("lines")?.as_array()?;
+    let out: Vec<StudioTextLineVm> = lines
+        .iter()
+        .filter_map(|line| {
+            if let Some(text) = line.as_str() {
+                return Some(StudioTextLineVm {
+                    text: text.to_string(),
+                    tone: StudioTone::Neutral,
+                });
+            }
+            let text = line.get("text").and_then(serde_json::Value::as_str)?;
+            Some(StudioTextLineVm {
+                text: text.to_string(),
+                tone: tone_from_name(line.get("tone").and_then(serde_json::Value::as_str)),
+            })
+        })
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
+fn view_hides_tile_chrome(core: &StudioCore, view_ref: &str) -> bool {
+    core.views
+        .get(view_ref)
+        .and_then(|binding| binding.presentation.chrome)
+        .is_some_and(|chrome| matches!(chrome, super::content::ViewChromePresentation::None))
+}
+
+fn text_position(binding: &super::content::ViewBinding) -> StudioTextPositionVm {
+    let pos = binding.presentation.position;
+    StudioTextPositionVm {
+        x: pos.map(|p| p.x).unwrap_or(0.5).clamp(0.0, 1.0),
+        y: pos.map(|p| p.y).unwrap_or(0.5).clamp(0.0, 1.0),
     }
 }
 

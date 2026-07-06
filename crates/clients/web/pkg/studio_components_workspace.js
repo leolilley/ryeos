@@ -175,6 +175,7 @@ function layoutNode(node, dispatchUi, motion = []) {
     return wrap;
   }
   const tile = el("section", `studio-tile${node.focused ? " focused" : ""}`);
+  if (node.chrome_hidden) tile.classList.add("chrome-hidden");
   tile.dataset.tileId = node.tile_id || "";
   const motionName = motionForTile(node, motion);
   if (motionName) tile.dataset.motion = motionName;
@@ -188,6 +189,8 @@ function layoutNode(node, dispatchUi, motion = []) {
   // A tile whose view declares `input` renders as the prompt.
   if (node.input) {
     tile.append(chrome, inputDock(node.input, dispatchUi));
+  } else if (node.chrome_hidden) {
+    tile.append(view(node.view || {}, dispatchUi));
   } else {
     tile.append(chrome, view(node.view || {}, dispatchUi), viewFooter(node.view || {}));
   }
@@ -206,6 +209,9 @@ function motionForTile(node, motion) {
 function view(viewVm, dispatchUi) {
   const body = el("div", "studio-tile-body");
   switch (viewVm.type) {
+    case "text":
+      body.append(textView(viewVm));
+      break;
     case "map":
       body.append(sceneMap(viewVm.scene, dispatchUi));
       break;
@@ -231,6 +237,17 @@ function view(viewVm, dispatchUi) {
       body.append(textEl("p", `Unknown view: ${viewVm.type || "missing"}`));
   }
   return body;
+}
+
+function textView(viewVm) {
+  const wrap = el("div", "studio-text-view");
+  const position = viewVm.position || { x: 0.5, y: 0.5 };
+  wrap.style.left = `${Math.max(0, Math.min(1, Number(position.x ?? 0.5))) * 100}%`;
+  wrap.style.top = `${Math.max(0, Math.min(1, Number(position.y ?? 0.5))) * 100}%`;
+  for (const line of viewVm.lines || []) {
+    wrap.append(textEl("div", line.text || "", `studio-text-line ${line.tone || "neutral"}`));
+  }
+  return wrap;
 }
 
 function listHeader(title, detail) {
@@ -305,8 +322,22 @@ function backdropScene(scene, _dispatchUi) {
   const generation = Number(scene?.generation || 0);
   const objects = scene?.objects || [];
   // Fit the object cloud to the stage (orthographic; +y up → top flips).
-  const xs = objects.map((o) => o.position?.[0] || 0);
-  const ys = objects.map((o) => o.position?.[1] || 0);
+  const fitObjects = objects.filter((o) => o.fit !== false);
+  const fitSource = fitObjects.length ? fitObjects : objects;
+  const xs = [];
+  const ys = [];
+  fitSource.forEach((object) => {
+    const px = object.position || [0, 0, 0];
+    if (object.kind === "fill" && Array.isArray(object.scale)) {
+      const radius = Number(object.scale[0] || 1);
+      const reach = Number(object.scale[1] || 1) + Number(object.scale[2] || 0);
+      xs.push(px[0] - radius, px[0] + radius);
+      ys.push(px[1] - reach, px[1] + reach);
+    } else {
+      xs.push(px[0] || 0);
+      ys.push(px[1] || 0);
+    }
+  });
   const minX = Math.min(...xs, -1), maxX = Math.max(...xs, 1);
   const minY = Math.min(...ys, -1), maxY = Math.max(...ys, 1);
   const spanX = Math.max(0.001, maxX - minX);

@@ -1,0 +1,17 @@
+# ryeos:unsigned
+name: backdrop-splash
+version: "1.0.0"
+description: Chrome-less RyeOS splash text rendered as content over the prism backdrop
+
+widget: text
+presentation:
+  chrome: none
+  background: transparent
+  position: { x: 0.5, y: 0.5 }
+body:
+  lines:
+    - { text: "RYE OS", tone: accent }
+    - ""
+    - { text: "portable verified execution", tone: neutral }
+    - ""
+    - { text: "ctrl+k launcher · ctrl+c quit", tone: neutral }

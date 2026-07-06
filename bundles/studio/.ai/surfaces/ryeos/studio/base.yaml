@@ -9,7 +9,8 @@ tiling:
   stack: { arrange: horizontal }
   insert: end
 
-tiles: []
+tiles:
+  - "view:ryeos/backdrop/splash"
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
@@ -24,6 +25,7 @@ backdrop: view:ryeos/backdrop/prism
 
 library:
   - view:ryeos/backdrop/prism
+  - view:ryeos/backdrop/splash
   - view:ryeos/input
   - view:ryeos/threads/live
   - view:ryeos/threads/live-all
@@ -67,7 +69,7 @@ input:
 
 ambient:
   show_background: true
-  opacity: 1.0
+  opacity: 0.35
 
 affordances:
   - id: view.graph

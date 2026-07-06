@@ -86,6 +86,11 @@ pub struct StudioSceneObjectVm {
     /// sweep across the face and each facet rolls through the light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spin: Option<f32>,
+    /// Whether this object contributes to scene fit bounds. Decorative
+    /// particles can opt out so the main object keeps visual scale while
+    /// the particles are still drawn and may clip at tight edges.
+    #[serde(default = "default_true")]
+    pub fit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,8 +110,8 @@ pub enum StudioSceneObjectKind {
     /// `scale` (`·`/`•`/`●`). The backdrop's orbiting motes are particles.
     Particle,
     /// A text object: the generic renderer draws its `label` at the
-    /// projected position. The backdrop's "RYE OS"/welcome/hint lines are
-    /// text objects, not a hardcoded welcome block.
+    /// projected position. Text scene objects remain generic content; the
+    /// RyeOS splash itself is authored as a separate text view.
     Text,
     /// A FILLED solid: the renderer rasterizes every interior cell from a
     /// signed-distance shape (`shape:` names it; `scale` carries its
@@ -567,9 +572,17 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioScene
             .get("spin")
             .and_then(serde_json::Value::as_f64)
             .map(|speed| speed as f32);
+        object.fit = obj
+            .get("fit")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         scene.objects.push(object);
     }
     scene
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `[x, y]` or `[x, y, z]` -> `[x, y, z]` (z defaults 0).
@@ -639,6 +652,7 @@ fn scene_object(
         shape: None,
         orbit: None,
         spin: None,
+        fit: true,
     }
 }
 

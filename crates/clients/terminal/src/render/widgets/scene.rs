@@ -614,6 +614,9 @@ impl Bounds {
             max_y = max_y.max(point[1]);
         };
         for object in objects {
+            if !object.fit {
+                continue;
+            }
             if object.orbit.is_some() {
                 // An orbiting object sweeps its whole ring: bound the
                 // ring, not today's spot, so layout never jitters as it

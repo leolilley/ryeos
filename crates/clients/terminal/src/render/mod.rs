@@ -24,14 +24,14 @@ mod widgets;
 
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::studio::view_model::{
-    StudioLayoutNodeVm, StudioSplitAxisVm, StudioViewModel, StudioViewVm,
+    StudioLayoutNodeVm, StudioSplitAxisVm, StudioTextLineVm, StudioViewModel, StudioViewVm,
 };
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
 
 use crate::render_text;
 
 use primitives::draw_lines;
-use text::truncate;
+use text::{display_width, truncate};
 use theme::{tone_style, BG, FG};
 
 pub struct StudioTerminalRenderer {
@@ -155,20 +155,27 @@ fn draw_layout_node(
             title,
             actions,
             view,
+            chrome_hidden,
             input,
-        } => chrome::draw_tile(
-            surface,
-            rect,
-            tile_id,
-            *focused,
-            title,
-            actions.len(),
-            view,
-            input.as_ref(),
-            border,
-            now_ms,
-            preserve_background,
-        ),
+        } => {
+            if *chrome_hidden && input.is_none() {
+                draw_view(surface, rect, view, now_ms);
+            } else {
+                chrome::draw_tile(
+                    surface,
+                    rect,
+                    tile_id,
+                    *focused,
+                    title,
+                    actions.len(),
+                    view,
+                    input.as_ref(),
+                    border,
+                    now_ms,
+                    preserve_background,
+                );
+            }
+        }
         StudioLayoutNodeVm::Split {
             axis,
             ratio,
@@ -272,8 +279,16 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms:
         widgets::table::draw_table(surface, rect, columns, rows, now_ms);
         return;
     }
+    if let StudioViewVm::Text {
+        lines, position, ..
+    } = view
+    {
+        draw_text_view(surface, rect, lines, *position);
+        return;
+    }
     let mut lines = Vec::new();
     match view {
+        StudioViewVm::Text { .. } => unreachable!("text views return above"),
         StudioViewVm::Rows { .. } => unreachable!("rows views return above"),
         StudioViewVm::Timeline { .. } => unreachable!("timeline views return above"),
         StudioViewVm::Map { .. } | StudioViewVm::Atlas { .. } => {
@@ -287,6 +302,35 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms:
         }
     }
     draw_lines(surface, rect, &lines);
+}
+
+fn draw_text_view(
+    surface: &mut TextSurface,
+    rect: Rect,
+    lines: &[StudioTextLineVm],
+    position: ryeos_client_base::studio::view_model::StudioTextPositionVm,
+) {
+    if rect.w == 0 || rect.h == 0 || lines.is_empty() {
+        return;
+    }
+    let width = rect.w as usize;
+    let height = rect.h as usize;
+    let anchor_y = (position.y * height.saturating_sub(1) as f32).round() as usize;
+    let start_y = rect.y as usize + anchor_y.saturating_sub(lines.len() / 2);
+    for (index, line) in lines.iter().enumerate() {
+        let y = start_y + index;
+        if y >= rect.y as usize + height {
+            break;
+        }
+        let text = truncate(&line.text, width);
+        let text_w = display_width(&text);
+        let anchor_x = (position.x * width.saturating_sub(1) as f32).round() as usize;
+        let local_x = anchor_x
+            .saturating_sub(text_w / 2)
+            .min(width.saturating_sub(text_w));
+        let x = rect.x as usize + local_x;
+        surface.draw_text(x, y, &text, tone_style(line.tone));
+    }
 }
 
 #[cfg(test)]

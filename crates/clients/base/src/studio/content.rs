@@ -65,6 +65,10 @@ pub struct ViewBinding {
     /// Open JSON — projected by renderers, never typed per-view.
     #[serde(default)]
     pub body: Value,
+    /// Optional renderer-neutral presentation hints. These are view-level
+    /// content declarations, not widget data: chrome/background/position.
+    #[serde(default)]
+    pub presentation: ViewPresentation,
     /// A seat-fold facet path this view renders directly as its data, in
     /// place of a service fetch — e.g. an inspector showing `selection.summary`
     /// (an inline event detail written by an inspect action) without a round
@@ -102,6 +106,34 @@ pub struct ViewBinding {
     /// view — degrade honestly, never drop silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ViewPresentation {
+    #[serde(default)]
+    pub chrome: Option<ViewChromePresentation>,
+    #[serde(default)]
+    pub background: Option<ViewBackgroundPresentation>,
+    #[serde(default)]
+    pub position: Option<ViewPositionPresentation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewChromePresentation {
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewBackgroundPresentation {
+    Transparent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ViewPositionPresentation {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// Treat an absent / ref-less / null `source` as no source. The view
