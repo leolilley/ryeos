@@ -78,7 +78,11 @@ mod tests {
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(

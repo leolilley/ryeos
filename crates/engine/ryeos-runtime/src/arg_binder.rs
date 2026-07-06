@@ -172,17 +172,13 @@ pub fn bind_argv_with_command_and_contract(
             .collect();
         if unset_slots.len() == 1 {
             let slot = unset_slots[0];
-            if command
-                .arguments
+            if command.arguments.iter().any(|arg| {
+                arg.name == slot.field
+                    && arg.arity == crate::CommandArgumentArity::Variadic
+                    && arg.kind == slot.matcher
+            }) && positionals
                 .iter()
-                .any(|arg| {
-                    arg.name == slot.field
-                        && arg.arity == crate::CommandArgumentArity::Variadic
-                        && arg.kind == slot.matcher
-                })
-                && positionals
-                    .iter()
-                    .all(|arg| positional_matches(slot.matcher, arg))
+                .all(|arg| positional_matches(slot.matcher, arg))
             {
                 obj.insert(
                     normalise_key(&slot.field),
@@ -234,12 +230,10 @@ pub fn normalize_params_with_contract(
     };
     let mut obj = match value {
         serde_json::Value::Object(obj) => obj,
-        other => {
-            return Err(format!(
-                "invocation parameters must be an object when a schema contract is declared, got {}",
-                json_type(&other)
-            ))
-        }
+        other => return Err(format!(
+            "invocation parameters must be an object when a schema contract is declared, got {}",
+            json_type(&other)
+        )),
     };
 
     for (field, decl) in &contract.fields {
@@ -262,7 +256,11 @@ fn normalize_field_value(
     match ty {
         InvocationInputType::String => match value {
             Value::String(_) => Ok(value),
-            other => Err(format!("--{} must be a string, got {}", flag_name(field), json_type(&other))),
+            other => Err(format!(
+                "--{} must be a string, got {}",
+                flag_name(field),
+                json_type(&other)
+            )),
         },
         InvocationInputType::Integer => match value {
             Value::Number(n) if n.is_i64() || n.is_u64() => Ok(Value::Number(n)),
@@ -270,7 +268,11 @@ fn normalize_field_value(
                 .parse::<i64>()
                 .map(|n| serde_json::json!(n))
                 .map_err(|_| format!("--{} must be an integer", flag_name(field))),
-            other => Err(format!("--{} must be an integer, got {}", flag_name(field), json_type(&other))),
+            other => Err(format!(
+                "--{} must be an integer, got {}",
+                flag_name(field),
+                json_type(&other)
+            )),
         },
         InvocationInputType::Number => match value {
             Value::Number(_) => Ok(value),
@@ -282,24 +284,40 @@ fn normalize_field_value(
                     _ => None,
                 })
                 .ok_or_else(|| format!("--{} must be a number", flag_name(field))),
-            other => Err(format!("--{} must be a number, got {}", flag_name(field), json_type(&other))),
+            other => Err(format!(
+                "--{} must be a number, got {}",
+                flag_name(field),
+                json_type(&other)
+            )),
         },
         InvocationInputType::Boolean => match value {
             Value::Bool(_) => Ok(value),
             Value::String(s) if s == "true" => Ok(Value::Bool(true)),
             Value::String(s) if s == "false" => Ok(Value::Bool(false)),
             Value::String(_) => Err(format!("--{} must be true or false", flag_name(field))),
-            other => Err(format!("--{} must be a boolean, got {}", flag_name(field), json_type(&other))),
+            other => Err(format!(
+                "--{} must be a boolean, got {}",
+                flag_name(field),
+                json_type(&other)
+            )),
         },
         InvocationInputType::Json => Ok(value),
         InvocationInputType::Object => match value {
             Value::Object(_) => Ok(value),
-            other => Err(format!("--{} must be an object, got {}", flag_name(field), json_type(&other))),
+            other => Err(format!(
+                "--{} must be an object, got {}",
+                flag_name(field),
+                json_type(&other)
+            )),
         },
         InvocationInputType::Array => match value {
             Value::Array(_) => Ok(value),
             Value::String(s) => Ok(Value::Array(vec![Value::String(s)])),
-            other => Err(format!("--{} must be an array, got {}", flag_name(field), json_type(&other))),
+            other => Err(format!(
+                "--{} must be an array, got {}",
+                flag_name(field),
+                json_type(&other)
+            )),
         },
     }
 }
@@ -806,12 +824,7 @@ mod tests {
         .unwrap();
 
         let result = bind_argv_with_command_and_contract(
-            &[
-                "--scopes".into(),
-                "a".into(),
-                "--scopes".into(),
-                "b".into(),
-            ],
+            &["--scopes".into(), "a".into(), "--scopes".into(), "b".into()],
             Some(&command),
             Some(&contract),
         )
@@ -893,10 +906,7 @@ mod tests {
         });
 
         let result = bind_argv_with_command(
-            &[
-                ".ai/directives/a.md".into(),
-                ".ai/directives/b.md".into(),
-            ],
+            &[".ai/directives/a.md".into(), ".ai/directives/b.md".into()],
             Some(&command),
         )
         .unwrap();

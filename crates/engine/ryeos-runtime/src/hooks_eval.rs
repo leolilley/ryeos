@@ -202,9 +202,8 @@ mod tests {
                 "params": {"reason": "${event.missing}"}
             }),
         }];
-        let dispatcher: HookDispatcher = Box::new(|_action, _project| {
-            Box::pin(async { Ok(json!({"action": "continue"})) })
-        });
+        let dispatcher: HookDispatcher =
+            Box::new(|_action, _project| Box::pin(async { Ok(json!({"action": "continue"})) }));
 
         let result = run_hooks(
             "continuation",

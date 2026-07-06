@@ -288,8 +288,12 @@ fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
     // not author node runtime state.
     let scheduled = std::fs::read_to_string(ai.join("node/schedules/nightly.yaml")).unwrap();
     assert!(
-        lillux::signature::parse_signature_line(scheduled.lines().next().unwrap_or_default(), "#", None)
-            .is_none(),
+        lillux::signature::parse_signature_line(
+            scheduled.lines().next().unwrap_or_default(),
+            "#",
+            None
+        )
+        .is_none(),
         "node runtime state must not be signed by publish"
     );
 }

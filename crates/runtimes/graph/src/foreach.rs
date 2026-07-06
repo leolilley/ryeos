@@ -142,7 +142,10 @@ async fn dispatch_item_with_retry(
                 RuntimeEventType::GraphNodeRetry,
                 Value::Object(
                     [
-                        ("graph_run_id".to_string(), Value::String(ev.graph_run_id.clone())),
+                        (
+                            "graph_run_id".to_string(),
+                            Value::String(ev.graph_run_id.clone()),
+                        ),
                         (
                             "definition_ref".to_string(),
                             Value::String(ev.definition_ref.clone()),

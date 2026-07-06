@@ -285,14 +285,14 @@ pub fn resolve_terminal_executor(
         EngineError::Internal("executor chain resolved to an empty intermediate list".to_string())
     })?;
     let decl: TerminalExecutorDecl = match last.parsed.get("terminal_executor") {
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
-            EngineError::SchemaLoaderError {
+        Some(v) => {
+            serde_json::from_value(v.clone()).map_err(|e| EngineError::SchemaLoaderError {
                 reason: format!(
                     "terminal executor `{}` has an invalid `terminal_executor:` block: {e}",
                     last.resolved_ref
                 ),
-            }
-        })?,
+            })?
+        }
         None => {
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(

@@ -639,8 +639,7 @@ fn lint_item_namespaces(
     let mut shadow_warnings: Vec<sign_bundle::ItemWarning> = Vec::new();
     let mut notes: Vec<sign_bundle::ItemWarning> = Vec::new();
 
-    let declared: std::collections::BTreeSet<&str> =
-        shadows.iter().map(String::as_str).collect();
+    let declared: std::collections::BTreeSet<&str> = shadows.iter().map(String::as_str).collect();
     let mut matched: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
 
     for outcome in report
@@ -909,8 +908,15 @@ mod tests {
             "undeclared shadows must not escalate: {:?}",
             lint.warnings
         );
-        assert_eq!(lint.shadow_warnings.len(), 2, "got {:?}", lint.shadow_warnings);
-        assert!(lint.shadow_warnings[0].message.contains("undeclared override"));
+        assert_eq!(
+            lint.shadow_warnings.len(),
+            2,
+            "got {:?}",
+            lint.shadow_warnings
+        );
+        assert!(lint.shadow_warnings[0]
+            .message
+            .contains("undeclared override"));
         assert_eq!(lint.notes.len(), 1, "got {:?}", lint.notes);
         assert_eq!(lint.notes[0].item_ref, "knowledge:other/notes");
     }
@@ -935,7 +941,9 @@ mod tests {
             lint.shadow_warnings
         );
         assert_eq!(lint.notes.len(), 2, "got {:?}", lint.notes);
-        assert!(lint.notes[0].message.contains("declared config shadow verified"));
+        assert!(lint.notes[0]
+            .message
+            .contains("declared config shadow verified"));
     }
 
     #[test]
@@ -948,7 +956,12 @@ mod tests {
         ];
         let lint = lint_item_namespaces(&report, "downstream", &shadows);
         assert!(lint.warnings.is_empty());
-        assert_eq!(lint.shadow_warnings.len(), 1, "got {:?}", lint.shadow_warnings);
+        assert_eq!(
+            lint.shadow_warnings.len(),
+            1,
+            "got {:?}",
+            lint.shadow_warnings
+        );
         assert_eq!(
             lint.shadow_warnings[0].item_ref,
             "config:ryeos-runtime/limits"

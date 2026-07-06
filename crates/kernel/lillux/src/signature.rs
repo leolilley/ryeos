@@ -534,7 +534,11 @@ mod tests {
     fn verify_signature_rejects_non_base64_payload() {
         let sk = SigningKey::from_bytes(&[7u8; 32]);
         let hash = content_hash("payload\n");
-        assert!(!verify_signature(&hash, "not*valid*base64", &sk.verifying_key()));
+        assert!(!verify_signature(
+            &hash,
+            "not*valid*base64",
+            &sk.verifying_key()
+        ));
     }
 
     #[test]

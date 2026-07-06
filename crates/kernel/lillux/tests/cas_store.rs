@@ -92,10 +92,7 @@ fn get_and_has_reject_malformed_hash() {
     assert!(!store.has_blob("nothex"));
     assert!(!store.has("too-short"));
     assert!(
-        store
-            .get_blob("not-a-valid-hash")
-            .expect("get")
-            .is_none(),
+        store.get_blob("not-a-valid-hash").expect("get").is_none(),
         "a malformed hash must never resolve to a blob"
     );
 }

@@ -135,7 +135,10 @@ fn spawned_process_is_alive_then_reaped() {
 
     // wait() reaps the child; give the kernel a beat to clear the entry.
     std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(!is_alive(pid), "process must be gone once wait has reaped it");
+    assert!(
+        !is_alive(pid),
+        "process must be gone once wait has reaped it"
+    );
 }
 
 // ── detached spawn ─────────────────────────────────────────────────────

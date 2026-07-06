@@ -49,7 +49,9 @@ impl SubscriberConfig {
     /// Config suitable for the ryeosd daemon.
     pub fn for_daemon() -> Self {
         Self {
-            default_filter: "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info".into(),
+            default_filter:
+                "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info"
+                    .into(),
             ..Self::default()
         }
     }
@@ -83,8 +85,11 @@ impl SubscriberConfig {
             .expect("failed to open trace-events.ndjson for writing");
 
         // Build the registry: stderr (human) + file (ndjson).
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(
+                "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info",
+            )
+        });
 
         // File layer: structured JSON, span NEW/CLOSE events.
         let file_layer = tracing_subscriber::fmt::layer()
@@ -115,7 +120,9 @@ impl SubscriberConfig {
             .try_init();
 
         Self {
-            default_filter: "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info".into(),
+            default_filter:
+                "ryeosd=info,ryeos_engine=info,ryeos_state=info,ryeos_executor=info,ryeos_app=info"
+                    .into(),
             ..Self::default()
         }
     }
@@ -295,14 +302,18 @@ mod tests {
         let writer = SharedFileWriter::open(&path, 32).unwrap();
 
         // First writes land in the primary file.
-        (&writer).write_all(b"line one, sized to fill the cap entirely\n").unwrap();
+        (&writer)
+            .write_all(b"line one, sized to fill the cap entirely\n")
+            .unwrap();
         // The cap is now exceeded, so the next write rotates first.
         (&writer).write_all(b"line two\n").unwrap();
 
         let rotated = tmp.path().join("trace-events.ndjson.1");
         assert!(rotated.exists(), "expected a rotated generation");
         assert!(
-            std::fs::read_to_string(&rotated).unwrap().contains("line one"),
+            std::fs::read_to_string(&rotated)
+                .unwrap()
+                .contains("line one"),
             "rotated file should hold the pre-rotation content"
         );
         assert_eq!(
@@ -312,10 +323,14 @@ mod tests {
         );
 
         // A second rotation replaces the previous generation.
-        (&writer).write_all(b"line three, also fills the cap entirely\n").unwrap();
+        (&writer)
+            .write_all(b"line three, also fills the cap entirely\n")
+            .unwrap();
         (&writer).write_all(b"line four\n").unwrap();
         assert!(
-            std::fs::read_to_string(&rotated).unwrap().contains("line two"),
+            std::fs::read_to_string(&rotated)
+                .unwrap()
+                .contains("line two"),
             "rotation should replace the previous generation"
         );
     }

@@ -921,8 +921,8 @@ fn run_build(
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_engine::roots;
     use ryeos_core_tools::actions::publish::{run_publish, PublishOptions};
+    use ryeos_engine::roots;
 
     let (
         bundle_source,
@@ -1465,8 +1465,11 @@ fn run_bundle_sign(
         .context("load trust store for registry roots")?;
 
     if source_path.join(ryeos_engine::AI_DIR).join("bin").is_dir() {
-        ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&source_path, &signing_key)
-            .context("rebuild source bundle binary manifest")?;
+        ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(
+            &source_path,
+            &signing_key,
+        )
+        .context("rebuild source bundle binary manifest")?;
     }
 
     let report = ryeos_core_tools::actions::sign_bundle::sign_bundle_items_with_trust(
@@ -1876,20 +1879,20 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
                 buf
             };
 
-            let report =
-                ryeos_core_tools::actions::vault::run_put(&ryeos_core_tools::actions::vault::PutOptions {
+            let report = ryeos_core_tools::actions::vault::run_put(
+                &ryeos_core_tools::actions::vault::PutOptions {
                     app_root: ssd,
                     entries: vec![(name, value)],
-                })?;
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         VaultCmd::List { app_root } => {
             let ssd = resolve_app_root(app_root)?;
-            let report =
-                ryeos_core_tools::actions::vault::run_list(&ryeos_core_tools::actions::vault::ListOptions {
-                    app_root: ssd,
-                })?;
+            let report = ryeos_core_tools::actions::vault::run_list(
+                &ryeos_core_tools::actions::vault::ListOptions { app_root: ssd },
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -1924,7 +1927,9 @@ fn run_authorize_client(
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
-    use ryeos_core_tools::actions::authorize::{run_authorize_client as run, AuthorizeClientParams};
+    use ryeos_core_tools::actions::authorize::{
+        run_authorize_client as run, AuthorizeClientParams,
+    };
 
     let params = if stdin_json {
         let val = read_stdin_json()?;
@@ -2018,7 +2023,9 @@ fn run_admission_token(
     ttl_secs: u64,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
+    use ryeos_core_tools::actions::authorize::{
+        run_mint_admission_token, MintAdmissionTokenParams,
+    };
 
     let (app_root, scopes, label, ttl_secs) = if stdin_json {
         let val = read_stdin_json()?;

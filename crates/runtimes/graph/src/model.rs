@@ -715,7 +715,10 @@ config:
       node_type: return
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
-        let retry = def.config.nodes["fetch"].retry.as_ref().expect("retry parsed");
+        let retry = def.config.nodes["fetch"]
+            .retry
+            .as_ref()
+            .expect("retry parsed");
         assert_eq!(retry.attempts, 3);
         assert_eq!(retry.backoff_ms, 1000);
         assert_eq!(retry.max_backoff_ms, Some(30000));

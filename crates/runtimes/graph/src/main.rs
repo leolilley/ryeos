@@ -306,8 +306,9 @@ fn main() -> anyhow::Result<()> {
     // default terminate action; an uncatchable SIGKILL remains the hard-kill
     // backstop when the grace period expires.
     let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, cancel_flag.clone())
-        .map_err(|e| anyhow::anyhow!("failed to install SIGTERM cooperative-cancel handler: {e}"))?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, cancel_flag.clone()).map_err(
+        |e| anyhow::anyhow!("failed to install SIGTERM cooperative-cancel handler: {e}"),
+    )?;
 
     let w = walker::Walker::new(
         graph,

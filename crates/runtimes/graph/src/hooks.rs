@@ -119,7 +119,10 @@ fn normalize_hook_dispatch_result(result: Value) -> Result<Value, CallbackError>
             || obj.contains_key("cost"));
     if is_native_runtime_envelope {
         let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        let status = obj.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let status = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         if !success || status != "completed" {
             let message = obj
                 .get("error")
@@ -175,7 +178,10 @@ mod tests {
             "outputs": null,
             "warnings": [],
         });
-        assert_eq!(normalize_hook_dispatch_result(env).unwrap(), json!({"ok": 1}));
+        assert_eq!(
+            normalize_hook_dispatch_result(env).unwrap(),
+            json!({"ok": 1})
+        );
     }
 
     #[test]
@@ -215,7 +221,10 @@ mod tests {
             "result": {"v": 2},
             "error": null,
         });
-        assert_eq!(normalize_hook_dispatch_result(env).unwrap(), json!({"v": 2}));
+        assert_eq!(
+            normalize_hook_dispatch_result(env).unwrap(),
+            json!({"v": 2})
+        );
     }
 
     #[tokio::test]
@@ -226,19 +235,18 @@ mod tests {
         let ctx = json!({"event": "graph_started"});
         // Empty hook list → Ok, and the dispatcher (which would panic here) is
         // never built.
-        assert!(run_graph_hooks(&client, "T-test", "/tmp", &[], "graph_started", &ctx)
-            .await
-            .is_ok());
+        assert!(
+            run_graph_hooks(&client, "T-test", "/tmp", &[], "graph_started", &ctx)
+                .await
+                .is_ok()
+        );
     }
 
     struct NoopClient;
 
     #[async_trait::async_trait]
     impl ryeos_runtime::callback::RuntimeCallbackAPI for NoopClient {
-        async fn dispatch_action(
-            &self,
-            _: DispatchActionRequest,
-        ) -> Result<Value, CallbackError> {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
             panic!("dispatch must not be called for an empty hook list");
         }
         async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {

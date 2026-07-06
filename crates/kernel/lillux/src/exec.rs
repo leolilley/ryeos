@@ -87,10 +87,7 @@ impl RunningProcess {
                     };
                 }
                 Ok(None) => {
-                    if timeout_rx
-                        .as_ref()
-                        .is_some_and(|rx| rx.try_recv().is_ok())
-                    {
+                    if timeout_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                         #[cfg(unix)]
                         {
                             // Kill the entire process group (child + grandchildren)
@@ -564,10 +561,7 @@ fn do_stream(
                 return status.code().unwrap_or(1);
             }
             Ok(None) => {
-                if timeout_rx
-                    .as_ref()
-                    .is_some_and(|rx| rx.try_recv().is_ok())
-                {
+                if timeout_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stdout_thread.join();

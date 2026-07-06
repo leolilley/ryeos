@@ -80,8 +80,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         write_knowledge_transcript(&path, "/flow", "gr-1", r#"{"ok": 1}"#).unwrap();
-        let written = std::fs::read_to_string(dir.path().join(".ai/state/graphs/flow/gr-1.md"))
-            .unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join(".ai/state/graphs/flow/gr-1.md")).unwrap();
         assert!(written.contains("gr-1"));
     }
 
