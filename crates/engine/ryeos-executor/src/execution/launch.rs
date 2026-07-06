@@ -1702,7 +1702,11 @@ async fn run_claimed_thread_row_inner(
 
     // 8. Write thread.json (status = created, pre-execution audit).
     //    `effective_trust_class` is recorded so the on-disk audit trail
-    //    matches what the launcher used for spawn-gating.
+    //    matches what the launcher used for spawn-gating. The record is
+    //    rewritten twice more: to `running` at the exec boundary inside the
+    //    blocking spawn task, and to its settled status (+completion time,
+    //    cost, outputs) after finalization below — so the file tracks the
+    //    execution instead of reading `created` forever.
     let meta = ThreadMeta {
         thread_id: thread_id.clone(),
         status: "created".to_string(),
@@ -1764,8 +1768,31 @@ async fn run_claimed_thread_row_inner(
     let app_root_owned = state.config.app_root.clone();
     let cas_root_owned = state.config.app_root.join("cas");
     let checkpoint_dir_owned = checkpoint_dir.clone();
+    // Execution starts at the exec boundary inside the blocking task, and the
+    // launcher then blocks for the runtime's whole lifetime — so the flip of
+    // the audit record from its pre-execution `created` posture to `running`
+    // must happen in there, not out here. Best-effort: the audit file never
+    // blocks a launch.
+    let running_meta = ThreadMeta {
+        status: "running".to_string(),
+        ..meta.clone()
+    };
+    let state_root_for_spawn = runtime_state_root.to_path_buf();
+    let identity_for_spawn = state.identity.clone();
 
     let spawn_result = tokio::task::spawn_blocking(move || {
+        if let Err(e) = super::thread_meta::write_thread_meta(
+            &state_root_for_spawn,
+            &thread_id_owned,
+            &running_meta,
+            &identity_for_spawn,
+        ) {
+            tracing::warn!(
+                thread_id = %thread_id_owned,
+                error = %e,
+                "failed to update thread.json audit record to running"
+            );
+        }
         spawn_runtime(SpawnRuntimeParams {
             descriptor: &descriptor_clone,
             binary: &binary_path,
@@ -1921,6 +1948,35 @@ async fn run_claimed_thread_row_inner(
         kick_follow_resume_if_ready(state, &finalized.chain_root_id);
         kick_launch_window_for_terminal(state, &finalized.chain_root_id);
         thread_detail = finalized;
+    }
+
+    // The audit record follows the execution to its settled state: the real
+    // status (terminal, or `continued` on a handoff), completion time, and
+    // cost land beside the launch-time posture — instead of `created`/
+    // `running` sitting on disk forever. Best-effort like every audit write.
+    let settled_meta = ThreadMeta {
+        status: thread_detail.status.clone(),
+        completed_at: (thread_detail.status
+            != ryeos_state::objects::ThreadStatus::Continued.as_str())
+        .then(lillux::time::iso8601_now),
+        cost: runtime_result
+            .cost
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        outputs: (!runtime_result.outputs.is_null()).then(|| runtime_result.outputs.clone()),
+        ..meta
+    };
+    if let Err(e) = super::thread_meta::write_thread_meta(
+        runtime_state_root,
+        &thread_id,
+        &settled_meta,
+        identity,
+    ) {
+        tracing::warn!(
+            thread_id = %thread_id,
+            error = %e,
+            "failed to update thread.json audit record to its settled status"
+        );
     }
 
     // The runtime returns terminal text in `result` (Option<String>) and any
