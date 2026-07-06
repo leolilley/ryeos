@@ -2,14 +2,20 @@
 //! full-width selection.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::StudioRowVm;
-use ryeos_client_base::text_surface::TextSurface;
+use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioRowVm};
+use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, letterspace, truncate};
-use super::super::theme::{style_fg, style_muted, style_selected, tone_glyph, tone_style};
+use super::super::theme::{mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT};
 
-pub fn draw_rows(surface: &mut TextSurface, rect: Rect, columns: &[String], rows: &[StudioRowVm]) {
+pub fn draw_rows(
+    surface: &mut TextSurface,
+    rect: Rect,
+    columns: &[String],
+    rows: &[StudioRowVm],
+    now_ms: u64,
+) {
     let width = rect.w as usize;
     let height = rect.h as usize;
     if width == 0 || height == 0 {
@@ -26,19 +32,28 @@ pub fn draw_rows(surface: &mut TextSurface, rect: Rect, columns: &[String], rows
         surface.draw_text(rect.x as usize, y, "no rows loaded", style_muted());
         return;
     }
-    for row in rows.iter().take(bottom.saturating_sub(y)) {
-        let style = if row.selected {
+    for row in rows {
+        if y >= bottom {
+            break;
+        }
+        let mut style = if row.selected {
             style_selected()
         } else {
             style_fg()
         };
+        style = shimmer_style(style, row.changed_at_ms, now_ms);
         fill_line(surface, rect.x as usize, y, width, style);
         let glyph_style = if row.selected {
             style
         } else {
             tone_style(row.tone)
         };
-        surface.draw_text(rect.x as usize, y, tone_glyph(row.tone), glyph_style);
+        let glyph = if row.expandable {
+            if row.expanded { "▾" } else { "▸" }
+        } else {
+            tone_glyph(row.tone)
+        };
+        surface.draw_text(rect.x as usize, y, glyph, glyph_style);
 
         let meta = row.meta.as_deref().unwrap_or_default();
         let meta_width = if meta.is_empty() {
@@ -65,5 +80,35 @@ pub fn draw_rows(surface: &mut TextSurface, rect: Rect, columns: &[String], rows
             surface.draw_text(meta_x, y, &meta_text, meta_style);
         }
         y += 1;
+        for detail in &row.detail {
+            if y >= bottom {
+                break;
+            }
+            draw_detail(surface, rect.x as usize, y, width, detail);
+            y += 1;
+        }
+    }
+}
+
+fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style {
+    let Some(changed_at_ms) = changed_at_ms else {
+        return style;
+    };
+    let age = now_ms.saturating_sub(changed_at_ms);
+    if age >= 1_200 {
+        return style;
+    }
+    let weight = 0.35 * (1.0 - age as f32 / 1_200.0);
+    style.fg(mix_toward(style.fg, ACCENT, weight))
+}
+
+fn draw_detail(surface: &mut TextSurface, left: usize, y: usize, width: usize, detail: &StudioRowDetailVm) {
+    fill_line(surface, left, y, width, style_fg());
+    let label = format!("  {}: ", detail.field);
+    surface.draw_text(left, y, &truncate(&label, width), style_muted());
+    let x = left + display_width(&label).min(width);
+    if x < left + width {
+        let style = detail.tone.map(tone_style).unwrap_or_else(style_fg);
+        surface.draw_text(x, y, &truncate(&detail.value, left + width - x), style);
     }
 }

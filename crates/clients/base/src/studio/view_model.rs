@@ -13,6 +13,8 @@ use crate::workspace::{TileState, ViewLocalState, ViewSpec};
 pub struct StudioViewModel {
     pub schema_version: String,
     pub generation: u64,
+    #[serde(default)]
+    pub now_ms: u64,
     pub session: StudioSessionVm,
     pub chrome: StudioChromeVm,
     pub presentation: StudioPresentationVm,
@@ -151,6 +153,10 @@ pub struct StudioStatusBarVm {
     pub visible: bool,
     pub segments: Vec<StudioStatusSegmentVm>,
     pub key_hint: String,
+    #[serde(default)]
+    pub energy: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<StudioTone>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -401,12 +407,28 @@ pub struct StudioTableRowVm {
     pub action: Option<StudioAction>,
     #[serde(default)]
     pub selected: bool,
+    #[serde(default)]
+    pub expandable: bool,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<StudioRowDetailVm>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at_ms: Option<u64>,
     /// The row's raw record — base-only (not serialized to clients). The launcher
     /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
     /// management is reachable. Skipped to avoid duplicating every record into
     /// the per-row wire payload.
     #[serde(skip)]
     pub raw: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioRowDetailVm {
+    pub field: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<StudioTone>,
 }
 
 /// One titled, collapsible group within a `Sections` view. `count` is the
@@ -484,6 +506,14 @@ pub struct StudioRowVm {
     pub action: Option<StudioAction>,
     pub tone: StudioTone,
     pub selected: bool,
+    #[serde(default)]
+    pub expandable: bool,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<StudioRowDetailVm>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -517,6 +547,7 @@ pub fn build_view_model(core: &StudioCore) -> StudioViewModel {
     StudioViewModel {
         schema_version: "ryeos.studio.vm.v1".to_string(),
         generation: core.generation,
+        now_ms: core.runtime.now_ms,
         presentation: presentation_vm(core, &session, &chrome, &workspace),
         session,
         chrome,
@@ -666,6 +697,7 @@ fn presentation_metrics_vm(
         core.ui.motion.len(),
         core.ui.loading.len(),
         active_thread_count,
+        core.runtime.activity_pulse,
     );
 
     StudioPresentationMetricsVm {
@@ -686,12 +718,14 @@ fn presentation_activity_level(
     motion_count: usize,
     loading_count: usize,
     active_thread_count: i64,
+    activity_pulse: f32,
 ) -> f32 {
     let active_threads = active_thread_count.max(0) as f32;
     ((tile_count as f32 * 0.12)
         + (motion_count as f32 * 0.22)
         + (loading_count as f32 * 0.18)
-        + (active_threads * 0.18))
+        + (active_threads * 0.18)
+        + activity_pulse.clamp(0.0, 1.0) * 0.35)
         .clamp(0.0, 1.0)
 }
 
@@ -749,6 +783,12 @@ fn status_bar_vm(
         .map(|threads| threads.threads.len())
         .unwrap_or_default();
     let (usage_in, usage_out) = conversation_usage(core);
+    let key_hint = if core.workspace.lens_stack.is_empty() {
+        "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
+    } else {
+        "⌫ back · alt+← back · ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
+            .to_string()
+    };
     StudioStatusBarVm {
         visible: core.ui.bottom_status_visible,
         segments: vec![
@@ -839,7 +879,10 @@ fn status_bar_vm(
                 grow: true,
             },
         ],
-        key_hint: "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string(),
+        key_hint,
+        energy: core.runtime.activity_pulse.clamp(0.0, 1.0),
+        attention: (core.runtime.now_ms < core.runtime.attention_until_ms)
+            .then_some(StudioTone::Warn),
     }
 }
 
@@ -901,7 +944,8 @@ fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
         .as_ref()
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
-    scene.energy = ((active_threads.max(0) as f32) * 0.25).clamp(0.0, 1.0);
+    let active_component = ((active_threads.max(0) as f32) * 0.25).clamp(0.0, 1.0);
+    scene.energy = active_component.max(core.runtime.activity_pulse.clamp(0.0, 1.0));
     Some(scene)
 }
 
@@ -929,7 +973,16 @@ fn dock_tile_vm(
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
-        view: bound_view_vm_keyed(core, &source_key, None, None, view_ref, &core.ui.atlas),
+        view: bound_view_vm_keyed(
+            core,
+            &source_key,
+            None,
+            None,
+            None,
+            None,
+            view_ref,
+            &core.ui.atlas,
+        ),
         input: instance_input_vm(core, &source_key, view_ref),
     })
 }
@@ -950,11 +1003,14 @@ fn instance_input_vm(
 /// Render a content-bound view: binding + source response -> widget VM.
 /// Pure projection; unknown widgets and missing data degrade honestly.
 fn bound_view_vm(core: &StudioCore, tile_id: TileId, view_ref: &str) -> StudioViewVm {
+    let (expanded_rows, changed_rows) = selected_row_state(core, tile_id);
     bound_view_vm_keyed(
         core,
         &tile_id.0.to_string(),
         selected_cursor(core, tile_id),
         selected_collapsed(core, tile_id),
+        expanded_rows,
+        changed_rows,
         view_ref,
         core.tile_atlas_state(tile_id),
     )
@@ -965,6 +1021,8 @@ fn bound_view_vm_keyed(
     source_key: &str,
     cursor: Option<usize>,
     collapsed: Option<&std::collections::BTreeSet<usize>>,
+    expanded_rows: Option<&std::collections::BTreeSet<String>>,
+    changed_rows: Option<&std::collections::BTreeMap<String, u64>>,
     view_ref: &str,
     atlas: &crate::atlas::AtlasUiStateVm,
 ) -> StudioViewVm {
@@ -1080,6 +1138,10 @@ fn bound_view_vm_keyed(
                             }),
                             tone: tone_from_name(record.tone.as_deref()),
                             selected,
+                            expandable: false,
+                            expanded: false,
+                            detail: Vec::new(),
+                            changed_at_ms: None,
                         });
                     }
                 }
@@ -1136,24 +1198,36 @@ fn bound_view_vm_keyed(
         },
         ("rows", Some(response)) => {
             let activate_affordance = activate_affordance(binding);
+            let expand_fields = super::content::expand_fields(binding);
             let rows = super::content::project_records(binding, response)
                 .into_iter()
                 .enumerate()
-                .map(|(index, record)| StudioRowVm {
-                    id: format!("{view_ref}#{index}"),
-                    primary: record.primary,
-                    secondary: None,
-                    meta: record.meta,
-                    kind: None,
-                    action: activate_affordance.as_ref().map(|affordance_id| {
-                        StudioAction::InvokeAffordance {
-                            view_ref: view_ref.to_string(),
-                            affordance_id: affordance_id.clone(),
-                            record: record.raw.clone(),
-                        }
-                    }),
-                    tone: tone_from_name(record.tone.as_deref()),
-                    selected: cursor == Some(index),
+                .map(|(index, record)| {
+                    let key = super::model::row_key(&record.raw, index);
+                    let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
+                    let detail = expanded
+                        .then(|| detail_vm(&record.raw, &expand_fields))
+                        .unwrap_or_default();
+                    StudioRowVm {
+                        id: format!("{view_ref}#{index}"),
+                        primary: record.primary,
+                        secondary: None,
+                        meta: record.meta,
+                        kind: None,
+                        action: activate_affordance.as_ref().map(|affordance_id| {
+                            StudioAction::InvokeAffordance {
+                                view_ref: view_ref.to_string(),
+                                affordance_id: affordance_id.clone(),
+                                record: record.raw.clone(),
+                            }
+                        }),
+                        tone: tone_from_name(record.tone.as_deref()),
+                        selected: cursor == Some(index),
+                        expandable: !expand_fields.is_empty(),
+                        expanded,
+                        detail,
+                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                    }
                 })
                 .collect();
             StudioViewVm::Rows {
@@ -1212,32 +1286,44 @@ fn bound_view_vm_keyed(
             // affordance the rows widget uses.
             let activate_affordance = activate_affordance(binding);
             let columns = super::content::table_columns(binding);
+            let expand_fields = super::content::expand_fields(binding);
             let column_labels = columns.iter().map(|col| col.label.clone()).collect();
             let rows = super::content::project_table(binding, response, &columns)
                 .into_iter()
                 .enumerate()
-                .map(|(index, record)| StudioTableRowVm {
-                    id: format!("{view_ref}#{index}"),
-                    cells: record.cells,
-                    cell_tones: if record.cell_tones.iter().all(Option::is_none) {
-                        Vec::new()
-                    } else {
-                        record
-                            .cell_tones
-                            .iter()
-                            .map(|tone| tone.as_deref().map(|t| tone_from_name(Some(t))))
-                            .collect()
-                    },
-                    tone: tone_from_name(record.tone.as_deref()),
-                    action: activate_affordance.as_ref().map(|affordance_id| {
-                        StudioAction::InvokeAffordance {
-                            view_ref: view_ref.to_string(),
-                            affordance_id: affordance_id.clone(),
-                            record: record.raw.clone(),
-                        }
-                    }),
-                    selected: cursor == Some(index),
-                    raw: record.raw,
+                .map(|(index, record)| {
+                    let key = super::model::row_key(&record.raw, index);
+                    let expanded = expanded_rows.is_some_and(|set| set.contains(&key));
+                    let detail = expanded
+                        .then(|| detail_vm(&record.raw, &expand_fields))
+                        .unwrap_or_default();
+                    StudioTableRowVm {
+                        id: format!("{view_ref}#{index}"),
+                        cells: record.cells,
+                        cell_tones: if record.cell_tones.iter().all(Option::is_none) {
+                            Vec::new()
+                        } else {
+                            record
+                                .cell_tones
+                                .iter()
+                                .map(|tone| tone.as_deref().map(|t| tone_from_name(Some(t))))
+                                .collect()
+                        },
+                        tone: tone_from_name(record.tone.as_deref()),
+                        action: activate_affordance.as_ref().map(|affordance_id| {
+                            StudioAction::InvokeAffordance {
+                                view_ref: view_ref.to_string(),
+                                affordance_id: affordance_id.clone(),
+                                record: record.raw.clone(),
+                            }
+                        }),
+                        selected: cursor == Some(index),
+                        expandable: !expand_fields.is_empty(),
+                        expanded,
+                        detail,
+                        changed_at_ms: changed_rows.and_then(|rows| rows.get(&key).copied()),
+                        raw: record.raw,
+                    }
                 })
                 .collect();
             StudioViewVm::Table {
@@ -1260,6 +1346,10 @@ fn bound_view_vm_keyed(
                     action: None,
                     tone: StudioTone::Neutral,
                     selected: false,
+                    expandable: false,
+                    expanded: false,
+                    detail: Vec::new(),
+                    changed_at_ms: None,
                 })
                 .collect();
             StudioViewVm::Rows {
@@ -1332,6 +1422,17 @@ pub(crate) fn tone_from_name(name: Option<&str>) -> StudioTone {
         Some("danger") => StudioTone::Danger,
         _ => StudioTone::Neutral,
     }
+}
+
+fn detail_vm(record: &serde_json::Value, fields: &[String]) -> Vec<StudioRowDetailVm> {
+    super::content::expanded_detail(record, fields)
+        .into_iter()
+        .map(|(field, value)| StudioRowDetailVm {
+            field,
+            value,
+            tone: None,
+        })
+        .collect()
 }
 
 /// Project a view instance's input buffer into the prompt VM. The target
@@ -1962,6 +2063,7 @@ fn help(core: &StudioCore) -> StudioHelpVm {
             entry("Act", "Alt+Enter", "Submit as an interrupt — cut the running thread's turn and redirect"),
             entry("Act", "Tab / ⇧Tab", "Accept completion, else cycle the route target"),
             entry("Act", "Esc", "Cancel a running thread; else close the lens"),
+            entry("Lenses", "⌫ / Alt+←", "Return from a drill-in lens"),
             entry("Input", "type", "The foot input is always live — text routes at the directive"),
             entry("Lenses", "Ctrl+K", "Open the lens launcher (swap the center lens)"),
             entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
@@ -2083,6 +2185,23 @@ fn selected_collapsed(
     match &core.workspace.tiles.get(&tile_id)?.local {
         ViewLocalState::GenericList { collapsed, .. } => Some(collapsed),
         ViewLocalState::None => None,
+    }
+}
+
+fn selected_row_state(
+    core: &StudioCore,
+    tile_id: TileId,
+) -> (
+    Option<&std::collections::BTreeSet<String>>,
+    Option<&std::collections::BTreeMap<String, u64>>,
+) {
+    match core.workspace.tiles.get(&tile_id).map(|tile| &tile.local) {
+        Some(ViewLocalState::GenericList {
+            expanded_rows,
+            changed_rows,
+            ..
+        }) => (Some(expanded_rows), Some(changed_rows)),
+        _ => (None, None),
     }
 }
 

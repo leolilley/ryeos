@@ -245,6 +245,12 @@ pub enum StudioUiEvent {
         section: usize,
         collapsed: bool,
     },
+    /// Expand/collapse the selected row in the focused rows/table lens. The
+    /// reducer resolves the selected record to a stable row key; keymaps never
+    /// carry row identity.
+    ExpandSelectedRow {
+        expand: bool,
+    },
     ActivateFocused,
     /// Step back up the execution-drill stack: restore the view a step-in left
     /// and the facet context it read. The "return" half of the debugger drill;

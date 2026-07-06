@@ -114,6 +114,10 @@ mod tests {
             action: None,
             tone: StudioTone::Neutral,
             selected: false,
+            expandable: false,
+            expanded: false,
+            detail: Vec::new(),
+            changed_at_ms: None,
         }
     }
 

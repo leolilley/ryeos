@@ -11,7 +11,7 @@ use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
-use super::theme::{border_for, style_muted, tone_style, ACCENT, BG, FG, MUTED};
+use super::theme::{border_for, mix_toward, style_muted, tone_style, ACCENT, BG, FG, MUTED, WARN};
 
 pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     // Breadcrumb: when a drill is open, prefix the return trail (root-first)
@@ -40,23 +40,36 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
 
 pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     let y = surface.height.saturating_sub(1);
-    fill_line(surface, 0, y, surface.width, Style::new().fg(MUTED).bg(BG));
+    let energy = vm.presentation.chrome.status_bar.energy.clamp(0.0, 1.0);
+    let mut bg = mix_toward(BG, ACCENT, 0.12 * energy);
+    if vm.presentation.chrome.status_bar.attention.is_some() {
+        bg = mix_toward(bg, WARN, 0.18);
+    }
+    let base = Style::new().fg(MUTED).bg(bg);
+    fill_line(surface, 0, y, surface.width, base);
     let mut x = 1usize;
+    let heartbeat = if energy > 0.05 {
+        ["⋄", "◇", "◈", "◆"][(vm.generation as usize / 2) % 4]
+    } else {
+        "⋄"
+    };
+    surface.draw_text(x, y, heartbeat, Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg));
+    x += 2;
     for segment in &vm.presentation.chrome.status_bar.segments {
         if x >= surface.width {
             return;
         }
         if let Some(label) = &segment.label {
             let label = format!("{}: ", letterspace(label));
-            surface.draw_text(x, y, &truncate(&label, surface.width - x), style_muted());
+            surface.draw_text(x, y, &truncate(&label, surface.width - x), style_muted().bg(bg));
             x = x.saturating_add(display_width(&label));
         }
         let value = truncate(&segment.value, surface.width.saturating_sub(x));
-        surface.draw_text(x, y, &value, tone_style(segment.tone));
+        surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg));
         x = x.saturating_add(display_width(&value) + 2);
     }
     if x + 3 < surface.width {
-        surface.draw_text(x, y, "·", style_muted());
+        surface.draw_text(x, y, "·", style_muted().bg(bg));
         x += 2;
         surface.draw_text(
             x,
@@ -65,7 +78,7 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
                 &vm.presentation.chrome.status_bar.key_hint,
                 surface.width - x,
             ),
-            style_muted(),
+            style_muted().bg(bg),
         );
     }
 }
@@ -85,7 +98,7 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
     let project_path = vm.session.project_path.as_deref();
     let (dock_rects, center) = carve_docks(body, &vm.workspace.docks);
     for (dock, rect) in dock_rects {
-        draw_dock_tile(surface, rect, dock, project_path, border);
+        draw_dock_tile(surface, rect, dock, project_path, border, vm.now_ms);
     }
     center
 }
@@ -149,6 +162,7 @@ fn draw_dock_tile(
     dock: &StudioDockTileVm,
     project_path: Option<&str>,
     border: Option<Border>,
+    now_ms: u64,
 ) {
     // An input dock renders minimally on the page background — no PANEL
     // fill, no title, no shadow. Just the bordered buffer + cursor.
@@ -192,7 +206,7 @@ fn draw_dock_tile(
         rect.w.saturating_sub(2),
         rect.h.saturating_sub(2),
     );
-    super::draw_view(surface, inner, &dock.view);
+    super::draw_view(surface, inner, &dock.view, now_ms);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -206,6 +220,7 @@ pub fn draw_tile(
     view: &StudioViewVm,
     input: Option<&StudioInputVm>,
     border: Option<Border>,
+    now_ms: u64,
 ) {
     let w = rect.w as usize;
     let h = rect.h as usize;
@@ -225,7 +240,7 @@ pub fn draw_tile(
     };
     fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
     if w < 2 || h < 2 {
-        super::draw_view(surface, rect, view);
+        super::draw_view(surface, rect, view, now_ms);
         return;
     }
     if let Some(border) = border {
@@ -274,9 +289,9 @@ pub fn draw_tile(
             let filter_rect = Rect::new(inner.x, inner.y, inner.w, 1);
             super::input::draw_filter_line(surface, filter_rect, input, focused);
             let view_rect = Rect::new(inner.x, inner.y + 1, inner.w, inner.h - 1);
-            super::draw_view(surface, view_rect, view);
+            super::draw_view(surface, view_rect, view, now_ms);
         } else {
-            super::draw_view(surface, inner, view);
+            super::draw_view(surface, inner, view, now_ms);
         }
         return;
     }
@@ -286,7 +301,7 @@ pub fn draw_tile(
         draw_input_tile(surface, inner, input, None, None);
         return;
     }
-    super::draw_view(surface, inner, view);
+    super::draw_view(surface, inner, view, now_ms);
 }
 
 fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
@@ -386,6 +401,10 @@ mod tests {
                 tone: StudioTone::Neutral,
                 action: None,
                 selected: false,
+                expandable: false,
+                expanded: false,
+                detail: Vec::new(),
+                changed_at_ms: None,
                 raw: serde_json::Value::Null,
             }],
         };
@@ -410,6 +429,7 @@ mod tests {
             &view,
             Some(&input),
             Some(Border::Sharp),
+            0,
         );
         let row = |y: usize| (0..40).map(|x| surface.get(x, y).rune).collect::<String>();
         // Filter strip on the first interior row (inside the top border).

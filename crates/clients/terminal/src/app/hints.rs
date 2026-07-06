@@ -9,10 +9,12 @@ use std::sync::Arc;
 
 use crate::transport::daemon::DaemonClient;
 
-/// Subscribe to the session event bus and forward hint kinds.
+pub type HintMessage = (String, serde_json::Value);
+
+/// Subscribe to the session event bus and forward hint kind plus payload.
 pub fn spawn_hint_listener(
     client: Arc<DaemonClient>,
-    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<HintMessage>,
 ) {
     tokio::spawn(async move {
         let Ok(mut stream) = client.open_session_events().await else {
@@ -20,20 +22,17 @@ pub fn spawn_hint_listener(
         };
         while let Some(frame) = stream.next_event().await {
             if frame.event_type == "message" || frame.event_type.ends_with(".hint") {
-                let kind = serde_json::from_str::<serde_json::Value>(&frame.data)
+                let Some((kind, payload)) = serde_json::from_str::<serde_json::Value>(&frame.data)
                     .ok()
                     .and_then(|value| {
-                        value
-                            .get("payload")
-                            .and_then(|p| p.get("kind"))
-                            .or_else(|| value.get("kind"))
-                            .and_then(|k| k.as_str())
-                            .map(str::to_string)
-                    });
-                if let Some(kind) = kind {
-                    if tx.send(kind).is_err() {
-                        break;
-                    }
+                        let payload = value.get("payload").cloned().unwrap_or(value);
+                        let kind = payload.get("kind")?.as_str()?.to_string();
+                        Some((kind, payload))
+                    }) else {
+                    continue;
+                };
+                if tx.send((kind, payload)).is_err() {
+                    break;
                 }
             }
         }

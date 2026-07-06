@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-26T00:56:44Z:623bc5bb121e25acda2b9b9e34b2158f5bd48bf78708c90e19bd77a1d24faf01:JA3MnM9y2fmrpKIl1fUHjdU7A7tKMvWxWyJqWqnPsHislOBk9bf5Wk6HoKEMZMwbZVTxaygMJrtk3MwnDkGZBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T05:31:39Z:25a47b49cf12cfca1d30c5d44b273a265fed3e6625b2efc64ae5d88f50a51b30:+byOiAbiMw7PqTFlBQnSIr1YPdAJl6AgwMvFmsY6H9EYbaP6XKS62hmgKBGYKb4/EtwQMGnwZFODZsR1Oa/3Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-status
 version: "1.0.0"
 description: >-
@@ -50,4 +50,4 @@ sections:
       primary: version
       meta: site_id
 refresh:
-  on_hint: thread
+  on_hint: [thread, activity]

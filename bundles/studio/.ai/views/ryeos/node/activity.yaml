@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T23:37:53Z:67b372146222f04659dc89210b8b69cc777c1013d19596c144e24b87a5667642:RWlJiPTFZIu5C4OS6Y8pzG0AtW2o10RpzYcX9XvSjyMLGYmHok9dEdLAPo5qNLHCUS3CPnbdIpIE1iyHeYg6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T05:31:39Z:40eb9c308360dd85f308ce4a15d4ee44dfdcf1e0317806f3965d62087478b19d:Esw4YKSAjYGZOKtUqoc5n76zbnqjGcDFg6I5AsKR3d4Onlkr5uDSYtlWNEQ8u2eJwUK1igR1KbdKoqrsGu1TCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-activity
 version: "1.0.0"
 description: >-
@@ -58,4 +58,4 @@ sections:
         default: neutral
     activate: watch-thread
 refresh:
-  on_hint: thread
+  on_hint: [thread, activity]

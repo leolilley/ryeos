@@ -12,7 +12,7 @@ use crate::atlas::AtlasUiStateVm;
 use crate::surface::{
     builtin_default, SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec,
 };
-use crate::workspace::{ViewSpec, Workspace};
+use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -418,6 +418,12 @@ pub(crate) fn atlas_item_scope(
 pub struct StudioRuntimeState {
     pub viewport: BrowserViewport,
     pub now_ms: u64,
+    #[serde(default)]
+    pub last_tick_ms: u64,
+    #[serde(default)]
+    pub activity_pulse: f32,
+    #[serde(default)]
+    pub attention_until_ms: u64,
 }
 
 impl Default for StudioRuntimeState {
@@ -425,6 +431,9 @@ impl Default for StudioRuntimeState {
         Self {
             viewport: BrowserViewport::default(),
             now_ms: 0,
+            last_tick_ms: 0,
+            activity_pulse: 0.0,
+            attention_until_ms: 0,
         }
     }
 }
@@ -467,6 +476,7 @@ impl StudioCore {
         core.data.session = Some(session);
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
+        core.runtime.last_tick_ms = now_ms;
         if let Some(route) = input_route {
             if let Ok(value) = serde_json::to_value(&route) {
                 core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
@@ -667,10 +677,63 @@ impl StudioCore {
         effects
     }
 
-    /// Hint arrival: refetch every bound tile whose binding declares
-    /// `refresh.on_hint: <kind>` (content decides its own liveness).
+    /// Hint arrival: semantic hook for transient "look" notices. Visual pulse
+    /// state is layered on this entry point; refetches are content-bound via
+    /// `refresh.on_hint`.
+    pub fn note_hint(
+        &mut self,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Vec<StudioEffect> {
+        match kind {
+            "activity" => {
+                let count = payload
+                    .get("event_count")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as f32;
+                self.runtime.activity_pulse = (self.runtime.activity_pulse
+                    + 0.3
+                    + 0.05 * (1.0 + count).ln())
+                .min(1.0);
+            }
+            "thread" => {
+                self.runtime.activity_pulse = (self.runtime.activity_pulse + 0.2).min(1.0);
+                if payload
+                    .get("event_type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|event| {
+                        matches!(event, "thread_failed" | "thread_killed" | "thread_timed_out")
+                    })
+                {
+                    self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
+                }
+            }
+            _ => {}
+        }
+        self.effects_for_hint(kind)
+    }
+
+    pub fn wants_fast_ticks(&self) -> bool {
+        self.workspace.center_is_empty()
+            || self.runtime.activity_pulse > 0.02
+            || self.row_shimmer_active()
+    }
+
+    fn row_shimmer_active(&self) -> bool {
+        let now_ms = self.runtime.now_ms;
+        self.workspace.tiles.values().any(|tile| match &tile.local {
+            ViewLocalState::GenericList { changed_rows, .. } => changed_rows
+                .values()
+                .any(|changed_at| now_ms.saturating_sub(*changed_at) < 1_200),
+            ViewLocalState::None => false,
+        })
+    }
+
+    /// Hint arrival: refetch every bound tile or visible slot whose binding
+    /// declares `refresh.on_hint: <kind>` or includes it in an array. Content
+    /// decides its own liveness.
     pub fn effects_for_hint(&mut self, kind: &str) -> Vec<StudioEffect> {
-        let targets: Vec<(crate::ids::TileId, String)> = self
+        let mut targets: Vec<(String, String)> = self
             .workspace
             .tile_ids()
             .into_iter()
@@ -678,13 +741,22 @@ impl StudioCore {
                 let tile = self.workspace.tiles.get(&tile_id)?;
                 let view_ref = &tile.view.view_ref;
                 let binding = self.views.get(view_ref)?;
-                (binding.refresh.get("on_hint").and_then(|v| v.as_str()) == Some(kind))
-                    .then(|| (tile_id, view_ref.clone()))
+                refresh_matches_hint(binding.refresh.get("on_hint"), kind)
+                    .then(|| (tile_id.0.to_string(), view_ref.clone()))
             })
             .collect();
+        targets.extend(
+            self.visible_dock_views()
+                .into_iter()
+                .filter(|(_, view_ref)| {
+                    self.views.get(view_ref).is_some_and(|binding| {
+                        refresh_matches_hint(binding.refresh.get("on_hint"), kind)
+                    })
+                }),
+        );
         targets
             .into_iter()
-            .flat_map(|(tile_id, view_ref)| self.emit_fetch_source(tile_id, &view_ref))
+            .flat_map(|(source_key, view_ref)| self.emit_fetch_source_keyed(source_key, &view_ref))
             .collect()
     }
 
@@ -732,15 +804,9 @@ impl StudioCore {
                     )
                 })
                 .collect();
-            // Drop each section's prior response before refetching: a single-lens
-            // detail tile reused for a new selection keeps its (stable) section
-            // keys, so without this it would render the previous selection's
-            // sections until the new fetches return. Scoped to sections — the
-            // single-source path (list/timeline) keeps its data to avoid a blank
-            // flash on periodic refresh.
-            for (key, _, _) in &resolved {
-                self.data.sources.remove(key);
-            }
+            // Keep prior section responses while refetching. `source_epoch`
+            // drops stale responses, and hint-driven activity refreshes would
+            // otherwise blank a sections view every coalesced activity tick.
             return resolved
                 .into_iter()
                 .filter_map(|(key, source, params)| self.build_fetch_source(key, &source, params))
@@ -1015,6 +1081,9 @@ impl StudioCore {
             })
             .is_some();
         let input_can_accept_completion = slash_can_accept || mention_can_accept;
+        let (focused_row_expandable, focused_row_expanded) = self
+            .focused_row_expand_state()
+            .unwrap_or((false, false));
 
         super::keymap::StudioKeyContext {
             launcher_open: self.ui.launcher.open,
@@ -1044,6 +1113,8 @@ impl StudioCore {
                 .thread
                 .as_deref()
                 .is_some_and(|head| self.head_thread_running(head)),
+            focused_row_expandable,
+            focused_row_expanded,
         }
     }
 
@@ -1062,6 +1133,184 @@ impl StudioCore {
                         })
             })
         })
+    }
+
+    pub(crate) fn note_source_row_changes(
+        &mut self,
+        source_key: &str,
+        old: Option<&serde_json::Value>,
+        new: &serde_json::Value,
+    ) {
+        let Some(tile_id) = parse_source_tile_key(source_key) else {
+            return;
+        };
+        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+            return;
+        };
+        let Some(binding) = self.views.get(&tile.view.view_ref) else {
+            return;
+        };
+        let new_rows = projected_row_signatures(binding, new);
+        if new_rows.is_empty() {
+            return;
+        }
+        let old_rows = old.map(|value| projected_row_signatures(binding, value)).unwrap_or_default();
+        let now_ms = self.runtime.now_ms;
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return;
+        };
+        let ViewLocalState::GenericList { changed_rows, .. } = &mut tile.local else {
+            return;
+        };
+        let mut live = std::collections::BTreeSet::new();
+        for (key, signature) in new_rows {
+            live.insert(key.clone());
+            if old_rows.get(&key) != Some(&signature) {
+                changed_rows.insert(key, now_ms);
+            }
+        }
+        changed_rows.retain(|key, changed_at| {
+            live.contains(key) && now_ms.saturating_sub(*changed_at) <= 2_000
+        });
+    }
+
+    pub(crate) fn focused_row_expand_state(&self) -> Option<(bool, bool)> {
+        let tile_id = self.workspace.focused_tile;
+        let tile = self.workspace.tiles.get(&tile_id)?;
+        let binding = self.views.get(&tile.view.view_ref)?;
+        if !matches!(binding.widget.as_str(), "rows" | "table") {
+            return None;
+        }
+        let fields = super::content::expand_fields(binding);
+        if fields.is_empty() {
+            return None;
+        }
+        let (key, _) = self.focused_row_key_and_record(tile_id, binding)?;
+        let expanded = match &tile.local {
+            ViewLocalState::GenericList { expanded_rows, .. } => expanded_rows.contains(&key),
+            ViewLocalState::None => false,
+        };
+        Some((true, expanded))
+    }
+
+    pub(crate) fn set_focused_row_expanded(&mut self, expand: bool) -> bool {
+        let tile_id = self.workspace.focused_tile;
+        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+            return false;
+        };
+        let Some(binding) = self.views.get(&tile.view.view_ref) else {
+            return false;
+        };
+        if super::content::expand_fields(binding).is_empty() {
+            return false;
+        }
+        let Some((key, _)) = self.focused_row_key_and_record(tile_id, binding) else {
+            return false;
+        };
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return false;
+        };
+        let ViewLocalState::GenericList { expanded_rows, .. } = &mut tile.local else {
+            return false;
+        };
+        if expand {
+            expanded_rows.insert(key)
+        } else {
+            expanded_rows.remove(&key)
+        }
+    }
+
+    fn focused_row_key_and_record(
+        &self,
+        tile_id: crate::ids::TileId,
+        binding: &super::content::ViewBinding,
+    ) -> Option<(String, serde_json::Value)> {
+        let tile = self.workspace.tiles.get(&tile_id)?;
+        let cursor = match &tile.local {
+            ViewLocalState::GenericList { cursor, .. } => *cursor,
+            ViewLocalState::None => 0,
+        };
+        let response = self.data.sources.get(&tile_id.0.to_string())?;
+        match binding.widget.as_str() {
+            "rows" => super::content::project_records(binding, response)
+                .into_iter()
+                .enumerate()
+                .nth(cursor)
+                .map(|(index, record)| (row_key(&record.raw, index), record.raw)),
+            "table" => {
+                let columns = super::content::table_columns(binding);
+                super::content::project_table(binding, response, &columns)
+                    .into_iter()
+                    .enumerate()
+                    .nth(cursor)
+                    .map(|(index, record)| (row_key(&record.raw, index), record.raw))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn row_key(record: &serde_json::Value, index: usize) -> String {
+    for field in ["id", "thread_id", "ref"] {
+        if let Some(value) = super::content::field_path(record, field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return format!("{field}:{value}");
+        }
+    }
+    format!("index:{index}")
+}
+
+fn projected_row_signatures(
+    binding: &super::content::ViewBinding,
+    response: &serde_json::Value,
+) -> std::collections::BTreeMap<String, String> {
+    match binding.widget.as_str() {
+        "rows" => super::content::project_records(binding, response)
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let signature = serde_json::json!({
+                    "primary": record.primary,
+                    "meta": record.meta,
+                    "tone": record.tone,
+                })
+                .to_string();
+                (row_key(&record.raw, index), signature)
+            })
+            .collect(),
+        "table" => {
+            let columns = super::content::table_columns(binding);
+            super::content::project_table(binding, response, &columns)
+                .into_iter()
+                .enumerate()
+                .map(|(index, record)| {
+                    let signature = serde_json::json!({
+                        "cells": record.cells,
+                        "cell_tones": record.cell_tones,
+                        "tone": record.tone,
+                    })
+                    .to_string();
+                    (row_key(&record.raw, index), signature)
+                })
+                .collect()
+        }
+        _ => std::collections::BTreeMap::new(),
+    }
+}
+
+fn parse_source_tile_key(source_key: &str) -> Option<crate::ids::TileId> {
+    source_key.parse::<u64>().ok().map(crate::ids::TileId::new)
+}
+
+fn refresh_matches_hint(value: Option<&serde_json::Value>, kind: &str) -> bool {
+    match value {
+        Some(serde_json::Value::String(s)) => s == kind,
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|s| s == kind)),
+        _ => false,
     }
 }
 
@@ -1205,6 +1454,92 @@ mod tests {
         let (source_ref, params) = fetch.expect("bound tile emits FetchSource");
         assert_eq!(source_ref, "service:ui/studio/threads");
         assert_eq!(params["limit"], 5);
+    }
+
+    #[test]
+    fn hint_refetch_matches_string_and_list_forms() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": ["view:ryeos/threads/list", "view:ryeos/node/status"],
+                "views": {
+                    "view:ryeos/threads/list": {
+                        "widget": "rows",
+                        "source": { "ref": "service:ui/studio/threads", "collection": "threads" },
+                        "projections": { "primary": "thread_id" },
+                        "refresh": { "on_hint": ["thread", "activity"] }
+                    },
+                    "view:ryeos/node/status": {
+                        "widget": "text",
+                        "source": { "ref": "service:system/status" },
+                        "refresh": { "on_hint": "thread" }
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+
+        let activity_fetches: Vec<String> = core
+            .effects_for_hint("activity")
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(activity_fetches, vec!["service:ui/studio/threads"]);
+
+        let thread_fetches: Vec<String> = core
+            .effects_for_hint("thread")
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(thread_fetches.contains(&"service:ui/studio/threads".to_string()));
+        assert!(thread_fetches.contains(&"service:system/status".to_string()));
+    }
+
+    #[test]
+    fn hint_refetch_reaches_visible_slot_views() {
+        let session = BrowserSession {
+            effective_surface: Some(serde_json::json!({
+                "name": "t",
+                "tiles": [],
+                "slots": {
+                    "top": { "content": "view:ryeos/node/status", "open": true, "size": 1 }
+                },
+                "views": {
+                    "view:ryeos/node/status": {
+                        "widget": "text",
+                        "source": { "ref": "service:system/status" },
+                        "refresh": { "on_hint": "thread" }
+                    }
+                }
+            })),
+            read_only: false,
+            ..Default::default()
+        };
+        let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
+        let fetches: Vec<(String, String)> = core
+            .effects_for_hint("thread")
+            .iter()
+            .filter_map(|effect| match &effect.kind {
+                StudioEffectKind::FetchSource {
+                    tile_id,
+                    source_ref,
+                    ..
+                } => Some((tile_id.clone(), source_ref.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fetches,
+            vec![("dock:top".to_string(), "service:system/status".to_string())]
+        );
     }
 
     #[test]

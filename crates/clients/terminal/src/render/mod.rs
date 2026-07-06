@@ -82,7 +82,7 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
     let center = chrome::draw_docks(&mut surface, body, vm);
     if let Some(root) = &vm.workspace.root {
         let border = theme::border_for(&vm.presentation.chrome.border);
-        draw_layout_node(&mut surface, center, root, border);
+        draw_layout_node(&mut surface, center, root, border, vm.now_ms);
     } else if let Some(backdrop) = &vm.workspace.backdrop {
         // Empty center: the backdrop is content — the ONE generic scene
         // renderer draws it (particles twinkle by generation). No
@@ -123,6 +123,7 @@ fn draw_layout_node(
     rect: Rect,
     node: &StudioLayoutNodeVm,
     border: Option<Border>,
+    now_ms: u64,
 ) {
     if rect.w == 0 || rect.h == 0 {
         return;
@@ -145,6 +146,7 @@ fn draw_layout_node(
             view,
             input.as_ref(),
             border,
+            now_ms,
         ),
         StudioLayoutNodeVm::Split {
             axis,
@@ -153,9 +155,9 @@ fn draw_layout_node(
             second,
         } => {
             let (first_rect, second_rect) = split_rect(rect, *axis, *ratio);
-            draw_layout_node(surface, first_rect, first, border);
+            draw_layout_node(surface, first_rect, first, border, now_ms);
             if let Some(second_rect) = second_rect {
-                draw_layout_node(surface, second_rect, second, border);
+                draw_layout_node(surface, second_rect, second, border, now_ms);
             }
         }
     }
@@ -194,7 +196,7 @@ fn split_rect(rect: Rect, axis: StudioSplitAxisVm, ratio: f32) -> (Rect, Option<
     }
 }
 
-fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
+fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms: u64) {
     if let StudioViewVm::Timeline {
         entries,
         entry_indents,
@@ -206,7 +208,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         return;
     }
     if let StudioViewVm::Rows { columns, rows, .. } = view {
-        widgets::rows::draw_rows(surface, rect, columns, rows);
+        widgets::rows::draw_rows(surface, rect, columns, rows, now_ms);
         return;
     }
     // Scenes (map/atlas) draw through the ONE generic scene renderer —
@@ -220,7 +222,7 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm) {
         return;
     }
     if let StudioViewVm::Table { columns, rows, .. } = view {
-        widgets::table::draw_table(surface, rect, columns, rows);
+        widgets::table::draw_table(surface, rect, columns, rows, now_ms);
         return;
     }
     let mut lines = Vec::new();
