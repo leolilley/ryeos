@@ -1,0 +1,43 @@
+# ryeos:unsigned
+name: project-schedules
+version: "1.0.0"
+description: Registered schedules and their state
+
+widget: table
+source:
+  ref: service:scheduler/list
+  params: {}
+  collection: schedules
+projections:
+  columns:
+    - label: schedule
+      field: schedule_id
+    - label: item
+      field: item_ref
+    - label: expression
+      field: expression
+    - label: enabled
+      field: enabled
+  tone:
+    field: enabled
+    map:
+      "true": good
+      "false": warn
+    default: neutral
+selection:
+  activate: pause
+affordances:
+  - id: pause
+    label: Pause
+    invoke:
+      plane: rye
+      tokens: [scheduler, pause]
+      args:
+        schedule_id: "{record.schedule_id}"
+  - id: resume
+    label: Resume
+    invoke:
+      plane: rye
+      tokens: [scheduler, resume]
+      args:
+        schedule_id: "{record.schedule_id}"

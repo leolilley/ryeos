@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T07:50:53Z:e44d41f29d8fe127f88a4f7838017929e6e905781dfeacf0ed6add5b8c5e41cd:ZSPCGmpa2ofkMnxbcGgFEXb0Ak7mW3QVQw13RJoMoPehJSGBrjaU+IieauhootGXO3OCqDPgzXtgBBTzliOJDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
 name: studio-workbench
 version: "1.0.0"
 description: Working seat - home pane beside a content-bound thread list
@@ -11,7 +11,7 @@ tiling:
 
 tiles:
   - "view:ryeos/graph/topology"
-  - "view:ryeos/threads/list"
+  - "view:ryeos/threads/history"
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
@@ -23,6 +23,19 @@ style:
 library:
   - view:ryeos/graph/topology
   - view:ryeos/atlas
+  - view:ryeos/threads/live
+  - view:ryeos/threads/live-all
+  - view:ryeos/threads/history
+  - view:ryeos/thread/transcript
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/node/threads/live
+  - view:ryeos/node/threads/history
+  - view:ryeos/node/events
+  - view:ryeos/node/remotes
+  - view:ryeos/node/bundles
+  - view:ryeos/node/gc
   - view:ryeos/run/activity
   - view:ryeos/run/all-activity
   - view:ryeos/projects/list

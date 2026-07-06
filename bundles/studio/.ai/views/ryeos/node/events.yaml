@@ -1,10 +1,7 @@
 # ryeos:unsigned
-name: node-activity
+name: node-events
 version: "1.0.0"
-description: >-
-  The node's execution pulse — what the one key is running now, what settled
-  inside the window and what it cost, above the latest durable events across
-  every thread on the node. Enter on an event steps into that thread's braid.
+description: Recent durable events across every thread on the node
 
 widget: sections
 affordances:
@@ -23,7 +20,6 @@ sections:
     source:
       ref: service:ui/studio/node/activity
       params:
-        # Pulse only — the Recent section fetches the feed itself.
         event_limit: 1
       collection: pulse
     projection:
@@ -34,9 +30,6 @@ sections:
       ref: service:ui/studio/node/activity
       params:
         event_limit: 80
-        # Feed noise is a content decision: seat facet writes are UI state,
-        # thread_usage is accounting (the Pulse carries it), cognition_out
-        # bulk text belongs to a thread's own braid lens.
         exclude_types: ["seat.facet", "thread_usage", "cognition_out"]
       collection: events
     projection:

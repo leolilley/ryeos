@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T07:50:53Z:728a88fb6d79ab00143076304898808ce80050e30e4efdf2a0f90f9cf82758b0:/PXiisNe+ErqQ9EWGhx55bWfsJG3jEVKFKJ8KvawK+RkOTclWH+PTPdrFjZCcLOo6Ctvk8DP9owKJYl4zyP2AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
 name: studio-base
 version: "1.0.0"
 description: RyeOS Studio home space
@@ -14,7 +14,7 @@ tiles: []
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
   top:    { content: "view:ryeos/node/status", open: false, size: 6 }
-  left: { content: "view:ryeos/threads/list", open: false, size: 32 }
+  left: { content: "view:ryeos/threads/history", open: false, size: 32 }
   right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 
 style:
@@ -25,6 +25,19 @@ backdrop: view:ryeos/backdrop/prism
 library:
   - view:ryeos/backdrop/prism
   - view:ryeos/input
+  - view:ryeos/threads/live
+  - view:ryeos/threads/live-all
+  - view:ryeos/threads/history
+  - view:ryeos/thread/transcript
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/node/threads/live
+  - view:ryeos/node/threads/history
+  - view:ryeos/node/events
+  - view:ryeos/node/remotes
+  - view:ryeos/node/bundles
+  - view:ryeos/node/gc
   - view:ryeos/run/activity
   - view:ryeos/run/all-activity
   - view:ryeos/projects/list

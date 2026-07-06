@@ -1,0 +1,16 @@
+# ryeos:unsigned
+name: node-bundles
+version: "1.0.0"
+description: Installed bundles on this node
+
+widget: table
+source:
+  ref: service:bundle/list
+  params: {}
+  collection: bundles
+projections:
+  columns:
+    - label: bundle
+      field: name
+    - label: path
+      field: path

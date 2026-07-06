@@ -901,6 +901,7 @@ fn status_bar_vm(
 
 fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
     let center_is_empty = core.workspace.center_is_empty();
+    let backdrop_visible = center_is_empty || surface_uses_backdrop_underlay(core);
     StudioWorkspaceVm {
         root: core
             .workspace
@@ -908,11 +909,9 @@ fn workspace_vm(core: &StudioCore) -> StudioWorkspaceVm {
             .map(|layout| layout_node_vm(&layout, core)),
         focused_tile: tile_id_text(core.workspace.focused_tile),
         center_is_empty,
-        // The backdrop scene resolves only on an empty center. The
-        // surface's `backdrop` ref selects the scene content (the
-        // renderer stays generic, so a data/service source later is
-        // invisible to it).
-        backdrop: center_is_empty.then(|| backdrop_scene(core)).flatten(),
+        // The backdrop scene resolves for empty centers, and for populated
+        // centers that opt into a translucent ambient underlay.
+        backdrop: backdrop_visible.then(|| backdrop_scene(core)).flatten(),
         tile_count: core.workspace.tile_ids().len(),
         docks: dock_plane_vm(core),
         lens_trail: core
@@ -963,6 +962,21 @@ fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
     let active_component = ((active_threads.max(0) as f32) * 0.06).clamp(0.0, 0.24);
     scene.energy = active_component.max(core.runtime.activity_pulse.clamp(0.0, 1.0));
     Some(scene)
+}
+
+fn surface_uses_backdrop_underlay(core: &StudioCore) -> bool {
+    core.data
+        .session
+        .as_ref()
+        .and_then(|session| session.effective_surface.as_ref())
+        .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+        .and_then(|surface| surface.ambient)
+        .is_some_and(|ambient| {
+            ambient.show_background.unwrap_or(true)
+                && ambient
+                    .opacity
+                    .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0)
+        })
 }
 
 fn dock_plane_vm(core: &StudioCore) -> StudioDockPlaneVm {

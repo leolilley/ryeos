@@ -1,0 +1,28 @@
+# ryeos:unsigned
+name: node-remotes
+version: "1.0.0"
+description: Configured remote nodes
+
+widget: table
+source:
+  ref: service:remote/list
+  params: {}
+  collection: remotes
+projections:
+  columns:
+    - label: remote
+      field: name
+    - label: url
+      field: url
+    - label: scope
+      field: scope
+selection:
+  activate: aim-site
+affordances:
+  - id: aim-site
+    label: Aim input at site
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        site: "{record.name}"

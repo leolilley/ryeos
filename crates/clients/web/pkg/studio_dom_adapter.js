@@ -25,7 +25,7 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
     opticFrame(vm.presentation?.frame),
     notices(vm.notices || []),
     topStatusLine(vm, chromeShell),
-    studioWorkspace(vm.workspace, presentation.motion, dispatchUi),
+    studioWorkspace(vm.workspace, vm.session?.ambient, presentation.motion, dispatchUi),
     statusLine(vm, chromeShell),
     launcherDialog(vm.launcher || {}, chromeShell),
   ];

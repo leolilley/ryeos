@@ -1,29 +1,22 @@
 # ryeos:unsigned
-name: run-activity
+name: node-threads-live
 version: "1.0.0"
-description: >-
-  The current project's live activity: active threads plus graph follow parents
-  suspended on live children, newest first. Enter steps into a thread's braid
-  (which in turn shows that thread's own children as drill-ins). The landing
-  lens, in place of the flat thread list.
+description: Node-wide live threads across project contexts
 
 widget: table
 source:
   ref: service:ui/studio/threads/list
   params:
-    # Only live threads — the settled history is not activity. Newest first.
     active: true
-    project: current
-    project_path: ""
     sort: newest
-    limit: 60
+    limit: 120
     exclude_item_prefixes:
       - service:ui/studio/
       - surface:ryeos/studio/
   collection: threads
 projections:
   columns:
-    - label: id
+    - label: thread
       field: thread_id
     - label: project
       field: project.name
@@ -32,7 +25,7 @@ projections:
     - label: stage
       field: current_node.node
     - label: follow
-      field: follow.display_state
+      field: follow.role
       tone:
         field: follow.display_state
         map:
@@ -44,7 +37,7 @@ projections:
     - label: started
       field: created_at
   expand:
-    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
   tone:
     field: status
     map:
@@ -52,14 +45,11 @@ projections:
       created: accent
       accepted: accent
       failed: danger
-      cancelled: warn
       killed: danger
-      timed_out: warn
+      timed_out: danger
+      cancelled: warn
       completed: good
     default: neutral
-# Enter steps into the thread's braid: aim the route at the thread (both thread +
-# chain_root so the braid resolves) and swap the single center lens to its
-# timeline, which renders the thread's own children as drill-ins.
 selection:
   activate: watch
 affordances:
@@ -72,8 +62,14 @@ affordances:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/thread/transcript
-      # Step INTO the braid (returnable via Backspace), pushing activity onto the
-      # drill stack so the operator can walk back up to the live view.
       drill: true
+input:
+  id: filter
+  feeds:
+    fields:
+      - { param: status, label: status }
+      - { param: kind, label: kind }
+      - { param: requested_by, label: source }
+    debounce_ms: 120
 refresh:
   on_hint: [thread, activity]

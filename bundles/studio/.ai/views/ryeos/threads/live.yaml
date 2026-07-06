@@ -1,17 +1,15 @@
 # ryeos:unsigned
-name: run-activity
+name: threads-live
 version: "1.0.0"
 description: >-
-  The current project's live activity: active threads plus graph follow parents
-  suspended on live children, newest first. Enter steps into a thread's braid
-  (which in turn shows that thread's own children as drill-ins). The landing
-  lens, in place of the flat thread list.
+  Current-project live threads: active execution threads plus graph follow
+  parents suspended on live children, newest first. This is the cockpit's
+  Activity lens.
 
 widget: table
 source:
   ref: service:ui/studio/threads/list
   params:
-    # Only live threads — the settled history is not activity. Newest first.
     active: true
     project: current
     project_path: ""
@@ -57,9 +55,6 @@ projections:
       timed_out: warn
       completed: good
     default: neutral
-# Enter steps into the thread's braid: aim the route at the thread (both thread +
-# chain_root so the braid resolves) and swap the single center lens to its
-# timeline, which renders the thread's own children as drill-ins.
 selection:
   activate: watch
 affordances:
@@ -72,8 +67,6 @@ affordances:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/thread/transcript
-      # Step INTO the braid (returnable via Backspace), pushing activity onto the
-      # drill stack so the operator can walk back up to the live view.
       drill: true
 refresh:
   on_hint: [thread, activity]

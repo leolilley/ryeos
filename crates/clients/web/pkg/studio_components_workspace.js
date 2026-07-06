@@ -8,7 +8,7 @@ const atlasViewport = {
 
 const utf8Encoder = new TextEncoder();
 
-export function studioWorkspace(vm, motion, dispatchUi) {
+export function studioWorkspace(vm, ambient, motion, dispatchUi) {
   const main = el("main", "studio-workspace");
   // There is no "home" mode. The plane (docks incl. the real bottom input
   // slot) renders in every state; the only branch is backdrop-vs-tiles in
@@ -18,11 +18,15 @@ export function studioWorkspace(vm, motion, dispatchUi) {
     return main;
   }
   if (vm.center_is_empty) main.classList.add("empty-center");
-  main.append(workspacePlane(vm, dispatchUi, motion));
+  const underlay = vm.root && vm.backdrop && ambient?.show_background !== false
+    && Number(ambient?.opacity || 1) > 0
+    && Number(ambient?.opacity || 1) < 1;
+  if (underlay) main.classList.add("ambient-underlay");
+  main.append(workspacePlane(vm, ambient, dispatchUi, motion));
   return main;
 }
 
-function workspacePlane(vm, dispatchUi, motion) {
+function workspacePlane(vm, ambient, dispatchUi, motion) {
   const plane = el("section", "studio-workspace-plane");
   const docks = vm.docks || {};
   const left = dockTile(docks.left, dispatchUi);
@@ -52,6 +56,15 @@ function workspacePlane(vm, dispatchUi, motion) {
   if (top) plane.append(top);
 
   const stack = el("section", "studio-workspace-stack");
+  const underlay = vm.root && vm.backdrop && ambient?.show_background !== false
+    && Number(ambient?.opacity || 1) > 0
+    && Number(ambient?.opacity || 1) < 1;
+  if (underlay) {
+    const backdrop = backdropScene(vm.backdrop, dispatchUi);
+    backdrop.classList.add("underlay");
+    backdrop.style.opacity = String(Number(ambient.opacity));
+    stack.append(backdrop);
+  }
   if (vm.root) {
     stack.append(layoutNode(vm.root, dispatchUi, motion));
   } else if (vm.backdrop) {

@@ -1845,6 +1845,23 @@ body,
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.studio-workspace-stack > .studio-backdrop.underlay {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.studio-workspace-stack > .studio-backdrop.underlay + .studio-tile,
+.studio-workspace-stack > .studio-backdrop.underlay + .studio-split {
+  position: relative;
+  z-index: 1;
+}
+
+.studio-workspace.ambient-underlay .studio-tile {
+  background: rgba(40, 40, 40, 0.72);
 }
 
 .studio-dock-tile {
