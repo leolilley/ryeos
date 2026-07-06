@@ -200,10 +200,14 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
                     (ramp_for(object)[steady_level(object.scale[0])], style)
                 };
                 if let Some(end) = object.end {
-                    let end = match object.orbit {
+                    let mut end = match object.orbit {
                         Some(speed) => orbit_point(end, speed, scene.generation, pace).0,
                         None => end,
                     };
+                    let offset = break_offset(object, scene.generation, pace);
+                    end[0] += offset[0];
+                    end[1] += offset[1];
+                    end[2] += offset[2];
                     let Some((end_col, end_row)) = project(end) else {
                         continue;
                     };
@@ -259,10 +263,52 @@ const ORBIT_SQUASH: f32 = 0.45;
 /// position fixes the ring radius and starting phase, so generation 0
 /// renders the scene exactly as authored.
 fn orbited_position(object: &StudioSceneObjectVm, generation: u64, pace: u64) -> ([f32; 3], f32) {
-    match object.orbit {
+    let (mut position, depth) = match object.orbit {
         Some(speed) => orbit_point(object.position, speed, generation, pace),
         None => (object.position, 1.0),
+    };
+    let offset = break_offset(object, generation, pace);
+    position[0] += offset[0];
+    position[1] += offset[1];
+    position[2] += offset[2];
+    (position, depth)
+}
+
+fn break_offset(object: &StudioSceneObjectVm, generation: u64, pace: u64) -> [f32; 3] {
+    let Some(motion) = object.break_motion else {
+        return [0.0, 0.0, 0.0];
+    };
+    let period = motion.period.max(4);
+    let step = generation
+        .wrapping_mul(pace)
+        .wrapping_add(motion.phase)
+        % period;
+    let progress = step as f32 / period as f32;
+    let eased = 0.5 - 0.5 * (progress * std::f32::consts::TAU).cos();
+    [
+        motion.away[0] * eased,
+        motion.away[1] * eased,
+        motion.away[2] * eased,
+    ]
+}
+
+fn local_clip_allows(object: &StudioSceneObjectVm, lx: f32, ly: f32) -> bool {
+    let Some(clip) = object.clip else {
+        return true;
+    };
+    if clip.x_min.map_or(false, |min| lx < min) {
+        return false;
     }
+    if clip.x_max.map_or(false, |max| lx > max) {
+        return false;
+    }
+    if clip.y_min.map_or(false, |min| ly < min) {
+        return false;
+    }
+    if clip.y_max.map_or(false, |max| ly > max) {
+        return false;
+    }
+    true
 }
 
 fn orbit_point(point: [f32; 3], speed: f32, generation: u64, pace: u64) -> ([f32; 3], f32) {
@@ -376,6 +422,12 @@ fn draw_fill(
     let ramp = ramp_for(object);
     let noise_amp = 0.10 + 0.12 * energy;
     let opacity = object.opacity.clamp(0.1, 1.0);
+    let offset = break_offset(object, scene.generation, pace);
+    let position = [
+        object.position[0] + offset[0],
+        object.position[1] + offset[1],
+        object.position[2] + offset[2],
+    ];
 
     for row in 0..h {
         for col in 0..w {
@@ -386,8 +438,11 @@ fn draw_fill(
             let y = ((h - 1) as f32 / 2.0 - row as f32) / (scale * zoom)
                 + center.1
                 + scene.camera.target[1];
-            let lx = x - object.position[0];
-            let ly = y - object.position[1];
+            let lx = x - position[0];
+            let ly = y - position[1];
+            if !local_clip_allows(object, lx, ly) {
+                continue;
+            }
 
             let (sd, shade) = match object.shape.as_deref() {
                 Some("sphere") => sphere_sample(object.scale[0], lx, ly, light_az),
@@ -644,6 +699,24 @@ impl Bounds {
                     object.position[0] + object.scale[0],
                     object.position[1] + reach,
                     0.0,
+                ]);
+                if let Some(motion) = object.break_motion {
+                    consider([
+                        object.position[0] + motion.away[0] - object.scale[0],
+                        object.position[1] + motion.away[1] - reach,
+                        0.0,
+                    ]);
+                    consider([
+                        object.position[0] + motion.away[0] + object.scale[0],
+                        object.position[1] + motion.away[1] + reach,
+                        0.0,
+                    ]);
+                }
+            } else if let Some(motion) = object.break_motion {
+                consider([
+                    object.position[0] + motion.away[0],
+                    object.position[1] + motion.away[1],
+                    object.position[2] + motion.away[2],
                 ]);
             }
         }

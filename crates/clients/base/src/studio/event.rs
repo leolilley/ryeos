@@ -48,6 +48,7 @@ pub enum StudioAction {
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
+    ToggleBackdropShards,
     ToggleDock {
         edge: StudioDockEdge,
     },

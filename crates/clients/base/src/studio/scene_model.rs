@@ -86,11 +86,41 @@ pub struct StudioSceneObjectVm {
     /// sweep across the face and each facet rolls through the light.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spin: Option<f32>,
+    /// Local-space clip window for a fill shape. This lets content shard
+    /// one shape into pieces while the renderer still samples the same
+    /// generic SDF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clip: Option<SceneClipVm>,
+    /// Looping offset motion: the object eases from its authored
+    /// position to `away` and back, giving scene content a generic
+    /// break-apart/rejoin animation.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "break")]
+    pub break_motion: Option<SceneBreakMotionVm>,
     /// Whether this object contributes to scene fit bounds. Decorative
     /// particles can opt out so the main object keeps visual scale while
     /// the particles are still drawn and may clip at tight edges.
     #[serde(default = "default_true")]
     pub fit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SceneClipVm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_max: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y_max: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SceneBreakMotionVm {
+    pub away: [f32; 3],
+    pub period: u64,
+    #[serde(default)]
+    pub phase: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -572,6 +602,8 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> StudioScene
             .get("spin")
             .and_then(serde_json::Value::as_f64)
             .map(|speed| speed as f32);
+        object.clip = read_clip(obj.get("clip"));
+        object.break_motion = read_break_motion(obj.get("break"));
         object.fit = obj
             .get("fit")
             .and_then(serde_json::Value::as_bool)
@@ -616,6 +648,40 @@ fn read_scale(v: Option<&serde_json::Value>) -> [f32; 3] {
     [s, s, s]
 }
 
+fn read_clip(v: Option<&serde_json::Value>) -> Option<SceneClipVm> {
+    let clip = v?;
+    let get = |name: &str| {
+        clip.get(name)
+            .and_then(serde_json::Value::as_f64)
+            .map(|value| value as f32)
+    };
+    Some(SceneClipVm {
+        x_min: get("x_min"),
+        x_max: get("x_max"),
+        y_min: get("y_min"),
+        y_max: get("y_max"),
+    })
+}
+
+fn read_break_motion(v: Option<&serde_json::Value>) -> Option<SceneBreakMotionVm> {
+    let motion = v?;
+    let away = read_position(motion.get("away"));
+    let period = motion
+        .get("period")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|period| *period > 0)
+        .unwrap_or(96);
+    let phase = motion
+        .get("phase")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some(SceneBreakMotionVm {
+        away,
+        period,
+        phase,
+    })
+}
+
 fn scene_tone(name: Option<&str>) -> StudioTone {
     match name {
         Some("accent") => StudioTone::Accent,
@@ -652,6 +718,8 @@ fn scene_object(
         shape: None,
         orbit: None,
         spin: None,
+        clip: None,
+        break_motion: None,
         fit: true,
     }
 }
@@ -757,6 +825,7 @@ mod tests {
         let body = serde_json::json!({
             "objects": [
                 { "kind": "particle", "position": [1.0, 2.0], "scale": 0.9, "color": "#d65d0e", "tone": "accent", "opacity": 0.95 },
+                { "kind": "fill", "shape": "prism", "position": [0.0, 0.0], "scale": [3.0, 3.6, 2.6], "clip": { "x_min": -3.0, "x_max": 0.0 }, "break": { "away": [-2.0, 0.5], "period": 120, "phase": 8 } },
                 { "kind": "text", "position": [0.0, -8.0], "label": "RYE OS", "color": "#d65d0e", "tone": "accent" }
             ]
         });
@@ -770,6 +839,16 @@ mod tests {
         assert_eq!(particle.position, [1.0, 2.0, 0.0]);
         assert_eq!(particle.scale, [0.9, 0.9, 0.9]);
         assert!((particle.opacity - 0.95).abs() < 1e-6);
+        let shard = scene
+            .objects
+            .iter()
+            .find(|o| o.kind == StudioSceneObjectKind::Fill)
+            .expect("fill shard from body");
+        assert_eq!(shard.clip.expect("clip").x_max, Some(0.0));
+        let motion = shard.break_motion.expect("break motion");
+        assert_eq!(motion.away, [-2.0, 0.5, 0.0]);
+        assert_eq!(motion.period, 120);
+        assert_eq!(motion.phase, 8);
         let brand = scene
             .objects
             .iter()

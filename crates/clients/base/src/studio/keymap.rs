@@ -122,6 +122,9 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'b') => {
             action(StudioAction::ToggleBottomStatusBar)
         }
+        StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'s') => {
+            action(StudioAction::ToggleBackdropShards)
+        }
         StudioKey::ArrowUp if event.modifiers.ctrl_shift() => resize(FocusDirection::Up),
         StudioKey::ArrowDown if event.modifiers.ctrl_shift() => resize(FocusDirection::Down),
         StudioKey::ArrowLeft if event.modifiers.ctrl_shift() => resize(FocusDirection::Left),

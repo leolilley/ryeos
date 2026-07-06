@@ -25,6 +25,7 @@ backdrop: view:ryeos/backdrop/prism
 
 library:
   - view:ryeos/backdrop/prism
+  - view:ryeos/backdrop/prism-shards
   - view:ryeos/backdrop/splash
   - view:ryeos/input
   - view:ryeos/threads/live

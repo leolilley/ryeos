@@ -816,9 +816,9 @@ fn status_bar_vm(
         .unwrap_or_default();
     let (usage_in, usage_out) = conversation_usage(core);
     let key_hint = if core.workspace.lens_stack.is_empty() {
-        "ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
+        "ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move".to_string()
     } else {
-        "⌫ back · alt+← back · ctrl+k open · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
+        "⌫ back · alt+← back · ctrl+k open · alt+s shards · alt+t/b bars · ctrl+←/→ tab · ctrl+↑/↓ move"
             .to_string()
     };
     StudioStatusBarVm {
@@ -2060,6 +2060,13 @@ fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> 
 
 fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     let mut items = Vec::new();
+    items.push(StudioLauncherItemVm {
+        label: "Toggle crystal shards".to_string(),
+        hint: "switch backdrop between prism and sharded prism".to_string(),
+        action: StudioAction::ToggleBackdropShards,
+        secondary_action: None,
+        enabled: true,
+    });
 
     // A recoverable failed terminal offers retry: re-submit its own stimulus as
     // a continuation, retargeted at the selected failed thread, pre-filled for
@@ -2246,6 +2253,7 @@ fn help(core: &StudioCore) -> StudioHelpVm {
                 "Ctrl+K",
                 "Open the lens launcher (swap the center lens)",
             ),
+            entry("Backdrop", "Alt+S", "Toggle the crystal shard backdrop"),
             entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
             entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
             entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),

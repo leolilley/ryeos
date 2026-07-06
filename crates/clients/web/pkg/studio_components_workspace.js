@@ -327,15 +327,28 @@ function backdropScene(scene, _dispatchUi) {
   const xs = [];
   const ys = [];
   fitSource.forEach((object) => {
-    const px = object.position || [0, 0, 0];
+    const positions = [object.position || [0, 0, 0]];
+    const motion = object.break;
+    if (motion?.away) {
+      const base = object.position || [0, 0, 0];
+      positions.push([
+        Number(base[0] || 0) + Number(motion.away[0] || 0),
+        Number(base[1] || 0) + Number(motion.away[1] || 0),
+        Number(base[2] || 0) + Number(motion.away[2] || 0),
+      ]);
+    }
     if (object.kind === "fill" && Array.isArray(object.scale)) {
       const radius = Number(object.scale[0] || 1);
       const reach = Number(object.scale[1] || 1) + Number(object.scale[2] || 0);
-      xs.push(px[0] - radius, px[0] + radius);
-      ys.push(px[1] - reach, px[1] + reach);
+      positions.forEach((px) => {
+        xs.push(px[0] - radius, px[0] + radius);
+        ys.push(px[1] - reach, px[1] + reach);
+      });
     } else {
-      xs.push(px[0] || 0);
-      ys.push(px[1] || 0);
+      positions.forEach((px) => {
+        xs.push(px[0] || 0);
+        ys.push(px[1] || 0);
+      });
     }
   });
   const minX = Math.min(...xs, -1), maxX = Math.max(...xs, 1);
@@ -343,7 +356,7 @@ function backdropScene(scene, _dispatchUi) {
   const spanX = Math.max(0.001, maxX - minX);
   const spanY = Math.max(0.001, maxY - minY);
   objects.forEach((object, index) => {
-    const px = object.position || [0, 0, 0];
+    const px = animatedObjectPosition(object, generation);
     const left = 6 + ((px[0] - minX) / spanX) * 88;
     const top = 6 + (1 - (px[1] - minY) / spanY) * 88;
     if (object.kind === "text" || object.kind === "label_anchor") {
@@ -352,6 +365,27 @@ function backdropScene(scene, _dispatchUi) {
       label.style.top = `${top}%`;
       label.style.setProperty("--node-color", object.color || "#d65d0e");
       stage.append(label);
+      return;
+    }
+    if (object.kind === "fill") {
+      const shard = el("span", `studio-backdrop-shard ${object.tone || "neutral"}`);
+      const scale = object.scale || [1, 1, 0];
+      const clip = object.clip || {};
+      const fullWidth = Math.max(8, (Number(scale[0] || 1) * 2 / spanX) * 88);
+      const fullHeight = Math.max(14, ((Number(scale[1] || 1) + Number(scale[2] || 0)) * 2 / spanY) * 88);
+      const xMin = Number(clip.x_min ?? -Number(scale[0] || 1));
+      const xMax = Number(clip.x_max ?? Number(scale[0] || 1));
+      const sliceWidth = Math.max(0.12, Math.min(1, (xMax - xMin) / Math.max(0.001, Number(scale[0] || 1) * 2)));
+      const sliceCenter = (xMin + xMax) / 2 / Math.max(0.001, Number(scale[0] || 1) * 2);
+      const spin = Number(object.spin || 0) * generation;
+      shard.style.left = `${left + sliceCenter * fullWidth * 0.18}%`;
+      shard.style.top = `${top}%`;
+      shard.style.width = `${fullWidth * sliceWidth}%`;
+      shard.style.height = `${fullHeight}%`;
+      shard.style.opacity = String(object.opacity ?? 1);
+      shard.style.setProperty("--node-color", object.color || "#d65d0e");
+      shard.style.setProperty("--shard-tilt", `${((spin % 18) - 9).toFixed(2)}deg`);
+      stage.append(shard);
       return;
     }
     const dot = el("span", `studio-backdrop-dot ${object.tone || "neutral"}`);
@@ -374,6 +408,21 @@ function backdropScene(scene, _dispatchUi) {
   });
   wrap.append(stage);
   return wrap;
+}
+
+function animatedObjectPosition(object, generation) {
+  const base = object?.position || [0, 0, 0];
+  const motion = object?.break;
+  if (!motion?.away) return base;
+  const period = Math.max(4, Number(motion.period || 96));
+  const phase = Number(motion.phase || 0);
+  const progress = ((generation + phase) % period) / period;
+  const eased = 0.5 - 0.5 * Math.cos(progress * Math.PI * 2);
+  return [
+    Number(base[0] || 0) + Number(motion.away[0] || 0) * eased,
+    Number(base[1] || 0) + Number(motion.away[1] || 0) * eased,
+    Number(base[2] || 0) + Number(motion.away[2] || 0) * eased,
+  ];
 }
 
 function sizeIndex(scale) {

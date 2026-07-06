@@ -509,6 +509,12 @@ impl StudioCore {
                 self.bump_generation();
                 Vec::new()
             }
+            StudioAction::ToggleBackdropShards => {
+                if self.toggle_backdrop_shards() {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
             StudioAction::ToggleDock { edge } => {
                 // Toggling flips a surface-declared slot open/closed; a
                 // closed slot frees its space. Absent edges have no slot.
@@ -720,6 +726,39 @@ impl StudioCore {
                 }
             }
         }
+    }
+
+    fn toggle_backdrop_shards(&mut self) -> bool {
+        const PRISM: &str = "view:ryeos/backdrop/prism";
+        const SHARDS: &str = "view:ryeos/backdrop/prism-shards";
+        let current = self
+            .data
+            .session
+            .as_ref()
+            .and_then(|session| session.effective_surface.as_ref())
+            .and_then(serde_json::Value::as_object)
+            .and_then(|surface| surface.get("backdrop"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(PRISM);
+        let next = if current == SHARDS { PRISM } else { SHARDS };
+        if !self.views.contains_key(next) {
+            self.notice(format!("{next} is not loaded."), StudioTone::Warn);
+            return false;
+        }
+        let Some(surface) = self
+            .data
+            .session
+            .as_mut()
+            .and_then(|session| session.effective_surface.as_mut())
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return false;
+        };
+        surface.insert(
+            "backdrop".to_string(),
+            serde_json::Value::String(next.to_string()),
+        );
+        true
     }
 
     pub(crate) fn has_pending_invoke(

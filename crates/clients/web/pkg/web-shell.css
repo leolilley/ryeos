@@ -2544,6 +2544,19 @@ body,
   transition: opacity 0.18s linear;
 }
 
+.studio-backdrop-shard {
+  position: absolute;
+  transform: translate(-50%, -50%) skewY(var(--shard-tilt, 0deg));
+  transform-origin: 50% 50%;
+  border-radius: 2px;
+  background:
+    linear-gradient(115deg, transparent 0 16%, color-mix(in srgb, var(--node-color, #d65d0e) 34%, transparent) 17% 34%, transparent 35% 49%, color-mix(in srgb, var(--node-color, #d65d0e) 78%, white 4%) 50% 64%, transparent 65% 100%),
+    linear-gradient(90deg, color-mix(in srgb, var(--node-color, #d65d0e) 28%, transparent), var(--node-color, #d65d0e), color-mix(in srgb, var(--node-color, #d65d0e) 18%, transparent));
+  clip-path: polygon(50% 0%, 100% 24%, 78% 50%, 100% 76%, 50% 100%, 0% 76%, 22% 50%, 0% 24%);
+  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--node-color, #d65d0e) 35%, transparent));
+  transition: opacity 0.18s linear;
+}
+
 .studio-backdrop-text {
   position: absolute;
   transform: translate(-50%, -50%);

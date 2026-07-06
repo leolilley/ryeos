@@ -69,6 +69,7 @@ library:
   - view:ryeos/node/status
   - view:ryeos/gc/status
   - view:ryeos/backdrop/prism
+  - view:ryeos/backdrop/prism-shards
   - view:ryeos/backdrop/splash
 
 input:
