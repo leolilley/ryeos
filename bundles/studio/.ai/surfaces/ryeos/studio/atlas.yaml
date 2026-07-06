@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T05:38:46Z:3aaf3c714b0330f74ecac3fb246272d921c93bb38c42f50f585b2d816e351b1e:LDhGAEyptbJyjnk14yDTAs3h7oOfJYYlmdd48Qfvg8c5ZXrrx3m6+/o08ES81Frj4V4PVdDyJ2E8Xq/ix+HLCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
 name: studio-atlas
 version: "1.0.0"
 description: RyeOS Studio with a Three.js 2D namespace atlas background
@@ -13,7 +13,7 @@ tiles: []
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  left: { content: "view:ryeos/threads/list", open: false, size: 32 }
+  left: { content: "view:ryeos/threads/history", open: false, size: 32 }
   right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 
 style:

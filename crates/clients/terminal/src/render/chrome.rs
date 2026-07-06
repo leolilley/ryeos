@@ -221,6 +221,7 @@ pub fn draw_tile(
     input: Option<&StudioInputVm>,
     border: Option<Border>,
     now_ms: u64,
+    preserve_background: bool,
 ) {
     let w = rect.w as usize;
     let h = rect.h as usize;
@@ -238,7 +239,9 @@ pub fn draw_tile(
     } else {
         Style::new().fg(MUTED).bg(BG)
     };
-    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    if !preserve_background {
+        fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    }
     if w < 2 || h < 2 {
         super::draw_view(surface, rect, view, now_ms);
         return;
@@ -430,6 +433,7 @@ mod tests {
             Some(&input),
             Some(Border::Sharp),
             0,
+            false,
         );
         let row = |y: usize| (0..40).map(|x| surface.get(x, y).rune).collect::<String>();
         // Filter strip on the first interior row (inside the top border).

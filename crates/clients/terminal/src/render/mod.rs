@@ -80,9 +80,28 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
     let body_h = height.saturating_sub(top_h + bottom_h).max(1);
     let body = Rect::new(0, top_h as u16, width as u16, body_h as u16);
     let center = chrome::draw_docks(&mut surface, body, vm);
+    let draw_backdrop_underlay = vm.workspace.root.is_some()
+        && vm.session.ambient.show_background
+        && vm
+            .session
+            .ambient
+            .opacity
+            .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
     if let Some(root) = &vm.workspace.root {
+        if draw_backdrop_underlay {
+            if let Some(backdrop) = &vm.workspace.backdrop {
+                widgets::scene::draw_scene(&mut surface, center, backdrop);
+            }
+        }
         let border = theme::border_for(&vm.presentation.chrome.border);
-        draw_layout_node(&mut surface, center, root, border, vm.now_ms);
+        draw_layout_node(
+            &mut surface,
+            center,
+            root,
+            border,
+            vm.now_ms,
+            draw_backdrop_underlay,
+        );
     } else if let Some(backdrop) = &vm.workspace.backdrop {
         // Empty center: the backdrop is content — the ONE generic scene
         // renderer draws it (particles twinkle by generation). No
@@ -124,6 +143,7 @@ fn draw_layout_node(
     node: &StudioLayoutNodeVm,
     border: Option<Border>,
     now_ms: u64,
+    preserve_background: bool,
 ) {
     if rect.w == 0 || rect.h == 0 {
         return;
@@ -147,6 +167,7 @@ fn draw_layout_node(
             input.as_ref(),
             border,
             now_ms,
+            preserve_background,
         ),
         StudioLayoutNodeVm::Split {
             axis,
@@ -155,9 +176,23 @@ fn draw_layout_node(
             second,
         } => {
             let (first_rect, second_rect) = split_rect(rect, *axis, *ratio);
-            draw_layout_node(surface, first_rect, first, border, now_ms);
+            draw_layout_node(
+                surface,
+                first_rect,
+                first,
+                border,
+                now_ms,
+                preserve_background,
+            );
             if let Some(second_rect) = second_rect {
-                draw_layout_node(surface, second_rect, second, border, now_ms);
+                draw_layout_node(
+                    surface,
+                    second_rect,
+                    second,
+                    border,
+                    now_ms,
+                    preserve_background,
+                );
             }
         }
     }

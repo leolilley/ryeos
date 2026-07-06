@@ -1,0 +1,68 @@
+# ryeos:unsigned
+name: studio-project
+version: "1.0.0"
+description: Active project explorer for files, signed items, and related execution
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.46, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - "view:ryeos/project/files"
+  - "view:ryeos/project/items"
+  - "view:ryeos/threads/live"
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
+  right:  { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
+
+backdrop: view:ryeos/backdrop/prism
+
+library:
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/threads/live
+  - view:ryeos/threads/history
+  - view:ryeos/thread/transcript
+  - view:ryeos/item/inspector
+  - view:ryeos/item/explain
+  - view:ryeos/input
+  - view:ryeos/node/status
+  - view:ryeos/backdrop/prism
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+      project_path: ""
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.files
+    label: Files
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.schedules
+    label: Schedules
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View

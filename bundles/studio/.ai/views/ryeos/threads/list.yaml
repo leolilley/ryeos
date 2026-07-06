@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T07:34:24Z:cc732ee77f2f12115c1f46ee399cb98cead1f882a3ad8f85fbb6a86e681a31bf:VSbiK1CqkruGIqsqZIGebTwB9lFRraHTBQQRgYkNiQBpWX0OjxuyekaqNoJpftmi8kR/UZ9lsGrAsK2VrgK8Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
@@ -68,7 +68,7 @@ affordances:
       merge:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/chain/timeline
+      open_view: view:ryeos/thread/transcript
       # Step INTO the braid (returnable via Backspace) rather than a flat swap:
       # the list + its context are pushed onto the drill stack so the operator
       # can walk back up the execution tree.
@@ -87,7 +87,7 @@ affordances:
       merge:
         thread: "{record.follow.child_thread_id}"
         chain_root: "{record.follow.child_chain_root_id}"
-      open_view: view:ryeos/chain/timeline
+      open_view: view:ryeos/thread/transcript
       # Step into the child chain — a return frame lets Backspace walk back to
       # the parent.
       drill: true

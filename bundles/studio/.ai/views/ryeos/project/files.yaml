@@ -1,0 +1,16 @@
+# ryeos:unsigned
+name: project-files
+version: "1.0.0"
+description: Active project file tree
+
+widget: rows
+source:
+  ref: service:ui/studio/files/list
+  params:
+    root: project
+    project_path: ""
+    path: ""
+  collection: entries
+projections:
+  primary: name
+  meta: kind

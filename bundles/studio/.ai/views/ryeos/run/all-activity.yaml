@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T08:06:08Z:8fbfcfc9fb801dec416cd2aa7bd5c5ee1da6e0575d3900102b6eaa5b3fd53a03:qLRP+v5WuJa8+mALtxCkg9x4woV6VpC+HeCWlscRXz7xdy3YqGlk0SW4wOTeXYZqnPBdwS7a+yjc0sK7Rg/WDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
 name: run-all-activity
 version: "1.0.0"
 description: >-
@@ -64,7 +64,7 @@ affordances:
       merge:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
-      open_view: view:ryeos/chain/timeline
+      open_view: view:ryeos/thread/transcript
       drill: true
 refresh:
   on_hint: [thread, activity]
