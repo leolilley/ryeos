@@ -354,27 +354,27 @@ pub fn register_standard_bundle(state_path: &Path, fixture: &FastFixture) -> Res
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
     fs::write(dir.join("standard.yaml"), signed)?;
-    // Studio bundle was split from standard — tests that register
-    // standard also need Studio for the UI service catalog self-check.
-    register_studio_bundle(state_path, fixture)?;
+    // RyeOS UI bundle was split from standard — tests that register
+    // standard also need RyeOS UI for the UI service catalog self-check.
+    register_ryeos_ui_bundle(state_path, fixture)?;
     Ok(())
 }
 
 /// Write a `kind: node` bundle record pointing at
-/// `bundles/studio`, signed with the publisher key. Use this when
-/// a test needs the Studio bundle's UI routes and services.
-pub fn register_studio_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
-    let studio = super::workspace_root().join("bundles/studio");
-    if !studio.is_dir() {
-        anyhow::bail!("bundles/studio does not exist at {}", studio.display());
+/// `bundles/ryeos-ui`, signed with the publisher key. Use this when
+/// a test needs the RyeOS UI bundle's UI routes and services.
+pub fn register_ryeos_ui_bundle(state_path: &Path, fixture: &FastFixture) -> Result<()> {
+    let ryeos_ui = super::workspace_root().join("bundles/ryeos-ui");
+    if !ryeos_ui.is_dir() {
+        anyhow::bail!("bundles/ryeos-ui does not exist at {}", ryeos_ui.display());
     }
-    let abs = studio.canonicalize()?;
+    let abs = ryeos_ui.canonicalize()?;
     let dir = state_path.join(AI_DIR).join("node").join("bundles");
     fs::create_dir_all(&dir)?;
-    let body = node_bundle_record_body("studio", &abs)?;
+    let body = node_bundle_record_body("ryeos-ui", &abs)?;
     let signed =
         lillux::signature::sign_content_at(&body, &fixture.publisher, "#", None, FAST_FIXTURE_TIME);
-    fs::write(dir.join("studio.yaml"), signed)?;
+    fs::write(dir.join("ryeos-ui.yaml"), signed)?;
     Ok(())
 }
 

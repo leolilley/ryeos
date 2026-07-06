@@ -252,7 +252,7 @@ The repository currently includes bundles such as:
 | `standard`     | Execution-facing workflows: directives, tools, graphs, threads, scheduler, and runtimes. |
 | `web`          | Web-oriented tools and runtimes.                                                         |
 | `browser`      | Browser automation tools.                                                                |
-| `studio`       | UI/operator-facing bundle assets.                                                        |
+| `ryeos-ui`       | UI/operator-facing bundle assets.                                                        |
 | `hosted-node`  | Policy for exposing a node as a hosted remote target.                                    |
 | `central-auth` | Reusable app-level auth primitives for RyeOS-backed projects.                            |
 
@@ -282,7 +282,7 @@ projection of its thread's durable state.
 | `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, and UI assets.   |
 | `crates/bin/cli`               | `ryeos`, the operator CLI and MCP target.                                           |
 | `crates/bin/daemon`            | `ryeosd`, the local node daemon.                                                    |
-| `crates/clients/*`             | Client surfaces: shared studio base, terminal, and web.                             |
+| `crates/clients/*`             | Client surfaces: shared ryeos-ui base, terminal, and web.                             |
 | `crates/runtimes/*`            | Directive, graph, and knowledge runtimes.                                           |
 | `crates/state/*`               | Durable state, scheduler, and vault crates.                                         |
 | `crates/tools/*`               | Bundle-owned tool binaries and handler protocols.                                   |

@@ -1,0 +1,14 @@
+# ryeos:signed:2026-06-19T05:40:59Z:6cc453337a3152665037f8b43ef04ca7651f01b17a72d30ff0ef7dce3aad8f4b:WDosm7F6y5f1yfrMpOzSYRgvp61C+2PYhZ1U4Snc0/kTGvYKSZrTck2y/zQo03FndnTrylUB9WJ+GLOOAf/gAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- web
+- base
+description: Open the browser RyeOS UI base surface.
+defaults:
+  surface: surface:ryeos/ui/base
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

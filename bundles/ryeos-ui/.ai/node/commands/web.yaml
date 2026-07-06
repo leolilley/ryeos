@@ -1,0 +1,16 @@
+# ryeos:signed:2026-06-19T05:40:59Z:ba3a608eb48702419c8f7a52eda1b4e3cfca028347ad2f455ef1fc4c02b3a87c:Emumw+zKwzH2NL0kjYYdi6oEdRPmWefUjuXrYdNtAkKTElooZMY3bmmXhJdtwhJJakzN4QO1fxu2QYKaebAuBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- web
+description: Open the browser RyeOS UI. Defaults to the Atlas surface.
+forms:
+- slots:
+  - field: surface
+defaults:
+  surface: surface:ryeos/ui/atlas
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/web

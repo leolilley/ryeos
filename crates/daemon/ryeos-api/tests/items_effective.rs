@@ -43,7 +43,7 @@ async fn wrong_kind_returns_typed_error_code() {
     let result = call_effective(
         &state,
         serde_json::json!({
-            "canonical_ref": "surface:ryeos/studio/base",
+            "canonical_ref": "surface:ryeos/ui/base",
             "expected_kind": "client"
         }),
     )

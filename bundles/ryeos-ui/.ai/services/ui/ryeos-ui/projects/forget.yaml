@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:46Z:1032822467867b2c3bef499391c505502bd81916c1e8547c3a94a8dd9025e6cf:4nSe6XkQMlpN9y2Qlxyv+5rfD11rDKm1C6coLbWDOPQWFUoE8d/8jmOVWzVmGk4TLkz3C/pxheLyJl7VXxaZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/projects/forget
+version: "1.0.0"
+description: Forget a local project registry entry and prune corresponding recent state.
+endpoint: ui.ryeos.projects.forget
+availability: daemon_only

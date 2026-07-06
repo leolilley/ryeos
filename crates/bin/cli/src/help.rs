@@ -719,13 +719,13 @@ mod tests {
         let mut defaults = std::collections::BTreeMap::new();
         defaults.insert(
             "surface".to_string(),
-            serde_json::Value::String("surface:ryeos/studio/atlas".to_string()),
+            serde_json::Value::String("surface:ryeos/ui/atlas".to_string()),
         );
         let command = LoadedCommandDescriptor {
             command: ryeos_runtime::CommandDef {
                 name: "web".into(),
                 tokens: vec!["web".into()],
-                description: "Open Studio".into(),
+                description: "Open RyeOS UI".into(),
                 aliases: vec![],
                 help: None,
                 arguments: vec![],
@@ -747,7 +747,7 @@ mod tests {
                 provenance: ryeos_runtime::CommandProvenance::default(),
             },
             tokens: vec!["web".into()],
-            description: "Open Studio".into(),
+            description: "Open RyeOS UI".into(),
         };
 
         assert_eq!(

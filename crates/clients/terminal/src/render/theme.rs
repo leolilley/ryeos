@@ -3,8 +3,8 @@
 //! tone semantics come from the VM; draw sites take styles from here
 //! and never invent colors.
 
-use ryeos_client_base::studio::view_model::StudioTone;
 use ryeos_client_base::text_surface::{Border, Color, Style};
+use ryeos_client_base::ui::view_model::RyeOsTone;
 
 pub const BG: Color = Color::Rgb(0x1d, 0x20, 0x21);
 pub const PANEL: Color = Color::Rgb(0x28, 0x28, 0x28);
@@ -20,23 +20,23 @@ pub const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
 // consistent across the backdrop, input box, tiles, and dock slots. There
 // is no distinct PANEL fill for content; PANEL stays only for overlays
 // overlay, which deliberately stands out against the dimmed scrim.
-pub fn tone_style(tone: StudioTone) -> Style {
+pub fn tone_style(tone: RyeOsTone) -> Style {
     match tone {
-        StudioTone::Good => Style::new().fg(GOOD).bg(BG),
-        StudioTone::Warn => Style::new().fg(WARN).bg(BG),
-        StudioTone::Danger => Style::new().fg(DANGER).bg(BG),
-        StudioTone::Accent => Style::new().fg(ACCENT).bg(BG),
-        StudioTone::Neutral => style_fg(),
+        RyeOsTone::Good => Style::new().fg(GOOD).bg(BG),
+        RyeOsTone::Warn => Style::new().fg(WARN).bg(BG),
+        RyeOsTone::Danger => Style::new().fg(DANGER).bg(BG),
+        RyeOsTone::Accent => Style::new().fg(ACCENT).bg(BG),
+        RyeOsTone::Neutral => style_fg(),
     }
 }
 
-pub fn tone_glyph(tone: StudioTone) -> &'static str {
+pub fn tone_glyph(tone: RyeOsTone) -> &'static str {
     match tone {
-        StudioTone::Good => "✓",
-        StudioTone::Warn => "!",
-        StudioTone::Danger => "✗",
-        StudioTone::Accent => "›",
-        StudioTone::Neutral => "•",
+        RyeOsTone::Good => "✓",
+        RyeOsTone::Warn => "!",
+        RyeOsTone::Danger => "✗",
+        RyeOsTone::Accent => "›",
+        RyeOsTone::Neutral => "•",
     }
 }
 

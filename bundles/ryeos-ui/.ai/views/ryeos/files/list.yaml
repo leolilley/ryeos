@@ -1,0 +1,16 @@
+# ryeos:signed:2026-07-06T08:10:12Z:4ad4a400b13efd56e4ad3a04dd8e379134297a99036557a0e90d618f2499c045:KTyefIORGvGQ7tqdVNCmLOotRmzxPHLJmxhodV/hij6LmckJ3wQTJiVvrOiJMOmEX7fyhlbBUGm5Eug8FHzMCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: files-list
+version: "1.0.0"
+description: Project file tree listing rooted at the active project workspace
+
+widget: rows
+source:
+  ref: service:ui/ryeos-ui/files/list
+  params:
+    root: project
+    project_path: ""
+    path: ""
+  collection: entries
+projections:
+  primary: name
+  meta: kind

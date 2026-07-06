@@ -7,7 +7,7 @@
 #   - bundle sources -> /usr/share/ryeos/<name> for each bundle in the set.
 #     The set membership is the single source of truth in
 #     scripts/pkg/bundle-sets.sh (full = core, central-auth, standard, web,
-#     browser, studio, hosted-node; the lean sets are subsets).
+#     browser, ryeos-ui, hosted-node; the lean sets are subsets).
 #   - ryeos init copies bundle sources into ~/.local/share/ryeos
 #
 # Use the AUR flow for package-manager ownership. Use this script for fast
@@ -24,7 +24,7 @@ Fast-install the current checkout using the packaged RyeOS layout:
   /usr/share/ryeos/<name>/.ai                      (each bundle in the set)
   ~/.local/share/ryeos/.ai/bundles/<name>          (after init)
 Set membership is defined in scripts/pkg/bundle-sets.sh (full = core,
-central-auth, standard, web, browser, studio, hosted-node).
+central-auth, standard, web, browser, ryeos-ui, hosted-node).
 
 Options:
   --populate            Run scripts/populate-bundles.sh first (expensive; rebuilds
@@ -169,7 +169,7 @@ bundle_payload_bins() {
                 rye-composer-extends-chain \
                 rye-composer-graph-permissions
             ;;
-        studio)
+        ryeos-ui)
             printf '%s\n' ryeos-tui web
             ;;
         web)
@@ -244,7 +244,7 @@ refresh_installed_bundle_payload() {
                 --registry-root "$share_dir/standard" \
                 --owner "$owner" >/dev/null
             ;;
-        studio)
+        ryeos-ui)
             sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
@@ -628,7 +628,7 @@ if [[ $run_init -eq 1 ]]; then
             die "initialized $name bundle missing from $state_root"
     done
     if [[ "$bundle_set" == "hosted-node" ]]; then
-        for name in standard studio web browser; do
+        for name in standard ryeos-ui web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized hosted-node state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -636,7 +636,7 @@ if [[ $run_init -eq 1 ]]; then
         done
     fi
     if [[ "$bundle_set" == "standard" ]]; then
-        for name in hosted-node studio web browser; do
+        for name in hosted-node ryeos-ui web browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized standard state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -644,9 +644,9 @@ if [[ $run_init -eq 1 ]]; then
         done
     fi
     if [[ "$bundle_set" == "central-host" ]]; then
-        # central-host is standard + web; it must NOT drag in the studio/browser
+        # central-host is standard + web; it must NOT drag in the ryeos-ui/browser
         # UI bundles or the hosted-node control plane.
-        for name in hosted-node studio browser; do
+        for name in hosted-node ryeos-ui browser; do
             test ! -e "$state_root/.ai/bundles/$name" || \
                 die "initialized central-host state unexpectedly contains $name bundle"
             test ! -e "$state_root/.ai/node/bundles/$name.yaml" || \
@@ -655,7 +655,7 @@ if [[ $run_init -eq 1 ]]; then
     fi
     if [[ "$bundle_set" == "full" ]]; then
         grep -q '^  execute: client:ryeos/tui$' \
-            "$state_root/.ai/bundles/studio/.ai/node/commands/tui.yaml" || \
+            "$state_root/.ai/bundles/ryeos-ui/.ai/node/commands/tui.yaml" || \
             die "initialized tui command is stale or not client-backed"
     fi
 

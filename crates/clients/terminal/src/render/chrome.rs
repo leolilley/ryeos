@@ -3,17 +3,17 @@
 //! truth (provenance, focus) — it is load-bearing, not decoration.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{
-    StudioDockPlaneVm, StudioDockTileVm, StudioInputVm, StudioViewModel, StudioViewVm,
-};
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
+use ryeos_client_base::ui::view_model::{
+    RyeOsDockPlaneVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsViewModel, RyeOsViewVm,
+};
 
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
 use super::theme::{border_for, mix_toward, style_muted, tone_style, ACCENT, BG, FG, MUTED, WARN};
 
-pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     // Breadcrumb: when a drill is open, prefix the return trail (root-first)
     // onto the current level so the operator sees the execution path they
     // stepped down and that Backspace walks back up. The current level reads its
@@ -36,7 +36,7 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     draw_bar(surface, 0, &text, ACCENT);
 }
 
-pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let y = surface.height.saturating_sub(1);
     let energy = vm.presentation.chrome.status_bar.energy.clamp(0.0, 1.0);
     let mut bg = mix_toward(BG, ACCENT, 0.12 * energy);
@@ -101,7 +101,7 @@ fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
     );
 }
 
-pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -> Rect {
+pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &RyeOsViewModel) -> Rect {
     let border = border_for(&vm.presentation.chrome.border);
     let project_path = vm.session.project_path.as_deref();
     let (dock_rects, center) = carve_docks(body, &vm.workspace.docks);
@@ -120,8 +120,8 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
 /// policy verbatim.
 fn carve_docks<'a>(
     body: Rect,
-    docks: &'a StudioDockPlaneVm,
-) -> (Vec<(&'a StudioDockTileVm, Rect)>, Rect) {
+    docks: &'a RyeOsDockPlaneVm,
+) -> (Vec<(&'a RyeOsDockTileVm, Rect)>, Rect) {
     let mut center = body;
     let mut out = Vec::new();
 
@@ -167,7 +167,7 @@ fn carve_docks<'a>(
 fn draw_dock_tile(
     surface: &mut TextSurface,
     rect: Rect,
-    dock: &StudioDockTileVm,
+    dock: &RyeOsDockTileVm,
     project_path: Option<&str>,
     border: Option<Border>,
     now_ms: u64,
@@ -225,8 +225,8 @@ pub fn draw_tile(
     focused: bool,
     title: &str,
     _action_count: usize,
-    view: &StudioViewVm,
-    input: Option<&StudioInputVm>,
+    view: &RyeOsViewVm,
+    input: Option<&RyeOsInputVm>,
     border: Option<Border>,
     now_ms: u64,
     preserve_background: bool,
@@ -320,19 +320,19 @@ pub fn draw_tile(
     super::draw_view(surface, inner, view, now_ms);
 }
 
-fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
+fn view_chrome(view: &RyeOsViewVm) -> Option<(&str, &[String])> {
     match view {
-        StudioViewVm::Rows {
+        RyeOsViewVm::Rows {
             provenance,
             affordance_hints,
             ..
         }
-        | StudioViewVm::Timeline {
+        | RyeOsViewVm::Timeline {
             provenance,
             affordance_hints,
             ..
         }
-        | StudioViewVm::Table {
+        | RyeOsViewVm::Table {
             provenance,
             affordance_hints,
             ..
@@ -346,14 +346,14 @@ fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::model::StudioDockEdge;
+    use ryeos_client_base::ui::model::RyeOsDockEdge;
 
-    fn dock(edge: StudioDockEdge, size: u16) -> StudioDockTileVm {
-        StudioDockTileVm {
+    fn dock(edge: RyeOsDockEdge, size: u16) -> RyeOsDockTileVm {
+        RyeOsDockTileVm {
             edge,
             title: "t".into(),
             size,
-            view: StudioViewVm::Placeholder {
+            view: RyeOsViewVm::Placeholder {
                 title: "t".into(),
                 message: "m".into(),
             },
@@ -363,8 +363,8 @@ mod tests {
 
     #[test]
     fn carve_docks_bottom_leaves_center_above_and_preserves_bounds() {
-        let docks = StudioDockPlaneVm {
-            bottom: Some(dock(StudioDockEdge::Bottom, 7)),
+        let docks = RyeOsDockPlaneVm {
+            bottom: Some(dock(RyeOsDockEdge::Bottom, 7)),
             ..Default::default()
         };
         let body = Rect::new(0, 0, 100, 30);
@@ -385,9 +385,9 @@ mod tests {
 
     #[test]
     fn carve_docks_left_and_right_keep_center_in_bounds() {
-        let docks = StudioDockPlaneVm {
-            left: Some(dock(StudioDockEdge::Left, 20)),
-            right: Some(dock(StudioDockEdge::Right, 20)),
+        let docks = RyeOsDockPlaneVm {
+            left: Some(dock(RyeOsDockEdge::Left, 20)),
+            right: Some(dock(RyeOsDockEdge::Right, 20)),
             ..Default::default()
         };
         let body = Rect::new(0, 0, 100, 30);
@@ -404,17 +404,17 @@ mod tests {
 
     #[test]
     fn live_filter_tile_composes_filter_line_above_the_widget() {
-        use ryeos_client_base::studio::view_model::{StudioTableRowVm, StudioTone};
-        let view = StudioViewVm::Table {
+        use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
+        let view = RyeOsViewVm::Table {
             title: "threads".into(),
             columns: vec!["thread".into()],
             provenance: None,
             affordance_hints: vec![],
-            rows: vec![StudioTableRowVm {
+            rows: vec![RyeOsTableRowVm {
                 id: "T-ab".into(),
                 cells: vec!["T-ab".into()],
                 cell_tones: Vec::new(),
-                tone: StudioTone::Neutral,
+                tone: RyeOsTone::Neutral,
                 action: None,
                 selected: false,
                 expandable: false,
@@ -424,7 +424,7 @@ mod tests {
                 raw: serde_json::Value::Null,
             }],
         };
-        let input = StudioInputVm {
+        let input = RyeOsInputVm {
             cursor: 3,
             route_label: String::new(),
             placeholder: "filter…".into(),
@@ -460,8 +460,8 @@ mod tests {
     #[test]
     fn carve_docks_tiny_body_drops_docks_that_would_starve_center() {
         // A left dock can't take so much that the center drops below 8 wide.
-        let docks = StudioDockPlaneVm {
-            left: Some(dock(StudioDockEdge::Left, 50)),
+        let docks = RyeOsDockPlaneVm {
+            left: Some(dock(RyeOsDockEdge::Left, 50)),
             ..Default::default()
         };
         let body = Rect::new(0, 0, 10, 6);

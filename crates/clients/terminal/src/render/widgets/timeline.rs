@@ -5,8 +5,8 @@
 //! into history when the point walks back off the tail.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioTimelineEntryVm, StudioTone};
 use ryeos_client_base::text_surface::{Style, TextSurface};
+use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
@@ -53,12 +53,12 @@ impl FeedLine {
 pub fn draw_timeline(
     surface: &mut TextSurface,
     rect: Rect,
-    entries: &[StudioTimelineEntryVm],
+    entries: &[RyeOsTimelineEntryVm],
     entry_indents: &[u8],
     selected: Option<usize>,
     entry_expandable: &[bool],
     entry_expanded: &[bool],
-    entry_details: &[Vec<StudioRowDetailVm>],
+    entry_details: &[Vec<RyeOsRowDetailVm>],
 ) {
     let width = rect.w as usize;
     let height = rect.h as usize;
@@ -113,12 +113,12 @@ pub fn draw_timeline(
 
 fn push_timeline_lines(
     lines: &mut Vec<FeedLine>,
-    entries: &[StudioTimelineEntryVm],
+    entries: &[RyeOsTimelineEntryVm],
     entry_indents: &[u8],
     width: usize,
     entry_expandable: &[bool],
     entry_expanded: &[bool],
-    entry_details: &[Vec<StudioRowDetailVm>],
+    entry_details: &[Vec<RyeOsRowDetailVm>],
 ) {
     if entries.is_empty() {
         lines.push(FeedLine::plain(
@@ -138,14 +138,14 @@ fn push_timeline_lines(
         let entry_width = width.saturating_sub(indent_cols).max(1);
         let first_line = lines.len();
         match entry {
-            StudioTimelineEntryVm::Block { text, tone } => {
+            RyeOsTimelineEntryVm::Block { text, tone } => {
                 // The braid stores the raw cognition prose; the lens typesets
                 // it (block-level markdown). Inline spans are a later pass.
                 push_markdown_block(lines, text, *tone, entry_width, index);
                 // Padding between blocks — not part of the entry's point.
                 lines.push(FeedLine::plain(String::new(), style_fg(), None));
             }
-            StudioTimelineEntryVm::Line {
+            RyeOsTimelineEntryVm::Line {
                 primary,
                 meta,
                 tone,
@@ -157,7 +157,7 @@ fn push_timeline_lines(
                     Some(index),
                 ));
             }
-            StudioTimelineEntryVm::Pair {
+            RyeOsTimelineEntryVm::Pair {
                 summary,
                 meta,
                 tone,
@@ -165,13 +165,13 @@ fn push_timeline_lines(
             } => {
                 let glyph = if *pending {
                     "▸"
-                } else if *tone == StudioTone::Danger {
+                } else if *tone == RyeOsTone::Danger {
                     "✗"
                 } else {
                     "✓"
                 };
                 let style = if *pending {
-                    tone_style(StudioTone::Accent)
+                    tone_style(RyeOsTone::Accent)
                 } else {
                     tone_style(*tone)
                 };
@@ -181,7 +181,7 @@ fn push_timeline_lines(
                     Some(index),
                 ));
             }
-            StudioTimelineEntryVm::Separator { label } => {
+            RyeOsTimelineEntryVm::Separator { label } => {
                 let label = format!(" {label} ");
                 let rule_len = entry_width.saturating_sub(display_width(&label));
                 let left = rule_len / 2;
@@ -253,7 +253,7 @@ fn push_timeline_lines(
 fn push_markdown_block(
     lines: &mut Vec<FeedLine>,
     text: &str,
-    tone: StudioTone,
+    tone: RyeOsTone,
     width: usize,
     index: usize,
 ) {
@@ -315,7 +315,7 @@ fn push_markdown_block(
 fn flush_paragraph(
     lines: &mut Vec<FeedLine>,
     para: &mut String,
-    tone: StudioTone,
+    tone: RyeOsTone,
     width: usize,
     index: usize,
 ) {
@@ -431,11 +431,11 @@ fn draw_inline(
 mod tests {
     use super::*;
 
-    fn line(primary: &str) -> StudioTimelineEntryVm {
-        StudioTimelineEntryVm::Line {
+    fn line(primary: &str) -> RyeOsTimelineEntryVm {
+        RyeOsTimelineEntryVm::Line {
             primary: primary.to_string(),
             meta: None,
-            tone: StudioTone::Neutral,
+            tone: RyeOsTone::Neutral,
             action: None,
             secondary_action: None,
         }
@@ -446,7 +446,7 @@ mod tests {
         let mut lines = Vec::new();
         let text =
             "# Title\n\npara one\nwith soft wrap\n\n- first\n- second\n\n```\ncode  spaced\n```";
-        push_markdown_block(&mut lines, text, StudioTone::Neutral, 60, 0);
+        push_markdown_block(&mut lines, text, RyeOsTone::Neutral, 60, 0);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
 
         // ATX heading: marker stripped, rendered bold.

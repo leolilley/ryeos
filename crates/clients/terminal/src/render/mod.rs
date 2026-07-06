@@ -1,7 +1,7 @@
-//! Terminal renderer for the shared Studio view model.
+//! Terminal renderer for the shared RyeOs view model.
 //!
-//! This is intentionally a renderer only: it consumes `StudioViewModel`
-//! and emits a terminal `TextSurface`. Studio state, actions, and
+//! This is intentionally a renderer only: it consumes `RyeOsViewModel`
+//! and emits a terminal `TextSurface`. RyeOs state, actions, and
 //! effects remain in `ryeos-client-base` so terminal and web share the
 //! same product semantics.
 //!
@@ -22,10 +22,10 @@ mod theme;
 mod widgets;
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{
-    StudioLayoutNodeVm, StudioSplitAxisVm, StudioTextLineVm, StudioViewModel, StudioViewVm,
-};
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
+use ryeos_client_base::ui::view_model::{
+    RyeOsLayoutNodeVm, RyeOsSplitAxisVm, RyeOsTextLineVm, RyeOsViewModel, RyeOsViewVm,
+};
 
 use crate::render_text;
 
@@ -33,11 +33,11 @@ use primitives::draw_lines;
 use text::{display_width, truncate};
 use theme::{tone_style, BG, FG};
 
-pub struct StudioTerminalRenderer {
+pub struct RyeOsTerminalRenderer {
     prev: Option<TextSurface>,
 }
 
-impl StudioTerminalRenderer {
+impl RyeOsTerminalRenderer {
     pub fn new() -> Self {
         Self { prev: None }
     }
@@ -45,7 +45,7 @@ impl StudioTerminalRenderer {
     pub fn render(
         &mut self,
         stdout: &mut impl std::io::Write,
-        vm: &StudioViewModel,
+        vm: &RyeOsViewModel,
         width: u16,
         height: u16,
     ) -> std::io::Result<()> {
@@ -54,7 +54,7 @@ impl StudioTerminalRenderer {
     }
 }
 
-fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurface {
+fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurface {
     let width = width.max(1);
     let height = height.max(1);
     let mut surface = TextSurface::new(width, height);
@@ -132,7 +132,7 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
 fn draw_layout_node(
     surface: &mut TextSurface,
     rect: Rect,
-    node: &StudioLayoutNodeVm,
+    node: &RyeOsLayoutNodeVm,
     border: Option<Border>,
     now_ms: u64,
     preserve_background: bool,
@@ -141,7 +141,7 @@ fn draw_layout_node(
         return;
     }
     match node {
-        StudioLayoutNodeVm::Tile {
+        RyeOsLayoutNodeVm::Tile {
             tile_id,
             focused,
             title,
@@ -168,7 +168,7 @@ fn draw_layout_node(
                 );
             }
         }
-        StudioLayoutNodeVm::Split {
+        RyeOsLayoutNodeVm::Split {
             axis,
             ratio,
             first,
@@ -205,9 +205,9 @@ fn draw_layout_node(
 /// exceeds 4, and the first child clamped to at least 1. The shared,
 /// policy-parameterized resolver (Phase B) replaces this with this exact
 /// behavior under a `GridPolicy` — these tests are its guard.
-fn split_rect(rect: Rect, axis: StudioSplitAxisVm, ratio: f32) -> (Rect, Option<Rect>) {
+fn split_rect(rect: Rect, axis: RyeOsSplitAxisVm, ratio: f32) -> (Rect, Option<Rect>) {
     match axis {
-        StudioSplitAxisVm::Horizontal => {
+        RyeOsSplitAxisVm::Horizontal => {
             let first_w =
                 ((rect.w as f32 * ratio).round() as u16).clamp(1, rect.w.saturating_sub(1).max(1));
             let gap = u16::from(rect.w > 4);
@@ -217,7 +217,7 @@ fn split_rect(rect: Rect, axis: StudioSplitAxisVm, ratio: f32) -> (Rect, Option<
                 (second_w > 0).then(|| Rect::new(rect.x + first_w + gap, rect.y, second_w, rect.h));
             (first, second)
         }
-        StudioSplitAxisVm::Vertical => {
+        RyeOsSplitAxisVm::Vertical => {
             let first_h =
                 ((rect.h as f32 * ratio).round() as u16).clamp(1, rect.h.saturating_sub(1).max(1));
             let gap = u16::from(rect.h > 4);
@@ -230,8 +230,8 @@ fn split_rect(rect: Rect, axis: StudioSplitAxisVm, ratio: f32) -> (Rect, Option<
     }
 }
 
-fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms: u64) {
-    if let StudioViewVm::Timeline {
+fn draw_view(surface: &mut TextSurface, rect: Rect, view: &RyeOsViewVm, now_ms: u64) {
+    if let RyeOsViewVm::Timeline {
         entries,
         entry_indents,
         selected,
@@ -253,25 +253,25 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms:
         );
         return;
     }
-    if let StudioViewVm::Rows { columns, rows, .. } = view {
+    if let RyeOsViewVm::Rows { columns, rows, .. } = view {
         widgets::rows::draw_rows(surface, rect, columns, rows, now_ms);
         return;
     }
     // Scenes (map/atlas) draw through the ONE generic scene renderer —
     // the same renderer the backdrop uses. No widget-specific scene code.
-    if let StudioViewVm::Map { scene } | StudioViewVm::Atlas { scene } = view {
+    if let RyeOsViewVm::Map { scene } | RyeOsViewVm::Atlas { scene } = view {
         widgets::scene::draw_scene(surface, rect, scene);
         return;
     }
-    if let StudioViewVm::Sections { sections, .. } = view {
+    if let RyeOsViewVm::Sections { sections, .. } = view {
         widgets::sections::draw_sections(surface, rect, sections);
         return;
     }
-    if let StudioViewVm::Table { columns, rows, .. } = view {
+    if let RyeOsViewVm::Table { columns, rows, .. } = view {
         widgets::table::draw_table(surface, rect, columns, rows, now_ms);
         return;
     }
-    if let StudioViewVm::Text {
+    if let RyeOsViewVm::Text {
         lines, position, ..
     } = view
     {
@@ -280,15 +280,15 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms:
     }
     let mut lines = Vec::new();
     match view {
-        StudioViewVm::Text { .. } => unreachable!("text views return above"),
-        StudioViewVm::Rows { .. } => unreachable!("rows views return above"),
-        StudioViewVm::Timeline { .. } => unreachable!("timeline views return above"),
-        StudioViewVm::Map { .. } | StudioViewVm::Atlas { .. } => {
+        RyeOsViewVm::Text { .. } => unreachable!("text views return above"),
+        RyeOsViewVm::Rows { .. } => unreachable!("rows views return above"),
+        RyeOsViewVm::Timeline { .. } => unreachable!("timeline views return above"),
+        RyeOsViewVm::Map { .. } | RyeOsViewVm::Atlas { .. } => {
             unreachable!("scene views return above")
         }
-        StudioViewVm::Sections { .. } => unreachable!("sections views return above"),
-        StudioViewVm::Table { .. } => unreachable!("table views return above"),
-        StudioViewVm::Placeholder { title, message } => {
+        RyeOsViewVm::Sections { .. } => unreachable!("sections views return above"),
+        RyeOsViewVm::Table { .. } => unreachable!("table views return above"),
+        RyeOsViewVm::Placeholder { title, message } => {
             lines.push(title.clone());
             lines.push(message.clone());
         }
@@ -299,8 +299,8 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms:
 fn draw_text_view(
     surface: &mut TextSurface,
     rect: Rect,
-    lines: &[StudioTextLineVm],
-    position: ryeos_client_base::studio::view_model::StudioTextPositionVm,
+    lines: &[RyeOsTextLineVm],
+    position: ryeos_client_base::ui::view_model::RyeOsTextPositionVm,
 ) {
     if rect.w == 0 || rect.h == 0 || lines.is_empty() {
         return;
@@ -328,8 +328,8 @@ fn draw_text_view(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::model::{BrowserSession, BrowserViewport, StudioCore};
-    use ryeos_client_base::studio::view_model::build_view_model;
+    use ryeos_client_base::ui::model::{BrowserSession, BrowserViewport, RyeOsCore};
+    use ryeos_client_base::ui::view_model::build_view_model;
     use serde_json::json;
 
     // Characterization tests: these pin the CURRENT terminal split policy
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn split_rect_horizontal_rounds_with_one_cell_gap() {
         let (first, second) =
-            split_rect(Rect::new(0, 0, 100, 10), StudioSplitAxisVm::Horizontal, 0.6);
+            split_rect(Rect::new(0, 0, 100, 10), RyeOsSplitAxisVm::Horizontal, 0.6);
         // round(100 * 0.6) = 60; gap = 1 (w > 4); second = 100 - 60 - 1 = 39.
         assert_eq!((first.x, first.w), (0, 60));
         let second = second.expect("second child present");
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn split_rect_vertical_rounds_with_one_cell_gap() {
-        let (first, second) = split_rect(Rect::new(0, 0, 20, 30), StudioSplitAxisVm::Vertical, 0.5);
+        let (first, second) = split_rect(Rect::new(0, 0, 20, 30), RyeOsSplitAxisVm::Vertical, 0.5);
         assert_eq!((first.y, first.h), (0, 15));
         let second = second.expect("second child present");
         assert_eq!((second.y, second.h), (16, 14));
@@ -358,7 +358,7 @@ mod tests {
     fn split_rect_tiny_widths_do_not_overflow_or_drop_first() {
         for w in 1u16..=5 {
             let (first, second) =
-                split_rect(Rect::new(0, 0, w, 4), StudioSplitAxisVm::Horizontal, 0.6);
+                split_rect(Rect::new(0, 0, w, 4), RyeOsSplitAxisVm::Horizontal, 0.6);
             assert!(
                 first.w >= 1,
                 "first child is always at least one cell (w={w})"
@@ -375,7 +375,7 @@ mod tests {
     fn split_rect_drops_second_when_it_would_be_zero() {
         // w = 2: first_w = round(2*0.6)=1, gap=0 (w<=4), second = 2-1-0 = 1.
         // w = 1: first_w clamped to 1, gap=0, second = 1-1 = 0 -> None.
-        let (_, second) = split_rect(Rect::new(0, 0, 1, 4), StudioSplitAxisVm::Horizontal, 0.6);
+        let (_, second) = split_rect(Rect::new(0, 0, 1, 4), RyeOsSplitAxisVm::Horizontal, 0.6);
         assert!(second.is_none(), "no zero-width second child");
     }
 
@@ -393,12 +393,12 @@ mod tests {
 
     /// A surface whose empty center declares a backdrop scene and a
     /// bottom input slot — the post-cut shape (no home mode).
-    fn empty_center_core() -> StudioCore {
+    fn empty_center_core() -> RyeOsCore {
         let session = BrowserSession {
             session_id: "S-backdrop".to_string(),
-            surface_ref: "surface:ryeos/studio/base".to_string(),
+            surface_ref: "surface:ryeos/ryeos/base".to_string(),
             effective_surface: Some(json!({
-                "name": "studio-base",
+                "name": "ryeos-base",
                 "version": "1.0.0",
                 "backdrop": "view:test/backdrop",
                 "slots": {
@@ -422,7 +422,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        StudioCore::new(session, BrowserViewport::default(), 0)
+        RyeOsCore::new(session, BrowserViewport::default(), 0)
     }
 
     #[test]

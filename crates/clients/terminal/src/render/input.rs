@@ -13,8 +13,8 @@
 //! stays clean the rest of the time.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::StudioInputVm;
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
+use ryeos_client_base::ui::view_model::RyeOsInputVm;
 
 use super::primitives::fill_rect;
 use super::text::{display_width, input_cursor_byte, truncate};
@@ -23,7 +23,7 @@ use super::theme::{ACCENT, BG, FG, MUTED};
 pub fn draw_input_tile(
     surface: &mut TextSurface,
     rect: Rect,
-    input: &StudioInputVm,
+    input: &RyeOsInputVm,
     project_path: Option<&str>,
     border: Option<Border>,
 ) {
@@ -118,7 +118,7 @@ pub fn draw_input_tile(
 pub fn draw_filter_line(
     surface: &mut TextSurface,
     rect: Rect,
-    input: &StudioInputVm,
+    input: &RyeOsInputVm,
     focused: bool,
 ) {
     let w = rect.w as usize;
@@ -195,8 +195,8 @@ fn shorten_home(path: &str) -> String {
 mod tests {
     use super::*;
 
-    fn input_vm(route_label: &str) -> StudioInputVm {
-        StudioInputVm {
+    fn input_vm(route_label: &str) -> RyeOsInputVm {
+        RyeOsInputVm {
             cursor: 0,
             route_label: route_label.to_string(),
             placeholder: String::new(),

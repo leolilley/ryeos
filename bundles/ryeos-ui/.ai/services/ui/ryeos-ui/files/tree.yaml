@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:46Z:e13e4535c01a0f0754d25ce719966113af28e443c517a5854022f7b67c6c335d:JphID43wmQzs7yhB0QbEJxTh4UVYWVMb/Nwjht4K5tktArn7ghguA2PcGEPwpqPLfBdKWl93uI7i160BggrpDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/files/tree
+version: "1.0.0"
+description: Bounded file-space tree snapshot for RyeOS UI Atlas — constrained to session project roots with traversal caps and built-in heavy-directory skips.
+endpoint: ui.ryeos.files.tree
+availability: daemon_only

@@ -1,6 +1,6 @@
-import { bootStudio } from "/ui/assets/studio_shell.js";
+import { bootRyeOs } from "/ui/assets/ryeos_shell.js";
 
-bootStudio(document.getElementById("app")).catch((error) => {
+bootRyeOs(document.getElementById("app")).catch((error) => {
   console.error("RyeOS boot failed", error);
   const app = document.getElementById("app");
   app.replaceChildren();

@@ -1,19 +1,18 @@
-//! The terminal effect executor: each `StudioEffect` from the core maps
+//! The terminal effect executor: each `RyeOsEffect` from the core maps
 //! to one daemon call; results fold back into the core as
-//! `EffectResult` events. No studio state lives here — this is the
+//! `EffectResult` events. No ryeos state lives here — this is the
 //! boundary where engine intent becomes transport calls.
 
-use ryeos_client_base::studio::{
-    StudioCore, StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind,
-    StudioEvent,
+use ryeos_client_base::ui::{
+    RyeOsCore, RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind, RyeOsEvent,
 };
 
 use crate::transport::daemon::{ClientError, DaemonClient};
 
 pub async fn dispatch_effects(
-    core: &mut StudioCore,
+    core: &mut RyeOsCore,
     client: &DaemonClient,
-    effects: Vec<StudioEffect>,
+    effects: Vec<RyeOsEffect>,
 ) {
     // Each generation of effects runs as one concurrent batch — a startup
     // burst of independent fetches costs one round trip, not one per view.
@@ -34,26 +33,26 @@ pub async fn dispatch_effects(
         )
         .await;
         for result in results {
-            pending.extend(core.dispatch(StudioEvent::EffectResult { result }));
+            pending.extend(core.dispatch(RyeOsEvent::EffectResult { result }));
         }
     }
 }
 
 async fn run_effect(
     client: &DaemonClient,
-    effect: &StudioEffect,
+    effect: &RyeOsEffect,
     project_path: Option<&str>,
-) -> StudioEffectResult {
+) -> RyeOsEffectResult {
     let kind = result_kind_for(&effect.kind);
     match effect_data(client, &effect.kind, project_path).await {
-        Ok(data) => StudioEffectResult {
+        Ok(data) => RyeOsEffectResult {
             id: effect.id,
             ok: true,
             kind,
             data: Some(data),
             error: None,
         },
-        Err(error) => StudioEffectResult {
+        Err(error) => RyeOsEffectResult {
             id: effect.id,
             ok: false,
             kind,
@@ -65,21 +64,21 @@ async fn run_effect(
 
 async fn effect_data(
     client: &DaemonClient,
-    kind: &StudioEffectKind,
+    kind: &RyeOsEffectKind,
     project_path: Option<&str>,
 ) -> Result<serde_json::Value, ClientError> {
     match kind {
-        StudioEffectKind::FetchDimension => client.get_json("/ui/api/studio/dimension").await,
-        StudioEffectKind::FetchProjects => client.get_json("/ui/api/studio/projects/list").await.or_else(|_| Ok(serde_json::json!({ "version": 1, "projects": [] }))),
-        StudioEffectKind::FetchTopology => client.get_json("/ui/api/graph/topology").await,
-        StudioEffectKind::FetchThreads { limit } => client.get_json(&format!("/ui/api/studio/threads/list?limit={limit}")).await,
-        StudioEffectKind::FetchItems { query, kind, limit, .. } => {
-            let mut path = format!("/ui/api/studio/items/list?limit={limit}");
+        RyeOsEffectKind::FetchDimension => client.get_json("/ui/api/ryeos/dimension").await,
+        RyeOsEffectKind::FetchProjects => client.get_json("/ui/api/ryeos/projects/list").await.or_else(|_| Ok(serde_json::json!({ "version": 1, "projects": [] }))),
+        RyeOsEffectKind::FetchTopology => client.get_json("/ui/api/graph/topology").await,
+        RyeOsEffectKind::FetchThreads { limit } => client.get_json(&format!("/ui/api/ryeos/threads/list?limit={limit}")).await,
+        RyeOsEffectKind::FetchItems { query, kind, limit, .. } => {
+            let mut path = format!("/ui/api/ryeos/items/list?limit={limit}");
             if let Some(query) = query.as_ref().filter(|value| !value.is_empty()) { path.push_str("&query="); path.push_str(&url_encode(query)); }
             if let Some(kind) = kind.as_ref().filter(|value| !value.is_empty()) { path.push_str("&kind="); path.push_str(&url_encode(kind)); }
             client.get_json(&path).await
         }
-        StudioEffectKind::FetchSource { source_ref, params, .. } => {
+        RyeOsEffectKind::FetchSource { source_ref, params, .. } => {
             // ONE generic source mechanism: any service ref through the
             // same execute path; result keyed to the subscribing tile. A
             // view OPTS INTO project scoping by declaring an (empty)
@@ -101,13 +100,13 @@ async fn effect_data(
             let envelope = client.signed_post("/execute", &body).await?;
             Ok(envelope.get("result").cloned().unwrap_or(envelope))
         }
-        StudioEffectKind::AddProject { root } => client.signed_post("/ui/api/studio/projects/add", &serde_json::json!({ "root": root })).await,
-        StudioEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/studio/projects/open", &serde_json::json!({ "local_id": local_id })).await,
-        StudioEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/studio/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        StudioEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/studio/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
-        StudioEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/studio/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        StudioEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
-        StudioEffectKind::SubmitThreadCommand { thread_id, command_type } => {
+        RyeOsEffectKind::AddProject { root } => client.signed_post("/ui/api/ryeos/projects/add", &serde_json::json!({ "root": root })).await,
+        RyeOsEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/ryeos/projects/open", &serde_json::json!({ "local_id": local_id })).await,
+        RyeOsEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/ryeos/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
+        RyeOsEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/ryeos/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
+        RyeOsEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/ryeos/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
+        RyeOsEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
+        RyeOsEffectKind::SubmitThreadCommand { thread_id, command_type } => {
             // Steer the head thread through the shared control channel. Authority
             // == the CLI's `commands submit`; see .tmp/thread-authorization-review.md
             // for the authz model. The control service denies unknown fields (no
@@ -119,8 +118,8 @@ async fn effect_data(
             let envelope = client.signed_post("/execute", &body).await?;
             Ok(envelope.get("result").cloned().unwrap_or(envelope))
         }
-        StudioEffectKind::Invoke { target, params, .. } => match target {
-            ryeos_client_base::studio::effect::InvokeRef::Ref { item_ref } => {
+        RyeOsEffectKind::Invoke { target, params, .. } => match target {
+            ryeos_client_base::ui::effect::InvokeRef::Ref { item_ref } => {
                 let mut params = params.clone();
                 // Opt-in project scoping (mirrors FetchSource): fill param-level
                 // project_path ONLY when the params object explicitly declares an
@@ -152,7 +151,7 @@ async fn effect_data(
                 let envelope = client.signed_post("/execute", &body).await?;
                 Ok(envelope.get("result").cloned().unwrap_or(envelope))
             }
-            ryeos_client_base::studio::effect::InvokeRef::Tokens { tokens } => {
+            ryeos_client_base::ui::effect::InvokeRef::Tokens { tokens } => {
                 // One daemon path: tokens resolve + bind server-side.
                 let mut params = serde_json::json!({ "tokens": tokens });
                 if let Some(project) = project_path {
@@ -166,31 +165,31 @@ async fn effect_data(
                 Ok(envelope.get("result").cloned().unwrap_or(envelope))
             }
         },
-        StudioEffectKind::SetLocationHash { .. } | StudioEffectKind::CopyToClipboard { .. } | StudioEffectKind::OpenUrl { .. } => Ok(serde_json::Value::Null),
+        RyeOsEffectKind::SetLocationHash { .. } | RyeOsEffectKind::CopyToClipboard { .. } | RyeOsEffectKind::OpenUrl { .. } => Ok(serde_json::Value::Null),
     }
 }
 
-fn result_kind_for(kind: &StudioEffectKind) -> StudioEffectResultKind {
+fn result_kind_for(kind: &RyeOsEffectKind) -> RyeOsEffectResultKind {
     match kind {
-        StudioEffectKind::FetchDimension => StudioEffectResultKind::Dimension,
-        StudioEffectKind::FetchProjects => StudioEffectResultKind::Projects,
-        StudioEffectKind::FetchTopology => StudioEffectResultKind::Topology,
-        StudioEffectKind::AddProject { .. } => StudioEffectResultKind::ProjectAdded,
-        StudioEffectKind::OpenProject { .. } => StudioEffectResultKind::ProjectOpened,
-        StudioEffectKind::FetchThreads { .. } => StudioEffectResultKind::Threads,
-        StudioEffectKind::FetchItems { .. } => StudioEffectResultKind::Items,
-        StudioEffectKind::FetchSource { .. } => StudioEffectResultKind::SourceData,
-        StudioEffectKind::ListFiles { .. } => StudioEffectResultKind::FilesList,
-        StudioEffectKind::FetchFileSpace { .. } => StudioEffectResultKind::FileSpace,
-        StudioEffectKind::ReadFile { .. } => StudioEffectResultKind::FileRead,
-        StudioEffectKind::InvokeAction { .. } => StudioEffectResultKind::ActionInvocation,
-        StudioEffectKind::SubmitThreadCommand { .. } => {
-            StudioEffectResultKind::ThreadCommandSubmitted
+        RyeOsEffectKind::FetchDimension => RyeOsEffectResultKind::Dimension,
+        RyeOsEffectKind::FetchProjects => RyeOsEffectResultKind::Projects,
+        RyeOsEffectKind::FetchTopology => RyeOsEffectResultKind::Topology,
+        RyeOsEffectKind::AddProject { .. } => RyeOsEffectResultKind::ProjectAdded,
+        RyeOsEffectKind::OpenProject { .. } => RyeOsEffectResultKind::ProjectOpened,
+        RyeOsEffectKind::FetchThreads { .. } => RyeOsEffectResultKind::Threads,
+        RyeOsEffectKind::FetchItems { .. } => RyeOsEffectResultKind::Items,
+        RyeOsEffectKind::FetchSource { .. } => RyeOsEffectResultKind::SourceData,
+        RyeOsEffectKind::ListFiles { .. } => RyeOsEffectResultKind::FilesList,
+        RyeOsEffectKind::FetchFileSpace { .. } => RyeOsEffectResultKind::FileSpace,
+        RyeOsEffectKind::ReadFile { .. } => RyeOsEffectResultKind::FileRead,
+        RyeOsEffectKind::InvokeAction { .. } => RyeOsEffectResultKind::ActionInvocation,
+        RyeOsEffectKind::SubmitThreadCommand { .. } => {
+            RyeOsEffectResultKind::ThreadCommandSubmitted
         }
-        StudioEffectKind::Invoke { .. } => StudioEffectResultKind::Invoked,
-        StudioEffectKind::SetLocationHash { .. }
-        | StudioEffectKind::CopyToClipboard { .. }
-        | StudioEffectKind::OpenUrl { .. } => StudioEffectResultKind::BrowserOnly,
+        RyeOsEffectKind::Invoke { .. } => RyeOsEffectResultKind::Invoked,
+        RyeOsEffectKind::SetLocationHash { .. }
+        | RyeOsEffectKind::CopyToClipboard { .. }
+        | RyeOsEffectKind::OpenUrl { .. } => RyeOsEffectResultKind::BrowserOnly,
     }
 }
 

@@ -1,5 +1,5 @@
 //! The terminal seat runtime: one event loop folding terminal input,
-//! braid tails, session hints, and ticks into the shared `StudioCore`.
+//! braid tails, session hints, and ticks into the shared `RyeOsCore`.
 //!
 //! This module is the loop and nothing else. Effect execution lives in
 //! `effects`, seat-thread lifecycle in `seat`, live-signal subscriptions
@@ -12,10 +12,10 @@ mod seat;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
-use ryeos_client_base::studio::{BrowserSession, BrowserViewport, StudioCore, StudioEvent};
 use ryeos_client_base::surface::LoadedSurface;
+use ryeos_client_base::ui::{BrowserSession, BrowserViewport, RyeOsCore, RyeOsEvent};
 
-use crate::render::StudioTerminalRenderer;
+use crate::render::RyeOsTerminalRenderer;
 use crate::terminal::TerminalGuard;
 use crate::transport::daemon::DaemonClient;
 
@@ -44,8 +44,8 @@ pub async fn run(
     let mut term = TerminalGuard::init()?;
     let (width, height) = term.size();
     let mut stdout = std::io::stdout();
-    let mut renderer = StudioTerminalRenderer::new();
-    let mut core = StudioCore::default();
+    let mut renderer = RyeOsTerminalRenderer::new();
+    let mut core = RyeOsCore::default();
     let mut dirty = true;
 
     // Degraded live timeline: tail the route's head thread over SSE.
@@ -55,7 +55,7 @@ pub async fn run(
     let mut tail_chain: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    let start_effects = core.dispatch(StudioEvent::Start {
+    let start_effects = core.dispatch(RyeOsEvent::Start {
         session: session_for(project_path, read_only, &loaded_surface),
         viewport: viewport(width, height),
         now_ms: now_ms(),
@@ -69,10 +69,7 @@ pub async fn run(
     // notices. Otherwise they print to stderr BEFORE the alternate screen is
     // entered, so they scroll off above the render where they can't be read.
     for message in diagnostics {
-        core.notice(
-            message,
-            ryeos_client_base::studio::view_model::StudioTone::Warn,
-        );
+        core.notice(message, ryeos_client_base::ui::view_model::RyeOsTone::Warn);
     }
 
     // First frame before any daemon round trip: chrome, docks, and the
@@ -189,7 +186,7 @@ pub async fn run(
                     }
                     Event::Resize(w, h) => {
                         let _ = term.update_size();
-                        let effects = core.dispatch(StudioEvent::Resize { viewport: viewport(w, h) });
+                        let effects = core.dispatch(RyeOsEvent::Resize { viewport: viewport(w, h) });
                         dispatch_effects(&mut core, &client, effects).await;
                         dirty = true;
                     }
@@ -203,7 +200,7 @@ pub async fn run(
                 if let Some(thread_id) = tail_thread.clone() {
                     let payload = serde_json::from_str::<serde_json::Value>(&data)
                         .unwrap_or(serde_json::Value::Null);
-                    let effects = core.dispatch(StudioEvent::ThreadTail {
+                    let effects = core.dispatch(RyeOsEvent::ThreadTail {
                         thread_id,
                         event_type,
                         payload,
@@ -253,7 +250,7 @@ pub async fn run(
                     let effects = core.refresh_focused_feeds();
                     dispatch_effects(&mut core, &client, effects).await;
                 }
-                let effects = core.dispatch(StudioEvent::Tick { now_ms: now_ms() });
+                let effects = core.dispatch(RyeOsEvent::Tick { now_ms: now_ms() });
                 dispatch_effects(&mut core, &client, effects).await;
                 sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
                 dirty = true;

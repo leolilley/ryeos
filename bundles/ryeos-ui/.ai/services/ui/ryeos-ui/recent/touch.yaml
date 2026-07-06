@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:46Z:94ca211a94e295494c285600b65531448ae5542a3e79fc97ba687b41f7e761df:XiZ+DRDuvjzYe1k7TbjOx1HOXeUvLMOfBpYCq5PgwbGrax74IzmvdMRp+GOsLJp5RU+WIOoK8ZIQW22jLbIuDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/recent/touch
+version: "1.0.0"
+description: Mark a known local RyeOS UI project as recently opened.
+endpoint: ui.ryeos.recent.touch
+availability: daemon_only

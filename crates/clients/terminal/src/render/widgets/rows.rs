@@ -2,8 +2,8 @@
 //! full-width selection.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioRowVm, StudioTone};
 use ryeos_client_base::text_surface::{Style, TextSurface};
+use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, letterspace, truncate};
@@ -15,7 +15,7 @@ pub fn draw_rows(
     surface: &mut TextSurface,
     rect: Rect,
     columns: &[String],
-    rows: &[StudioRowVm],
+    rows: &[RyeOsRowVm],
     now_ms: u64,
 ) {
     let width = rect.w as usize;
@@ -109,8 +109,8 @@ fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style
     style.fg(mix_toward(style.fg, ACCENT, weight))
 }
 
-fn active_pulse_style(style: Style, tone: StudioTone, now_ms: u64) -> Style {
-    if tone != StudioTone::Accent {
+fn active_pulse_style(style: Style, tone: RyeOsTone, now_ms: u64) -> Style {
+    if tone != RyeOsTone::Accent {
         return style;
     }
     let phase = (now_ms / 180) % 8;
@@ -128,7 +128,7 @@ fn draw_detail(
     left: usize,
     y: usize,
     width: usize,
-    detail: &StudioRowDetailVm,
+    detail: &RyeOsRowDetailVm,
 ) {
     fill_line(surface, left, y, width, style_fg());
     let label = format!("  {}: ", detail.field);

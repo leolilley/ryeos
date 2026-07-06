@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-19T05:40:59Z:9577db1e66e26720ef5613350038acaf6ee303e3f7699275fecdac149b0bdcbf:aEP0AHFxLOJ62LW0yNQnRiQ+bWK7O85LKzKUbOMETF6i0bDJ0MdowYCn9Ir1MkiaEa9tN0UwcWaTo3DhZ5erAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/projects/open
+path: /ui/api/ryeos-ui/projects/open
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/projects/open"

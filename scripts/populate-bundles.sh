@@ -13,7 +13,7 @@
 #   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow]
 #
 # Bundle sets:
-#   full            core + standard + web + browser + studio + hosted-node (default)
+#   full            core + standard + web + browser + ryeos-ui + hosted-node (default)
 #   central-host    core + standard + web — standard node plus the rye/web/search
 #                   tool; the app-hosting image (e.g. tv-tracker) that also serves
 #                   its own central-auth realm
@@ -180,7 +180,7 @@ CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
 WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
-STUDIO="$ROOT/bundles/studio"
+RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
 INIT_SEED="$SOURCE_ROOT_AI/node/init"
@@ -210,7 +210,7 @@ CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
 BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
-STUDIO_BIN="$STUDIO/.ai/bin/$TRIPLE"
+RYEOS_UI_BIN="$RYEOS_UI/.ai/bin/$TRIPLE"
 HOSTED_NODE_BIN="$HOSTED_NODE/.ai/bin/$TRIPLE"
 
 # Bin dirs for exactly the bin-managed bundles this set builds.
@@ -344,11 +344,11 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
 fi
 
 if [[ "$BUNDLE_SET" == "full" ]]; then
-  echo "[populate-bundles] installing studio bundle binaries → $STUDIO_BIN"
+  echo "[populate-bundles] installing ryeos-ui bundle binaries → $RYEOS_UI_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
     "$TARGET/release/web" \
-    "$STUDIO_BIN/"
+    "$RYEOS_UI_BIN/"
 
   echo "[populate-bundles] installing browser bundle binaries → $BROWSER_BIN"
   install -m 0755 \
@@ -427,8 +427,8 @@ if [[ "$BUNDLE_SET" == "full" ]]; then
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 
-  echo "[populate-bundles] publishing studio bundle…"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STUDIO" \
+  echo "[populate-bundles] publishing ryeos-ui bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$RYEOS_UI" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null

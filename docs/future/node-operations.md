@@ -21,7 +21,7 @@ Add `.ai/node/operations/*.yaml` only if at least one of these becomes real:
    UX.
 4. A single operation intentionally maps to multiple execution targets under
    node policy.
-5. Studio needs operation grouping that cannot be represented by command groups
+5. RyeOS UI needs operation grouping that cannot be represented by command groups
    or item metadata.
 
 ## Non-goals

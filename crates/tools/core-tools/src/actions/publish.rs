@@ -37,7 +37,7 @@ pub struct PublishOptions {
     /// Registry/dependency roots supplying kind schemas + parsers for sign-items.
     ///
     /// When publishing `core` itself, pass the same path as `bundle_source`.
-    /// Bundles that depend on kinds from multiple bundles (for example Studio
+    /// Bundles that depend on kinds from multiple bundles (for example RyeOS UI
     /// depends on `surface` from standard and base parsers/handlers from core)
     /// must pass each dependency root so every signable item is discovered and
     /// validated during authoring.

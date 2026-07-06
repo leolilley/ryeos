@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:46Z:1400cd192f64a8a22b9967e5a03cacbed9f52dc880c935fc69052a4520647170:ol51hzZD1GsyMyeN5y5OZwmp256R7UfCyhF42sjWntvVB7QkfpA/mHwvbNUftJwrHnTzqfjKD4IbrVKZ+tQNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/item/inspect
+version: "1.0.0"
+description: Inspect one real canonical RyeOS item — resolve, classify trust, and return raw source and effective composition.
+endpoint: ui.ryeos.item.inspect
+availability: daemon_only

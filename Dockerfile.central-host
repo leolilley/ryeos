@@ -5,7 +5,7 @@
 #
 # Bakes core + central-auth + standard + web: everything the `standard` image
 # ships, plus the central-auth bundle (login/verify/revoke, policy) so the node
-# is its own auth authority, and the web bundle (rye/web/search). Studio,
+# is its own auth authority, and the web bundle (rye/web/search). RyeOS UI,
 # browser, and hosted-node are intentionally excluded.
 #
 # This is the base for app-hosting images such as tv-tracker's ryeos-node,

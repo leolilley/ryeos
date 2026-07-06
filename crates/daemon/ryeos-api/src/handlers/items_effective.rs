@@ -65,7 +65,7 @@ use ryeos_runtime::events::RuntimeEventType;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// Canonical item ref to resolve, e.g. "surface:ryeos/studio/base".
+    /// Canonical item ref to resolve, e.g. "surface:ryeos/ui/base".
     pub canonical_ref: String,
 
     /// Optional project path for project-space resolution.
@@ -396,7 +396,7 @@ mod tests {
         };
 
         let err = EngineError::ComposedValueContractViolation {
-            canonical_ref: "surface:ryeos/studio/base".into(),
+            canonical_ref: "surface:ryeos/ui/base".into(),
             report,
         };
 
@@ -409,7 +409,7 @@ mod tests {
                 assert!(body["error"]
                     .as_str()
                     .unwrap()
-                    .contains("surface:ryeos/studio/base"));
+                    .contains("surface:ryeos/ui/base"));
                 assert!(body["error"].as_str().unwrap().contains("2 errors"));
                 assert!(body["error"].as_str().unwrap().contains("1 warning"));
 

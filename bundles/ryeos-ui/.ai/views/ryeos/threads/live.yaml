@@ -1,0 +1,72 @@
+# ryeos:unsigned
+name: threads-live
+version: "1.0.0"
+description: >-
+  Current-project live threads: active execution threads plus graph follow
+  parents suspended on live children, newest first. This is the cockpit's
+  Activity lens.
+
+widget: table
+source:
+  ref: service:ui/ryeos-ui/threads/list
+  params:
+    active: true
+    project: current
+    project_path: ""
+    sort: newest
+    limit: 60
+    exclude_item_prefixes:
+      - service:ui/ryeos-ui/
+      - surface:ryeos/ui/
+  collection: threads
+projections:
+  columns:
+    - label: id
+      field: thread_id
+    - label: project
+      field: project.name
+    - label: item
+      field: item_ref
+    - label: stage
+      field: current_node.node
+    - label: follow
+      field: follow.display_state
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resume_queued: neutral
+          resumed: good
+    - label: status
+      field: status
+    - label: started
+      field: created_at
+  expand:
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      accepted: accent
+      failed: danger
+      cancelled: warn
+      killed: danger
+      timed_out: warn
+      completed: good
+    default: neutral
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+refresh:
+  on_hint: [thread, activity]

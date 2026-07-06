@@ -181,7 +181,7 @@ A hosted node is a high-uptime RyeOS node.
 It can act as:
 
 - gallery;
-- studio;
+- ryeos-ui;
 - lab;
 - classroom;
 - game server;

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-11T22:51:46Z:95c17174bca42819c3dc32f2809cb2f22801ed6ffd807cc26bdfd51794247f30:KRo7cqJZeO25UGbdFi6b95YOoSpUSQcZkzJu9w01NNu5eeX7D/7gwqf6Ec4IW/D9l3yV1JqbbAbCCBz+AEHrAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/files/list
+version: "1.0.0"
+description: Safe scoped file listing for RyeOS UI — constrained to session project root or project .ai directory. No arbitrary path access.
+endpoint: ui.ryeos.files.list
+availability: daemon_only

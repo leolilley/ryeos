@@ -6,8 +6,8 @@
 //!
 //! Section directories (routes, commands) support recursive subfolders:
 //!
-//!   .ai/node/routes/ui/studio/dimension-get.yaml
-//!   .ai/node/routes/ui/studio/items/list.yaml
+//!   .ai/node/routes/ui/ryeos-ui/dimension-get.yaml
+//!   .ai/node/routes/ui/ryeos-ui/items/list.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The `bundles` section remains flat (no subdirectories).

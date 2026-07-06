@@ -1,4 +1,4 @@
-//! `web` — mints a RyeOS Studio launch token and opens the browser.
+//! `web` — mints a RyeOS RyeOs launch token and opens the browser.
 //!
 //! This binary is the `cli_exec` target for `client:ryeos/web`. It:
 //! 1. Parses launch args (surface, project, read_only).
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Parser)]
 #[command(name = "web", about = "Launch RyeOS in the browser")]
 struct Cli {
-    /// Surface ref backing Studio. Command descriptors provide the default.
+    /// Surface ref backing RyeOs. Command descriptors provide the default.
     #[arg(long = "surface", required = true)]
     surface: String,
 
@@ -32,7 +32,7 @@ struct Cli {
     read_only: bool,
 
     /// Allow browser actions that can mutate daemon/project state.
-    /// Studio defaults to read-only unless this is explicit.
+    /// RyeOs defaults to read-only unless this is explicit.
     #[arg(long = "allow-actions")]
     allow_actions: bool,
 
@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long = "no-open")]
     no_open: bool,
 
-    /// Bind Studio principal storage to this launcher's signing-key principal.
+    /// Bind RyeOs principal storage to this launcher's signing-key principal.
     #[arg(long = "hosted-principal")]
     hosted_principal: bool,
 }
@@ -450,13 +450,13 @@ mod tests {
     #[test]
     fn mint_request_serializes_surface() {
         let req = MintRequest {
-            surface_ref: "surface:ryeos/studio/base".to_string(),
+            surface_ref: "surface:ryeos/ryeos/base".to_string(),
             project_path: Some("/tmp/proj".to_string()),
             read_only: false,
             user_principal_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["surface_ref"], "surface:ryeos/studio/base");
+        assert_eq!(json["surface_ref"], "surface:ryeos/ryeos/base");
         assert_eq!(json["project_path"], "/tmp/proj");
         assert_eq!(json["read_only"], false);
     }

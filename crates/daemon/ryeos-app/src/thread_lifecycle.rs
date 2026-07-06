@@ -323,7 +323,7 @@ pub struct CurrentNode {
 }
 
 /// Project context attached to a thread from its launch metadata. This is
-/// display/scoping metadata for the Studio, not an authorization boundary.
+/// display/scoping metadata for the RyeOS UI, not an authorization boundary.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectSummary {
     pub path: String,

@@ -1,0 +1,138 @@
+# ryeos:unsigned
+name: threads-list
+version: "1.0.0"
+description: Thread list over the ryeos-ui threads source
+
+widget: table
+# Operator watch dashboard: the UI-ryeos-ui (operator-scoped) thread list, ordered
+# active-first then newest (sort: watch), applied before the limit so the most
+# relevant rows always show.
+source:
+  ref: service:ui/ryeos-ui/threads/list
+  params:
+    limit: 200
+    sort: watch
+  collection: threads
+projections:
+  columns:
+    - label: thread
+      field: thread_id
+    - label: kind
+      field: kind
+    - label: item
+      field: item_ref
+    - label: project
+      field: project.name
+    - label: status
+      field: status
+    - label: source
+      field: requested_by
+    # Graph `follow:` lineage: `suspended_parent` (issued a follow, awaiting its
+    # child chain) or `resume_successor` (consumes the child result). Blank for
+    # non-follow rows (the `follow` fact is absent). The full child chain + child
+    # terminal status live in the thread detail lens; this column is the at-a-
+    # glance "waiting on child" marker the watch console reads. The per-column
+    # tone keys off the coarse display state so a waiting parent reads warm
+    # while the ROW keeps its status tone.
+    - label: follow
+      field: follow.role
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resume_queued: neutral
+          resumed: good
+    - label: created
+      field: created_at
+  expand:
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      failed: danger
+      cancelled: warn
+      completed: good
+    default: neutral
+# Enter watches the row: aim the route at the thread (both thread + chain_root so
+# the braid resolves) and swap the single center lens to its braid.
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      # Step INTO the braid (returnable via Backspace) rather than a flat swap:
+      # the list + its context are pushed onto the drill stack so the operator
+      # can walk back up the execution tree.
+      drill: true
+  # Watch the followed CHILD chain of a suspended parent — same shape as `watch`
+  # but aims the route at the child chain root the daemon recorded on the follow
+  # fact (`follow.child_chain_root_id`, head thread `follow.child_thread_id`), so
+  # activating it on a suspended parent opens the child's braid. Meaningful only
+  # on a suspended-parent row; on a non-follow row both merge fields resolve to
+  # null (per-row affordance gating does not exist yet — see follow-up).
+  - id: watch-child
+    label: Watch child
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.follow.child_thread_id}"
+        chain_root: "{record.follow.child_chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      # Step into the child chain — a return frame lets Backspace walk back to
+      # the parent.
+      drill: true
+  # Inspect swaps the center lens to the thread's detail sections. Write the
+  # selected thread FIRST (the detail sources read @facet:selection.thread),
+  # then open the lens — the P1 open_view ordering guarantees the facet is set
+  # before the new lens fetches.
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
+  # Row-specific cancel through the ONE ryeos-ui cancel path: the audited command
+  # channel `service:commands/submit` with `command_type: cancel`. It carries
+  # the per-thread ownership check and writes a command record, unlike the raw
+  # cancel services. Args reach the daemon as /execute parameters (the token
+  # path would drop them), so `{record.thread_id}` targets THIS row rather than
+  # the route head. See docs/decisions/steering-graph-interrupt-and-cancel-path.md.
+  - id: cancel
+    label: Cancel
+    invoke:
+      plane: rye
+      ref: service:commands/submit
+      args:
+        thread_id: "{record.thread_id}"
+        command_type: cancel
+      # Success copy lives in view data, not the reducer: rendered against the
+      # command record ({result.<field>}) when the submit succeeds.
+      notice: "Cancelled {result.thread_id}."
+# Inline live filter: typing narrows the list (substring) as you type; the buffer
+# feeds ONE source param (empty buffer = unfiltered), and Tab cycles which field it
+# targets — status → kind → source (requested_by). No `submit:`, so this is a live
+# filter — Enter activates the focused row (watches it), it does not submit. When
+# the list lens is focused, printable keys edit this filter rather than the foot
+# route input — the watch dashboard filters, it doesn't compose.
+input:
+  id: filter
+  feeds:
+    fields:
+      - { param: status, label: status }
+      - { param: kind, label: kind }
+      - { param: requested_by, label: source }
+    debounce_ms: 120
+refresh:
+  on_hint: [thread, activity]

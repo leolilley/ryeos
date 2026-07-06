@@ -3,7 +3,7 @@
 //! the braid as they append, settle on exit. Fold-from-braid keeps live
 //! and replay the same fold.
 
-use ryeos_client_base::studio::{SeatEvent, SeatEventKind, StudioCore};
+use ryeos_client_base::ui::{RyeOsCore, SeatEvent, SeatEventKind};
 
 use crate::transport::daemon::DaemonClient;
 
@@ -114,7 +114,7 @@ fn seat_event_from_replay(event: &serde_json::Value) -> Option<SeatEvent> {
 /// local log is the write-ahead view; the braid is the durable truth.
 pub async fn sync_seat_braid(
     client: &DaemonClient,
-    core: &StudioCore,
+    core: &RyeOsCore,
     seat_thread: &Option<String>,
     synced: &mut usize,
 ) {

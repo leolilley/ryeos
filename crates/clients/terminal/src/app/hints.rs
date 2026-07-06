@@ -42,7 +42,7 @@ pub fn spawn_hint_listener(
 
 /// Tail one chain's event stream, forwarding each frame's
 /// `(event_type, raw json data)` to the loop. The loop dispatches a
-/// `StudioEvent::ThreadTail`, so the shared reducer — not this client —
+/// `RyeOsEvent::ThreadTail`, so the shared reducer — not this client —
 /// applies ryeos semantics (the same path the web `EventSource` uses).
 /// The braid is the truth; this is it arriving now.
 pub fn spawn_thread_tail(

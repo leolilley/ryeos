@@ -1,0 +1,16 @@
+# ryeos:signed:2026-06-23T05:17:25Z:f47f2fe3793fb3d22cfb05ff1a671fa964f8564dfa846b2679b047969a5c985b:wZ+BoN+nZLlnuwf6Np5+H9X1JhCgqC10ergm+jbkY+yeaBXvoWQTpQuQUVekBXSi0trgGKyyiIOdueEXbA9ICQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+tokens:
+- tui
+description: Open the terminal RyeOS UI
+forms:
+- slots:
+  - field: surface
+defaults:
+  surface: surface:ryeos/ui/lens
+project:
+  resolution: optional
+  bind_parameter: project
+  no_project_flag: true
+dispatch:
+  kind: execute_ref
+  execute: client:ryeos/tui

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-06-24T04:51:58Z:66a081202684b992d2920ab16a05e2abbfe590df9ce9f821d9d404fa95af0ed3:WlAhZ5eahSYi5JXHXtJr38KG9e67Z1KEbjFUsULKWXFgGzAjAqlEq8MJzWBBWVJAHJ3YuI7i7ZWfiOg5CNFMAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/projects/list
+version: "1.0.0"
+description: List the local per-principal RyeOS UI project registry.
+endpoint: ui.ryeos.projects.list
+availability: daemon_only

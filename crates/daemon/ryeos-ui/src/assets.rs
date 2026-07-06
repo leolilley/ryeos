@@ -47,23 +47,23 @@ fn compute_etag(bytes: &[u8]) -> String {
 
 static INDEX_HTML: &[u8] = include_bytes!("../../../clients/web/pkg/index.html");
 static BOOTSTRAP_JS: &[u8] = include_bytes!("../../../clients/web/pkg/bootstrap.js");
-static STUDIO_COMPONENTS_CHROME_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_components_chrome.js");
-static STUDIO_COMPONENTS_HOME_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_components_home.js");
-static STUDIO_COMPONENTS_PRIMITIVES_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_components_primitives.js");
-static STUDIO_COMPONENTS_WORKSPACE_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_components_workspace.js");
-static STUDIO_DOM_ADAPTER_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_dom_adapter.js");
-static STUDIO_AMBIENT_SCENE_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_ambient_scene.js");
-static STUDIO_EFFECTS_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_effects.js");
-static STUDIO_MOTION_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_motion.js");
-static STUDIO_PRESENTATION_STATE_JS: &[u8] =
-    include_bytes!("../../../clients/web/pkg/studio_presentation_state.js");
-static STUDIO_SHELL_JS: &[u8] = include_bytes!("../../../clients/web/pkg/studio_shell.js");
+static RYEOS_UI_COMPONENTS_CHROME_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_components_chrome.js");
+static RYEOS_UI_COMPONENTS_HOME_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_components_home.js");
+static RYEOS_UI_COMPONENTS_PRIMITIVES_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_components_primitives.js");
+static RYEOS_UI_COMPONENTS_WORKSPACE_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_components_workspace.js");
+static RYEOS_UI_DOM_ADAPTER_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_dom_adapter.js");
+static RYEOS_UI_AMBIENT_SCENE_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_ambient_scene.js");
+static RYEOS_UI_EFFECTS_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_effects.js");
+static RYEOS_UI_MOTION_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_motion.js");
+static RYEOS_UI_PRESENTATION_STATE_JS: &[u8] =
+    include_bytes!("../../../clients/web/pkg/ryeos_presentation_state.js");
+static RYEOS_UI_SHELL_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_shell.js");
 static WEB_SHELL_CSS: &[u8] = include_bytes!("../../../clients/web/pkg/web-shell.css");
 static RYEOS_WEB_JS: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web.js");
 static RYEOS_WEB_WASM: &[u8] = include_bytes!("../../../clients/web/pkg/ryeos_web_bg.wasm");
@@ -80,30 +80,30 @@ impl StaticAssetProvider for WebAssetProvider {
         let (bytes, cache_control) = match trimmed {
             "index.html" | "ui/index.html" => (INDEX_HTML, "no-cache"),
             "bootstrap.js" | "ui/assets/bootstrap.js" => (BOOTSTRAP_JS, "no-cache"),
-            "studio_components_chrome.js" | "ui/assets/studio_components_chrome.js" => {
-                (STUDIO_COMPONENTS_CHROME_JS, "no-cache")
+            "ryeos_components_chrome.js" | "ui/assets/ryeos_components_chrome.js" => {
+                (RYEOS_UI_COMPONENTS_CHROME_JS, "no-cache")
             }
-            "studio_components_home.js" | "ui/assets/studio_components_home.js" => {
-                (STUDIO_COMPONENTS_HOME_JS, "no-cache")
+            "ryeos_components_home.js" | "ui/assets/ryeos_components_home.js" => {
+                (RYEOS_UI_COMPONENTS_HOME_JS, "no-cache")
             }
-            "studio_components_primitives.js" | "ui/assets/studio_components_primitives.js" => {
-                (STUDIO_COMPONENTS_PRIMITIVES_JS, "no-cache")
+            "ryeos_components_primitives.js" | "ui/assets/ryeos_components_primitives.js" => {
+                (RYEOS_UI_COMPONENTS_PRIMITIVES_JS, "no-cache")
             }
-            "studio_components_workspace.js" | "ui/assets/studio_components_workspace.js" => {
-                (STUDIO_COMPONENTS_WORKSPACE_JS, "no-cache")
+            "ryeos_components_workspace.js" | "ui/assets/ryeos_components_workspace.js" => {
+                (RYEOS_UI_COMPONENTS_WORKSPACE_JS, "no-cache")
             }
-            "studio_dom_adapter.js" | "ui/assets/studio_dom_adapter.js" => {
-                (STUDIO_DOM_ADAPTER_JS, "no-cache")
+            "ryeos_dom_adapter.js" | "ui/assets/ryeos_dom_adapter.js" => {
+                (RYEOS_UI_DOM_ADAPTER_JS, "no-cache")
             }
-            "studio_ambient_scene.js" | "ui/assets/studio_ambient_scene.js" => {
-                (STUDIO_AMBIENT_SCENE_JS, "no-cache")
+            "ryeos_ambient_scene.js" | "ui/assets/ryeos_ambient_scene.js" => {
+                (RYEOS_UI_AMBIENT_SCENE_JS, "no-cache")
             }
-            "studio_effects.js" | "ui/assets/studio_effects.js" => (STUDIO_EFFECTS_JS, "no-cache"),
-            "studio_motion.js" | "ui/assets/studio_motion.js" => (STUDIO_MOTION_JS, "no-cache"),
-            "studio_presentation_state.js" | "ui/assets/studio_presentation_state.js" => {
-                (STUDIO_PRESENTATION_STATE_JS, "no-cache")
+            "ryeos_effects.js" | "ui/assets/ryeos_effects.js" => (RYEOS_UI_EFFECTS_JS, "no-cache"),
+            "ryeos_motion.js" | "ui/assets/ryeos_motion.js" => (RYEOS_UI_MOTION_JS, "no-cache"),
+            "ryeos_presentation_state.js" | "ui/assets/ryeos_presentation_state.js" => {
+                (RYEOS_UI_PRESENTATION_STATE_JS, "no-cache")
             }
-            "studio_shell.js" | "ui/assets/studio_shell.js" => (STUDIO_SHELL_JS, "no-cache"),
+            "ryeos_shell.js" | "ui/assets/ryeos_shell.js" => (RYEOS_UI_SHELL_JS, "no-cache"),
             "web-shell.css" | "ui/assets/web-shell.css" => (WEB_SHELL_CSS, "no-cache"),
             "ryeos_web.js" | "ui/assets/ryeos_web.js" => (RYEOS_WEB_JS, "no-cache"),
             "ryeos_web_bg.wasm" | "ui/assets/ryeos_web_bg.wasm" => (RYEOS_WEB_WASM, "no-cache"),
@@ -200,15 +200,15 @@ mod tests {
         assert!(js.bytes.len() > 0);
         assert!(js.content_type.contains("javascript"));
 
-        let studio = provider
-            .get("ui/assets/studio_shell.js")
-            .expect("studio_shell.js must be embedded");
-        assert!(studio.bytes.len() > 0);
-        assert!(studio.content_type.contains("javascript"));
+        let ryeos_ui = provider
+            .get("ui/assets/ryeos_shell.js")
+            .expect("ryeos_shell.js must be embedded");
+        assert!(ryeos_ui.bytes.len() > 0);
+        assert!(ryeos_ui.content_type.contains("javascript"));
 
         let ambient = provider
-            .get("ui/assets/studio_ambient_scene.js")
-            .expect("studio_ambient_scene.js must be embedded");
+            .get("ui/assets/ryeos_ambient_scene.js")
+            .expect("ryeos_ambient_scene.js must be embedded");
         assert!(ambient.bytes.len() > 0);
         assert!(ambient.content_type.contains("javascript"));
 

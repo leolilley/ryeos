@@ -250,7 +250,7 @@ mod tests {
             expires_at: now + Duration::from_secs(60),
             granted_caps: vec!["ui.read".to_string()],
             project_root: None,
-            surface_ref: "surface:ryeos/studio/base".to_string(),
+            surface_ref: "surface:ryeos/ui/base".to_string(),
             read_only: false,
             user_principal_id,
         }

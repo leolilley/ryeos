@@ -53,7 +53,7 @@ package() {
     # Plain `ryeos init` uses /usr/share/ryeos as its default source and
     # discovers immediate children containing .ai/. The loop below ships every
     # bundle directory present under bundles/ — currently core, central-auth,
-    # standard, web, browser, studio, hosted-node — so it never drifts from the
+    # standard, web, browser, ryeos-ui, hosted-node — so it never drifts from the
     # tree. (The shell installers enumerate sets from scripts/pkg/bundle-sets.sh;
     # this package build simply ships all of them.)
     mkdir -p "$pkgdir/usr/share/ryeos"

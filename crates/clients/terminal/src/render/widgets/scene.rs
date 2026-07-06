@@ -1,6 +1,6 @@
 //! The generic scene renderer: ONE renderer for every `widget: scene`
 //! (the backdrop, the atlas, any future scene). It draws whatever objects
-//! a `StudioSceneModel` declares — it knows nothing about "the prism" or
+//! a `RyeOsSceneModel` declares — it knows nothing about "the prism" or
 //! "the starfield". The background is content; this is the closed
 //! primitive that draws it.
 //!
@@ -50,11 +50,11 @@
 //! already share the density→ramp→colour mapping.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::scene_model::{
-    StudioSceneModel, StudioSceneObjectKind, StudioSceneObjectVm,
-};
-use ryeos_client_base::studio::view_model::StudioTone;
 use ryeos_client_base::text_surface::{Color, Style, TextSurface};
+use ryeos_client_base::ui::scene_model::{
+    RyeOsSceneModel, RyeOsSceneObjectKind, RyeOsSceneObjectVm,
+};
+use ryeos_client_base::ui::view_model::RyeOsTone;
 
 use super::super::text::display_width;
 use super::super::theme::{mix_toward, ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN};
@@ -93,7 +93,7 @@ const BREATHE: [f32; 16] = [
     0.30, 0.36, 0.45, 0.54, 0.62, 0.71, 0.80, 0.87, 0.92, 0.87, 0.80, 0.71, 0.62, 0.54, 0.45, 0.36,
 ];
 
-pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneModel) {
+pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel) {
     let w = rect.w as usize;
     let h = rect.h as usize;
     if w == 0 || h == 0 {
@@ -152,7 +152,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
     // Fill pass first: solids are the mass everything else rides on
     // (edges, motes, and text draw over them).
     for object in &scene.objects {
-        if matches!(object.kind, StudioSceneObjectKind::Fill) {
+        if matches!(object.kind, RyeOsSceneObjectKind::Fill) {
             draw_fill(
                 surface,
                 rect,
@@ -177,8 +177,8 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
             continue;
         };
         match object.kind {
-            StudioSceneObjectKind::Fill => {}
-            StudioSceneObjectKind::Text | StudioSceneObjectKind::LabelAnchor => {
+            RyeOsSceneObjectKind::Fill => {}
+            RyeOsSceneObjectKind::Text | RyeOsSceneObjectKind::LabelAnchor => {
                 if let Some(label) = object.label.as_deref() {
                     draw_label(surface, rect, col, row, label, scene_style(object.tone));
                 }
@@ -191,7 +191,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
             // a steady glyph.
             _ => {
                 let base_phase = phase_for(&object.id, index);
-                let breathes = matches!(object.kind, StudioSceneObjectKind::Particle);
+                let breathes = matches!(object.kind, RyeOsSceneObjectKind::Particle);
                 let steady_cell = || -> (char, Style) {
                     let mut style = scene_style(object.tone);
                     if object.opacity < 0.5 {
@@ -262,7 +262,7 @@ const ORBIT_SQUASH: f32 = 0.45;
 /// `[0, 1]` (1 = nearest the viewer, 0 = passing behind). The declared
 /// position fixes the ring radius and starting phase, so generation 0
 /// renders the scene exactly as authored.
-fn orbited_position(object: &StudioSceneObjectVm, generation: u64, pace: u64) -> ([f32; 3], f32) {
+fn orbited_position(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> ([f32; 3], f32) {
     let (mut position, depth) = match object.orbit {
         Some(speed) => orbit_point(object.position, speed, generation, pace),
         None => (object.position, 1.0),
@@ -274,15 +274,12 @@ fn orbited_position(object: &StudioSceneObjectVm, generation: u64, pace: u64) ->
     (position, depth)
 }
 
-fn break_offset(object: &StudioSceneObjectVm, generation: u64, pace: u64) -> [f32; 3] {
+fn break_offset(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> [f32; 3] {
     let Some(motion) = object.break_motion else {
         return [0.0, 0.0, 0.0];
     };
     let period = motion.period.max(4);
-    let step = generation
-        .wrapping_mul(pace)
-        .wrapping_add(motion.phase)
-        % period;
+    let step = generation.wrapping_mul(pace).wrapping_add(motion.phase) % period;
     let progress = step as f32 / period as f32;
     let eased = 0.5 - 0.5 * (progress * std::f32::consts::TAU).cos();
     [
@@ -292,7 +289,7 @@ fn break_offset(object: &StudioSceneObjectVm, generation: u64, pace: u64) -> [f3
     ]
 }
 
-fn local_clip_allows(object: &StudioSceneObjectVm, lx: f32, ly: f32) -> bool {
+fn local_clip_allows(object: &RyeOsSceneObjectVm, lx: f32, ly: f32) -> bool {
     let Some(clip) = object.clip else {
         return true;
     };
@@ -334,8 +331,8 @@ fn orbit_point(point: [f32; 3], speed: f32, generation: u64, pace: u64) -> ([f32
 /// toward the foreground — light rolling across a facet. The glyph only
 /// steps around its base size at the curve's extremes.
 fn particle_cell(
-    object: &StudioSceneObjectVm,
-    scene: &StudioSceneModel,
+    object: &RyeOsSceneObjectVm,
+    scene: &RyeOsSceneModel,
     phase: u64,
     pace: u64,
     sweep_band: Option<(f32, f32)>,
@@ -390,8 +387,8 @@ fn particle_cell(
 fn draw_fill(
     surface: &mut TextSurface,
     rect: Rect,
-    scene: &StudioSceneModel,
-    object: &StudioSceneObjectVm,
+    scene: &RyeOsSceneModel,
+    object: &RyeOsSceneObjectVm,
     scale: f32,
     cell_aspect: f32,
     center: (f32, f32),
@@ -572,7 +569,7 @@ fn hash_noise(col: usize, row: usize, seed: u64) -> f32 {
 }
 
 /// Resolve an object's named glyph ramp (content's choice; dots default).
-fn ramp_for(object: &StudioSceneObjectVm) -> &'static [char; 7] {
+fn ramp_for(object: &RyeOsSceneObjectVm) -> &'static [char; 7] {
     match object.glyph.as_deref() {
         Some("diamond") => &RAMP_DIAMOND,
         _ => &RAMP_DOT,
@@ -632,19 +629,19 @@ fn draw_label(
 
 /// Tone → theme colour. Colour is mapped, never invented; animation only
 /// ever blends between these mapped colours and the background.
-fn tone_color(tone: StudioTone) -> Color {
+fn tone_color(tone: RyeOsTone) -> Color {
     match tone {
-        StudioTone::Good => GOOD,
-        StudioTone::Warn => WARN,
-        StudioTone::Danger => DANGER,
-        StudioTone::Accent => ACCENT,
-        StudioTone::Neutral => FG_SOFT,
+        RyeOsTone::Good => GOOD,
+        RyeOsTone::Warn => WARN,
+        RyeOsTone::Danger => DANGER,
+        RyeOsTone::Accent => ACCENT,
+        RyeOsTone::Neutral => FG_SOFT,
     }
 }
 
 /// Tone → style over the backdrop background (BG, not PANEL): the scene is
 /// drawn on the empty center, not inside a tile.
-fn scene_style(tone: StudioTone) -> Style {
+fn scene_style(tone: RyeOsTone) -> Style {
     Style::new().fg(tone_color(tone)).bg(BG)
 }
 
@@ -657,7 +654,7 @@ struct Bounds {
 }
 
 impl Bounds {
-    fn of(objects: &[StudioSceneObjectVm]) -> Self {
+    fn of(objects: &[RyeOsSceneObjectVm]) -> Self {
         let mut min_x = f32::INFINITY;
         let mut max_x = f32::NEG_INFINITY;
         let mut min_y = f32::INFINITY;
@@ -686,7 +683,7 @@ impl Bounds {
             if let Some(end) = object.end {
                 consider(end);
             }
-            if matches!(object.kind, StudioSceneObjectKind::Fill) {
+            if matches!(object.kind, RyeOsSceneObjectKind::Fill) {
                 // A fill's extent is its shape's, not its centre point:
                 // radius wide, body + termination each way vertically.
                 let reach = object.scale[1] + object.scale[2];
@@ -738,7 +735,7 @@ impl Bounds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::scene_model::scene_from_body;
+    use ryeos_client_base::ui::scene_model::scene_from_body;
 
     fn render(generation: u64, w: u16, h: u16) -> TextSurface {
         // A content-shaped scene (particles + a brand text object), the
@@ -782,7 +779,7 @@ mod tests {
     #[test]
     fn empty_scene_degrades_to_nothing() {
         let mut surface = TextSurface::new(20, 10);
-        let scene = StudioSceneModel::default();
+        let scene = RyeOsSceneModel::default();
         draw_scene(&mut surface, Rect::new(0, 0, 20, 10), &scene);
         // A scene with no objects leaves the surface untouched (default
         // blank cells) — the background fill stands.

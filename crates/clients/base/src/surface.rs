@@ -1,4 +1,4 @@
-//! SurfaceSpec — declarative UI contract for the RyeOS Studio.
+//! SurfaceSpec — declarative UI contract for the RyeOS RyeOs.
 //!
 //! A surface is a non-executable Rye item describing the dynamic-tiling
 //! workspace (tiling algorithm + ordered initial tiles), edge slots,
@@ -793,17 +793,17 @@ fn empty_provenance(requested_ref: &str) -> SurfaceProvenance {
 // Built-in default surface
 // ---------------------------------------------------------------------------
 
-/// The built-in default Studio surface — dynamic-tiling workspace.
+/// The built-in default RyeOs surface — dynamic-tiling workspace.
 ///
-/// Data-equivalent to `surface:ryeos/studio/base`: empty center (the
+/// Data-equivalent to `surface:ryeos/ui/base`: empty center (the
 /// backdrop scene shows on first-run), default master/stack tiling,
 /// bottom input slot open, side slots closed, thin borders.
 pub fn builtin_default() -> SurfaceSpec {
     SurfaceSpec {
-        name: "studio-base".into(),
+        name: "ryeos-ui-base".into(),
         version: "1.0.0".into(),
         extends: None,
-        description: Some("Default RyeOS Studio — dynamic tiling workspace".into()),
+        description: Some("Default RyeOS RyeOs — dynamic tiling workspace".into()),
         tiling: TilingSpec::default(),
         tiles: Vec::new(),
         slots: SlotsSpec::default(),
@@ -1002,7 +1002,7 @@ mod tests {
         // (no fire-sword). Real content comes from surface data; with nothing
         // resolved, the fallback is simply empty.
         let spec = builtin_default();
-        assert_eq!(spec.name, "studio-base");
+        assert_eq!(spec.name, "ryeos-ui-base");
         assert!(spec.tiles.is_empty());
         assert_eq!(spec.tiling, TilingSpec::default());
         assert!(spec.slots.bottom.is_none());
@@ -1204,7 +1204,7 @@ style:
         };
         let loaded = load_surface(&opts);
         assert!(matches!(loaded, LoadedSurface::Builtin { .. }));
-        assert_eq!(loaded.spec().name, "studio-base");
+        assert_eq!(loaded.spec().name, "ryeos-ui-base");
         assert!(matches!(loaded.source(), SurfaceSource::BuiltinDefault));
     }
 
@@ -1300,10 +1300,10 @@ tiles = ["view:ryeos/threads/list"]
         assert_eq!(local.source_label(), "local preview (untrusted)");
 
         let resolved = LoadedSurface::RyeResolved {
-            requested_ref: "surface:ryeos/studio/graph".into(),
+            requested_ref: "surface:ryeos/ui/graph".into(),
             spec: builtin_default(),
             trusted: true,
-            provenance: empty_provenance("surface:ryeos/studio/graph"),
+            provenance: empty_provenance("surface:ryeos/ui/graph"),
             item_diagnostics: Vec::new(),
             tui_diagnostics: Vec::new(),
         };
@@ -1326,12 +1326,12 @@ tiles = ["view:ryeos/threads/list"]
     fn bundled_base_surface_loads() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/studio/.ai/surfaces/ryeos/studio/base.yaml");
+            .join("bundles/ryeos-ui/.ai/surfaces/ryeos/ui/base.yaml");
         assert!(path.exists(), "bundled surface missing at {path:?}");
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse bundled base surface: {}", e));
-        assert_eq!(spec.name, "studio-base");
+        assert_eq!(spec.name, "ryeos-ui-base");
         assert!(!spec.affordances.is_empty());
         assert!(spec.tiles.is_empty(), "base starts with an empty center");
         assert!(matches!(
@@ -1391,7 +1391,7 @@ tiles = ["view:ryeos/threads/list"]
     fn bundled_workbench_surface_loads_with_bound_view() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/studio/.ai/surfaces/ryeos/studio/workbench.yaml");
+            .join("bundles/ryeos-ui/.ai/surfaces/ryeos/ui/workbench.yaml");
         assert!(
             path.exists(),
             "bundled workbench surface missing at {path:?}"
@@ -1399,7 +1399,7 @@ tiles = ["view:ryeos/threads/list"]
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse bundled workbench surface: {}", e));
-        assert_eq!(spec.name, "studio-workbench");
+        assert_eq!(spec.name, "ryeos-ui-workbench");
         // Views-as-content: the workbench binds the threads view by ref
         // in its ordered center tiles.
         assert!(
@@ -1415,12 +1415,12 @@ tiles = ["view:ryeos/threads/list"]
     fn bundled_atlas_surface_loads() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../..")
-            .join("bundles/studio/.ai/surfaces/ryeos/studio/atlas.yaml");
+            .join("bundles/ryeos-ui/.ai/surfaces/ryeos/ui/atlas.yaml");
         assert!(path.exists(), "bundled atlas surface missing at {path:?}");
         let content = std::fs::read_to_string(path).unwrap();
         let spec: SurfaceSpec = serde_yaml::from_str(&content)
             .unwrap_or_else(|e| panic!("failed to parse bundled atlas surface: {}", e));
-        assert_eq!(spec.name, "studio-atlas");
+        assert_eq!(spec.name, "ryeos-ui-atlas");
         assert_eq!(
             spec.ambient.as_ref().map(|ambient| ambient.mode),
             Some(AmbientModeSpec::NamespaceAtlas)
@@ -1513,14 +1513,14 @@ id = "test"
     #[test]
     fn from_daemon_signed_surface() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/base",
-            "canonical_ref": "surface:ryeos/studio/base",
+            "requested_ref": "surface:ryeos/ui/base",
+            "canonical_ref": "surface:ryeos/ui/base",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_bundle",
             "root_trust_class": "trusted_bundle",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/base.yaml" },
-            "provenance": provenance_json("surface:ryeos/studio/base", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/base.yaml" },
+            "provenance": provenance_json("surface:ryeos/ui/base", []),
             "composed_value": {
                 "name": "base",
                 "tiles": ["view:ryeos/chain/timeline"],
@@ -1533,7 +1533,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let loaded = LoadedSurface::from_daemon("surface:ryeos/studio/base", response).unwrap();
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/ui/base", response).unwrap();
 
         match &loaded {
             LoadedSurface::RyeResolved {
@@ -1544,13 +1544,13 @@ id = "test"
                 item_diagnostics,
                 tui_diagnostics,
             } => {
-                assert_eq!(requested_ref, "surface:ryeos/studio/base");
+                assert_eq!(requested_ref, "surface:ryeos/ui/base");
                 assert_eq!(spec.name, "base");
                 assert_eq!(spec.tiles.len(), 1);
                 assert_eq!(spec.affordances.len(), 1);
                 assert_eq!(spec.affordances[0].id, "view.thread");
                 assert!(*trusted, "signed surface should be trusted");
-                assert_eq!(provenance.root.resolved_ref, "surface:ryeos/studio/base");
+                assert_eq!(provenance.root.resolved_ref, "surface:ryeos/ui/base");
                 assert!(provenance.ancestors.is_empty());
                 assert!(
                     item_diagnostics.is_empty(),
@@ -1572,14 +1572,14 @@ id = "test"
         // into the loaded surface (warn → ValidationError notice, info →
         // Info on stderr).
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/base",
-            "canonical_ref": "surface:ryeos/studio/base",
+            "requested_ref": "surface:ryeos/ui/base",
+            "canonical_ref": "surface:ryeos/ui/base",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_bundle",
             "root_trust_class": "trusted_bundle",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/base.yaml" },
-            "provenance": provenance_json("surface:ryeos/studio/base", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/base.yaml" },
+            "provenance": provenance_json("surface:ryeos/ui/base", []),
             "composed_value": {
                 "name": "base",
                 "tiles": ["view:ryeos/chain/timeline", "view:ryeos/gone"],
@@ -1596,7 +1596,7 @@ id = "test"
             ]
         });
 
-        let loaded = LoadedSurface::from_daemon("surface:ryeos/studio/base", response).unwrap();
+        let loaded = LoadedSurface::from_daemon("surface:ryeos/ui/base", response).unwrap();
 
         let views = loaded.spec().views.as_ref().expect("views embedded");
         assert_eq!(views["view:ryeos/chain/timeline"]["widget"], "timeline");
@@ -1623,14 +1623,14 @@ id = "test"
     #[test]
     fn from_daemon_unsigned_surface_fails_closed() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/graph",
-            "canonical_ref": "surface:ryeos/studio/graph",
+            "requested_ref": "surface:ryeos/ui/graph",
+            "canonical_ref": "surface:ryeos/ui/graph",
             "kind": "surface",
             "trusted": false,
             "trust_class": "unsigned",
             "root_trust_class": "unsigned",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/graph.yaml" },
-            "provenance": provenance_json("surface:ryeos/studio/graph", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/graph.yaml" },
+            "provenance": provenance_json("surface:ryeos/ui/graph", []),
             "composed_value": {
                 "name": "graph",
                 "tiles": ["view:ryeos/graph/topology"],
@@ -1641,7 +1641,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/studio/graph", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/ui/graph", response).unwrap_err();
 
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
@@ -1654,21 +1654,21 @@ id = "test"
     #[test]
     fn from_daemon_invalid_composed_fails_closed() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/bad",
-            "canonical_ref": "surface:ryeos/studio/bad",
+            "requested_ref": "surface:ryeos/ui/bad",
+            "canonical_ref": "surface:ryeos/ui/bad",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_bundle",
             "root_trust_class": "trusted_bundle",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/bad.yaml" },
-            "provenance": provenance_json("surface:ryeos/studio/bad", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/bad.yaml" },
+            "provenance": provenance_json("surface:ryeos/ui/bad", []),
             "composed_value": { "garbage": true },
             "derived": {},
             "policy_facts": {},
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/studio/bad", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/ui/bad", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("daemon returned invalid surface"));
@@ -1680,14 +1680,14 @@ id = "test"
     #[test]
     fn from_daemon_rejects_legacy_layout_field() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/old",
-            "canonical_ref": "surface:ryeos/studio/old",
+            "requested_ref": "surface:ryeos/ui/old",
+            "canonical_ref": "surface:ryeos/ui/old",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_bundle",
             "root_trust_class": "trusted_bundle",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/old.yaml" },
-            "provenance": provenance_json("surface:ryeos/studio/old", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/old.yaml" },
+            "provenance": provenance_json("surface:ryeos/ui/old", []),
             "composed_value": {
                 "name": "old",
                 "layout": {
@@ -1702,7 +1702,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/studio/old", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/ui/old", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("unknown field `layout`"));
@@ -1714,14 +1714,14 @@ id = "test"
     #[test]
     fn from_daemon_rejects_old_commands_field() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/old",
-            "canonical_ref": "surface:ryeos/studio/old",
+            "requested_ref": "surface:ryeos/ui/old",
+            "canonical_ref": "surface:ryeos/ui/old",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_bundle",
             "root_trust_class": "trusted_bundle",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/old.yaml" },
-            "provenance": provenance_json("surface:ryeos/studio/old", []),
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/old.yaml" },
+            "provenance": provenance_json("surface:ryeos/ui/old", []),
             "composed_value": {
                 "name": "old",
                 "tiles": ["view:ryeos/chain/timeline"],
@@ -1732,7 +1732,7 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/studio/old", response).unwrap_err();
+        let err = LoadedSurface::from_daemon("surface:ryeos/ui/old", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("unknown field `commands`"));
@@ -1744,13 +1744,13 @@ id = "test"
     #[test]
     fn from_daemon_invalid_provenance_fails_closed() {
         let response = serde_json::json!({
-            "requested_ref": "surface:ryeos/studio/bad-provenance",
-            "canonical_ref": "surface:ryeos/studio/bad-provenance",
+            "requested_ref": "surface:ryeos/ui/bad-provenance",
+            "canonical_ref": "surface:ryeos/ui/bad-provenance",
             "kind": "surface",
             "trusted": true,
             "trust_class": "trusted_bundle",
             "root_trust_class": "trusted_bundle",
-            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/studio/bad-provenance.yaml" },
+            "source": { "path": "/usr/lib/ryeos/.ai/surfaces/ryeos/ui/bad-provenance.yaml" },
             "provenance": ["old-string-list-is-invalid"],
             "composed_value": {
                 "name": "bad-provenance",
@@ -1762,8 +1762,8 @@ id = "test"
             "diagnostics": []
         });
 
-        let err = LoadedSurface::from_daemon("surface:ryeos/studio/bad-provenance", response)
-            .unwrap_err();
+        let err =
+            LoadedSurface::from_daemon("surface:ryeos/ui/bad-provenance", response).unwrap_err();
         match err {
             SurfaceDiagnostic::ValidationError { message } => {
                 assert!(message.contains("invalid provenance"));
@@ -1784,7 +1784,7 @@ id = "test"
             "source": { "path": "/home/user/.ai/surfaces/my/custom.yaml" },
             "provenance": provenance_json(
                 "surface:my/custom",
-                ["surface:ryeos/studio/base"]
+                ["surface:ryeos/ui/base"]
             ),
             "composed_value": {
                 "name": "custom",
@@ -1803,7 +1803,7 @@ id = "test"
                 assert_eq!(provenance.root.resolved_ref, "surface:my/custom");
                 assert_eq!(
                     provenance.ancestors[0].resolved_ref,
-                    "surface:ryeos/studio/base"
+                    "surface:ryeos/ui/base"
                 );
             }
             other => panic!(

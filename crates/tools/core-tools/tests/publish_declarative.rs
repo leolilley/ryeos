@@ -44,14 +44,14 @@ fn load_dev_signing_key() -> SigningKey {
 }
 
 fn create_declarative_bundle(root: &Path) -> PathBuf {
-    let bundle = root.join("studio");
+    let bundle = root.join("ryeos-ui");
     let ai_dir = bundle.join(ryeos_engine::AI_DIR);
     std::fs::create_dir_all(&ai_dir).unwrap();
     std::fs::write(
         ai_dir.join("manifest.source.yaml"),
-        r#"name: studio
+        r#"name: ryeos-ui
 version: "0.1.0"
-description: "Declarative studio bundle test fixture"
+description: "Declarative ryeos-ui bundle test fixture"
 requires_kinds: []
 "#,
     )

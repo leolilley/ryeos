@@ -4,8 +4,8 @@
 //! for now (weighted/right-aligned columns are a later refinement).
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioTableRowVm, StudioTone};
 use ryeos_client_base::text_surface::{Style, TextSurface};
+use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTableRowVm, RyeOsTone};
 
 use super::super::primitives::fill_line;
 use super::super::text::{letterspace, truncate};
@@ -20,7 +20,7 @@ pub fn draw_table(
     surface: &mut TextSurface,
     rect: Rect,
     columns: &[String],
-    rows: &[StudioTableRowVm],
+    rows: &[RyeOsTableRowVm],
     now_ms: u64,
 ) {
     let width = rect.w as usize;
@@ -136,7 +136,7 @@ pub fn draw_table(
                     .get(i)
                     .copied()
                     .flatten()
-                    .filter(|tone| *tone != StudioTone::Neutral);
+                    .filter(|tone| *tone != RyeOsTone::Neutral);
                 let cell_style = if row.selected {
                     style
                 } else if let Some(tone) = cell_tone {
@@ -167,7 +167,7 @@ pub fn draw_table(
     }
 }
 
-fn row_height(row: &StudioTableRowVm) -> usize {
+fn row_height(row: &RyeOsTableRowVm) -> usize {
     1 + row.detail.len()
 }
 
@@ -183,8 +183,8 @@ fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style
     style.fg(mix_toward(style.fg, ACCENT, weight))
 }
 
-fn active_pulse_style(style: Style, tone: StudioTone, now_ms: u64) -> Style {
-    if tone != StudioTone::Accent {
+fn active_pulse_style(style: Style, tone: RyeOsTone, now_ms: u64) -> Style {
+    if tone != RyeOsTone::Accent {
         return style;
     }
     let phase = (now_ms / 180) % 8;
@@ -202,7 +202,7 @@ fn draw_detail(
     left: usize,
     y: usize,
     width: usize,
-    detail: &StudioRowDetailVm,
+    detail: &RyeOsRowDetailVm,
 ) {
     fill_line(surface, left, y, width, style_fg());
     let label = format!("  {}: ", detail.field);
@@ -217,10 +217,10 @@ fn draw_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::view_model::StudioTone;
+    use ryeos_client_base::ui::view_model::RyeOsTone;
 
-    fn trow(tone: StudioTone, cells: &[&str]) -> StudioTableRowVm {
-        StudioTableRowVm {
+    fn trow(tone: RyeOsTone, cells: &[&str]) -> RyeOsTableRowVm {
+        RyeOsTableRowVm {
             id: cells.first().copied().unwrap_or_default().to_string(),
             cells: cells.iter().map(|c| c.to_string()).collect(),
             cell_tones: Vec::new(),
@@ -272,7 +272,7 @@ mod tests {
             &mut s,
             rect,
             &columns(),
-            &[trow(StudioTone::Neutral, &["T-ab", "ops/base", "running"])],
+            &[trow(RyeOsTone::Neutral, &["T-ab", "ops/base", "running"])],
             0,
         );
         // Headers render letterspaced/uppercased (house style); normalise to
@@ -310,8 +310,8 @@ mod tests {
             rect,
             &columns(),
             &[
-                trow(StudioTone::Neutral, &["T-ab", "ops/base", "running"]),
-                trow(StudioTone::Neutral, &["T-cd", "ops/scan", "completed"]),
+                trow(RyeOsTone::Neutral, &["T-ab", "ops/base", "running"]),
+                trow(RyeOsTone::Neutral, &["T-cd", "ops/scan", "completed"]),
             ],
             0,
         );
@@ -323,7 +323,7 @@ mod tests {
     fn selected_row_fills_its_line() {
         use super::super::super::theme::ACCENT;
         let (mut s, rect) = surface(60, 4);
-        let mut r = trow(StudioTone::Neutral, &["T-ab", "ops/base", "running"]);
+        let mut r = trow(RyeOsTone::Neutral, &["T-ab", "ops/base", "running"]);
         r.selected = true;
         draw_table(&mut s, rect, &columns(), &[r], 0);
         assert!(
@@ -342,7 +342,7 @@ mod tests {
             &mut s,
             rect,
             &[],
-            &[trow(StudioTone::Neutral, &["a", "b", "c"])],
+            &[trow(RyeOsTone::Neutral, &["a", "b", "c"])],
             0,
         );
         let col_w = (60 - GUTTER) / 3;
@@ -357,7 +357,7 @@ mod tests {
         let cols = vec!["thread".to_string()];
         let make = || {
             (0..20)
-                .map(|i| trow(StudioTone::Neutral, &[format!("T-{i}").as_str()]))
+                .map(|i| trow(RyeOsTone::Neutral, &[format!("T-{i}").as_str()]))
                 .collect::<Vec<_>>()
         };
 
@@ -396,11 +396,11 @@ mod tests {
     fn table_scrolls_by_lines_when_expanded_row_precedes_selection() {
         let cols = vec!["thread".to_string()];
         let mut rows = (0..20)
-            .map(|i| trow(StudioTone::Neutral, &[format!("T-{i}").as_str()]))
+            .map(|i| trow(RyeOsTone::Neutral, &[format!("T-{i}").as_str()]))
             .collect::<Vec<_>>();
         rows[2].expanded = true;
         rows[2].detail = (0..6)
-            .map(|i| StudioRowDetailVm {
+            .map(|i| RyeOsRowDetailVm {
                 field: format!("field_{i}"),
                 value: format!("value_{i}"),
                 tone: None,
@@ -423,8 +423,8 @@ mod tests {
     #[test]
     fn cell_tone_overrides_the_muted_secondary_style() {
         let (mut s, rect) = surface(60, 4);
-        let mut toned = trow(StudioTone::Neutral, &["T-ab", "suspended", "running"]);
-        toned.cell_tones = vec![None, Some(StudioTone::Warn), None];
+        let mut toned = trow(RyeOsTone::Neutral, &["T-ab", "suspended", "running"]);
+        toned.cell_tones = vec![None, Some(RyeOsTone::Warn), None];
         draw_table(&mut s, rect, &columns(), &[toned], 0);
 
         let (mut plain_s, plain_rect) = surface(60, 4);
@@ -432,7 +432,7 @@ mod tests {
             &mut plain_s,
             plain_rect,
             &columns(),
-            &[trow(StudioTone::Neutral, &["T-ab", "suspended", "running"])],
+            &[trow(RyeOsTone::Neutral, &["T-ab", "suspended", "running"])],
             0,
         );
 

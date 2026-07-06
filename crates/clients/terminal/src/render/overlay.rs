@@ -3,8 +3,8 @@
 //! here by widget shape, not by product-specific overlay names.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioOverlayItemVm, StudioOverlayVm};
 use ryeos_client_base::text_surface::{Border, Style, TextSurface};
+use ryeos_client_base::ui::view_model::{RyeOsOverlayItemVm, RyeOsOverlayVm};
 
 use super::primitives::fill_rect;
 use super::text::{display_width, truncate};
@@ -13,14 +13,14 @@ use super::theme::{ACCENT, BG, FG, GOOD, MUTED, PANEL};
 const CAT_W: usize = 12;
 const KEY_W: usize = 16;
 
-pub fn draw_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
+pub fn draw_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     match overlay.widget.as_str() {
         "table" => draw_table_overlay(surface, overlay),
         _ => draw_palette_overlay(surface, overlay),
     }
 }
 
-fn draw_palette_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
+fn draw_palette_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     let w = surface.width.min(76).max(32);
     let max_rows = surface.height.saturating_sub(8).max(3);
     let rows = overlay.items.len().min(max_rows);
@@ -45,7 +45,7 @@ fn draw_palette_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
     draw_hint(surface, x, y + h - 2, &overlay.hint, w);
 }
 
-fn draw_table_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
+fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     let w = surface.width.min(84).max(44);
     let max_rows = surface.height.saturating_sub(8).max(4);
     let rows = overlay.items.len().min(max_rows);
@@ -133,7 +133,7 @@ fn draw_palette_row(
     x: usize,
     y: usize,
     w: usize,
-    item: &StudioOverlayItemVm,
+    item: &RyeOsOverlayItemVm,
     selected: bool,
 ) {
     let bg = if selected { ACCENT } else { PANEL };

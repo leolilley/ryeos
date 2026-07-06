@@ -1,6 +1,6 @@
-//! Seat caller authentication for studio services.
+//! Seat caller authentication for ryeos-ui services.
 //!
-//! Studio sources serve two caller lanes with one gate:
+//! RyeOS UI sources serve two caller lanes with one gate:
 //! - **browser sessions** (cookie → `session:<id>` fingerprint), and
 //! - **verified operators** (signed requests through the one daemon
 //!   invocation path — `/execute` → service dispatch).

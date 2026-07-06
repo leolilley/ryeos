@@ -230,10 +230,12 @@ pub fn normalize_params_with_contract(
     };
     let mut obj = match value {
         serde_json::Value::Object(obj) => obj,
-        other => return Err(format!(
+        other => {
+            return Err(format!(
             "invocation parameters must be an object when a schema contract is declared, got {}",
             json_type(&other)
-        )),
+        ))
+        }
     };
 
     for (field, decl) in &contract.fields {
@@ -648,12 +650,12 @@ mod tests {
         let mut command = test_command(vec!["web".into(), "base".into()], Vec::new());
         command.defaults.insert(
             "surface".into(),
-            serde_json::Value::String("surface:ryeos/studio/base".into()),
+            serde_json::Value::String("surface:ryeos/ui/base".into()),
         );
 
         let result = bind_argv_with_command(&[], Some(&command)).unwrap();
 
-        assert_eq!(result["surface"], "surface:ryeos/studio/base");
+        assert_eq!(result["surface"], "surface:ryeos/ui/base");
     }
 
     #[test]
@@ -669,14 +671,14 @@ mod tests {
         );
         command.defaults.insert(
             "surface".into(),
-            serde_json::Value::String("surface:ryeos/studio/atlas".into()),
+            serde_json::Value::String("surface:ryeos/ui/atlas".into()),
         );
 
         let result =
-            bind_argv_with_command(&["surface:custom/studio/debug".into()], Some(&command))
+            bind_argv_with_command(&["surface:custom/ryeos-ui/debug".into()], Some(&command))
                 .unwrap();
 
-        assert_eq!(result["surface"], "surface:custom/studio/debug");
+        assert_eq!(result["surface"], "surface:custom/ryeos-ui/debug");
     }
 
     #[test]

@@ -1,0 +1,50 @@
+# ryeos:unsigned
+name: ryeos-ui-atlas
+version: "1.0.0"
+description: RyeOS UI with a Three.js 2D namespace atlas background
+
+tiling:
+  mode: master_stack
+  master: { side: right, arrange: vertical, ratio: 0.6, count: 1 }
+  stack: { arrange: horizontal }
+  insert: end
+
+tiles: []
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  left: { content: "view:ryeos/threads/history", open: false, size: 32 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
+
+ambient:
+  show_background: true
+  opacity: 1.0
+  mode: namespace_atlas
+  atlas:
+    style: flat_2d
+
+affordances:
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: view.atlas
+    label: Atlas
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.files
+    label: Files
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.services
+    label: Services
+    category: View

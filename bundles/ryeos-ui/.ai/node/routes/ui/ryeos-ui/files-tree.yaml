@@ -1,0 +1,15 @@
+# ryeos:signed:2026-06-19T05:40:59Z:ef10ef27b438f46eebc8e82f3b9b2c616b976eefa11193f059d0a4e5cd14b4aa:k+lWWLCDmLdZOsbK17edBT65Lz1wn02PEyAqdeomf8qW8aUZZw/GMxOKDpq1WYzslWr89ZGV30DszmMgqnyIAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/files/tree
+path: /ui/api/ryeos-ui/files/tree
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 10000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/files/tree"

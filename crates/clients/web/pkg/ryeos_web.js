@@ -5,8 +5,8 @@
  * @param {any} result_json
  * @returns {any}
  */
-export function studio_apply_effect_result(result_json) {
-    const ret = wasm.studio_apply_effect_result(result_json);
+export function ryeos_apply_effect_result(result_json) {
+    const ret = wasm.ryeos_apply_effect_result(result_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -18,8 +18,8 @@ export function studio_apply_effect_result(result_json) {
  * @param {any} event_json
  * @returns {any}
  */
-export function studio_dispatch(event_json) {
-    const ret = wasm.studio_dispatch(event_json);
+export function ryeos_dispatch(event_json) {
+    const ret = wasm.ryeos_dispatch(event_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -27,12 +27,12 @@ export function studio_dispatch(event_json) {
 }
 
 /**
- * Replay durable seat braid events into the in-memory Studio engine.
+ * Replay durable seat braid events into the in-memory RyeOs engine.
  * @param {any} events_json
  * @returns {any}
  */
-export function studio_replay_seat_events(events_json) {
-    const ret = wasm.studio_replay_seat_events(events_json);
+export function ryeos_replay_seat_events(events_json) {
+    const ret = wasm.ryeos_replay_seat_events(events_json);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -43,8 +43,8 @@ export function studio_replay_seat_events(events_json) {
  * Return the current RyeOS scene model without mutating state.
  * @returns {any}
  */
-export function studio_scene_model() {
-    const ret = wasm.studio_scene_model();
+export function ryeos_scene_model() {
+    const ret = wasm.ryeos_scene_model();
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -55,8 +55,8 @@ export function studio_scene_model() {
  * Return the local seat event log so JS can mirror it into the seat braid.
  * @returns {any}
  */
-export function studio_seat_events() {
-    const ret = wasm.studio_seat_events();
+export function ryeos_seat_events() {
+    const ret = wasm.ryeos_seat_events();
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -70,8 +70,8 @@ export function studio_seat_events() {
  * @param {bigint} now_ms
  * @returns {any}
  */
-export function studio_start(session_json, viewport_json, now_ms) {
-    const ret = wasm.studio_start(session_json, viewport_json, now_ms);
+export function ryeos_start(session_json, viewport_json, now_ms) {
+    const ret = wasm.ryeos_start(session_json, viewport_json, now_ms);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -82,8 +82,8 @@ export function studio_start(session_json, viewport_json, now_ms) {
  * Return the current RyeOS view model without mutating state.
  * @returns {any}
  */
-export function studio_view_model() {
-    const ret = wasm.studio_view_model();
+export function ryeos_view_model() {
+    const ret = wasm.ryeos_view_model();
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
