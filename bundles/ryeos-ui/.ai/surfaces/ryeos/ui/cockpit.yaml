@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-06T13:20:06Z:55a56b8da64facb4b9968cc2eca45dfe689d94fa4cc9c38a7df11f3a73385470:wuMpmtyFvaEfvN6kzaQDdBkeHtwPPvX98iXFxVaeoTV20Kfsg+JkQC4QF04l+/u3S2ZwaOZ190HbWW/r94zcCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-cockpit
 version: "1.0.0"
@@ -29,7 +30,7 @@ slots:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/prism
+backdrop: view:ryeos/backdrop/prism-shards
 
 library:
   - view:ryeos/threads/live

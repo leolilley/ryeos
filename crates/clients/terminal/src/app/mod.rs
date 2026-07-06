@@ -111,11 +111,11 @@ pub async fn run(
 
     let mut events = EventStream::new();
     // Adaptive frame clock: the backdrop's breathe/sweep animation reads
-    // fluid at ~8fps, so the tick quickens while the center is empty (the
+    // fluid at ~14fps, so the tick quickens while the center is empty (the
     // diff renderer repaints only the handful of changed cells). With
     // tiles up nothing animates per-tick, so 4fps keeps the debounce and
     // seat sync cadence without burning cycles.
-    const TICK_BACKDROP_MS: u64 = 120;
+    const TICK_BACKDROP_MS: u64 = 72;
     const TICK_TILES_MS: u64 = 250;
     let mut tick_ms = TICK_TILES_MS;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));

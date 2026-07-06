@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-06T13:20:06Z:5cd4e6d67cfa929fedc2f4ab42de7412647433d4dc708002b020ac7f3e195ffc:tOUCMA8XpVPSnEgqvo2VSuQBU/Duwf04YlW1lsu7TknKfFxtatXeysOrOq0wqDzcWrbyjzWkZtTCuMyEJw8xAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
@@ -19,7 +20,7 @@ slots:
 style:
   border: hidden
 
-backdrop: view:ryeos/backdrop/prism
+backdrop: view:ryeos/backdrop/prism-shards
 
 library:
   - view:ryeos/thread/transcript

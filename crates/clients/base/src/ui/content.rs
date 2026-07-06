@@ -1168,7 +1168,7 @@ mod tests {
     fn threads_binding() -> ViewBinding {
         serde_json::from_value(json!({
             "widget": "rows",
-            "source": { "ref": "service:ui/ryeos/threads", "params": {"limit": 200}, "collection": "threads" },
+            "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {"limit": 200}, "collection": "threads" },
             "projections": {
                 "primary": "item_ref",
                 "meta": "status",
@@ -1182,7 +1182,7 @@ mod tests {
     fn project_table_per_column_tone_is_independent_of_row_tone() {
         let binding: ViewBinding = serde_json::from_value(json!({
             "widget": "table",
-            "source": { "ref": "service:ui/ryeos/threads/list", "collection": "threads" },
+            "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" },
             "projections": {
                 "columns": [
                     { "label": "thread", "field": "thread_id" },
@@ -1284,7 +1284,7 @@ mod tests {
         // response this way, without dumping the whole payload.
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Outcome",
-            "source": { "ref": "service:ui/ryeos/thread/inspect", "collection": "result" },
+            "source": { "ref": "service:ui/ryeos-ui/thread/inspect", "collection": "result" },
             "projection": { "primary": "outcome_code", "meta": "error" }
         }))
         .unwrap();
@@ -1304,7 +1304,7 @@ mod tests {
         // whole compacted response.
         let section: SectionBinding = serde_json::from_value(json!({
             "title": "Outcome",
-            "source": { "ref": "service:ui/ryeos/thread/inspect", "collection": "result" },
+            "source": { "ref": "service:ui/ryeos-ui/thread/inspect", "collection": "result" },
             "projection": { "primary": "outcome_code", "meta": "error" }
         }))
         .unwrap();

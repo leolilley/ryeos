@@ -68,12 +68,12 @@ async fn effect_data(
     project_path: Option<&str>,
 ) -> Result<serde_json::Value, ClientError> {
     match kind {
-        RyeOsEffectKind::FetchDimension => client.get_json("/ui/api/ryeos/dimension").await,
-        RyeOsEffectKind::FetchProjects => client.get_json("/ui/api/ryeos/projects/list").await.or_else(|_| Ok(serde_json::json!({ "version": 1, "projects": [] }))),
+        RyeOsEffectKind::FetchDimension => client.get_json("/ui/api/ryeos-ui/dimension").await,
+        RyeOsEffectKind::FetchProjects => client.get_json("/ui/api/ryeos-ui/projects/list").await.or_else(|_| Ok(serde_json::json!({ "version": 1, "projects": [] }))),
         RyeOsEffectKind::FetchTopology => client.get_json("/ui/api/graph/topology").await,
-        RyeOsEffectKind::FetchThreads { limit } => client.get_json(&format!("/ui/api/ryeos/threads/list?limit={limit}")).await,
+        RyeOsEffectKind::FetchThreads { limit } => client.get_json(&format!("/ui/api/ryeos-ui/threads/list?limit={limit}")).await,
         RyeOsEffectKind::FetchItems { query, kind, limit, .. } => {
-            let mut path = format!("/ui/api/ryeos/items/list?limit={limit}");
+            let mut path = format!("/ui/api/ryeos-ui/items/list?limit={limit}");
             if let Some(query) = query.as_ref().filter(|value| !value.is_empty()) { path.push_str("&query="); path.push_str(&url_encode(query)); }
             if let Some(kind) = kind.as_ref().filter(|value| !value.is_empty()) { path.push_str("&kind="); path.push_str(&url_encode(kind)); }
             client.get_json(&path).await
@@ -100,11 +100,11 @@ async fn effect_data(
             let envelope = client.signed_post("/execute", &body).await?;
             Ok(envelope.get("result").cloned().unwrap_or(envelope))
         }
-        RyeOsEffectKind::AddProject { root } => client.signed_post("/ui/api/ryeos/projects/add", &serde_json::json!({ "root": root })).await,
-        RyeOsEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/ryeos/projects/open", &serde_json::json!({ "local_id": local_id })).await,
-        RyeOsEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/ryeos/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
-        RyeOsEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/ryeos/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
-        RyeOsEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/ryeos/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
+        RyeOsEffectKind::AddProject { root } => client.signed_post("/ui/api/ryeos-ui/projects/add", &serde_json::json!({ "root": root })).await,
+        RyeOsEffectKind::OpenProject { local_id } => client.signed_post("/ui/api/ryeos-ui/projects/open", &serde_json::json!({ "local_id": local_id })).await,
+        RyeOsEffectKind::ListFiles { root, path, .. } => client.signed_post("/ui/api/ryeos-ui/files/list", &serde_json::json!({ "root": file_root(root), "path": path })).await,
+        RyeOsEffectKind::FetchFileSpace { root, path, max_depth, max_entries, .. } => client.signed_post("/ui/api/ryeos-ui/files/tree", &serde_json::json!({ "root": file_root(root), "path": path, "max_depth": max_depth, "max_entries": max_entries })).await,
+        RyeOsEffectKind::ReadFile { root, path } => client.signed_post("/ui/api/ryeos-ui/files/read", &serde_json::json!({ "root": file_root(root), "path": path })).await,
         RyeOsEffectKind::InvokeAction { command_id, args } => client.signed_post("/ui/api/actions/invoke", &serde_json::json!({ "command_id": command_id, "args": args })).await,
         RyeOsEffectKind::SubmitThreadCommand { thread_id, command_type } => {
             // Steer the head thread through the shared control channel. Authority

@@ -191,7 +191,7 @@ pub async fn handle_projects_add(
             .name
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| inferred_project_name(&root)),
-        root: root_text,
+        root: root_text.clone(),
         added_at: lillux::time::iso8601_now(),
         tags: req.tags.unwrap_or_default(),
     };

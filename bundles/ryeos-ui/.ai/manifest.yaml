@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T09:54:36Z:094c4ad70e3e1538d3b4e7140431988df16514a7f608d3b4ed092e2e614047e5:xmu8W46RhGib4WsbepJYvLuuIn09DXFRXQlm2IH78smmzxUUkUgstB9mFjTefBW7kObMGx79Ba/G3dUdxH5kCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T12:24:56Z:cc6969ca4ff1460e9ef2c9738814604c8a4b9a3bc6984a34d64668320047afad:RlIS73K5QLfUwexP746PcCiOkJdSFUgmHdPHdIWB7Ip6v7M80KszkD0fa1f7PWqBz8EBMgzttGwT4XqqrZaaBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: ryeos-ui
 version: 0.5.0
 description: RyeOS UI surfaces, UI routes, operational inspector services, and renderer entrypoints

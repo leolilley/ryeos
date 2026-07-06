@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-06T13:20:06Z:034dd1749ea12ec1bbedce077fdf48d651c981c942f3ae05320e1bfa6a05f73d:rjFNZN1IV5DeGUktGjmlD1ADCqfO84oakY658MpBBdk6tdncOIzjcY+JFHTgBdY0LiAOJiQ3W/Iyl/Vk3k0lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-node
 version: "1.0.0"
@@ -22,7 +23,7 @@ slots:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/prism
+backdrop: view:ryeos/backdrop/prism-shards
 
 library:
   - view:ryeos/node/threads/live

@@ -2,19 +2,19 @@ export async function runEffect(effect) {
   const kind = effect.kind;
   switch (kind.type) {
     case "fetch_dimension":
-      return result(effect, "dimension", await getJson("/ui/api/ryeos/dimension"));
+      return result(effect, "dimension", await getJson("/ui/api/ryeos-ui/dimension"));
     case "fetch_projects":
       return result(effect, "projects", await optionalProjectsJson());
     case "fetch_topology":
       return result(effect, "topology", await getJson("/ui/api/graph/topology"));
     case "add_project":
-      return result(effect, "project_added", await postJson("/ui/api/ryeos/projects/add", { root: kind.root }));
+      return result(effect, "project_added", await postJson("/ui/api/ryeos-ui/projects/add", { root: kind.root }));
     case "open_project":
-      return result(effect, "project_opened", await postJson("/ui/api/ryeos/projects/open", { local_id: kind.local_id }));
+      return result(effect, "project_opened", await postJson("/ui/api/ryeos-ui/projects/open", { local_id: kind.local_id }));
     case "fetch_threads":
-      return result(effect, "threads", await getJson(withParams("/ui/api/ryeos/threads/list", { limit: kind.limit })));
+      return result(effect, "threads", await getJson(withParams("/ui/api/ryeos-ui/threads/list", { limit: kind.limit })));
     case "fetch_items":
-      return result(effect, "items", await getJson(withParams("/ui/api/ryeos/items/list", {
+      return result(effect, "items", await getJson(withParams("/ui/api/ryeos-ui/items/list", {
         limit: kind.limit,
         query: kind.query,
         kind: kind.kind,
@@ -24,16 +24,16 @@ export async function runEffect(effect) {
       return result(effect, "source_data", resp?.result?.result ?? resp?.result ?? resp);
     }
     case "list_files":
-      return result(effect, "files_list", await fileJson("/ui/api/ryeos/files/list", kind));
+      return result(effect, "files_list", await fileJson("/ui/api/ryeos-ui/files/list", kind));
     case "fetch_file_space":
-      return result(effect, "file_space", await postJson("/ui/api/ryeos/files/tree", {
+      return result(effect, "file_space", await postJson("/ui/api/ryeos-ui/files/tree", {
         root: kind.root || "project",
         path: kind.path || "",
         max_depth: kind.max_depth,
         max_entries: kind.max_entries,
       }));
     case "read_file":
-      return result(effect, "file_read", await fileJson("/ui/api/ryeos/files/read", kind));
+      return result(effect, "file_read", await fileJson("/ui/api/ryeos-ui/files/read", kind));
     case "invoke_action":
       return result(effect, "action_invocation", await postJson("/ui/api/actions/invoke", {
         command_id: kind.command_id,
@@ -94,9 +94,9 @@ async function fileJson(url, kind) {
 
 async function optionalProjectsJson() {
   try {
-    return await getJson("/ui/api/ryeos/projects/list");
+    return await getJson("/ui/api/ryeos-ui/projects/list");
   } catch (error) {
-    if (String(error?.message || error).includes("/ui/api/ryeos/projects/list: 404")) {
+    if (String(error?.message || error).includes("/ui/api/ryeos-ui/projects/list: 404")) {
       return { version: 1, projects: [] };
     }
     throw error;
@@ -105,7 +105,7 @@ async function optionalProjectsJson() {
 
 function isNoBoundProjectError(error) {
   const message = String(error?.message || error);
-  return message.includes("/ui/api/ryeos/files/list: 400") && message.includes("no project bound to this session");
+  return message.includes("/ui/api/ryeos-ui/files/list: 400") && message.includes("no project bound to this session");
 }
 
 export function failedResultFor(effect, error) {

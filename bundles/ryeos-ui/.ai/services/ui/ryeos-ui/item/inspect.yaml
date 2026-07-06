@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T22:51:46Z:1400cd192f64a8a22b9967e5a03cacbed9f52dc880c935fc69052a4520647170:ol51hzZD1GsyMyeN5y5OZwmp256R7UfCyhF42sjWntvVB7QkfpA/mHwvbNUftJwrHnTzqfjKD4IbrVKZ+tQNBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T12:24:55Z:b80f4225a561bd3bbc9deb39f3b1ea9daa506b91be3a7aafa4e9479927d46dd3:lAKAm/EH3OjiR8sxhGf8PH68bvcSgTVskydnMlwRQefrYyQ6ZXMt7fVNlzNtuRvQF5xUwTDUQEDZcWPw0S8QAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/item/inspect
 version: "1.0.0"

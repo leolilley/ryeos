@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-06T12:24:55Z:5b5fbd537a937fcdde687630ec127657fd144abc600226766ffabac7e6a51011:btvS69XWsPRfTaG9JXKXDcPhwyOeHu59TowEXoNlNs6pQjL+uZJabJNVXWAIXs/iwPQOQJ6A7A83M9gQADObCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/ryeos-ui"
 name: "navigation-tree-v1"

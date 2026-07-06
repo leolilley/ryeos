@@ -91,7 +91,7 @@ impl RyeOsCore {
             }) => {
                 if item_ref == "service:projects/open"
                     || item_ref == "service:ui/projects/open"
-                    || item_ref == "service:ui/ryeos/projects/open"
+                    || item_ref == "service:ui/ryeos-ui/projects/open"
                 {
                     if let Some(local_id) = args.get("local_id").and_then(serde_json::Value::as_str)
                     {
@@ -340,7 +340,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "table",
-                "source": { "ref": "service:ui/ryeos/threads/list", "params": {}, "collection": "threads" },
+                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
                 "affordances": [{
                     "id": "watch",
                     "invoke": {
@@ -411,7 +411,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "table",
-                "source": { "ref": "service:ui/ryeos/threads/list", "params": {}, "collection": "threads" },
+                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
                 "affordances": [{
                     "id": "cancel",
                     "invoke": {
@@ -515,7 +515,7 @@ mod tests {
         // audited command channel `service:commands/submit` with
         // `command_type: cancel`. The row Cancel affordance in the shipped
         // list.yaml must target that, and the killed raw-cancel service refs
-        // (`service:ui/ryeos/thread/cancel`, `service:threads/cancel`) must be
+        // (`service:ui/ryeos-ui/thread/cancel`, `service:threads/cancel`) must be
         // gone from every affordance in the view.
         let binding: crate::ui::content::ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../../bundles/ryeos/.ai/views/ryeos/threads/list.yaml"
@@ -545,7 +545,7 @@ mod tests {
         // The killed cancel forms appear nowhere in the view's affordances.
         let all = serde_json::to_string(&binding.affordances).unwrap();
         assert!(
-            !all.contains("service:ui/ryeos/thread/cancel"),
+            !all.contains("service:ui/ryeos-ui/thread/cancel"),
             "the ui/ryeos/thread/cancel affordance route is gone"
         );
         assert!(
@@ -884,7 +884,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:ui/ryeos/threads", "params": {}, "collection": "rows" },
+                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" },
                 "projections": { "primary": "thread_id", "meta": "item_ref" }
             }),
         );
@@ -924,12 +924,12 @@ mod tests {
                 "sections": [
                     {
                         "title": "Threads",
-                        "source": { "ref": "service:ui/ryeos/threads", "collection": "rows" },
+                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" },
                         "projection": { "primary": "thread_id", "meta": "status" }
                     },
                     {
                         "title": "Bundles",
-                        "source": { "ref": "service:ui/ryeos/bundles", "collection": "rows" },
+                        "source": { "ref": "service:ui/ryeos-ui/items/list", "collection": "rows" },
                         "projection": { "primary": "name", "meta": "version" }
                     }
                 ]
@@ -977,7 +977,7 @@ mod tests {
                 "widget": "sections",
                 "sections": [{
                     "title": "Threads",
-                    "source": { "ref": "service:ui/ryeos/threads", "collection": "rows" },
+                    "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" },
                     "projection": { "primary": "thread_id" }
                 }]
             }),

@@ -296,6 +296,8 @@ pub enum RyeOsLayoutNodeVm {
         view: RyeOsViewVm,
         #[serde(default)]
         chrome_hidden: bool,
+        #[serde(default)]
+        background_transparent: bool,
         /// Present when the tile's view declares an `input` block.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<RyeOsInputVm>,
@@ -1790,6 +1792,11 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 .tiles
                 .get(tile_id)
                 .is_some_and(|tile| view_hides_tile_chrome(core, &tile.view.view_ref));
+            let background_transparent = core
+                .workspace
+                .tiles
+                .get(tile_id)
+                .is_some_and(|tile| view_has_transparent_background(core, &tile.view.view_ref));
             RyeOsLayoutNodeVm::Tile {
                 tile_id: tile_id_text(*tile_id),
                 focused: *tile_id == core.workspace.focused_tile,
@@ -1797,6 +1804,7 @@ fn layout_node_vm(node: &LayoutTree, core: &RyeOsCore) -> RyeOsLayoutNodeVm {
                 actions: tile_actions(core, *tile_id),
                 view,
                 chrome_hidden,
+                background_transparent,
                 input,
             }
         }
@@ -1843,6 +1851,18 @@ fn view_hides_tile_chrome(core: &RyeOsCore, view_ref: &str) -> bool {
         .get(view_ref)
         .and_then(|binding| binding.presentation.chrome)
         .is_some_and(|chrome| matches!(chrome, super::content::ViewChromePresentation::None))
+}
+
+fn view_has_transparent_background(core: &RyeOsCore, view_ref: &str) -> bool {
+    core.views
+        .get(view_ref)
+        .and_then(|binding| binding.presentation.background)
+        .is_some_and(|background| {
+            matches!(
+                background,
+                super::content::ViewBackgroundPresentation::Transparent
+            )
+        })
 }
 
 fn text_position(binding: &super::content::ViewBinding) -> RyeOsTextPositionVm {
@@ -1954,7 +1974,7 @@ pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem
                 .unwrap_or_else(|| {
                     view_ref
                         .strip_prefix("view:")
-                        .unwrap_or(view_ref)
+                        .unwrap_or(view_ref.as_str())
                         .to_string()
                 }),
             hint: binding
@@ -1967,10 +1987,6 @@ pub(crate) fn view_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem
         });
     }
     items
-}
-
-pub(crate) fn view_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
-    view_overlay_items(core)
 }
 
 fn dock_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
@@ -2178,7 +2194,7 @@ fn overlays(core: &RyeOsCore) -> Vec<RyeOsOverlayVm> {
     let Some(active) = core.ui.overlay.active.as_deref() else {
         return Vec::new();
     };
-    let (title, widget, hint, source_ref) = overlay_definition(core, active);
+    let (title, widget, hint, _source_ref) = overlay_definition(core, active);
     let items = active_overlay_items(core);
     let selected = core.ui.overlay.selected.min(items.len().saturating_sub(1));
     vec![RyeOsOverlayVm {
@@ -2365,7 +2381,8 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
             "Ctrl+K",
             "Open the view overlay (swap the center lens)",
         ),
-        entry("Backdrop", "Alt+S", "Toggle the crystal shard backdrop"),
+        entry("Commands", "Ctrl+P", "Open the command overlay"),
+        entry("Backdrop", "Ctrl+S", "Toggle the crystal shard backdrop"),
         entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
         entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
         entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
@@ -2920,7 +2937,7 @@ mod tests {
         // The watch dashboard sources the operator-scoped UI-ryeos list,
         // active-first (sort: watch), before the limit.
         let source = binding.source.as_ref().expect("threads list has a source");
-        assert_eq!(source.item_ref, "service:ui/ryeos/threads/list");
+        assert_eq!(source.item_ref, "service:ui/ryeos-ui/threads/list");
         assert_eq!(source.params["limit"], 200);
         assert_eq!(source.params["sort"], "watch");
         assert_eq!(source.collection.as_deref(), Some("threads"));
@@ -3204,7 +3221,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "table",
-                        "source": { "ref": "service:ui/ryeos/threads/list", "collection": "threads" },
+                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" },
                         "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
                         "selection": { "activate": "watch" },
                         "affordances": [

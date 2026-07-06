@@ -703,6 +703,7 @@ impl RyeOsCore {
 
     pub fn wants_fast_ticks(&self) -> bool {
         self.workspace.center_is_empty()
+            || (self.surface_uses_backdrop_underlay() && self.workspace_has_transparent_view())
             || self.runtime.activity_pulse > 0.02
             || self.row_shimmer_active()
     }
@@ -885,6 +886,37 @@ impl RyeOsCore {
             .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
             .and_then(|surface| surface.ambient)
             .is_some_and(|ambient| ambient.uses_namespace_atlas())
+    }
+
+    fn surface_uses_backdrop_underlay(&self) -> bool {
+        self.data
+            .session
+            .as_ref()
+            .and_then(|session| session.effective_surface.as_ref())
+            .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+            .is_some_and(|surface| {
+                surface.backdrop.is_some()
+                    && surface.ambient.is_some_and(|ambient| {
+                        ambient.show_background.unwrap_or(true)
+                            && ambient
+                                .opacity
+                                .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0)
+                    })
+            })
+    }
+
+    fn workspace_has_transparent_view(&self) -> bool {
+        self.workspace.tiles.values().any(|tile| {
+            self.views
+                .get(&tile.view.view_ref)
+                .and_then(|binding| binding.presentation.background)
+                .is_some_and(|background| {
+                    matches!(
+                        background,
+                        super::content::ViewBackgroundPresentation::Transparent
+                    )
+                })
+        })
     }
 
     pub fn bump_generation(&mut self) {
@@ -1426,8 +1458,8 @@ mod tests {
                     "view:ryeos/ryeos/status": {
                         "widget": "sections",
                         "sections": [
-                            { "title": "Threads", "source": { "ref": "service:ui/ryeos/threads", "collection": "rows" }, "projection": { "primary": "thread_id" } },
-                            { "title": "Bundles", "source": { "ref": "service:ui/ryeos/bundles", "collection": "rows" }, "projection": { "primary": "name" } }
+                            { "title": "Threads", "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "rows" }, "projection": { "primary": "thread_id" } },
+                            { "title": "Bundles", "source": { "ref": "service:ui/ryeos-ui/items/list", "collection": "rows" }, "projection": { "primary": "name" } }
                         ]
                     }
                 }
@@ -1450,8 +1482,8 @@ mod tests {
             .collect();
         // One fetch per section, in section order, each addressing its own service.
         assert_eq!(fetches.len(), 2, "one fetch per section: {fetches:?}");
-        assert_eq!(fetches[0].1, "service:ui/ryeos/threads");
-        assert_eq!(fetches[1].1, "service:ui/ryeos/bundles");
+        assert_eq!(fetches[0].1, "service:ui/ryeos-ui/threads/list");
+        assert_eq!(fetches[1].1, "service:ui/ryeos-ui/items/list");
         // Distinct per-section keys so the resolver reads each independently.
         assert!(fetches[0].0.ends_with("#section0"), "{fetches:?}");
         assert!(fetches[1].0.ends_with("#section1"), "{fetches:?}");
@@ -1467,7 +1499,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "rows",
-                        "source": { "ref": "service:ui/ryeos/threads", "params": { "limit": 5 }, "collection": "threads" },
+                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": { "limit": 5 }, "collection": "threads" },
                         "projections": { "primary": "item_ref" }
                     }
                 }
@@ -1484,7 +1516,7 @@ mod tests {
             _ => None,
         });
         let (source_ref, params) = fetch.expect("bound tile emits FetchSource");
-        assert_eq!(source_ref, "service:ui/ryeos/threads");
+        assert_eq!(source_ref, "service:ui/ryeos-ui/threads/list");
         assert_eq!(params["limit"], 5);
     }
 
@@ -1497,7 +1529,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "rows",
-                        "source": { "ref": "service:ui/ryeos/threads", "collection": "threads" },
+                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "collection": "threads" },
                         "projections": { "primary": "thread_id" },
                         "refresh": { "on_hint": ["thread", "activity"] }
                     },
@@ -1521,7 +1553,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(activity_fetches, vec!["service:ui/ryeos/threads"]);
+        assert_eq!(activity_fetches, vec!["service:ui/ryeos-ui/threads/list"]);
 
         let thread_fetches: Vec<String> = core
             .effects_for_hint("thread")
@@ -1531,7 +1563,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(thread_fetches.contains(&"service:ui/ryeos/threads".to_string()));
+        assert!(thread_fetches.contains(&"service:ui/ryeos-ui/threads/list".to_string()));
         assert!(thread_fetches.contains(&"service:system/status".to_string()));
     }
 

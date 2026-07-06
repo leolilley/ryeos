@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-24T04:51:58Z:fb2ed734573470071a9d54cd6e72b8cd57458062d0049fb09d076ab00a239da2:NynrGga7JVZJKnehU2QcAfYvyBSbqPSxF0qR9MwNOOGkpwnTqkbjvdzNZkeFO/nB8V0IvILa0/0HVQAr1BbaBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T12:24:56Z:bed13eec7c14ed24611698c758eadd18541fc9a186a9ab7bb858955e465d09dd:AuMpvfml2KIvIbXsoB1asYucoGKaOwEBKxVnJ2D6bxjtyJY0oVkZPBswo9ML1VftKwc8JxXv/7eCQvZDEUydBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: ryeos-ui/projects/add
 version: "1.0.0"

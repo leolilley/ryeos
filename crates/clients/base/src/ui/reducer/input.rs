@@ -588,7 +588,7 @@ mod tests {
                 "tiles": ["view:ryeos/threads/list"],
                 "views": { "view:ryeos/threads/list": {
                     "widget": "table",
-                    "source": { "ref": "service:ui/ryeos/threads/list", "params": { "sort": "watch" }, "collection": "threads" },
+                    "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": { "sort": "watch" }, "collection": "threads" },
                     "input": { "id": "filter", "feeds": { "fields": [
                         { "param": "status", "label": "status" },
                         { "param": "requested_by", "label": "source" }
@@ -637,7 +637,7 @@ mod tests {
                 "views": {
                     "view:ryeos/threads/list": {
                         "widget": "table",
-                        "source": { "ref": "service:ui/ryeos/threads/list", "params": {}, "collection": "threads" },
+                        "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
                         "projections": { "columns": [ { "label": "thread", "field": "thread_id" } ] },
                         "selection": { "activate": "watch" },
                         "affordances": [{

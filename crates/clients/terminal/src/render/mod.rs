@@ -148,9 +148,13 @@ fn draw_layout_node(
             actions,
             view,
             chrome_hidden,
+            background_transparent,
             input,
         } => {
             if *chrome_hidden && input.is_none() {
+                if !background_transparent {
+                    primitives::fill_rect(surface, rect, theme::style_fg());
+                }
                 draw_view(surface, rect, view, now_ms);
             } else {
                 chrome::draw_tile(
@@ -164,7 +168,7 @@ fn draw_layout_node(
                     input.as_ref(),
                     border,
                     now_ms,
-                    preserve_background,
+                    preserve_background && *background_transparent,
                 );
             }
         }

@@ -114,8 +114,11 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel
     let zoom = (scene.camera.fov_degrees / 45.0).max(0.1);
     let span_x = ((bounds.max_x - bounds.min_x) * zoom).max(0.001);
     let span_y = ((bounds.max_y - bounds.min_y) * zoom).max(0.001);
-    let scale = ((w.saturating_sub(1)) as f32 / (span_x * CELL_ASPECT))
-        .min((h.saturating_sub(1)) as f32 / span_y);
+    let fit_w = w.saturating_sub(1) as f32;
+    let fit_h = h.saturating_sub(1) as f32;
+    let fit_scale = (fit_w / (span_x * CELL_ASPECT)).min(fit_h / span_y);
+    let width_scale = (fit_w / 58.0).clamp(1.0, 2.2);
+    let scale = fit_scale.min(width_scale);
     let center_x = (bounds.min_x + bounds.max_x) / 2.0;
     let center_y = (bounds.min_y + bounds.max_y) / 2.0;
     let project = |position: [f32; 3]| -> Option<(usize, usize)> {
@@ -261,17 +264,20 @@ const ORBIT_SQUASH: f32 = 0.45;
 /// Where an orbiting object is this frame, plus its front-ness in
 /// `[0, 1]` (1 = nearest the viewer, 0 = passing behind). The declared
 /// position fixes the ring radius and starting phase, so generation 0
-/// renders the scene exactly as authored.
+/// renders the scene exactly as authored. Break motion is folded into the
+/// point before orbiting so split shards can revolve around the center
+/// instead of only pulsing in fixed columns.
 fn orbited_position(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> ([f32; 3], f32) {
-    let (mut position, depth) = match object.orbit {
-        Some(speed) => orbit_point(object.position, speed, generation, pace),
-        None => (object.position, 1.0),
-    };
     let offset = break_offset(object, generation, pace);
-    position[0] += offset[0];
-    position[1] += offset[1];
-    position[2] += offset[2];
-    (position, depth)
+    let position = [
+        object.position[0] + offset[0],
+        object.position[1] + offset[1],
+        object.position[2] + offset[2],
+    ];
+    match object.orbit {
+        Some(speed) => orbit_point(position, speed, generation, pace),
+        None => (position, 1.0),
+    }
 }
 
 fn break_offset(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> [f32; 3] {
@@ -348,11 +354,13 @@ fn particle_cell(
             (1.0 - ((d - band).abs() / width.max(0.001))).max(0.0)
         })
         .unwrap_or(0.0);
+    let reveal = reveal_multiplier(object, scene.generation, pace);
     // Ring depth dims the back half of an orbit — a mote passing behind
     // the scene's mass glows faintly through it, never occludes it.
     let intensity = ((breathe * (0.55 + 0.25 * energy)) + boost * 0.65 + energy * 0.10)
         .clamp(0.0, 1.0)
         * object.opacity.clamp(0.1, 1.0)
+        * reveal
         * (0.55 + 0.45 * depth.clamp(0.0, 1.0));
 
     // Intensity walks the whole ramp; size biases the walk upward. A big
@@ -418,13 +426,9 @@ fn draw_fill(
     let soft = 1.0 / (scale * cell_aspect * zoom).max(0.001);
     let ramp = ramp_for(object);
     let noise_amp = 0.10 + 0.12 * energy;
-    let opacity = object.opacity.clamp(0.1, 1.0);
-    let offset = break_offset(object, scene.generation, pace);
-    let position = [
-        object.position[0] + offset[0],
-        object.position[1] + offset[1],
-        object.position[2] + offset[2],
-    ];
+    let opacity =
+        object.opacity.clamp(0.1, 1.0) * reveal_multiplier(object, scene.generation, pace);
+    let (position, _depth) = orbited_position(object, scene.generation, pace);
 
     for row in 0..h {
         for col in 0..w {
@@ -462,10 +466,10 @@ fn draw_fill(
                 .unwrap_or(0.0);
             let noise = hash_noise(col, row, scene.generation / 3);
             // TASTE KNOBS — tune these before touching anything else:
-            // 0.24 = ambient floor (how visible the dark faces stay),
+            // 0.34 = ambient floor (how visible the dark faces stay),
             // 0.62 = facet weight (how hard lit/unlit faces contrast),
             // 0.30 = sweep lift, and `noise_amp` above = surface grain.
-            let density = ((coverage * (0.24 + 0.62 * shade + 0.08 * energy))
+            let density = ((coverage * (0.34 + 0.62 * shade + 0.08 * energy))
                 + boost * 0.30
                 + (noise - 0.5) * noise_amp)
                 .clamp(0.0, 1.0)
@@ -474,7 +478,7 @@ fn draw_fill(
                 continue;
             }
             let level = ((density * 6.0).round() as i32).clamp(0, 6) as usize;
-            let mut fg = mix_toward(tone_color(object.tone), BG, 0.78 * (1.0 - density));
+            let mut fg = mix_toward(tone_color(object.tone), BG, 0.62 * (1.0 - density));
             let glyph = if boost > 0.7 && density > 0.75 && noise > 0.78 {
                 fg = mix_toward(fg, FG, 0.5);
                 GLINT
@@ -489,6 +493,19 @@ fn draw_fill(
             );
         }
     }
+}
+
+fn reveal_multiplier(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> f32 {
+    let Some(reveal) = object.reveal else {
+        return 1.0;
+    };
+    let period = reveal.period.max(4);
+    let step = generation.wrapping_mul(pace).wrapping_add(reveal.phase) % period;
+    let progress = step as f32 / period as f32;
+    let closed = 0.5 + 0.5 * (progress * std::f32::consts::TAU).cos();
+    let sharpness = reveal.sharpness.max(0.1);
+    let floor = reveal.floor.clamp(0.0, 1.0);
+    floor + (1.0 - floor) * closed.powf(sharpness)
 }
 
 /// Prism SDF + shading: a hexagonal crystal column (radius `r`, body

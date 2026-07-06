@@ -106,7 +106,12 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 overlay_id: "views".to_string(),
             })
         }
-        RyeOsKey::Char(c) if event.modifiers.ctrl_shift() && c.eq_ignore_ascii_case(&'p') => {
+        // Most terminals cannot distinguish Ctrl+Shift+P from Ctrl+P, so the
+        // reliable command-overlay binding is Ctrl+P.
+        RyeOsKey::Char(c)
+            if (event.modifiers.ctrl_only() || event.modifiers.ctrl_shift())
+                && c.eq_ignore_ascii_case(&'p') =>
+        {
             ui(RyeOsUiEvent::OpenOverlay {
                 overlay_id: "commands".to_string(),
             })
@@ -123,7 +128,10 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'b') => {
             action(RyeOsAction::ToggleBottomStatusBar)
         }
-        RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'s') => {
+        RyeOsKey::Char(c)
+            if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
+                && c.eq_ignore_ascii_case(&'s') =>
+        {
             action(RyeOsAction::ToggleBackdropShards)
         }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_shift() => resize(FocusDirection::Up),
@@ -535,12 +543,32 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_shift_p_opens_the_commands_overlay() {
+    fn ctrl_p_opens_the_commands_overlay() {
+        assert!(matches!(
+            ryeos_key_command(ctrl('p'), context(false, true)),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "commands"
+        ));
+    }
+
+    #[test]
+    fn ctrl_shift_p_also_opens_the_commands_overlay_when_reported() {
         assert!(matches!(
             ryeos_key_command(ctrl_shift('p'), context(false, true)),
             RyeOsKeyCommand::Ui {
                 event: RyeOsUiEvent::OpenOverlay { overlay_id }
             } if overlay_id == "commands"
+        ));
+    }
+
+    #[test]
+    fn ctrl_s_toggles_backdrop_shards() {
+        assert!(matches!(
+            ryeos_key_command(ctrl('s'), context(false, true)),
+            RyeOsKeyCommand::Action {
+                action: RyeOsAction::ToggleBackdropShards
+            }
         ));
     }
 

@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-06T13:20:06Z:f1203bc4a5bf39566b755b909073bd873f83bc21ebf2dbf24dc7d3d38b7ef15b:2zbrx8VCw5DgjIjSG5ay6IMx1JHpbhZTukH788XjZh/pYiuuwRJOheReMM2260GlJPa6QpWhEH6+n+r5sGWQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-lens
 version: "1.0.0"
@@ -31,7 +32,7 @@ slots:
 style:
   border: thin
 
-backdrop: view:ryeos/backdrop/prism
+backdrop: view:ryeos/backdrop/prism-shards
 
 # The full lens set — swap the single center lens to reach any of these.
 library:

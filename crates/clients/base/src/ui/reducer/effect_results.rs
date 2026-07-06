@@ -736,7 +736,7 @@ mod tests {
                 "tiles": ["view:ryeos/threads/list"],
                 "views": { "view:ryeos/threads/list": {
                     "widget": "table",
-                    "source": { "ref": "service:ui/ryeos/threads/list", "params": {}, "collection": "threads" },
+                    "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "threads" },
                     "input": { "id": "filter", "feeds": { "param": "status" } }
                 }}
             })),

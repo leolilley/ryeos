@@ -930,7 +930,7 @@ mod tests {
             "view:ryeos/threads/list",
             serde_json::json!({
                 "widget": "rows",
-                "source": { "ref": "service:ui/ryeos/threads", "params": {}, "collection": "rows" }
+                "source": { "ref": "service:ui/ryeos-ui/threads/list", "params": {}, "collection": "rows" }
             }),
         );
         assert!(build_view_model(&core).workspace.docks.left.is_none());
@@ -947,7 +947,7 @@ mod tests {
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(RyeOsEffectKind::FetchSource { tile_id, source_ref, .. })
-                if tile_id == "dock:left" && source_ref == "service:ui/ryeos/threads"
+                if tile_id == "dock:left" && source_ref == "service:ui/ryeos-ui/threads/list"
         ));
     }
 
@@ -1370,7 +1370,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "widget": "rows",
                 "description": "Item space",
-                "source": { "ref": "service:ui/ryeos/items/list", "params": {}, "collection": "items" }
+                "source": { "ref": "service:ui/ryeos-ui/items/list", "params": {}, "collection": "items" }
             }))
             .unwrap(),
         );
@@ -1492,7 +1492,7 @@ mod tests {
                 "widget": "key_value",
                 "facet": "selection.summary",
                 "source": {
-                    "ref": "service:ui/ryeos/item/inspect",
+                    "ref": "service:ui/ryeos-ui/item/inspect",
                     "params": { "canonical_ref": "@facet:selection.item" }
                 },
                 "projections": { "detail": ["canonical_ref", "title", "detail"] },

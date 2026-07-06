@@ -96,6 +96,11 @@ pub struct RyeOsSceneObjectVm {
     /// break-apart/rejoin animation.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "break")]
     pub break_motion: Option<SceneBreakMotionVm>,
+    /// Opacity pulse keyed to the scene generation. Content can use this
+    /// for glints that appear only near a cycle boundary, such as an inner
+    /// core shining through when surrounding shards rejoin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reveal: Option<SceneRevealVm>,
     /// Whether this object contributes to scene fit bounds. Decorative
     /// particles can opt out so the main object keeps visual scale while
     /// the particles are still drawn and may clip at tight edges.
@@ -121,6 +126,17 @@ pub struct SceneBreakMotionVm {
     pub period: u64,
     #[serde(default)]
     pub phase: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SceneRevealVm {
+    pub period: u64,
+    #[serde(default)]
+    pub phase: u64,
+    #[serde(default)]
+    pub floor: f32,
+    #[serde(default)]
+    pub sharpness: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -604,6 +620,7 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> RyeOsSceneM
             .map(|speed| speed as f32);
         object.clip = read_clip(obj.get("clip"));
         object.break_motion = read_break_motion(obj.get("break"));
+        object.reveal = read_reveal(obj.get("reveal"));
         object.fit = obj
             .get("fit")
             .and_then(serde_json::Value::as_bool)
@@ -682,6 +699,35 @@ fn read_break_motion(v: Option<&serde_json::Value>) -> Option<SceneBreakMotionVm
     })
 }
 
+fn read_reveal(v: Option<&serde_json::Value>) -> Option<SceneRevealVm> {
+    let reveal = v.and_then(serde_json::Value::as_object)?;
+    let period = reveal
+        .get("period")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|period| *period > 0)
+        .unwrap_or(120);
+    let phase = reveal
+        .get("phase")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let floor = reveal
+        .get("floor")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32)
+        .unwrap_or(0.0);
+    let sharpness = reveal
+        .get("sharpness")
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32)
+        .unwrap_or(2.0);
+    Some(SceneRevealVm {
+        period,
+        phase,
+        floor,
+        sharpness,
+    })
+}
+
 fn scene_tone(name: Option<&str>) -> RyeOsTone {
     match name {
         Some("accent") => RyeOsTone::Accent,
@@ -720,6 +766,7 @@ fn scene_object(
         spin: None,
         clip: None,
         break_motion: None,
+        reveal: None,
         fit: true,
     }
 }
