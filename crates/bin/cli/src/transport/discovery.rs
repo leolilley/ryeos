@@ -95,9 +95,7 @@ pub async fn discover_audience(daemon_url: &str) -> Result<DiscoveredAudience, C
 /// not `/public-key`) is rejected here — discovery fails loudly rather than
 /// letting the dispatcher append signed paths onto a wrong base and mis-target
 /// the signed request.
-fn effective_base_from_public_key_url(
-    public_key_url: &str,
-) -> Result<String, CliTransportError> {
+fn effective_base_from_public_key_url(public_key_url: &str) -> Result<String, CliTransportError> {
     // The base is `scheme://host[:port][/prefix]`; query/fragment belong to the
     // probe request, not the base. Strip fragment, then query, then derive.
     let without_fragment = public_key_url.split('#').next().unwrap_or(public_key_url);
@@ -156,7 +154,10 @@ mod tests {
     #[test]
     fn drops_query_and_fragment() {
         assert_eq!(base("https://host/public-key?x=1").unwrap(), "https://host");
-        assert_eq!(base("https://host/public-key#frag").unwrap(), "https://host");
+        assert_eq!(
+            base("https://host/public-key#frag").unwrap(),
+            "https://host"
+        );
     }
 
     #[test]

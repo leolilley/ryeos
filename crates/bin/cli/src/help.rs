@@ -575,7 +575,10 @@ fn print_lifecycle_command_help(command_tokens: &[String]) -> std::io::Result<()
                 "ryeos sign — Sign RyeOS items by canonical ref, glob, or .ai path"
             )?;
             writeln!(out)?;
-            writeln!(out, "USAGE: ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]")?;
+            writeln!(
+                out,
+                "USAGE: ryeos sign <item_ref_or_glob_or_path> [...more] [OPTIONS]"
+            )?;
             writeln!(out)?;
             writeln!(out, "EXAMPLES:")?;
             writeln!(out, "  ryeos sign knowledge:my/entry")?;

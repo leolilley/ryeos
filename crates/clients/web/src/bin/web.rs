@@ -408,7 +408,10 @@ mod tests {
             base("https://node.example.com/public-key").unwrap(),
             "https://node.example.com"
         );
-        assert_eq!(base("https://host/prefix/public-key").unwrap(), "https://host/prefix");
+        assert_eq!(
+            base("https://host/prefix/public-key").unwrap(),
+            "https://host/prefix"
+        );
         assert_eq!(
             base("http://127.0.0.1:7400/public-key").unwrap(),
             "http://127.0.0.1:7400"
