@@ -1790,6 +1790,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auxiliary_thread_terminal_in_followed_chain_does_not_ready_the_waiter() {
+        // A followed child's launch pipeline runs AUXILIARY threads in the
+        // child's own chain (e.g. a launch-time knowledge composition). The
+        // first of those completes in milliseconds; recording it would resume
+        // the parent with the auxiliary's envelope while the child is still
+        // launching. Only the child itself — or a continuation successor of
+        // it — settles the follow.
+        let (_tmp, state) = setup_app_state();
+        state
+            .threads
+            .create_thread(&make_create_params("Cfollow", "Cfollow"))
+            .unwrap();
+        state.threads.mark_running("Cfollow").unwrap();
+        arm_waiting_follow(&state, "wk-aux", "Cfollow");
+
+        // Auxiliary run riding the child's chain: own thread id, child's chain root.
+        state
+            .threads
+            .create_thread(&make_create_params("Kaux", "Cfollow"))
+            .unwrap();
+        state.threads.mark_running("Kaux").unwrap();
+        finalize_child(&state, "Kaux", "completed", Some(json!({ "positions": 1 })));
+
+        let waiter = state
+            .state_store
+            .get_follow_waiter_by_key("wk-aux")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiter.phase,
+            ryeos_app::runtime_db::follow_phase::WAITING,
+            "an auxiliary thread's terminal must not ready the waiter"
+        );
+
+        // The recovery path must agree: the chain's lineage tip (the child) is
+        // still running, so there is nothing to recover despite a completed
+        // auxiliary thread sitting in the chain.
+        let actions = crate::reconcile::reconcile_follow(&state).unwrap();
+        assert!(
+            !actions.iter().any(|a| matches!(
+                a,
+                crate::reconcile::FollowReconcileAction::Resume { follow_key } if follow_key == "wk-aux"
+            )),
+            "recovery must not resume off an auxiliary terminal, got {actions:?}"
+        );
+
+        // The child's own terminal still settles the follow.
+        finalize_child(&state, "Cfollow", "completed", Some(json!({ "ok": true })));
+        let waiter = state
+            .state_store
+            .get_follow_waiter_by_key("wk-aux")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            waiter.phase,
+            ryeos_app::runtime_db::follow_phase::READY,
+            "the child's own terminal readies the waiter"
+        );
+        assert_eq!(
+            waiter.child_terminal_thread_id.as_deref(),
+            Some("Cfollow"),
+            "the recorded terminal is the child, not the auxiliary"
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_follow_converges_reserved_with_child_and_successor() {
         // Partial spawn: child + successor recorded (so the parent is continued), but
         // crashed before mark_follow_waiting → stuck `reserved`. Converge to waiting;

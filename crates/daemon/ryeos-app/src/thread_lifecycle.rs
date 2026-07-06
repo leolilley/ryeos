@@ -1067,36 +1067,64 @@ impl ThreadLifecycleService {
         if terminal_status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
             return;
         }
+        match self.state_store.get_follow_waiter_by_child_chain(chain_root_id) {
+            // No waiter awaits this chain — nothing to record (the common,
+            // non-follow case). No noise.
+            Ok(None) => return,
+            Ok(Some(_)) => {}
+            Err(e) => {
+                tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    error = %e,
+                    "failed to look up follow waiter for terminal recording",
+                );
+                return;
+            }
+        }
+        // Only the followed child itself — or a continuation successor of it —
+        // settles the follow. The child's chain also carries AUXILIARY runs
+        // (launch-time knowledge composition, nested dispatches); the first of
+        // those completes in milliseconds, and recording it would resume the
+        // parent with the auxiliary's envelope while the child is still
+        // launching.
+        match self.chain_continuation_lineage_contains(chain_root_id, thread_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    thread_id,
+                    chain_root_id,
+                    "terminal thread in a followed chain is not in the followed child's \
+                     continuation lineage (auxiliary run); waiter untouched",
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    error = %e,
+                    "follow lineage check failed; leaving waiter untouched",
+                );
+                return;
+            }
+        }
         // Prefer the canonical envelope carried through finalization (preserves
         // outputs/warnings/raw cost). When none is present, this is a cancel /
-        // reconcile / pre-run finalize or an old runtime — only a REAL follow
-        // waiter needs a stored result, and it must be a visible in-band FAILURE
-        // (not a silently-empty success) so the parent resumes into on_error.
+        // reconcile / pre-run finalize or an old runtime — the stored result
+        // must be a visible in-band FAILURE (not a silently-empty success) so
+        // the parent resumes into on_error.
         let envelope = match managed_envelope {
             Some(env) => env,
-            None => match self.state_store.get_follow_waiter_by_child_chain(chain_root_id) {
-                Ok(Some(_)) => {
-                    tracing::warn!(
-                        thread_id,
-                        chain_root_id,
-                        "follow child finalized without a canonical envelope; storing a \
-                         DEGRADED FAILURE envelope (outputs/warnings unavailable)",
-                    );
-                    degraded_follow_envelope(terminal_status, result, error, final_cost)
-                }
-                // No waiter awaits this chain — nothing to record (the common,
-                // non-follow case). No noise.
-                Ok(None) => return,
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id,
-                        chain_root_id,
-                        error = %e,
-                        "failed to look up follow waiter for terminal recording",
-                    );
-                    return;
-                }
-            },
+            None => {
+                tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    "follow child finalized without a canonical envelope; storing a \
+                     DEGRADED FAILURE envelope (outputs/warnings unavailable)",
+                );
+                degraded_follow_envelope(terminal_status, result, error, final_cost)
+            }
         };
         if let Err(e) = self.state_store.mark_follow_child_terminal(
             chain_root_id,
@@ -1111,6 +1139,31 @@ impl ThreadLifecycleService {
                 "failed to record follow child terminal result",
             );
         }
+    }
+
+    /// Whether `thread_id` lies on the chain's continuation lineage: the chain
+    /// root, then `successor_thread_id` links from each `continued` handoff.
+    /// A chain also carries auxiliary threads (launch-time knowledge
+    /// composition, nested dispatches) — in the chain, but NOT the lineage.
+    fn chain_continuation_lineage_contains(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let mut cursor = chain_root_id.to_string();
+        for _ in 0..1024 {
+            if cursor == thread_id {
+                return Ok(true);
+            }
+            match self.get_thread(&cursor)? {
+                Some(t) => match t.successor_thread_id {
+                    Some(next) => cursor = next,
+                    None => return Ok(false),
+                },
+                None => return Ok(false),
+            }
+        }
+        Ok(false)
     }
 
     /// Recover a `waiting` follow waiter whose child chain already reached a
@@ -1133,18 +1186,35 @@ impl ThreadLifecycleService {
             Some(w) if w.phase == crate::runtime_db::follow_phase::WAITING => w,
             _ => return Ok(None),
         };
-        let chain = match self.get_chain(child_chain_root_id)? {
-            Some(c) => c,
-            None => return Ok(None),
-        };
-        // The chain tail the parent awaits: a NON-continued terminal thread
-        // (`continued` links are intermediate handoffs of the child's own chain).
-        let terminal = chain.threads.iter().map(|v| &v.thread).find(|t| {
-            t.status != ryeos_state::objects::ThreadStatus::Continued.as_str()
-                && ryeos_state::objects::ThreadStatus::from_str_lossy(&t.status)
-                    .is_some_and(|s| s.is_terminal())
-        });
-        let terminal = match terminal {
+        // The chain tail the parent awaits: walk the continuation lineage from
+        // the chain root (the followed child) via successor links to its tip.
+        // The chain also carries AUXILIARY threads (launch-time knowledge
+        // composition, nested dispatches) whose terminals must never satisfy
+        // the recovery — only the child's own lineage settles the follow.
+        let mut cursor = child_chain_root_id.to_string();
+        let mut tip = None;
+        for _ in 0..1024 {
+            let Some(t) = self.get_thread(&cursor)? else {
+                break;
+            };
+            if t.status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
+                match t.successor_thread_id {
+                    Some(next) => {
+                        cursor = next;
+                        continue;
+                    }
+                    // A handoff in flight (no successor recorded yet) — not an end.
+                    None => break,
+                }
+            }
+            if ryeos_state::objects::ThreadStatus::from_str_lossy(&t.status)
+                .is_some_and(|s| s.is_terminal())
+            {
+                tip = Some(t);
+            }
+            break;
+        }
+        let terminal = match tip {
             Some(t) => t,
             // Chain not yet terminal — reconcile's native resume / the finalize kick
             // still own it; nothing to recover here.
