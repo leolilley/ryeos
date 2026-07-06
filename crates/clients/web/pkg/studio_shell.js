@@ -48,8 +48,8 @@ async function commit(envelope) {
     restoreTileScroll(root, scroll);
     revealSelectedRows(root);
     restoreFocus(root, focus);
-    if (envelope.view_model?.launcher?.open) {
-      requestAnimationFrame(() => root?.querySelector("[data-studio-launcher-input]")?.focus());
+    if ((envelope.view_model?.overlays || []).length) {
+      requestAnimationFrame(() => root?.querySelector("[data-studio-overlay-input]")?.focus());
     }
     for (const effect of envelope.effects || []) {
       runEffect(effect)
@@ -160,17 +160,17 @@ function rerenderShell() {
 function shellController() {
   return {
     dimension: latestDimension,
-    closeLauncher() {
-      dispatchUi({ type: "close_launcher" });
+    closeOverlay() {
+      dispatchUi({ type: "close_overlay" });
     },
-    setLauncherQuery(value) {
-      dispatchUi({ type: "set_launcher_query", query: value });
+    setOverlayQuery(value) {
+      dispatchUi({ type: "set_overlay_query", query: value });
     },
-    moveLauncher(delta) {
-      dispatchUi({ type: "move_launcher_selection", delta });
+    moveOverlay(delta) {
+      dispatchUi({ type: "move_overlay_selection", delta });
     },
-    chooseLauncher(secondary) {
-      dispatchUi({ type: "choose_launcher", secondary: !!secondary });
+    chooseOverlay(secondary) {
+      dispatchUi({ type: "choose_overlay", secondary: !!secondary });
     },
   };
 }
@@ -256,7 +256,7 @@ function attachBrowserEvents() {
     // studio_key_command in base), identical to the terminal, so the two
     // renderers never diverge on what a key does. Only genuinely-web key
     // handling stays here in JS: native text entry (the input-dock textarea
-    // and the launcher search field own their own typing, submit, and
+    // and the overlay search field own their own typing, submit, and
     // completion while focused) and native activation controls. Everything
     // else routes through the shared keymap.
     if (isTypingTarget(event.target)) return;

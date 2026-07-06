@@ -66,7 +66,7 @@ pub enum StudioTimelineEntryVm {
         /// structured error. Most lines carry no action.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         action: Option<StudioAction>,
-        /// A second affordance for this entry, surfaced through the launcher
+        /// A second affordance for this entry, surfaced through command overlays
         /// (its Shift+Enter secondary and a distinct context item) rather than
         /// a direct key — e.g. "retry this failed turn" beside the entry's
         /// Enter=inspect action. Most lines carry none.
@@ -787,7 +787,7 @@ fn execution_entry(
         ),
         _ => return None,
     };
-    // What activating this entry does, and its launcher-secondary affordance:
+    // What activating this entry does, and its command-overlay secondary affordance:
     // - a forked subthread is a step-in (Enter drills into the child braid,
     //   pushing a return frame so Backspace walks back up);
     // - an error-like terminal (failed / timed out / killed) is inspectable

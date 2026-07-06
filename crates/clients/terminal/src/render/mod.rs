@@ -10,13 +10,12 @@
 //! colors); `text` is width-aware string shaping; `primitives` are raw
 //! surface ops; `chrome` is bars/frames/docks; `widgets/*` is one file
 //! per widget primitive (incl. the generic `scene` renderer);
-//! `launcher`/`input` are compositions. This file orchestrates: layout
+//! `overlay`/`input` are compositions. This file orchestrates: layout
 //! traversal, the empty-center backdrop, view dispatch.
 
 mod chrome;
-mod help;
 mod input;
-mod launcher;
+mod overlay;
 mod primitives;
 mod text;
 mod theme;
@@ -62,7 +61,7 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
     surface.fill(Style::new().fg(FG).bg(BG));
 
     // There is no "home" mode. The bars, docks (incl. the real bottom
-    // input slot), and launcher render in EVERY state. The only branch is
+    // input slot), and overlays render in EVERY state. The only branch is
     // backdrop-vs-tiles in the center: an empty center draws the backdrop
     // scene; tiles fill it otherwise.
     let top_h = if vm.presentation.chrome.top_bar.visible && height >= 3 {
@@ -122,16 +121,9 @@ fn build_surface(vm: &StudioViewModel, width: usize, height: usize) -> TextSurfa
         }
     }
 
-    if vm.launcher.open {
-        // The overlay dims the whole frame behind it (a scrim), then draws
-        // the palette on top at full brightness.
+    if let Some(active_overlay) = vm.overlays.first() {
         primitives::dim_surface(&mut surface);
-        launcher::draw_launcher(&mut surface, vm);
-    } else if vm.help.open {
-        // The keys overlay is a sibling scrim — never stacked with the
-        // launcher (the keymap makes them mutually exclusive).
-        primitives::dim_surface(&mut surface);
-        help::draw_help(&mut surface, vm);
+        overlay::draw_overlay(&mut surface, active_overlay);
     }
 
     surface

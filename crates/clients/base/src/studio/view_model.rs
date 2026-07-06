@@ -19,9 +19,6 @@ pub struct StudioViewModel {
     pub chrome: StudioChromeVm,
     pub presentation: StudioPresentationVm,
     pub workspace: StudioWorkspaceVm,
-    pub launcher: StudioLauncherVm,
-    #[serde(default)]
-    pub help: StudioHelpVm,
     pub overlays: Vec<StudioOverlayVm>,
     pub notices: Vec<StudioNoticeVm>,
 }
@@ -196,8 +193,6 @@ pub enum StudioMotionEventVm {
     FocusChanged {
         tile_id: String,
     },
-    LauncherOpen,
-    LauncherClose,
     TabChanged {
         workspace_number: usize,
     },
@@ -447,7 +442,7 @@ pub struct StudioTableRowVm {
     pub detail: Vec<StudioRowDetailVm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
-    /// The row's raw record — base-only (not serialized to clients). The launcher
+    /// The row's raw record — base-only (not serialized to clients). Overlays
     /// rebuilds the row's non-activate affordances (e.g. Cancel) from it, so row
     /// management is reachable. Skipped to avoid duplicating every record into
     /// the per-row wire payload.
@@ -485,7 +480,7 @@ pub struct StudioSectionVm {
 pub use super::timeline::StudioTimelineEntryVm;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioLauncherItemVm {
+pub struct StudioOverlayActionItem {
     pub label: String,
     pub hint: String,
     pub action: StudioAction,
@@ -494,24 +489,7 @@ pub struct StudioLauncherItemVm {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioLauncherVm {
-    pub open: bool,
-    pub query: String,
-    pub selected: usize,
-    pub hint: String,
-    pub items: Vec<StudioLauncherItemVm>,
-}
-
-/// The keys/help overlay: a static catalogue of the global key bindings,
-/// grouped by category. A meta-overlay (discoverability), not braid content.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct StudioHelpVm {
-    pub open: bool,
-    pub entries: Vec<StudioHelpEntryVm>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StudioHelpEntryVm {
+pub struct StudioShortcutEntryVm {
     pub category: String,
     pub keys: String,
     pub description: String,
@@ -525,8 +503,26 @@ pub struct StudioTileActionVm {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum StudioOverlayVm {}
+pub struct StudioOverlayVm {
+    pub id: String,
+    pub title: String,
+    pub widget: String,
+    pub query: String,
+    pub selected: usize,
+    pub hint: String,
+    pub items: Vec<StudioOverlayItemVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StudioOverlayItemVm {
+    pub category: String,
+    pub primary: String,
+    pub secondary: String,
+    pub meta: String,
+    pub enabled: bool,
+    pub action: Option<StudioAction>,
+    pub secondary_action: Option<StudioAction>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StudioRowVm {
@@ -584,9 +580,7 @@ pub fn build_view_model(core: &StudioCore) -> StudioViewModel {
         session,
         chrome,
         workspace,
-        launcher: launcher(core),
-        help: help(core),
-        overlays: Vec::new(),
+        overlays: overlays(core),
         notices: core.notices_vm(),
     }
 }
@@ -655,7 +649,7 @@ fn focused_tile_title(core: &StudioCore) -> String {
         .unwrap_or_else(|| "home".to_string())
 }
 
-/// Tile/launcher title for a bound view: prefer the view item's authored
+/// Tile/view-overlay title for a bound view: prefer the view item's authored
 /// `name:` (content), fall back to the ref tail when none is declared. The
 /// authored label is content too — "views are content" extends to the title.
 fn tile_title(core: &StudioCore, view: &crate::workspace::ViewSpec) -> String {
@@ -1945,13 +1939,16 @@ fn ambient_vm(core: &StudioCore) -> StudioAmbientVm {
 /// Launchable views: every view embedded in the effective surface,
 /// graph/atlas included (they are ordinary `view:` items now). Nothing
 /// here names a product concept — labels and hints come from the items.
-pub(crate) fn launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
-    let mut items: Vec<StudioLauncherItemVm> = Vec::new();
-    for (view_ref, binding) in &core.views {
+pub(crate) fn view_overlay_items(core: &StudioCore) -> Vec<StudioOverlayActionItem> {
+    let mut items: Vec<StudioOverlayActionItem> = Vec::new();
+    for view_ref in core.lens_library() {
+        let Some(binding) = core.views.get(&view_ref) else {
+            continue;
+        };
         let view = ViewSpec {
             view_ref: view_ref.clone(),
         };
-        items.push(StudioLauncherItemVm {
+        items.push(StudioOverlayActionItem {
             // Prefer the view item's authored name; fall back to the ref
             // (sans `view:` prefix) so unnamed views still identify.
             label: binding
@@ -1978,14 +1975,11 @@ pub(crate) fn launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     items
 }
 
-pub(crate) fn launcher_items_for(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
-    let mut items = context_launcher_items(core);
-    items.extend(dock_launcher_items(core));
-    items.extend(launcher_items(core));
-    items
+pub(crate) fn view_overlay_items_for(core: &StudioCore) -> Vec<StudioOverlayActionItem> {
+    view_overlay_items(core)
 }
 
-fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+fn dock_command_items(core: &StudioCore) -> Vec<StudioOverlayActionItem> {
     // Only surface-declared slots are toggleable; absent edges have no
     // slot and offer nothing. Labels stay mechanism words (edge names).
     [
@@ -2000,7 +1994,7 @@ fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     ]
     .into_iter()
     .filter_map(|(edge, name, slot)| slot.map(|slot| (edge, name, slot.visible)))
-    .map(|(edge, name, visible)| StudioLauncherItemVm {
+    .map(|(edge, name, visible)| StudioOverlayActionItem {
         label: format!("{} {name} slot", if visible { "Hide" } else { "Show" }),
         hint: "toggle edge slot".to_string(),
         action: StudioAction::ToggleDock { edge },
@@ -2010,12 +2004,10 @@ fn dock_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     .collect()
 }
 
-/// Launcher items for the focused table row's affordances OTHER than its
-/// activate (Enter) action — so row management (Cancel, …) is reachable. Each is
-/// rebuilt as an `InvokeAffordance` from the row's raw record and the view's
-/// declared affordances. Table lenses only (the list surfaces are all tables);
-/// rows-widget affordances are out of scope here.
-fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+/// Focused table row affordances OTHER than its activate (Enter) action.
+/// Each is rebuilt as an `InvokeAffordance` from the row's raw record and
+/// the view's declared affordances.
+fn focused_row_command_items(core: &StudioCore) -> Vec<StudioOverlayActionItem> {
     let Some(view) = core.workspace.focused_view() else {
         return Vec::new();
     };
@@ -2043,7 +2035,7 @@ fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> 
                 .and_then(|v| v.as_str())
                 .unwrap_or(id)
                 .to_string();
-            Some(StudioLauncherItemVm {
+            Some(StudioOverlayActionItem {
                 label,
                 hint: "focused row".to_string(),
                 action: StudioAction::InvokeAffordance {
@@ -2058,9 +2050,9 @@ fn focused_row_affordance_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> 
         .collect()
 }
 
-fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
+fn context_command_items(core: &StudioCore) -> Vec<StudioOverlayActionItem> {
     let mut items = Vec::new();
-    items.push(StudioLauncherItemVm {
+    items.push(StudioOverlayActionItem {
         label: "Toggle crystal shards".to_string(),
         hint: "switch backdrop between prism and sharded prism".to_string(),
         action: StudioAction::ToggleBackdropShards,
@@ -2081,7 +2073,7 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
         } else {
             focused_selection_hint(core).unwrap_or_else(|| "focused row".to_string())
         };
-        items.push(StudioLauncherItemVm {
+        items.push(StudioOverlayActionItem {
             label: "Inspect selection".to_string(),
             hint,
             action,
@@ -2091,7 +2083,7 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     }
 
     if let Some(action) = retry {
-        items.push(StudioLauncherItemVm {
+        items.push(StudioOverlayActionItem {
             label: "Retry failed turn".to_string(),
             hint: "re-submit this failed turn (review, then Enter)".to_string(),
             action,
@@ -2103,7 +2095,7 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
     // The focused row's non-activate affordances (e.g. Cancel on a thread row),
     // so row management is reachable — the row's Enter action is only the
     // activate affordance.
-    items.extend(focused_row_affordance_items(core));
+    items.extend(focused_row_command_items(core));
 
     // Steering the active execution: offered only when the route has a head
     // thread. Each dispatches the shared SubmitThreadCommand → commands/submit.
@@ -2114,16 +2106,14 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
         //
         // No command-style "interrupt" item: the operator interrupts a running
         // directive by submitting text with Alt+Enter (a live cognition_in
-        // redirect via threads/input) — "Interrupt" is reserved for that. The old
-        // commands/submit "interrupt" was inert for directives (nothing claims it)
-        // and only muddied the meaning.
+        // redirect via threads/input) — "Interrupt" is reserved for that.
         use crate::studio::dto::ThreadControlCommand;
         let operator_continuable = core.thread_supports_operator_followup(&head) != Some(false);
         for (label, command) in [
             ("Continue thread", ThreadControlCommand::Continue),
             ("Cancel thread", ThreadControlCommand::Cancel),
         ] {
-            items.push(StudioLauncherItemVm {
+            items.push(StudioOverlayActionItem {
                 label: label.to_string(),
                 hint: "active thread".to_string(),
                 action: StudioAction::SubmitThreadCommand { command },
@@ -2133,6 +2123,12 @@ fn context_launcher_items(core: &StudioCore) -> Vec<StudioLauncherItemVm> {
         }
     }
 
+    items
+}
+
+pub(crate) fn command_overlay_items_for(core: &StudioCore) -> Vec<StudioOverlayActionItem> {
+    let mut items = context_command_items(core);
+    items.extend(dock_command_items(core));
     items
 }
 
@@ -2184,90 +2180,211 @@ fn truncate_middle(value: &str, max_chars: usize) -> String {
     format!("{start}…{end}")
 }
 
-fn launcher(core: &StudioCore) -> StudioLauncherVm {
-    let query = core.ui.launcher.query.trim().to_lowercase();
-    let items: Vec<_> = launcher_items_for(core)
-        .into_iter()
-        .filter(|item| {
-            let haystack = format!("{} {}", item.label, item.hint).to_lowercase();
-            query.is_empty() || haystack.contains(&query)
-        })
-        .collect();
-    let selected = core.ui.launcher.selected.min(items.len().saturating_sub(1));
-    StudioLauncherVm {
-        open: core.ui.launcher.open,
-        query: core.ui.launcher.query.clone(),
+fn overlays(core: &StudioCore) -> Vec<StudioOverlayVm> {
+    let Some(active) = core.ui.overlay.active.as_deref() else {
+        return Vec::new();
+    };
+    let (title, widget, hint, source_ref) = overlay_definition(core, active);
+    let items = active_overlay_items(core);
+    let selected = core.ui.overlay.selected.min(items.len().saturating_sub(1));
+    vec![StudioOverlayVm {
+        id: active.to_string(),
+        title,
+        widget,
+        query: core.ui.overlay.query.clone(),
         selected,
-        hint: "Alt+K open · Ctrl+←/→ tab · Ctrl+↑/↓ move · Ctrl+Shift+arrows resize · Alt+M master/slave · Alt+Q close"
-            .to_string(),
+        hint,
         items,
+    }]
+}
+
+fn overlay_definition(core: &StudioCore, id: &str) -> (String, String, String, String) {
+    let declared = core
+        .data
+        .session
+        .as_ref()
+        .and_then(|session| session.effective_surface.as_ref())
+        .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
+        .and_then(|surface| surface.overlays.get(id).cloned());
+    if let Some(spec) = declared {
+        let source_ref = spec
+            .source
+            .map(|source| source.item_ref)
+            .unwrap_or_else(|| format!("runtime:{id}"));
+        return (
+            if spec.title.is_empty() {
+                id.to_string()
+            } else {
+                spec.title
+            },
+            if spec.widget.is_empty() {
+                "palette".to_string()
+            } else {
+                spec.widget
+            },
+            spec.hint,
+            source_ref,
+        );
+    }
+    match id {
+        "views" => (
+            "Views".to_string(),
+            "palette".to_string(),
+            "type to filter views · enter to open · shift+enter for new tile".to_string(),
+            "runtime:views/launchable".to_string(),
+        ),
+        "commands" => (
+            "Commands".to_string(),
+            "palette".to_string(),
+            "type to filter commands · enter to run · esc to close".to_string(),
+            "runtime:commands/available".to_string(),
+        ),
+        "shortcuts" => (
+            "Shortcuts".to_string(),
+            "table".to_string(),
+            "type to filter shortcuts · esc to close".to_string(),
+            "runtime:shortcuts".to_string(),
+        ),
+        _ => (
+            id.to_string(),
+            "palette".to_string(),
+            "esc to close".to_string(),
+            format!("runtime:{id}"),
+        ),
     }
 }
 
-/// The keys overlay catalogue — the canonical global bindings, mirroring
-/// `studio_key_command`. Static content (no per-state filtering): the overlay
-/// is for discovery, so it always lists the full vocabulary.
-fn help(core: &StudioCore) -> StudioHelpVm {
-    let entry = |category: &str, keys: &str, description: &str| StudioHelpEntryVm {
+pub(crate) fn active_overlay_items(core: &StudioCore) -> Vec<StudioOverlayItemVm> {
+    let Some(active) = core.ui.overlay.active.as_deref() else {
+        return Vec::new();
+    };
+    let (_, _, _, source_ref) = overlay_definition(core, active);
+    let query = core.ui.overlay.query.trim().to_lowercase();
+    overlay_source_items(core, &source_ref)
+        .into_iter()
+        .filter(|item| {
+            let haystack = format!(
+                "{} {} {} {}",
+                item.category, item.primary, item.secondary, item.meta
+            )
+            .to_lowercase();
+            query.is_empty() || haystack.contains(&query)
+        })
+        .collect()
+}
+
+fn overlay_source_items(core: &StudioCore, source_ref: &str) -> Vec<StudioOverlayItemVm> {
+    match source_ref {
+        "runtime:commands/available" => command_overlay_items_for(core)
+            .into_iter()
+            .map(overlay_item_from_action_item)
+            .collect(),
+        "runtime:shortcuts" => shortcut_overlay_items(),
+        "runtime:views/launchable" => view_overlay_items(core)
+            .into_iter()
+            .map(overlay_item_from_action_item)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn overlay_item_from_action_item(item: StudioOverlayActionItem) -> StudioOverlayItemVm {
+    let (category, primary) = action_category_and_label(&item.label);
+    StudioOverlayItemVm {
+        category,
+        primary,
+        secondary: item.hint,
+        meta: String::new(),
+        enabled: item.enabled,
+        action: Some(item.action),
+        secondary_action: item.secondary_action,
+    }
+}
+
+fn shortcut_overlay_items() -> Vec<StudioOverlayItemVm> {
+    shortcut_entries()
+        .into_iter()
+        .map(|entry| StudioOverlayItemVm {
+            category: entry.category,
+            primary: entry.keys,
+            secondary: entry.description,
+            meta: String::new(),
+            enabled: false,
+            action: None,
+            secondary_action: None,
+        })
+        .collect()
+}
+
+fn action_category_and_label(label: &str) -> (String, String) {
+    let trimmed = label.trim();
+    if let Some((category, command)) = trimmed.rsplit_once('/') {
+        return (category.to_string(), command.to_string());
+    }
+    if let Some((first, rest)) = trimmed.split_once(' ') {
+        return (first.to_string(), rest.to_string());
+    }
+    ("View".to_string(), trimmed.to_string())
+}
+
+fn shortcut_entries() -> Vec<StudioShortcutEntryVm> {
+    let entry = |category: &str, keys: &str, description: &str| StudioShortcutEntryVm {
         category: category.to_string(),
         keys: keys.to_string(),
         description: description.to_string(),
     };
-    StudioHelpVm {
-        open: core.ui.help_open,
-        entries: vec![
-            entry(
-                "Move",
-                "↑ / ↓",
-                "Move the point through rows; else move focus",
-            ),
-            entry(
-                "Move",
-                "← / →",
-                "Expand row/feed details, fold sections, or move focus",
-            ),
-            entry(
-                "Act",
-                "Enter",
-                "Activate the selected row (or steer-submit when typing)",
-            ),
-            entry(
-                "Act",
-                "Alt+Enter",
-                "Submit as an interrupt — cut the running thread's turn and redirect",
-            ),
-            entry(
-                "Act",
-                "Tab / ⇧Tab",
-                "Accept completion, else cycle the route target",
-            ),
-            entry("Act", "Esc", "Cancel a running thread; else close the lens"),
-            entry("Lenses", "⌫ / Alt+←", "Return from a drill-in lens"),
-            entry(
-                "Input",
-                "type",
-                "The foot input is always live — text routes at the directive",
-            ),
-            entry(
-                "Lenses",
-                "Ctrl+K",
-                "Open the lens launcher (swap the center lens)",
-            ),
-            entry("Backdrop", "Alt+S", "Toggle the crystal shard backdrop"),
-            entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
-            entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
-            entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
-            entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
-            entry(
-                "Layout",
-                "Alt+T / Alt+B",
-                "Toggle the top / bottom status bar",
-            ),
-            entry("App", "Alt+Q", "Close the focused lens"),
-            entry("App", "Ctrl+C", "Quit"),
-            entry("App", "?", "Show / hide this help"),
-        ],
-    }
+    vec![
+        entry(
+            "Move",
+            "↑ / ↓",
+            "Move the point through rows; else move focus",
+        ),
+        entry(
+            "Move",
+            "← / →",
+            "Expand row/feed details, fold sections, or move focus",
+        ),
+        entry(
+            "Act",
+            "Enter",
+            "Activate the selected row (or steer-submit when typing)",
+        ),
+        entry(
+            "Act",
+            "Alt+Enter",
+            "Submit as an interrupt — cut the running thread's turn and redirect",
+        ),
+        entry(
+            "Act",
+            "Tab / ⇧Tab",
+            "Accept completion, else cycle the route target",
+        ),
+        entry("Act", "Esc", "Cancel a running thread; else close the lens"),
+        entry("Lenses", "⌫ / Alt+←", "Return from a drill-in lens"),
+        entry(
+            "Input",
+            "type",
+            "The foot input is always live — text routes at the directive",
+        ),
+        entry(
+            "Lenses",
+            "Ctrl+K",
+            "Open the view overlay (swap the center lens)",
+        ),
+        entry("Backdrop", "Alt+S", "Toggle the crystal shard backdrop"),
+        entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
+        entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
+        entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
+        entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
+        entry(
+            "Layout",
+            "Alt+T / Alt+B",
+            "Toggle the top / bottom status bar",
+        ),
+        entry("App", "Alt+Q", "Close the focused lens"),
+        entry("App", "Ctrl+C", "Quit"),
+        entry("App", "?", "Show shortcut overlay"),
+    ]
 }
 
 fn tile_actions(core: &StudioCore, tile_id: TileId) -> Vec<StudioTileActionVm> {
@@ -2300,8 +2417,8 @@ pub(crate) fn action_for_focused_row(core: &StudioCore) -> Option<StudioAction> 
 
 /// The timeline entry under the point in the focused feed lens, if the focused
 /// view is a timeline with a point on an entry. The single home for reading the
-/// focused feed entry — both the Enter action and the launcher-surfaced
-/// secondary (retry) derive from it.
+/// focused feed entry — both the Enter action and command-overlay secondary
+/// actions derive from it.
 fn focused_timeline_entry(core: &StudioCore) -> Option<StudioTimelineEntryVm> {
     let tile_id = core.workspace.focused_tile;
     let view = core.workspace.focused_view()?;
@@ -2315,7 +2432,7 @@ fn focused_timeline_entry(core: &StudioCore) -> Option<StudioTimelineEntryVm> {
 }
 
 /// The focused feed entry's secondary affordance — the retry a recoverable
-/// failed terminal carries. Surfaced through the launcher (its Shift+Enter
+/// failed terminal carries. Surfaced through the commands overlay (its Shift+Enter
 /// secondary and a distinct "Retry failed turn" item), never a direct feed key,
 /// so Enter stays inspect.
 fn retry_action_for_focused_row(core: &StudioCore) -> Option<StudioAction> {
@@ -2581,7 +2698,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_label_prefers_authored_name_else_stripped_ref() {
+    fn view_overlay_label_prefers_authored_name_else_stripped_ref() {
         let core = session_with_views(
             json!({
                 "view:ryeos/atlas": { "widget": "atlas", "name": "Atlas", "description": "the namespace atlas" },
@@ -2589,7 +2706,7 @@ mod tests {
             }),
             json!([]),
         );
-        let items = launcher_items(&core);
+        let items = view_overlay_items(&core);
         let labels: Vec<&str> = items.iter().map(|item| item.label.as_str()).collect();
         assert!(
             labels.contains(&"Atlas"),
@@ -3084,7 +3201,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_surfaces_focused_row_cancel_but_not_the_activate() {
+    fn command_overlay_surfaces_focused_row_cancel_but_not_the_activate() {
         use crate::studio::model::{BrowserSession, BrowserViewport};
         let session = BrowserSession {
             effective_surface: Some(json!({
@@ -3118,13 +3235,13 @@ mod tests {
             json!({ "threads": [ { "thread_id": "T-ab", "chain_root_id": "T-ab" } ] }),
         );
 
-        let items = launcher_items_for(&core);
+        let items = command_overlay_items_for(&core);
         // The focused row (default cursor 0 = T-ab) exposes a reachable Cancel
         // targeting that specific row.
         let cancel = items
             .iter()
             .find(|i| i.label == "Cancel")
-            .expect("cancel launcher item");
+            .expect("cancel overlay item");
         assert!(
             matches!(&cancel.action,
                 StudioAction::InvokeAffordance { view_ref, affordance_id, record }
@@ -3175,14 +3292,14 @@ mod tests {
     }
 
     #[test]
-    fn launcher_offers_inspect_and_retry_on_a_focused_failed_feed_entry() {
+    fn command_overlay_offers_inspect_and_retry_on_a_focused_failed_feed_entry() {
         let core = feed_core(json!([
             { "event_type": "cognition_in", "thread_id": "T-1", "payload": { "content": "do it" } },
             { "event_type": "thread_failed", "thread_id": "T-1", "chain_root_id": "R-1",
               "payload": { "error": { "message": "boom" } } }
         ]));
 
-        let items = launcher_items_for(&core);
+        let items = command_overlay_items_for(&core);
         // Enter=inspect, carrying the visible line as title and the raw event.
         let inspect = items
             .iter()
@@ -3211,7 +3328,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_offers_neither_inspect_nor_retry_on_a_cancelled_terminal() {
+    fn command_overlay_offers_neither_inspect_nor_retry_on_a_cancelled_terminal() {
         // Cancelled is operator-initiated, not an error — it is neither
         // inspectable nor retryable.
         let core = feed_core(json!([
@@ -3219,13 +3336,13 @@ mod tests {
             { "event_type": "thread_cancelled", "thread_id": "T-1", "chain_root_id": "R-1",
               "payload": {} }
         ]));
-        let items = launcher_items_for(&core);
+        let items = command_overlay_items_for(&core);
         assert!(!items.iter().any(|i| i.label == "Retry failed turn"));
         assert!(!items.iter().any(|i| i.label == "Inspect selection"));
     }
 
     #[test]
-    fn launcher_offers_inspect_but_not_retry_on_a_timed_out_terminal() {
+    fn command_overlay_offers_inspect_but_not_retry_on_a_timed_out_terminal() {
         // timed_out is inspectable but not retryable in v1 (the daemon refuses
         // continuation for that status).
         let core = feed_core(json!([
@@ -3233,7 +3350,7 @@ mod tests {
             { "event_type": "thread_timed_out", "thread_id": "T-1", "chain_root_id": "R-1",
               "payload": {} }
         ]));
-        let items = launcher_items_for(&core);
+        let items = command_overlay_items_for(&core);
         assert!(items.iter().any(|i| i.label == "Inspect selection"));
         assert!(!items.iter().any(|i| i.label == "Retry failed turn"));
     }

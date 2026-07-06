@@ -1,11 +1,11 @@
 import { el, textEl } from "/ui/assets/studio_components_primitives.js";
 
-let launcherWasOpen = false;
+let overlayWasOpen = false;
 const dismissedNoticeKeys = new Set();
 
-export function launcherDialog(state, shell) {
-  const opening = Boolean(state.open && !launcherWasOpen);
-  launcherWasOpen = Boolean(state.open);
+export function overlayDialog(state, shell) {
+  const opening = Boolean(state.open && !overlayWasOpen);
+  overlayWasOpen = Boolean(state.open);
   const overlay = el("div", `studio-command-overlay${state.open ? " open" : ""}${opening ? " opening" : ""}`);
   if (!state.open) return overlay;
 
@@ -13,50 +13,53 @@ export function launcherDialog(state, shell) {
   const selected = Math.min(state.selected || 0, Math.max(choices.length - 1, 0));
   const dialog = el("section", "studio-command-dialog");
   dialog.setAttribute("role", "dialog");
-  dialog.setAttribute("aria-label", "Open RyeOS tile");
+  dialog.setAttribute("aria-label", state.title || "Open RyeOS tile");
 
   const input = document.createElement("input");
   input.type = "search";
-  input.placeholder = "open tile…";
+  input.placeholder = state.title ? `${state.title.toLowerCase()}…` : "open tile…";
   input.autocomplete = "off";
   input.spellcheck = false;
   input.value = state.query || "";
-  input.setAttribute("data-studio-launcher-input", "");
-  input.addEventListener("input", () => shell.setLauncherQuery?.(input.value));
+  input.setAttribute("data-studio-overlay-input", "");
+  input.addEventListener("input", () => shell.setOverlayQuery?.(input.value));
   input.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      shell.closeLauncher?.();
+      shell.closeOverlay?.();
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
-      shell.moveLauncher?.(1);
+      shell.moveOverlay?.(1);
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      shell.moveLauncher?.(-1);
+      shell.moveOverlay?.(-1);
     } else if (event.key === "Enter") {
       event.preventDefault();
-      shell.chooseLauncher?.(event.shiftKey);
+      shell.chooseOverlay?.(event.shiftKey);
     }
   });
 
   const list = el("div", "studio-command-list");
   if (choices.length === 0) {
     const empty = el("div", "studio-command-empty");
-    empty.textContent = "No matching tile.";
+    empty.textContent = "No matches.";
     list.append(empty);
   }
   choices.forEach((item, index) => {
     const row = el("button", `studio-command-choice${index === selected ? " selected" : ""}`);
     row.type = "button";
     row.disabled = item.enabled === false;
-    row.append(textEl("strong", item.label || "View"), textEl("span", item.hint || ""));
+    row.append(
+      textEl("strong", item.label || item.primary || "View"),
+      textEl("span", item.hint || item.secondary || item.meta || ""),
+    );
     row.addEventListener("click", () => {
       if (item.enabled === false) return;
       if (item.action && shell.dispatchUi) {
         shell.dispatchUi({ type: "activate", action: item.action });
-        shell.closeLauncher?.();
+        shell.closeOverlay?.();
       } else {
-        shell.chooseLauncher?.(false);
+        shell.chooseOverlay?.(false);
       }
     });
     list.append(row);
@@ -67,7 +70,7 @@ export function launcherDialog(state, shell) {
   dialog.append(input, list, hint);
   overlay.append(dialog);
   overlay.addEventListener("mousedown", (event) => {
-    if (event.target === overlay) shell.closeLauncher?.();
+    if (event.target === overlay) shell.closeOverlay?.();
   });
   return overlay;
 }

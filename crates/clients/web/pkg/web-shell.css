@@ -908,54 +908,6 @@ body {
 .studio-os-title span,
 .studio-os-session small { color: var(--studio-muted); }
 
-.studio-launcher {
-  grid-row: 2 / 4;
-  border-right: 2px solid var(--studio-shadow);
-  background: var(--studio-panel);
-  padding: 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-}
-
-.studio-launcher > strong { color: var(--studio-warn); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.78rem; }
-
-.studio-launcher-item {
-  border: 2px solid var(--studio-shadow);
-  background: var(--studio-bg);
-  color: var(--studio-fg);
-  text-align: left;
-  padding: 10px;
-  display: grid;
-  gap: 4px;
-  font: inherit;
-}
-
-.studio-launcher-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 30px;
-  gap: 6px;
-  align-items: stretch;
-}
-
-.studio-launcher-add {
-  border: 2px solid var(--studio-shadow);
-  background: var(--studio-bg);
-  color: var(--studio-fg-soft);
-  font: inherit;
-  font-weight: 700;
-  padding: 0;
-}
-
-.studio-launcher-add:hover,
-.studio-launcher-item:hover {
-  border-color: var(--studio-accent);
-  color: var(--studio-warn);
-}
-
-.studio-launcher-item small { color: var(--studio-muted); }
-
 .studio-workspace {
   min-width: 0;
   min-height: 0;
@@ -1042,13 +994,6 @@ body,
 .studio-osbar {
   grid-column: 1 / -1;
   grid-row: 1;
-}
-
-.studio-launcher {
-  grid-column: 1;
-  grid-row: 2;
-  min-height: 0;
-  overflow: auto;
 }
 
 .studio-workspace {

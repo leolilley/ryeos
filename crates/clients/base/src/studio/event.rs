@@ -186,11 +186,11 @@ pub enum StudioUiEvent {
     FocusDirection {
         direction: FocusDirection,
     },
-    OpenLauncher,
-    CloseLauncher,
-    OpenHelp,
-    CloseHelp,
-    SetLauncherQuery {
+    OpenOverlay {
+        overlay_id: String,
+    },
+    CloseOverlay,
+    SetOverlayQuery {
         query: String,
     },
     InsertInputChar {
@@ -230,10 +230,10 @@ pub enum StudioUiEvent {
     /// cuts the in-flight cognition and redirects. Falls back to steer semantics
     /// on non-running targets. Bound to Alt+Enter.
     SubmitInputInterrupt,
-    MoveLauncherSelection {
+    MoveOverlaySelection {
         delta: i32,
     },
-    ChooseLauncher {
+    ChooseOverlay {
         secondary: bool,
     },
     SetTileCursor {

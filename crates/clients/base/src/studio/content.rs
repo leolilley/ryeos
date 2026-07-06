@@ -48,7 +48,7 @@ pub struct ViewBinding {
     #[serde(default)]
     pub widget: String,
     /// The view item's authored `name:` (content, like `description`). Used
-    /// for the tile header and launcher label so chrome shows the authored
+    /// for the tile header and view-overlay label so chrome shows the authored
     /// title rather than the munged ref tail. Absent for views that don't
     /// declare one — callers fall back to the ref tail.
     #[serde(default)]

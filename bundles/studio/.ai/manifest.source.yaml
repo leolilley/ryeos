@@ -1,6 +1,6 @@
 name: studio
 version: "0.5.0"
-description: "Studio surfaces, UI routes, operational inspector services, and v0 renderer launchers"
+description: "Studio surfaces, UI routes, operational inspector services, and renderer entrypoints"
 requires_kinds:
   - client
   - service

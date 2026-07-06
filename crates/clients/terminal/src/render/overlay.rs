@@ -1,0 +1,176 @@
+//! Generic overlay host. Overlays are transient surface layers over the
+//! workspace; their content is data-projected in the shared VM and rendered
+//! here by widget shape, not by product-specific overlay names.
+
+use ryeos_client_base::layout::Rect;
+use ryeos_client_base::studio::view_model::{StudioOverlayItemVm, StudioOverlayVm};
+use ryeos_client_base::text_surface::{Border, Style, TextSurface};
+
+use super::primitives::fill_rect;
+use super::text::{display_width, truncate};
+use super::theme::{ACCENT, BG, FG, GOOD, MUTED, PANEL};
+
+const CAT_W: usize = 12;
+const KEY_W: usize = 16;
+
+pub fn draw_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
+    match overlay.widget.as_str() {
+        "table" => draw_table_overlay(surface, overlay),
+        _ => draw_palette_overlay(surface, overlay),
+    }
+}
+
+fn draw_palette_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
+    let w = surface.width.min(76).max(32);
+    let max_rows = surface.height.saturating_sub(8).max(3);
+    let rows = overlay.items.len().min(max_rows);
+    let h = rows + 4;
+    let x = surface.width.saturating_sub(w) / 2;
+    let y = surface.height.saturating_sub(h) / 3;
+    let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
+    draw_panel(surface, rect, &overlay.title);
+    draw_prompt(surface, x, y + 1, w, &overlay.query);
+
+    let start = scroll_start(overlay.selected, rows, overlay.items.len());
+    for (row, item) in overlay.items.iter().skip(start).take(rows).enumerate() {
+        draw_palette_row(
+            surface,
+            x + 1,
+            y + 3 + row,
+            w.saturating_sub(2),
+            item,
+            start + row == overlay.selected,
+        );
+    }
+    draw_hint(surface, x, y + h - 2, &overlay.hint, w);
+}
+
+fn draw_table_overlay(surface: &mut TextSurface, overlay: &StudioOverlayVm) {
+    let w = surface.width.min(84).max(44);
+    let max_rows = surface.height.saturating_sub(8).max(4);
+    let rows = overlay.items.len().min(max_rows);
+    let h = rows + 5;
+    let x = surface.width.saturating_sub(w) / 2;
+    let y = surface.height.saturating_sub(h) / 3;
+    let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
+    draw_panel(surface, rect, &overlay.title);
+    draw_prompt(surface, x, y + 1, w, &overlay.query);
+    surface.draw_text(x + 2, y + 3, "Keys", Style::new().fg(GOOD).bg(PANEL).bold());
+    surface.draw_text(
+        x + 2 + KEY_W,
+        y + 3,
+        "Action",
+        Style::new().fg(GOOD).bg(PANEL).bold(),
+    );
+    let start = scroll_start(overlay.selected, rows, overlay.items.len());
+    for (row, item) in overlay.items.iter().skip(start).take(rows).enumerate() {
+        let ry = y + 4 + row;
+        let selected = start + row == overlay.selected;
+        let bg = if selected { ACCENT } else { PANEL };
+        let fg = if selected { BG } else { FG };
+        for col in 0..w.saturating_sub(2) {
+            surface.draw_char(x + 1 + col, ry, ' ', Style::new().fg(fg).bg(bg));
+        }
+        surface.draw_text(
+            x + 2,
+            ry,
+            &truncate(&item.primary, KEY_W.saturating_sub(1)),
+            Style::new().fg(fg).bg(bg).bold(),
+        );
+        surface.draw_text(
+            x + 2 + KEY_W,
+            ry,
+            &truncate(&item.secondary, w.saturating_sub(KEY_W + 5)),
+            Style::new().fg(if selected { BG } else { MUTED }).bg(bg),
+        );
+    }
+    draw_hint(surface, x, y + h - 2, &overlay.hint, w);
+}
+
+fn draw_panel(surface: &mut TextSurface, rect: Rect, title: &str) {
+    fill_rect(surface, rect, Style::new().fg(FG).bg(PANEL));
+    let x = rect.x as usize;
+    let y = rect.y as usize;
+    let w = rect.w as usize;
+    let h = rect.h as usize;
+    surface.draw_box(
+        x,
+        y,
+        x + w - 1,
+        y + h - 1,
+        Border::Thick,
+        Style::new().fg(ACCENT).bg(PANEL),
+    );
+    surface.draw_text(
+        x + 2,
+        y,
+        &format!(" {} ", title),
+        Style::new().fg(ACCENT).bg(PANEL).bold(),
+    );
+}
+
+fn draw_prompt(surface: &mut TextSurface, x: usize, y: usize, w: usize, query: &str) {
+    surface.draw_text(x + 2, y, ">", Style::new().fg(ACCENT).bg(PANEL).bold());
+    let query = truncate(query, w.saturating_sub(6));
+    surface.draw_text(x + 4, y, &query, Style::new().fg(FG).bg(PANEL));
+    let cur_x = x + 4 + display_width(&query);
+    surface.draw_char(cur_x, y, ' ', Style::new().fg(PANEL).bg(FG));
+}
+
+fn draw_hint(surface: &mut TextSurface, x: usize, y: usize, hint: &str, w: usize) {
+    if !hint.is_empty() {
+        surface.draw_text(
+            x + 2,
+            y,
+            &truncate(hint, w.saturating_sub(4)),
+            Style::new().fg(MUTED).bg(PANEL),
+        );
+    }
+}
+
+fn draw_palette_row(
+    surface: &mut TextSurface,
+    x: usize,
+    y: usize,
+    w: usize,
+    item: &StudioOverlayItemVm,
+    selected: bool,
+) {
+    let bg = if selected { ACCENT } else { PANEL };
+    let row_fg = if selected { BG } else { FG };
+    let cat_fg = if selected { BG } else { GOOD };
+    let desc_fg = if selected { BG } else { MUTED };
+    for col in 0..w {
+        surface.draw_char(x + col, y, ' ', Style::new().fg(row_fg).bg(bg));
+    }
+    let cat = truncate(&item.category, CAT_W);
+    let cat_x = x + CAT_W.saturating_sub(display_width(&cat));
+    surface.draw_text(cat_x, y, &cat, Style::new().fg(cat_fg).bg(bg));
+    let primary_x = x + CAT_W + 2;
+    let primary = truncate(&item.primary, w.saturating_sub(CAT_W + 3));
+    let primary_style = if item.enabled {
+        Style::new().fg(row_fg).bg(bg).bold()
+    } else {
+        Style::new().fg(desc_fg).bg(bg)
+    };
+    surface.draw_text(primary_x, y, &primary, primary_style);
+    if !item.secondary.is_empty() {
+        let desc_x = primary_x + display_width(&primary) + 2;
+        if desc_x < x + w {
+            surface.draw_text(
+                desc_x,
+                y,
+                &truncate(&item.secondary, x + w - desc_x),
+                Style::new().fg(desc_fg).bg(bg),
+            );
+        }
+    }
+}
+
+fn scroll_start(selected: usize, rows: usize, total: usize) -> usize {
+    if total <= rows || selected < rows {
+        0
+    } else {
+        (selected + 1 - rows).min(total - rows)
+    }
+}

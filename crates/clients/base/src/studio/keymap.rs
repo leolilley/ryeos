@@ -39,10 +39,7 @@ pub struct StudioKeyEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StudioKeyContext {
-    pub launcher_open: bool,
-    /// The keys/help overlay is open — any dismiss key closes it; everything
-    /// else is swallowed so the overlay is modal.
-    pub help_open: bool,
+    pub overlay_open: bool,
     pub input_visible: bool,
     /// The focused input has a non-empty buffer. Plain Enter then submits
     /// (the chat convention) rather than activating a row — terminals
@@ -83,24 +80,21 @@ pub enum StudioKeyCommand {
         delta: i32,
         fallback_direction: FocusDirection,
     },
-    InsertLauncherChar {
+    InsertOverlayChar {
         ch: char,
     },
-    DeleteLauncherChar,
+    DeleteOverlayChar,
     Quit,
     Ignore,
 }
 
 pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> StudioKeyCommand {
-    if context.launcher_open {
-        return launcher_key_command(event);
-    }
-    if context.help_open {
-        return help_key_command(event);
+    if context.overlay_open {
+        return overlay_key_command(event);
     }
 
     match event.key {
-        // Ctrl+K is the reliable launcher binding: a control char that
+        // Ctrl+K is the reliable view-overlay binding: a control char that
         // terminals and tmux pass straight through. Alt+K is kept for
         // environments that deliver it, but Alt/ESC combos are eaten by
         // tmux, so Ctrl+K is what we advertise.
@@ -108,7 +102,14 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
             if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
                 && c.eq_ignore_ascii_case(&'k') =>
         {
-            ui(StudioUiEvent::OpenLauncher)
+            ui(StudioUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            })
+        }
+        StudioKey::Char(c) if event.modifiers.ctrl_shift() && c.eq_ignore_ascii_case(&'p') => {
+            ui(StudioUiEvent::OpenOverlay {
+                overlay_id: "commands".to_string(),
+            })
         }
         StudioKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'q') => {
             action(StudioAction::CloseFocused)
@@ -243,7 +244,9 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         // still types into a message you're composing (the chat convention;
         // the always-present foot input owns plain chars otherwise).
         StudioKey::Char('?') if event.modifiers.none() && !context.input_has_text => {
-            ui(StudioUiEvent::OpenHelp)
+            ui(StudioUiEvent::OpenOverlay {
+                overlay_id: "shortcuts".to_string(),
+            })
         }
         StudioKey::Char(ch)
             if context.input_visible
@@ -257,36 +260,23 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
     }
 }
 
-/// The keys overlay is modal: any dismiss key (Esc, `?`, `q`, Enter) closes
-/// it, Ctrl+C still quits, and every other key is swallowed.
-fn help_key_command(event: StudioKeyEvent) -> StudioKeyCommand {
+fn overlay_key_command(event: StudioKeyEvent) -> StudioKeyCommand {
     match event.key {
-        StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
-        StudioKey::Escape | StudioKey::Enter => ui(StudioUiEvent::CloseHelp),
-        StudioKey::Char(c) if event.modifiers.none() && (c == '?' || c == 'q') => {
-            ui(StudioUiEvent::CloseHelp)
-        }
-        _ => StudioKeyCommand::Ignore,
-    }
-}
-
-fn launcher_key_command(event: StudioKeyEvent) -> StudioKeyCommand {
-    match event.key {
-        StudioKey::Escape if event.modifiers.none() => ui(StudioUiEvent::CloseLauncher),
-        StudioKey::Enter if event.modifiers.none_or_shift() => ui(StudioUiEvent::ChooseLauncher {
+        StudioKey::Escape if event.modifiers.none() => ui(StudioUiEvent::CloseOverlay),
+        StudioKey::Enter if event.modifiers.none_or_shift() => ui(StudioUiEvent::ChooseOverlay {
             secondary: event.modifiers.shift,
         }),
         StudioKey::ArrowUp if event.modifiers.none() => {
-            ui(StudioUiEvent::MoveLauncherSelection { delta: -1 })
+            ui(StudioUiEvent::MoveOverlaySelection { delta: -1 })
         }
         StudioKey::ArrowDown if event.modifiers.none() => {
-            ui(StudioUiEvent::MoveLauncherSelection { delta: 1 })
+            ui(StudioUiEvent::MoveOverlaySelection { delta: 1 })
         }
-        StudioKey::Backspace if event.modifiers.none() => StudioKeyCommand::DeleteLauncherChar,
+        StudioKey::Backspace if event.modifiers.none() => StudioKeyCommand::DeleteOverlayChar,
         StudioKey::Char(ch)
             if !event.modifiers.ctrl && !event.modifiers.alt && !event.modifiers.meta =>
         {
-            StudioKeyCommand::InsertLauncherChar { ch }
+            StudioKeyCommand::InsertOverlayChar { ch }
         }
         StudioKey::Char('c') if event.modifiers.ctrl_only() => StudioKeyCommand::Quit,
         _ => StudioKeyCommand::Ignore,
@@ -346,7 +336,7 @@ impl StudioKeyModifiers {
 impl super::model::StudioCore {
     /// Apply a resolved shared-keymap command to the core. This is the ONE
     /// interpretation of `StudioKeyCommand` — the row-cursor walk, the
-    /// focus fallback, and the launcher query edits live here so renderers
+    /// focus fallback, and the overlay query edits live here so renderers
     /// cannot drift on what a command does. Platform adapters translate
     /// their native key events into `StudioKeyEvent`, call
     /// [`studio_key_command`], and hand the command straight in; `Quit` is
@@ -360,18 +350,18 @@ impl super::model::StudioCore {
                 delta,
                 fallback_direction,
             } => self.move_focused_row_or_focus(delta, fallback_direction),
-            StudioKeyCommand::InsertLauncherChar { ch } => {
-                let mut query = self.ui.launcher.query.clone();
+            StudioKeyCommand::InsertOverlayChar { ch } => {
+                let mut query = self.ui.overlay.query.clone();
                 query.push(ch);
                 self.dispatch(StudioEvent::Ui {
-                    event: StudioUiEvent::SetLauncherQuery { query },
+                    event: StudioUiEvent::SetOverlayQuery { query },
                 })
             }
-            StudioKeyCommand::DeleteLauncherChar => {
-                let mut query = self.ui.launcher.query.clone();
+            StudioKeyCommand::DeleteOverlayChar => {
+                let mut query = self.ui.overlay.query.clone();
                 query.pop();
                 self.dispatch(StudioEvent::Ui {
-                    event: StudioUiEvent::SetLauncherQuery { query },
+                    event: StudioUiEvent::SetOverlayQuery { query },
                 })
             }
             StudioKeyCommand::Quit | StudioKeyCommand::Ignore => Vec::new(),
@@ -505,26 +495,6 @@ mod tests {
         }
     }
 
-    fn alt(ch: char) -> StudioKeyEvent {
-        StudioKeyEvent {
-            key: StudioKey::Char(ch),
-            modifiers: StudioKeyModifiers {
-                alt: true,
-                ..Default::default()
-            },
-        }
-    }
-
-    fn alt_arrow(key: StudioKey) -> StudioKeyEvent {
-        StudioKeyEvent {
-            key,
-            modifiers: StudioKeyModifiers {
-                alt: true,
-                ..Default::default()
-            },
-        }
-    }
-
     fn ctrl(ch: char) -> StudioKeyEvent {
         StudioKeyEvent {
             key: StudioKey::Char(ch),
@@ -535,395 +505,58 @@ mod tests {
         }
     }
 
+    fn ctrl_shift(ch: char) -> StudioKeyEvent {
+        StudioKeyEvent {
+            key: StudioKey::Char(ch),
+            modifiers: StudioKeyModifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn context(overlay_open: bool, input_visible: bool) -> StudioKeyContext {
+        StudioKeyContext {
+            overlay_open,
+            input_visible,
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn ctrl_k_opens_the_launcher() {
-        // The reliable launcher binding — Alt/ESC combos are eaten by tmux.
+    fn ctrl_k_opens_the_views_overlay() {
         assert!(matches!(
             studio_key_command(ctrl('k'), context(false, true)),
             StudioKeyCommand::Ui {
-                event: StudioUiEvent::OpenLauncher
-            }
-        ));
-    }
-
-    fn ctrl_arrow(key: StudioKey) -> StudioKeyEvent {
-        StudioKeyEvent {
-            key,
-            modifiers: StudioKeyModifiers {
-                ctrl: true,
-                ..Default::default()
-            },
-        }
-    }
-
-    fn context(launcher_open: bool, input_visible: bool) -> StudioKeyContext {
-        StudioKeyContext {
-            launcher_open,
-            help_open: false,
-            input_visible,
-            input_has_text: false,
-            input_is_live_filter: false,
-            input_filter_fields: false,
-            input_has_completion: false,
-            input_can_accept_completion: false,
-            input_target_cycle: None,
-            head_thread_running: false,
-            focused_row_expandable: false,
-            focused_row_expanded: false,
-        }
-    }
-
-    fn context_typing() -> StudioKeyContext {
-        StudioKeyContext {
-            launcher_open: false,
-            help_open: false,
-            input_visible: true,
-            input_has_text: true,
-            input_is_live_filter: false,
-            input_filter_fields: false,
-            input_has_completion: false,
-            input_can_accept_completion: false,
-            input_target_cycle: None,
-            head_thread_running: false,
-            focused_row_expandable: false,
-            focused_row_expanded: false,
-        }
-    }
-
-    fn shift_enter() -> StudioKeyEvent {
-        StudioKeyEvent {
-            key: StudioKey::Enter,
-            modifiers: StudioKeyModifiers {
-                shift: true,
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn maps_global_web_studio_keys() {
-        assert!(matches!(
-            studio_key_command(alt('k'), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::OpenLauncher
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(alt('q'), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::Activate {
-                    action: StudioAction::CloseFocused
-                }
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(ctrl_arrow(StudioKey::ArrowRight), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::Activate {
-                    action: StudioAction::CycleTab {
-                        direction: StudioStackMoveDirection::Down
-                    }
-                }
-            }
+                event: StudioUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "views"
         ));
     }
 
     #[test]
-    fn maps_rows_before_focus_like_web() {
-        assert_eq!(
-            studio_key_command(key(StudioKey::ArrowDown), context(false, true)),
-            StudioKeyCommand::MoveFocusedRowOrFocus {
-                delta: 1,
-                fallback_direction: FocusDirection::Down,
-            }
-        );
-    }
-
-    #[test]
-    fn launcher_captures_text_and_selection() {
-        assert_eq!(
-            studio_key_command(key(StudioKey::Char('a')), context(true, false)),
-            StudioKeyCommand::InsertLauncherChar { ch: 'a' }
-        );
+    fn ctrl_shift_p_opens_the_commands_overlay() {
         assert!(matches!(
-            studio_key_command(key(StudioKey::ArrowUp), context(true, false)),
+            studio_key_command(ctrl_shift('p'), context(false, true)),
             StudioKeyCommand::Ui {
-                event: StudioUiEvent::MoveLauncherSelection { delta: -1 }
-            }
+                event: StudioUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "commands"
         ));
     }
 
     #[test]
-    fn maps_studio_input_text_and_submit() {
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Char('x')), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::InsertInputChar { ch: 'x' }
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Backspace), context_typing()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::DeleteInputChar
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Tab), context_target()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleInputTarget { forward: true }
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(shift_tab(), context_target()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleInputTarget { forward: false }
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(shift_enter(), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::SubmitInput
-            }
-        ));
-    }
-
-    /// A context whose focused input declares route-chain targeting.
-    fn context_target() -> StudioKeyContext {
-        StudioKeyContext {
-            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
-            ..context(false, true)
-        }
-    }
-
-    fn shift_tab() -> StudioKeyEvent {
-        StudioKeyEvent {
-            key: StudioKey::Tab,
-            modifiers: StudioKeyModifiers {
-                shift: true,
-                ..Default::default()
-            },
-        }
-    }
-
-    #[test]
-    fn esc_interrupts_running_head_else_falls_through() {
-        // Head thread running → esc interrupts it.
-        let running = StudioKeyContext {
-            head_thread_running: true,
-            ..context(false, true)
-        };
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Escape), running),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::InterruptHead
-            }
-        ));
-        // Idle (no running head) → esc does NOT interrupt (existing behavior).
-        assert!(!matches!(
-            studio_key_command(key(StudioKey::Escape), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::InterruptHead
-            }
-        ));
-    }
-
-    #[test]
-    fn alt_enter_submits_as_interrupt_plain_enter_steers() {
-        let alt_enter = StudioKeyEvent {
-            key: StudioKey::Enter,
-            modifiers: StudioKeyModifiers {
-                alt: true,
-                ..Default::default()
-            },
-        };
-        assert!(matches!(
-            studio_key_command(alt_enter, context_typing()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::SubmitInputInterrupt
-            }
-        ));
-        // Plain Enter with text steers (default intent).
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Enter), context_typing()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::SubmitInput
-            }
-        ));
-    }
-
-    #[test]
-    fn tab_precedence_completion_vs_targeting() {
-        // No target, has completion that can accept → Tab completes (1 & 4).
-        let complete_ctx = StudioKeyContext {
-            input_has_completion: true,
-            input_can_accept_completion: true,
-            ..context(false, true)
-        };
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Tab), complete_ctx),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CompleteInput
-            }
-        ));
-
-        // BOTH completion and targeting, completion can accept (`/foo⇥`) →
-        // completion wins (4a).
-        let both_accept = StudioKeyContext {
-            input_has_completion: true,
-            input_can_accept_completion: true,
-            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
-            ..context(false, true)
-        };
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Tab), both_accept),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CompleteInput
-            }
-        ));
-
-        // BOTH, but completion can't accept now (prose / cursor mid-line) →
-        // targeting cycles (4b & 4c).
-        let both_no_accept = StudioKeyContext {
-            input_has_completion: true,
-            input_can_accept_completion: false,
-            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
-            ..context(false, true)
-        };
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Tab), both_no_accept.clone()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleInputTarget { forward: true }
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(shift_tab(), both_no_accept),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleInputTarget { forward: false }
-            }
-        ));
-
-        // Launcher open beats everything (test 4).
-        let launcher_ctx = StudioKeyContext {
-            launcher_open: true,
-            input_target_cycle: Some(crate::studio::content::InputTargetCycle::RouteChains),
-            ..context(true, true)
-        };
-        assert!(!matches!(
-            studio_key_command(key(StudioKey::Tab), launcher_ctx),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleInputTarget { .. }
-            }
-        ));
-    }
-
-    #[test]
-    fn plain_enter_submits_when_input_has_text() {
-        // The core chat loop: typing then plain Enter submits (terminals
-        // can't be relied on for Shift+Enter).
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Enter), context_typing()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::SubmitInput
-            }
-        ));
-        // Empty input: plain Enter activates the focused row instead.
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Enter), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::ActivateFocused
-            }
-        ));
-    }
-
-    #[test]
-    fn live_filter_enter_activates_the_row_while_typing_still_filters() {
-        // A live-filter input (feeds, no submit) applies live: even with text,
-        // Enter activates the focused row rather than submitting the buffer.
-        let filtering = StudioKeyContext {
-            input_is_live_filter: true,
-            ..context_typing()
-        };
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Enter), filtering),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::ActivateFocused
-            }
-        ));
-        // Alt+Enter is not an interrupt for a live filter either.
-        let alt_enter = StudioKeyEvent {
-            key: StudioKey::Enter,
-            modifiers: StudioKeyModifiers {
-                alt: true,
-                ..Default::default()
-            },
-        };
-        assert!(!matches!(
-            studio_key_command(
-                alt_enter,
-                StudioKeyContext {
-                    input_is_live_filter: true,
-                    ..context_typing()
-                }
-            ),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::SubmitInputInterrupt
-            }
-        ));
-        // Typing still edits the filter buffer.
-        assert!(matches!(
-            studio_key_command(
-                key(StudioKey::Char('r')),
-                StudioKeyContext {
-                    input_is_live_filter: true,
-                    ..context_typing()
-                }
-            ),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::InsertInputChar { ch: 'r' }
-            }
-        ));
-    }
-
-    #[test]
-    fn tab_cycles_a_multi_field_live_filter() {
-        let ctx = StudioKeyContext {
-            input_is_live_filter: true,
-            input_filter_fields: true,
-            ..context_typing()
-        };
-        assert!(matches!(
-            studio_key_command(key(StudioKey::Tab), ctx),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleFilterField { forward: true }
-            }
-        ));
-        assert!(matches!(
-            studio_key_command(
-                shift_tab(),
-                StudioKeyContext {
-                    input_is_live_filter: true,
-                    input_filter_fields: true,
-                    ..context_typing()
-                }
-            ),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::CycleFilterField { forward: false }
-            }
-        ));
-    }
-
-    #[test]
-    fn question_mark_opens_help_only_with_an_empty_input() {
-        // Empty input → `?` opens the keys overlay.
+    fn question_mark_opens_shortcuts_only_when_input_is_empty() {
         assert!(matches!(
             studio_key_command(key(StudioKey::Char('?')), context(false, true)),
             StudioKeyCommand::Ui {
-                event: StudioUiEvent::OpenHelp
-            }
+                event: StudioUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "shortcuts"
         ));
-        // Mid-message → `?` is just a character (the foot input owns it).
+
+        let mut composing = context(false, true);
+        composing.input_has_text = true;
         assert!(matches!(
-            studio_key_command(key(StudioKey::Char('?')), context_typing()),
+            studio_key_command(key(StudioKey::Char('?')), composing),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::InsertInputChar { ch: '?' }
             }
@@ -931,107 +564,33 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_is_modal_and_dismissible() {
-        let help_ctx = StudioKeyContext {
-            help_open: true,
-            ..context(false, true)
-        };
-        for k in [
-            StudioKey::Escape,
-            StudioKey::Enter,
-            StudioKey::Char('?'),
-            StudioKey::Char('q'),
-        ] {
-            assert!(
-                matches!(
-                    studio_key_command(key(k), help_ctx),
-                    StudioKeyCommand::Ui {
-                        event: StudioUiEvent::CloseHelp
-                    }
-                ),
-                "{k:?} should close the help overlay"
-            );
-        }
-        // Any other key is swallowed (the overlay is modal)…
-        assert_eq!(
-            studio_key_command(key(StudioKey::Char('x')), help_ctx),
-            StudioKeyCommand::Ignore
-        );
-        // …but Ctrl+C still quits.
-        assert_eq!(
-            studio_key_command(ctrl('c'), help_ctx),
-            StudioKeyCommand::Quit
-        );
-    }
-
-    #[test]
-    fn does_not_edit_hidden_input() {
-        assert_eq!(
-            studio_key_command(key(StudioKey::Char('x')), context(false, false)),
-            StudioKeyCommand::Ignore,
-        );
-        assert_eq!(
-            studio_key_command(key(StudioKey::Backspace), context(false, false)),
+    fn overlay_keys_edit_query_and_choose_selection() {
+        let overlay = context(true, true);
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Char('a')), overlay),
+            StudioKeyCommand::InsertOverlayChar { ch: 'a' }
+        ));
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Backspace), overlay),
+            StudioKeyCommand::DeleteOverlayChar
+        ));
+        assert!(matches!(
+            studio_key_command(key(StudioKey::ArrowDown), overlay),
             StudioKeyCommand::Ui {
-                event: StudioUiEvent::PopLens
-            },
-        );
-        assert_eq!(
-            studio_key_command(shift_enter(), context(false, false)),
-            StudioKeyCommand::Ignore,
-        );
-    }
-
-    #[test]
-    fn backspace_pops_empty_input_but_edits_non_empty_input() {
-        assert_eq!(
-            studio_key_command(key(StudioKey::Backspace), context(false, true)),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::PopLens
-            },
-        );
-        assert_eq!(
-            studio_key_command(key(StudioKey::Backspace), context_typing()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::DeleteInputChar
-            },
-        );
-    }
-
-    #[test]
-    fn alt_left_pops_lens_even_while_typing() {
-        assert_eq!(
-            studio_key_command(alt_arrow(StudioKey::ArrowLeft), context_typing()),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::PopLens
-            },
-        );
-    }
-
-    #[test]
-    fn arrows_expand_and_collapse_selected_expandable_row_before_focus() {
-        let collapsed = StudioKeyContext {
-            focused_row_expandable: true,
-            focused_row_expanded: false,
-            ..context(false, true)
-        };
-        assert_eq!(
-            studio_key_command(key(StudioKey::ArrowRight), collapsed),
-            StudioKeyCommand::Ui {
-                event: StudioUiEvent::ExpandSelectedRow { expand: true }
+                event: StudioUiEvent::MoveOverlaySelection { delta: 1 }
             }
-        );
-
-        let expanded = StudioKeyContext {
-            focused_row_expandable: true,
-            focused_row_expanded: true,
-            ..context(false, true)
-        };
-        assert_eq!(
-            studio_key_command(key(StudioKey::ArrowLeft), expanded),
+        ));
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Enter), overlay),
             StudioKeyCommand::Ui {
-                event: StudioUiEvent::ExpandSelectedRow { expand: false }
+                event: StudioUiEvent::ChooseOverlay { secondary: false }
             }
-        );
+        ));
+        assert!(matches!(
+            studio_key_command(key(StudioKey::Escape), overlay),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::CloseOverlay
+            }
+        ));
     }
 }

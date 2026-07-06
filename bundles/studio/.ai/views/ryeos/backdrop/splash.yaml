@@ -14,4 +14,4 @@ body:
     - ""
     - { text: "portable verified execution", tone: neutral }
     - ""
-    - { text: "ctrl+k launcher · ctrl+c quit", tone: neutral }
+    - { text: "ctrl+k views · ctrl+c quit", tone: neutral }

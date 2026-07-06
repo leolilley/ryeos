@@ -1,4 +1,4 @@
-import { launcherDialog, notices } from "/ui/assets/studio_components_chrome.js";
+import { overlayDialog, notices } from "/ui/assets/studio_components_chrome.js";
 import { opticFrame, statusLine, studioHome, topStatusLine } from "/ui/assets/studio_components_home.js";
 import { studioWorkspace, tileIdsForNode } from "/ui/assets/studio_components_workspace.js";
 import { applyWorkspaceMotion, captureWorkspaceMotion } from "/ui/assets/studio_motion.js";
@@ -27,10 +27,29 @@ export function renderDom(root, vm, scene, dispatchUi, shell = {}) {
     topStatusLine(vm, chromeShell),
     studioWorkspace(vm.workspace, vm.session?.ambient, presentation.motion, dispatchUi),
     statusLine(vm, chromeShell),
-    launcherDialog(vm.launcher || {}, chromeShell),
+    overlayDialog(activeOverlayState(vm) || {}, chromeShell),
   ];
   if (root.firstChild !== home) root.prepend(home);
   while (home.nextSibling) home.nextSibling.remove();
   root.append(...layers);
   applyWorkspaceMotion(root, motionSnapshot, currentTileIds, presentation.currentMotion);
+}
+
+function activeOverlayState(vm) {
+  const overlay = vm.overlays?.[0];
+  if (!overlay) return null;
+  return {
+    open: true,
+    title: overlay.title,
+    query: overlay.query || "",
+    selected: overlay.selected || 0,
+    hint: overlay.hint || "",
+    items: (overlay.items || []).map((item) => ({
+      label: item.primary || item.category || "",
+      hint: item.secondary || item.meta || item.category || "",
+      enabled: item.enabled !== false,
+      action: item.action,
+      secondary_action: item.secondary_action,
+    })),
+  };
 }

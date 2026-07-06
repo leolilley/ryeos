@@ -3,7 +3,7 @@ name: studio-lens
 version: "1.0.0"
 description: >-
   The cell-grid single-lens operator surface. One center lens fills the
-  screen at a time; breadth comes from swapping the lens (Ctrl+K launcher),
+  screen at a time; breadth comes from swapping the lens (Ctrl+K view overlay),
   never from arranging panes. The foot input routes at the directive, so the
   timeline lens reads as a live cognition feed you talk into. This is the
   TUI's own composition over the shared model — not the web's tiled Studio.
@@ -19,7 +19,7 @@ tiling:
 # Land on a chrome-less splash text view over the prism backdrop until the
 # operator picks a lens (Ctrl+K) or speaks into the foot input. Every lens in
 # the library — the live activity table, a thread's braid, the item space — is
-# one launcher stroke away; breadth is swapping the lens, never arranging panes.
+# one view-overlay stroke away; breadth is swapping the lens, never arranging panes.
 tiles:
   - "view:ryeos/backdrop/splash"
 
@@ -71,6 +71,23 @@ library:
   - view:ryeos/backdrop/prism
   - view:ryeos/backdrop/prism-shards
   - view:ryeos/backdrop/splash
+
+overlays:
+  views:
+    title: Views
+    widget: palette
+    source: { ref: "runtime:views/launchable" }
+    hint: "type to filter views · enter to open"
+  commands:
+    title: Commands
+    widget: palette
+    source: { ref: "runtime:commands/available" }
+    hint: "type to filter commands · enter to run"
+  shortcuts:
+    title: Shortcuts
+    widget: table
+    source: { ref: "runtime:shortcuts" }
+    hint: "type to filter shortcuts · esc to close"
 
 input:
   route:

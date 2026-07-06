@@ -61,7 +61,7 @@ sections:
         default: neutral
 
   # Policy facts: the daemon-composed policy values (e.g. effective_caps) the
-  # launcher reads by name. A map keyed by fact name — projected as one detail
+  # view overlay reads by name. A map keyed by fact name — projected as one detail
   # row carrying the composed facts. Empty ({}) for kinds that declare none.
   - title: Policy facts
     source:

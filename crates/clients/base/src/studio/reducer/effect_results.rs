@@ -1291,7 +1291,7 @@ mod tests {
 
     #[test]
     fn thread_command_submitted_result_notices_and_refreshes() {
-        // The one cancel path's result: an Esc / launcher / row cancel all land
+        // The one cancel path's result: an Esc / command overlay / row cancel all land
         // as `SubmitThreadCommand { cancel }` → `ThreadCommandSubmitted`, which
         // notices and refreshes the thread list.
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);

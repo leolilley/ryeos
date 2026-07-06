@@ -27,9 +27,7 @@ mod tiles;
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::event::{StudioAction, StudioEvent, StudioStackMoveDirection, StudioUiEvent};
 use super::model::StudioCore;
-use super::view_model::{
-    action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioTone,
-};
+use super::view_model::{action_for_focused_row, StudioMotionEventVm, StudioTone};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
 use crate::workspace::ViewSpec;
 
@@ -214,37 +212,25 @@ impl StudioCore {
                 }
                 Vec::new()
             }
-            StudioUiEvent::OpenLauncher => {
-                self.ui.launcher.open = true;
-                self.ui.launcher.query.clear();
-                self.ui.launcher.selected = 0;
-                self.push_motion(StudioMotionEventVm::LauncherOpen);
+            StudioUiEvent::OpenOverlay { overlay_id } => {
+                self.ui.overlay.active = Some(overlay_id);
+                self.ui.overlay.query.clear();
+                self.ui.overlay.selected = 0;
                 self.bump_generation();
                 Vec::new()
             }
-            StudioUiEvent::CloseLauncher => {
-                if self.ui.launcher.open {
-                    self.ui.launcher.open = false;
-                    self.push_motion(StudioMotionEventVm::LauncherClose);
+            StudioUiEvent::CloseOverlay => {
+                if self.ui.overlay.active.is_some() {
+                    self.ui.overlay.active = None;
+                    self.ui.overlay.query.clear();
+                    self.ui.overlay.selected = 0;
                     self.bump_generation();
                 }
                 Vec::new()
             }
-            StudioUiEvent::OpenHelp => {
-                self.ui.help_open = true;
-                self.bump_generation();
-                Vec::new()
-            }
-            StudioUiEvent::CloseHelp => {
-                if self.ui.help_open {
-                    self.ui.help_open = false;
-                    self.bump_generation();
-                }
-                Vec::new()
-            }
-            StudioUiEvent::SetLauncherQuery { query } => {
-                self.ui.launcher.query = query;
-                self.ui.launcher.selected = 0;
+            StudioUiEvent::SetOverlayQuery { query } => {
+                self.ui.overlay.query = query;
+                self.ui.overlay.selected = 0;
                 self.bump_generation();
                 Vec::new()
             }
@@ -340,7 +326,7 @@ impl StudioCore {
             StudioUiEvent::InterruptHead => {
                 // Esc while the head thread works → cancel it through the single
                 // studio cancel path: `service:commands/submit { cancel }`, the
-                // same channel the launcher and row affordance use. No-op if
+                // same channel row affordances use. No-op if
                 // there's no running head.
                 let Some(head) = self.seat.fold().input_route().thread else {
                     return Vec::new();
@@ -366,37 +352,37 @@ impl StudioCore {
             }
             StudioUiEvent::SubmitInput => self.submit_focused_input(false),
             StudioUiEvent::SubmitInputInterrupt => self.submit_focused_input(true),
-            StudioUiEvent::MoveLauncherSelection { delta } => {
-                let len = filtered_launcher_items(self).len();
+            StudioUiEvent::MoveOverlaySelection { delta } => {
+                let len = super::view_model::active_overlay_items(self).len();
                 if len > 0 {
-                    self.ui.launcher.selected = wrap_index(self.ui.launcher.selected, delta, len);
+                    self.ui.overlay.selected = wrap_index(self.ui.overlay.selected, delta, len);
                     self.bump_generation();
                 }
                 Vec::new()
             }
-            StudioUiEvent::ChooseLauncher { secondary } => {
-                let items = filtered_launcher_items(self);
-                let selected = self.ui.launcher.selected.min(items.len().saturating_sub(1));
-                if items.get(selected).is_some_and(|item| !item.enabled) {
-                    self.notice("Command is unavailable in this session.", StudioTone::Warn);
-                    self.bump_generation();
-                    return Vec::new();
-                }
+            StudioUiEvent::ChooseOverlay { secondary } => {
+                let items = super::view_model::active_overlay_items(self);
+                let selected = self.ui.overlay.selected.min(items.len().saturating_sub(1));
                 let action = items.get(selected).and_then(|item| {
+                    if !item.enabled {
+                        return None;
+                    }
                     if secondary {
                         item.secondary_action
                             .clone()
-                            .or_else(|| Some(item.action.clone()))
+                            .or_else(|| item.action.clone())
                     } else {
-                        Some(item.action.clone())
+                        item.action.clone()
                     }
                 });
-                self.ui.launcher.open = false;
-                self.ui.launcher.query.clear();
-                self.ui.launcher.selected = 0;
-                self.push_motion(StudioMotionEventVm::LauncherClose);
+                let Some(action) = action else {
+                    return Vec::new();
+                };
+                self.ui.overlay.active = None;
+                self.ui.overlay.query.clear();
+                self.ui.overlay.selected = 0;
                 self.bump_generation();
-                action.map_or_else(Vec::new, |action| self.dispatch_action(action))
+                self.dispatch_action(action)
             }
             StudioUiEvent::SetTileCursor { tile_id, index } => {
                 let Some(tile_id) = parse_tile_id(&tile_id) else {
@@ -804,17 +790,6 @@ fn parse_tile_id(tile_id: &str) -> Option<crate::ids::TileId> {
     tile_id.parse::<u64>().ok().map(crate::ids::TileId::new)
 }
 
-fn filtered_launcher_items(core: &StudioCore) -> Vec<super::view_model::StudioLauncherItemVm> {
-    let query = core.ui.launcher.query.trim().to_lowercase();
-    launcher_items_for(core)
-        .into_iter()
-        .filter(|item| {
-            let haystack = format!("{} {}", item.label, item.hint).to_lowercase();
-            query.is_empty() || haystack.contains(&query)
-        })
-        .collect()
-}
-
 fn wrap_index(current: usize, delta: i32, len: usize) -> usize {
     (current as i32 + delta).rem_euclid(len as i32) as usize
 }
@@ -877,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_lists_embedded_views_including_scene_widgets() {
+    fn view_overlay_lists_embedded_views_including_scene_widgets() {
         let mut core = StudioCore::default();
         core.views.insert(
             "view:ryeos/threads/list".to_string(),
@@ -892,7 +867,7 @@ mod tests {
             "view:ryeos/graph/topology".to_string(),
             serde_json::from_value(serde_json::json!({ "widget": "graph" })).unwrap(),
         );
-        let items = launcher_items(&core);
+        let items = view_overlay_items(&core);
         // The scene-widget view launches as a Bound tile, labeled by ref.
         assert!(items.iter().any(|item| {
             item.label == "ryeos/graph/topology"
@@ -916,11 +891,11 @@ mod tests {
     }
 
     #[test]
-    fn launcher_includes_shared_dock_toggles() {
+    fn command_overlay_includes_shared_dock_toggles() {
         let core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-        let vm = build_view_model(&core);
+        let items = command_overlay_items_for(&core);
 
-        assert!(vm.launcher.items.iter().any(|item| {
+        assert!(items.iter().any(|item| {
             item.label == "Hide bottom slot"
                 && matches!(
                     item.action,
@@ -929,7 +904,7 @@ mod tests {
                     }
                 )
         }));
-        assert!(vm.launcher.items.iter().any(|item| {
+        assert!(items.iter().any(|item| {
             item.label == "Show left slot"
                 && matches!(
                     item.action,
@@ -939,7 +914,7 @@ mod tests {
                 )
         }));
         // No surface-declared top slot → nothing to toggle there.
-        assert!(!vm.launcher.items.iter().any(|item| matches!(
+        assert!(!items.iter().any(|item| matches!(
             item.action,
             StudioAction::ToggleDock {
                 edge: crate::studio::model::StudioDockEdge::Top
@@ -1011,21 +986,23 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_toggles_through_the_view_model() {
+    fn shortcuts_overlay_toggles_through_the_view_model() {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
-        // The catalogue is always present (discovery); only `open` toggles.
-        assert!(!build_view_model(&core).help.open);
-        assert!(!build_view_model(&core).help.entries.is_empty());
+        assert!(build_view_model(&core).overlays.is_empty());
 
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::OpenHelp,
+            event: StudioUiEvent::OpenOverlay {
+                overlay_id: "shortcuts".to_string(),
+            },
         });
-        assert!(build_view_model(&core).help.open);
+        let vm = build_view_model(&core);
+        assert_eq!(vm.overlays.first().map(|overlay| overlay.id.as_str()), Some("shortcuts"));
+        assert!(!vm.overlays[0].items.is_empty());
 
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::CloseHelp,
+            event: StudioUiEvent::CloseOverlay,
         });
-        assert!(!build_view_model(&core).help.open);
+        assert!(build_view_model(&core).overlays.is_empty());
     }
 
     #[test]
@@ -1383,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_state_is_reduced_in_core() {
+    fn overlay_state_is_reduced_in_core() {
         let mut core = StudioCore::new(session(), BrowserViewport::default(), 0);
         core.views.insert(
             "view:ryeos/items/space".to_string(),
@@ -1395,21 +1372,23 @@ mod tests {
             .unwrap(),
         );
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::OpenLauncher,
+            event: StudioUiEvent::OpenOverlay {
+                overlay_id: "views".to_string(),
+            },
         });
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetLauncherQuery {
+            event: StudioUiEvent::SetOverlayQuery {
                 query: "items".to_string(),
             },
         });
 
-        assert!(core.ui.launcher.open);
-        assert_eq!(core.ui.launcher.query, "items");
+        assert_eq!(core.ui.overlay.active.as_deref(), Some("views"));
+        assert_eq!(core.ui.overlay.query, "items");
         let effects = core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::ChooseLauncher { secondary: false },
+            event: StudioUiEvent::ChooseOverlay { secondary: false },
         });
 
-        assert!(!core.ui.launcher.open);
+        assert!(core.ui.overlay.active.is_none());
         assert!(matches!(
             core.workspace.focused_view(),
             Some(ViewSpec { view_ref }) if view_ref == "view:ryeos/items/space"

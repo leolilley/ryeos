@@ -91,8 +91,8 @@ pub struct StudioNotice {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct StudioLauncherState {
-    pub open: bool,
+pub struct StudioOverlayState {
+    pub active: Option<String>,
     pub query: String,
     pub selected: usize,
 }
@@ -293,11 +293,8 @@ impl StudioDockState {
 pub struct StudioUiState {
     pub filters: StudioFilters,
     pub files: StudioFilesState,
-    pub launcher: StudioLauncherState,
-    /// The keys/help overlay is open. A meta-overlay (not conversation
-    /// content), so it is modal like the launcher, unlike braid entries.
     #[serde(default)]
-    pub help_open: bool,
+    pub overlay: StudioOverlayState,
     /// Transient input buffers, keyed layout-neutrally by
     /// `InputBufferKey::storage_key()`. A buffer belongs to a view
     /// instance, not a placement; the same view rendered twice has
@@ -332,8 +329,7 @@ impl Default for StudioUiState {
         Self {
             filters: StudioFilters::default(),
             files: StudioFilesState::default(),
-            launcher: StudioLauncherState::default(),
-            help_open: false,
+            overlay: StudioOverlayState::default(),
             input_buffers: BTreeMap::new(),
             docks: StudioDockState::default(),
             atlas: AtlasUiStateVm::default(),
@@ -1089,8 +1085,7 @@ impl StudioCore {
             self.focused_row_expand_state().unwrap_or((false, false));
 
         super::keymap::StudioKeyContext {
-            launcher_open: self.ui.launcher.open,
-            help_open: self.ui.help_open,
+            overlay_open: self.ui.overlay.active.is_some(),
             input_visible: focused.is_some(),
             input_has_text: !text.is_empty(),
             input_is_live_filter: input.is_some_and(|i| i.is_live_filter()),

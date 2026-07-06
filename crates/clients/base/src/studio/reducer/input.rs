@@ -132,7 +132,7 @@ impl StudioCore {
         // A suspended follow-parent takes no operator input regardless of kind
         // policy — its resume successor (not it) is the live target. Gating here
         // means every consumer of this predicate (the input-target list, the
-        // foot-input "continuing" label, the Continue launcher item) excludes a
+        // foot-input "continuing" label, the Continue command item) excludes a
         // suspended parent without each re-deriving the follow state.
         Some(facts.supports_operator_followup && !row_is_suspended_parent(row))
     }

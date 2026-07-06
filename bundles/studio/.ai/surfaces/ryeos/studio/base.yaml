@@ -58,6 +58,22 @@ library:
   - view:ryeos/files/list
   - view:ryeos/gc/status
 
+overlays:
+  views:
+    title: Views
+    widget: palette
+    source: { ref: "runtime:views/launchable" }
+    hint: "type to filter views · enter to open · shift+enter for new tile"
+  commands:
+    title: Commands
+    widget: palette
+    source: { ref: "runtime:commands/available" }
+    hint: "type to filter commands · enter to run"
+  shortcuts:
+    title: Shortcuts
+    widget: table
+    source: { ref: "runtime:shortcuts" }
+    hint: "type to filter shortcuts · esc to close"
 
 input:
   route:

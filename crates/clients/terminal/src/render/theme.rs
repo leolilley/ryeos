@@ -18,7 +18,7 @@ pub const DANGER: Color = Color::Rgb(0xfb, 0x49, 0x34);
 
 // Content renders on the page background (BG), separated by borders —
 // consistent across the backdrop, input box, tiles, and dock slots. There
-// is no distinct PANEL fill for content; PANEL stays only for the launcher
+// is no distinct PANEL fill for content; PANEL stays only for overlays
 // overlay, which deliberately stands out against the dimmed scrim.
 pub fn tone_style(tone: StudioTone) -> Style {
     match tone {

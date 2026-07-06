@@ -14,6 +14,7 @@
 
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,9 +93,15 @@ pub struct SurfaceSpec {
     #[serde(default)]
     pub backdrop: Option<String>,
     /// Launchable view refs (the surface's library): resolved and
-    /// embedded alongside pane refs; the launcher derives from these.
+    /// embedded alongside pane refs; the view overlay derives from these.
     #[serde(default)]
     pub library: Vec<String>,
+    /// Transient overlays declared by the surface. Overlays are not workspace
+    /// views: they sit over the layout, own query/selection ephemera, and
+    /// dispatch actions into the workspace. Their content still comes from
+    /// generic widgets and runtime/source projections.
+    #[serde(default)]
+    pub overlays: BTreeMap<String, SurfaceOverlaySpec>,
     #[serde(default)]
     pub ambient: Option<AmbientSpec>,
     #[serde(default)]
@@ -103,6 +110,28 @@ pub struct SurfaceSpec {
     pub instruments: Vec<InstrumentSpec>,
     #[serde(default)]
     pub capabilities: Option<SurfaceCapabilitySpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceOverlaySpec {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub widget: String,
+    #[serde(default)]
+    pub source: Option<SurfaceOverlaySourceSpec>,
+    #[serde(default)]
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceOverlaySourceSpec {
+    #[serde(rename = "ref")]
+    pub item_ref: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 /// Surface capability restrictions.
@@ -783,6 +812,7 @@ pub fn builtin_default() -> SurfaceSpec {
         views: None,
         backdrop: None,
         library: Vec::new(),
+        overlays: BTreeMap::new(),
         ambient: None,
         affordances: Vec::new(),
         instruments: Vec::new(),

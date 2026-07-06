@@ -6,7 +6,9 @@ pub(crate) use crate::studio::effect::{
 };
 pub(crate) use crate::studio::event::{StudioAction, StudioEvent, StudioUiEvent};
 pub(crate) use crate::studio::model::{BrowserSession, BrowserViewport, StudioCore};
-pub(crate) use crate::studio::view_model::{build_view_model, launcher_items};
+pub(crate) use crate::studio::view_model::{
+    build_view_model, command_overlay_items_for, view_overlay_items,
+};
 pub(crate) use crate::workspace::{FocusDirection, ViewSpec};
 
 pub(crate) fn session() -> BrowserSession {
