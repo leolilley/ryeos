@@ -115,7 +115,12 @@ pub fn draw_input_tile(
 /// cursor when focused (or the placeholder when empty). Unlike `draw_input_tile`
 /// this draws no box — it composes ABOVE a widget inside the tile's own frame,
 /// so a table lens shows its rows with a filter line at the top.
-pub fn draw_filter_line(surface: &mut TextSurface, rect: Rect, input: &StudioInputVm, focused: bool) {
+pub fn draw_filter_line(
+    surface: &mut TextSurface,
+    rect: Rect,
+    input: &StudioInputVm,
+    focused: bool,
+) {
     let w = rect.w as usize;
     if w < 4 {
         return;
@@ -142,7 +147,12 @@ pub fn draw_filter_line(surface: &mut TextSurface, rect: Rect, input: &StudioInp
         let cursor_byte = input_cursor_byte(&input.text, input.cursor);
         let cursor_col = display_width(&input.text[..cursor_byte]).min(avail.saturating_sub(1));
         let cursor_char = input.text[cursor_byte..].chars().next().unwrap_or(' ');
-        surface.draw_char(field_x + cursor_col, y, cursor_char, Style::new().fg(BG).bg(FG));
+        surface.draw_char(
+            field_x + cursor_col,
+            y,
+            cursor_char,
+            Style::new().fg(BG).bg(FG),
+        );
     }
 }
 

@@ -5,9 +5,7 @@
 //! into history when the point walks back off the tail.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{
-    StudioRowDetailVm, StudioTimelineEntryVm, StudioTone,
-};
+use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioTimelineEntryVm, StudioTone};
 use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::primitives::fill_line;
@@ -446,7 +444,8 @@ mod tests {
     #[test]
     fn markdown_block_typesets_code_heading_and_bullets() {
         let mut lines = Vec::new();
-        let text = "# Title\n\npara one\nwith soft wrap\n\n- first\n- second\n\n```\ncode  spaced\n```";
+        let text =
+            "# Title\n\npara one\nwith soft wrap\n\n- first\n- second\n\n```\ncode  spaced\n```";
         push_markdown_block(&mut lines, text, StudioTone::Neutral, 60, 0);
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
 

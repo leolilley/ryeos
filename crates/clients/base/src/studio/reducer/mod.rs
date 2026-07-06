@@ -20,16 +20,18 @@
 mod affordances;
 mod effect_results;
 mod input;
-mod tiles;
 #[cfg(test)]
 mod test_support;
+mod tiles;
 
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::event::{StudioAction, StudioEvent, StudioStackMoveDirection, StudioUiEvent};
 use super::model::StudioCore;
-use super::view_model::{action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioTone};
-use crate::workspace::{ViewSpec};
+use super::view_model::{
+    action_for_focused_row, launcher_items_for, StudioMotionEventVm, StudioTone,
+};
 pub(crate) use super::{content, dto, effect, event, model, seat, tokenize, view_model};
+use crate::workspace::ViewSpec;
 
 impl StudioCore {
     pub fn dispatch(&mut self, event: StudioEvent) -> Vec<StudioEffect> {
@@ -285,39 +287,46 @@ impl StudioCore {
                 // An inline @-mention under the cursor wins; otherwise the
                 // line-start / command grammar. Both resolve to an optional
                 // (text, cursor) before the buffer is mutated.
-                let completed = if super::tokenize::active_mention(&buffer.text, buffer.cursor)
-                    .is_some()
-                {
-                    let records = self
-                        .views
-                        .get(&view_ref)
-                        .and_then(|binding| binding.input.as_ref())
-                        .and_then(|input| input.mentions.as_ref())
-                        .and_then(|mentions| {
-                            let response = self.data.sources.get(
-                                &super::content::mention_source_key(&view_ref, &key.input_id),
-                            )?;
-                            Some(super::content::project_mentions(mentions, response))
-                        })
-                        .unwrap_or_default();
-                    super::tokenize::accept_mention_completion(&records, &buffer.text, buffer.cursor)
-                } else {
-                    self.views
-                        .get(&view_ref)
-                        .and_then(|binding| binding.input.as_ref())
-                        .and_then(|input| input.completion.as_ref())
-                        .and_then(|completion| {
-                            let response = self.data.sources.get(
-                                &super::content::completion_source_key(&view_ref, &key.input_id),
-                            )?;
-                            let records = super::content::completion_records(completion, response);
-                            super::tokenize::accept_slash_completion(
-                                records,
-                                &buffer.text,
-                                buffer.cursor,
-                            )
-                        })
-                };
+                let completed =
+                    if super::tokenize::active_mention(&buffer.text, buffer.cursor).is_some() {
+                        let records = self
+                            .views
+                            .get(&view_ref)
+                            .and_then(|binding| binding.input.as_ref())
+                            .and_then(|input| input.mentions.as_ref())
+                            .and_then(|mentions| {
+                                let response = self.data.sources.get(
+                                    &super::content::mention_source_key(&view_ref, &key.input_id),
+                                )?;
+                                Some(super::content::project_mentions(mentions, response))
+                            })
+                            .unwrap_or_default();
+                        super::tokenize::accept_mention_completion(
+                            &records,
+                            &buffer.text,
+                            buffer.cursor,
+                        )
+                    } else {
+                        self.views
+                            .get(&view_ref)
+                            .and_then(|binding| binding.input.as_ref())
+                            .and_then(|input| input.completion.as_ref())
+                            .and_then(|completion| {
+                                let response = self.data.sources.get(
+                                    &super::content::completion_source_key(
+                                        &view_ref,
+                                        &key.input_id,
+                                    ),
+                                )?;
+                                let records =
+                                    super::content::completion_records(completion, response);
+                                super::tokenize::accept_slash_completion(
+                                    records,
+                                    &buffer.text,
+                                    buffer.cursor,
+                                )
+                            })
+                    };
                 if let Some((text, cursor)) = completed {
                     if let Some(buffer) = self.focused_input_buffer_mut() {
                         buffer.set_text(text, cursor);
@@ -1232,16 +1241,20 @@ mod tests {
         // The `cancel_thread` effect variant is gone: its wire tag no longer
         // deserializes into a StudioEffectKind. The one cancel path is
         // `submit_thread_command { command_type: "cancel" }`.
-        assert!(serde_json::from_value::<StudioEffectKind>(serde_json::json!({
-            "type": "cancel_thread",
-            "thread_id": "T-x"
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<StudioEffectKind>(serde_json::json!({
+                "type": "cancel_thread",
+                "thread_id": "T-x"
+            }))
+            .is_err()
+        );
         // And its result tag is likewise gone.
-        assert!(serde_json::from_value::<
-            crate::studio::effect::StudioEffectResultKind,
-        >(serde_json::json!("thread_cancelled"))
-        .is_err());
+        assert!(
+            serde_json::from_value::<crate::studio::effect::StudioEffectResultKind>(
+                serde_json::json!("thread_cancelled")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1485,7 +1498,10 @@ mod tests {
 
         // The facet carries the summary …
         let fold = core.seat.fold();
-        assert_eq!(fold.get("selection").unwrap()["summary"]["title"], "failed — boom");
+        assert_eq!(
+            fold.get("selection").unwrap()["summary"]["title"],
+            "failed — boom"
+        );
 
         // … and the inspector actually RENDERS it.
         let vm = build_view_model(&core);
@@ -1496,12 +1512,14 @@ mod tests {
         };
         assert!(
             rows.iter()
-                .any(|row| row.primary.starts_with("title:") && row.primary.contains("failed — boom")),
+                .any(|row| row.primary.starts_with("title:")
+                    && row.primary.contains("failed — boom")),
             "the inspector renders the summary title: {rows:?}"
         );
         assert!(
             rows.iter()
-                .any(|row| row.primary.starts_with("detail:") && row.primary.contains("thread_failed")),
+                .any(|row| row.primary.starts_with("detail:")
+                    && row.primary.contains("thread_failed")),
             "the inspector renders the full-event detail: {rows:?}"
         );
     }
@@ -1538,7 +1556,11 @@ mod tests {
             "route retargets at the selected failed thread, not the ratcheted head"
         );
         assert_eq!(route.chain_root.as_deref(), Some("R-1"));
-        assert_eq!(focused_input_text(&core), "run the thing", "the failed turn's input is staged");
+        assert_eq!(
+            focused_input_text(&core),
+            "run the thing",
+            "the failed turn's input is staged"
+        );
         assert!(
             !effects
                 .iter()
@@ -1565,7 +1587,11 @@ mod tests {
             core.seat.fold().input_route().thread.is_none(),
             "read-only does not retarget the route"
         );
-        assert!(core.ui.notices.iter().any(|n| n.message.contains("read-only")));
+        assert!(core
+            .ui
+            .notices
+            .iter()
+            .any(|n| n.message.contains("read-only")));
     }
 
     #[test]

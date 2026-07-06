@@ -679,7 +679,10 @@ impl LoadedSurface {
                     .iter()
                     .filter_map(|entry| {
                         let message = entry.get("message")?.as_str()?.to_string();
-                        let level = entry.get("level").and_then(|l| l.as_str()).unwrap_or("info");
+                        let level = entry
+                            .get("level")
+                            .and_then(|l| l.as_str())
+                            .unwrap_or("info");
                         Some(if level == "info" {
                             SurfaceDiagnostic::Info { message }
                         } else {

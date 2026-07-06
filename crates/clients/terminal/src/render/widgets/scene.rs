@@ -90,8 +90,7 @@ const GLINT: char = '✦';
 /// tick. Sixteen steps ≈ a 2s cycle at the backdrop tick — unhurried,
 /// while still changing every frame.
 const BREATHE: [f32; 16] = [
-    0.30, 0.36, 0.45, 0.54, 0.62, 0.71, 0.80, 0.87, 0.92, 0.87, 0.80, 0.71, 0.62, 0.54, 0.45,
-    0.36,
+    0.30, 0.36, 0.45, 0.54, 0.62, 0.71, 0.80, 0.87, 0.92, 0.87, 0.80, 0.71, 0.62, 0.54, 0.45, 0.36,
 ];
 
 pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneModel) {
@@ -240,15 +239,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &StudioSceneMode
                     }
                 } else {
                     let (glyph, style) = if breathes {
-                        particle_cell(
-                            object,
-                            scene,
-                            base_phase,
-                            pace,
-                            sweep_band,
-                            position,
-                            depth,
-                        )
+                        particle_cell(object, scene, base_phase, pace, sweep_band, position, depth)
                     } else {
                         steady_cell()
                     };
@@ -377,8 +368,7 @@ fn draw_fill(
     // `spin:`): facet seams sweep across the face and each facet rolls
     // through the light. Accumulated in f64 modulo a full turn so
     // precision holds over long sessions.
-    let spin = ((object.spin.unwrap_or(0.0) as f64
-        * scene.generation.wrapping_mul(pace) as f64)
+    let spin = ((object.spin.unwrap_or(0.0) as f64 * scene.generation.wrapping_mul(pace) as f64)
         .rem_euclid(360.0) as f32)
         .to_radians();
     // One cell's width in scene units: the anti-alias band.
@@ -416,9 +406,7 @@ fn draw_fill(
                 continue;
             }
             let boost = sweep_band
-                .map(|(band, width)| {
-                    (1.0 - (((x + y) - band).abs() / width.max(0.001))).max(0.0)
-                })
+                .map(|(band, width)| (1.0 - (((x + y) - band).abs() / width.max(0.001))).max(0.0))
                 .unwrap_or(0.0);
             let noise = hash_noise(col, row, scene.generation / 3);
             // TASTE KNOBS — tune these before touching anything else:
@@ -494,8 +482,7 @@ fn prism_sample(
         shade *= 0.9;
     }
     // Grounding: slightly darker toward the base.
-    let vertical =
-        0.88 + 0.17 * ((ly + bh + tip) / (2.0 * (bh + tip)).max(0.001)).clamp(0.0, 1.0);
+    let vertical = 0.88 + 0.17 * ((ly + bh + tip) / (2.0 * (bh + tip)).max(0.001)).clamp(0.0, 1.0);
     (sd, shade * vertical)
 }
 
@@ -670,7 +657,6 @@ impl Bounds {
             max_y,
         }
     }
-
 }
 
 #[cfg(test)]

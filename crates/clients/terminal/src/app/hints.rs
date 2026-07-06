@@ -28,7 +28,8 @@ pub fn spawn_hint_listener(
                         let payload = value.get("payload").cloned().unwrap_or(value);
                         let kind = payload.get("kind")?.as_str()?.to_string();
                         Some((kind, payload))
-                    }) else {
+                    })
+                else {
                     continue;
                 };
                 if tx.send((kind, payload)).is_err() {

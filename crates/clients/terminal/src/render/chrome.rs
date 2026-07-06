@@ -31,9 +31,7 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     };
     let text = format!(
         " {}  {}  {} ",
-        vm.presentation.chrome.version_label,
-        crumb,
-        vm.presentation.chrome.top_bar.layout_symbol
+        vm.presentation.chrome.version_label, crumb, vm.presentation.chrome.top_bar.layout_symbol
     );
     draw_bar(surface, 0, &text, ACCENT);
 }
@@ -53,7 +51,12 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     } else {
         "⋄"
     };
-    surface.draw_text(x, y, heartbeat, Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg));
+    surface.draw_text(
+        x,
+        y,
+        heartbeat,
+        Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg),
+    );
     x += 2;
     for segment in &vm.presentation.chrome.status_bar.segments {
         if x >= surface.width {
@@ -61,7 +64,12 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
         }
         if let Some(label) = &segment.label {
             let label = format!("{}: ", letterspace(label));
-            surface.draw_text(x, y, &truncate(&label, surface.width - x), style_muted().bg(bg));
+            surface.draw_text(
+                x,
+                y,
+                &truncate(&label, surface.width - x),
+                style_muted().bg(bg),
+            );
             x = x.saturating_add(display_width(&label));
         }
         let value = truncate(&segment.value, surface.width.saturating_sub(x));
@@ -254,7 +262,12 @@ pub fn draw_tile(
         } else {
             style_muted()
         };
-        surface.draw_text(x + 2, y, &truncate(&label, w.saturating_sub(4)), title_style);
+        surface.draw_text(
+            x + 2,
+            y,
+            &truncate(&label, w.saturating_sub(4)),
+            title_style,
+        );
     }
     // Provenance (left) + affordance hints (right) in the bottom border.
     if w > 6 {

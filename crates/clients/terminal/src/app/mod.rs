@@ -69,7 +69,10 @@ pub async fn run(
     // notices. Otherwise they print to stderr BEFORE the alternate screen is
     // entered, so they scroll off above the render where they can't be read.
     for message in diagnostics {
-        core.notice(message, ryeos_client_base::studio::view_model::StudioTone::Warn);
+        core.notice(
+            message,
+            ryeos_client_base::studio::view_model::StudioTone::Warn,
+        );
     }
 
     // First frame before any daemon round trip: chrome, docks, and the

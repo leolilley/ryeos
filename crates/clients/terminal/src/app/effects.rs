@@ -184,7 +184,9 @@ fn result_kind_for(kind: &StudioEffectKind) -> StudioEffectResultKind {
         StudioEffectKind::FetchFileSpace { .. } => StudioEffectResultKind::FileSpace,
         StudioEffectKind::ReadFile { .. } => StudioEffectResultKind::FileRead,
         StudioEffectKind::InvokeAction { .. } => StudioEffectResultKind::ActionInvocation,
-        StudioEffectKind::SubmitThreadCommand { .. } => StudioEffectResultKind::ThreadCommandSubmitted,
+        StudioEffectKind::SubmitThreadCommand { .. } => {
+            StudioEffectResultKind::ThreadCommandSubmitted
+        }
         StudioEffectKind::Invoke { .. } => StudioEffectResultKind::Invoked,
         StudioEffectKind::SetLocationHash { .. }
         | StudioEffectKind::CopyToClipboard { .. }

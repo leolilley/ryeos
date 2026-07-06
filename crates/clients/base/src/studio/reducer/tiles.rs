@@ -2,13 +2,16 @@ use super::effect::StudioEffect;
 use super::event::StudioStackMoveDirection;
 use super::model::StudioCore;
 use super::view_model::{StudioMotionEventVm, StudioSplitAxisVm};
+use super::wrap_index;
 use crate::ids::TileId;
 use crate::surface::ArrangeSpec;
 use crate::workspace::{ViewLocalState, ViewSpec};
-use super::wrap_index;
 
 impl StudioCore {
-    pub(crate) fn cycle_workspace_tab(&mut self, direction: StudioStackMoveDirection) -> Vec<StudioEffect> {
+    pub(crate) fn cycle_workspace_tab(
+        &mut self,
+        direction: StudioStackMoveDirection,
+    ) -> Vec<StudioEffect> {
         let delta = match direction {
             StudioStackMoveDirection::Up => -1,
             StudioStackMoveDirection::Down => 1,
@@ -105,7 +108,12 @@ impl StudioCore {
         }
     }
 
-    pub(crate) fn set_tile_fold(&mut self, tile_id: TileId, section: usize, collapsed: bool) -> bool {
+    pub(crate) fn set_tile_fold(
+        &mut self,
+        tile_id: TileId,
+        section: usize,
+        collapsed: bool,
+    ) -> bool {
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
             return false;
         };
@@ -277,9 +285,7 @@ mod tests {
 
     #[test]
     fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {
-        use crate::studio::view_model::{
-            action_for_focused_row, StudioLayoutNodeVm, StudioViewVm,
-        };
+        use crate::studio::view_model::{action_for_focused_row, StudioLayoutNodeVm, StudioViewVm};
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
                 "name": "t",
@@ -339,11 +345,18 @@ mod tests {
         // Flat cursor 0 = the first Threads row; its section's activation fires
         // carrying that row's record.
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 0 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key.clone(),
+                index: 0,
+            },
         });
         assert_eq!(selected_primaries(&core), vec!["T-ab".to_string()]);
         match action_for_focused_row(&core).expect("threads row activates") {
-            StudioAction::InvokeAffordance { affordance_id, record, .. } => {
+            StudioAction::InvokeAffordance {
+                affordance_id,
+                record,
+                ..
+            } => {
                 assert_eq!(affordance_id, "aim-input");
                 assert_eq!(record["thread_id"], "T-ab");
             }
@@ -353,7 +366,10 @@ mod tests {
         // Flat cursor 2 = the first Bundles row (Threads contributed 2). Bundles
         // declares no activation, so the point resolves a row but no action.
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 2 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key.clone(),
+                index: 2,
+            },
         });
         assert_eq!(selected_primaries(&core), vec!["studio".to_string()]);
         assert!(
@@ -396,7 +412,10 @@ mod tests {
 
         fn tile_sections(
             core: &StudioCore,
-        ) -> (Vec<crate::studio::view_model::StudioSectionVm>, Option<usize>) {
+        ) -> (
+            Vec<crate::studio::view_model::StudioSectionVm>,
+            Option<usize>,
+        ) {
             fn find(node: &StudioLayoutNodeVm) -> Option<&StudioViewVm> {
                 match node {
                     StudioLayoutNodeVm::Tile { view, .. } => Some(view),
@@ -434,20 +453,32 @@ mod tests {
         // The collapsed section now occupies one flat point: its header at
         // index 0. The point there marks the header (no row) and folds it.
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 0 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key.clone(),
+                index: 0,
+            },
         });
         let (sections, fold_section) = tile_sections(&core);
-        assert!(sections[0].header_selected, "collapsed header carries the point");
+        assert!(
+            sections[0].header_selected,
+            "collapsed header carries the point"
+        );
         assert_eq!(fold_section, Some(0), "fold key would toggle threads");
 
         // Flat index 1 is now the first Bundles row (Threads contributes one
         // header point, not two rows).
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 1 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key.clone(),
+                index: 1,
+            },
         });
         let (sections, fold_section) = tile_sections(&core);
         assert!(!sections[0].header_selected);
-        assert!(sections[1].rows[0].selected, "point lands on the bundles row");
+        assert!(
+            sections[1].rows[0].selected,
+            "point lands on the bundles row"
+        );
         assert_eq!(fold_section, Some(1));
     }
 

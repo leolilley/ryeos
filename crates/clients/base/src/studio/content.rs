@@ -1355,7 +1355,11 @@ mod tests {
         }});
         let b = views_from_surface(Some(&surface));
         let b = b.get("view:ryeos/ok").expect("present");
-        assert!(b.degraded.is_none(), "valid target parses: {:?}", b.degraded);
+        assert!(
+            b.degraded.is_none(),
+            "valid target parses: {:?}",
+            b.degraded
+        );
         assert_eq!(
             b.input.as_ref().unwrap().target.as_ref().unwrap().cycle,
             InputTargetCycle::RouteChains
@@ -1371,7 +1375,9 @@ mod tests {
         let b = views_from_surface(Some(&surface));
         let b = b.get("view:ryeos/bad").expect("present");
         assert!(
-            b.degraded.as_deref().is_some_and(|m| m.contains("target") && m.contains("route")),
+            b.degraded
+                .as_deref()
+                .is_some_and(|m| m.contains("target") && m.contains("route")),
             "target without submit:route degrades visibly: {:?}",
             b.degraded
         );
@@ -1386,7 +1392,9 @@ mod tests {
         let b = views_from_surface(Some(&surface));
         let b = b.get("view:ryeos/badcycle").expect("present");
         assert!(
-            b.degraded.as_deref().is_some_and(|m| m.contains("invalid view binding")),
+            b.degraded
+                .as_deref()
+                .is_some_and(|m| m.contains("invalid view binding")),
             "unknown cycle vocabulary degrades, not silently ignored: {:?}",
             b.degraded
         );
@@ -1459,7 +1467,10 @@ mod tests {
         }});
         let b = views_from_surface(Some(&surface));
         let b = b.get("view:ryeos/keys").expect("present");
-        assert!(b.degraded.is_some(), "keys: under target degrades, not dropped");
+        assert!(
+            b.degraded.is_some(),
+            "keys: under target degrades, not dropped"
+        );
     }
 
     #[test]
@@ -1472,7 +1483,10 @@ mod tests {
         }});
         let b = views_from_surface(Some(&surface));
         let b = b.get("view:ryeos/incnew").expect("present");
-        assert!(b.degraded.is_some(), "include_new: under target degrades, not dropped");
+        assert!(
+            b.degraded.is_some(),
+            "include_new: under target degrades, not dropped"
+        );
     }
 
     #[test]

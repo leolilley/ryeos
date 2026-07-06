@@ -214,8 +214,7 @@ fn main() {
             // still renders; unresolved panes show the missing-binding
             // placeholder.
             let mut loaded = ryeos_client_base::surface::load_surface(&surface_opts);
-            let spec_value =
-                serde_json::to_value(loaded.spec()).unwrap_or(serde_json::Value::Null);
+            let spec_value = serde_json::to_value(loaded.spec()).unwrap_or(serde_json::Value::Null);
             let mut view_refs: Vec<String> = Vec::new();
             collect_view_refs(&spec_value, &mut view_refs);
             view_refs.sort();
@@ -252,9 +251,7 @@ fn main() {
                                     binding.get("composed_value").cloned().unwrap_or(binding);
                                 views.insert(view_ref, composed);
                             }
-                            Err(e) => {
-                                diagnostics.push(format!("view {view_ref} unavailable: {e}"))
-                            }
+                            Err(e) => diagnostics.push(format!("view {view_ref} unavailable: {e}")),
                         }
                     }
                     daemon_client = Some(client);

@@ -7,7 +7,9 @@ use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, letterspace, truncate};
-use super::super::theme::{mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT};
+use super::super::theme::{
+    mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT,
+};
 
 pub fn draw_rows(
     surface: &mut TextSurface,
@@ -50,7 +52,11 @@ pub fn draw_rows(
             tone_style(row.tone)
         };
         let glyph = if row.expandable {
-            if row.expanded { "▾" } else { "▸" }
+            if row.expanded {
+                "▾"
+            } else {
+                "▸"
+            }
         } else {
             tone_glyph(row.tone)
         };
@@ -117,7 +123,13 @@ fn active_pulse_style(style: Style, tone: StudioTone, now_ms: u64) -> Style {
     style.fg(mix_toward(style.fg, ACCENT, wave))
 }
 
-fn draw_detail(surface: &mut TextSurface, left: usize, y: usize, width: usize, detail: &StudioRowDetailVm) {
+fn draw_detail(
+    surface: &mut TextSurface,
+    left: usize,
+    y: usize,
+    width: usize,
+    detail: &StudioRowDetailVm,
+) {
     fill_line(surface, left, y, width, style_fg());
     let label = format!("  {}: ", detail.field);
     surface.draw_text(left, y, &truncate(&label, width), style_muted());

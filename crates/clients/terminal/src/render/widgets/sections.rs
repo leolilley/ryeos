@@ -72,7 +72,11 @@ fn draw_row(surface: &mut TextSurface, left: usize, y: usize, width: usize, row:
     };
     fill_line(surface, left, y, width, style);
 
-    let glyph_style = if row.selected { style } else { tone_style(row.tone) };
+    let glyph_style = if row.selected {
+        style
+    } else {
+        tone_style(row.tone)
+    };
     let glyph_x = left + ROW_INDENT;
     surface.draw_text(glyph_x, y, tone_glyph(row.tone), glyph_style);
 
@@ -176,7 +180,11 @@ mod tests {
         draw_sections(
             &mut s,
             rect,
-            &[section("Threads", true, vec![row("T-ab", None), row("T-cd", None)])],
+            &[section(
+                "Threads",
+                true,
+                vec![row("T-ab", None), row("T-cd", None)],
+            )],
         );
         let header = row_text(&s, 40, 0);
         assert!(header.starts_with('▸'), "collapsed glyph leads: {header:?}");

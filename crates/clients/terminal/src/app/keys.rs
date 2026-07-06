@@ -27,7 +27,9 @@ pub fn handle_key(core: &mut StudioCore, key: KeyEvent) -> Vec<StudioEffect> {
     let context = key_context(core);
     if no_mods && matches!(event.key, StudioKey::ArrowLeft | StudioKey::ArrowRight) {
         let expansion_wins = match event.key {
-            StudioKey::ArrowRight => context.focused_row_expandable && !context.focused_row_expanded,
+            StudioKey::ArrowRight => {
+                context.focused_row_expandable && !context.focused_row_expanded
+            }
             StudioKey::ArrowLeft => context.focused_row_expandable && context.focused_row_expanded,
             _ => false,
         };

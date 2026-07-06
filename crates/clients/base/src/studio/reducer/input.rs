@@ -1,8 +1,8 @@
 use super::effect::{StudioEffect, StudioEffectKind};
 use super::event::StudioFilterField;
 use super::model::StudioCore;
-use super::view_model::StudioTone;
 use super::parse_tile_id;
+use super::view_model::StudioTone;
 
 impl StudioCore {
     /// Refetch the focused instance's source when its input declares
@@ -21,7 +21,10 @@ impl StudioCore {
     /// are debounced by the client loop (which calls [`Self::refresh_focused_feeds`]
     /// on its tick) so typing a filter doesn't block on a daemon round-trip per
     /// keystroke. The edit itself already applied; this only defers the fetch.
-    pub(crate) fn feeds_effects_unless_live_filter(&mut self, live_filter: bool) -> Vec<StudioEffect> {
+    pub(crate) fn feeds_effects_unless_live_filter(
+        &mut self,
+        live_filter: bool,
+    ) -> Vec<StudioEffect> {
         if live_filter {
             Vec::new()
         } else {
@@ -102,15 +105,9 @@ impl StudioCore {
     /// machine-continuation affordance.
     #[allow(dead_code)]
     pub(crate) fn thread_supports_continuation(&self, thread_id: &str) -> Option<bool> {
-        let row = self
-            .data
-            .threads
-            .as_ref()?
-            .threads
-            .iter()
-            .find(|row| {
-                row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
-            })?;
+        let row = self.data.threads.as_ref()?.threads.iter().find(|row| {
+            row.get("thread_id").and_then(serde_json::Value::as_str) == Some(thread_id)
+        })?;
         // Typed execution facts (no `supports_continuation` string literal).
         // `None` = no execution object on the row (unknown), distinct from an
         // explicit `Some(false)`. A suspended follow-parent is never
@@ -171,7 +168,10 @@ impl StudioCore {
         let rows = &threads.threads;
         let upstreams: std::collections::HashSet<&str> = rows
             .iter()
-            .filter_map(|t| t.get("upstream_thread_id").and_then(serde_json::Value::as_str))
+            .filter_map(|t| {
+                t.get("upstream_thread_id")
+                    .and_then(serde_json::Value::as_str)
+            })
             .collect();
         let mut out: Vec<(String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -186,7 +186,9 @@ impl StudioCore {
             // the root if the list is partial.
             let head = rows
                 .iter()
-                .filter(|x| x.get("chain_root_id").and_then(serde_json::Value::as_str) == Some(root))
+                .filter(|x| {
+                    x.get("chain_root_id").and_then(serde_json::Value::as_str) == Some(root)
+                })
                 .filter_map(|x| x.get("thread_id").and_then(serde_json::Value::as_str))
                 .find(|id| !upstreams.contains(id))
                 .unwrap_or(root);
@@ -598,7 +600,9 @@ mod tests {
         };
         let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
         // Type into the first field (status).
-        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'r' } });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InsertInputChar { ch: 'r' },
+        });
         assert_eq!(
             core.focused_input_buffer().map(|b| b.text.clone()),
             Some("r".to_string())
@@ -660,7 +664,10 @@ mod tests {
             }),
         );
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 50 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key.clone(),
+                index: 50,
+            },
         });
         let cursor = |core: &StudioCore| match &core.workspace.tiles.get(&tile).unwrap().local {
             ViewLocalState::GenericList { cursor, .. } => *cursor,
@@ -770,7 +777,11 @@ mod tests {
             "graph is machine-only"
         );
         assert_eq!(core.thread_supports_continuation("T-b"), Some(false));
-        assert_eq!(core.thread_supports_continuation("T-c"), None, "missing facts → unknown");
+        assert_eq!(
+            core.thread_supports_continuation("T-c"),
+            None,
+            "missing facts → unknown"
+        );
         assert_eq!(core.thread_supports_operator_followup("T-c"), None);
         assert_eq!(core.thread_supports_continuation("T-missing"), None);
     }
@@ -834,7 +845,10 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::CycleInputTarget { forward: true },
         });
-        assert_eq!(core.seat.fold().input_route().chain_root.as_deref(), Some("T-ok"));
+        assert_eq!(
+            core.seat.fold().input_route().chain_root.as_deref(),
+            Some("T-ok")
+        );
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::CycleInputTarget { forward: true },
         });
@@ -864,7 +878,10 @@ mod tests {
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::CycleInputTarget { forward: true },
         });
-        assert_eq!(core.seat.fold().input_route().chain_root.as_deref(), Some("T-yes"));
+        assert_eq!(
+            core.seat.fold().input_route().chain_root.as_deref(),
+            Some("T-yes")
+        );
         // Forward again → wraps straight back to "new conversation".
         core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::CycleInputTarget { forward: true },
@@ -907,7 +924,10 @@ mod tests {
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread, None, "no declaration → no mutation");
         assert_eq!(route.chain_root, None);
-        assert!(core.ui.notices.is_empty(), "no declaration → silent (no notice)");
+        assert!(
+            core.ui.notices.is_empty(),
+            "no declaration → silent (no notice)"
+        );
     }
 
     #[test]
@@ -915,8 +935,10 @@ mod tests {
         let mut core = StudioCore::new(writable_session(), BrowserViewport::default(), 0);
         seed_input_view(&mut core);
         // Route facet with no invoke template at all.
-        core.seat
-            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, serde_json::json!({ "thread": "T-x" }));
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            serde_json::json!({ "thread": "T-x" }),
+        );
         core.data.threads = Some(StudioThreadsDto {
             threads: vec![serde_json::json!({ "thread_id": "T-x", "chain_root_id": "T-x" })],
         });
@@ -962,7 +984,11 @@ mod tests {
         });
         let route = core.seat.fold().input_route();
         assert_eq!(route.chain_root.as_deref(), Some("T-a1"));
-        assert_eq!(route.thread.as_deref(), Some("T-a2"), "prefers fetched head");
+        assert_eq!(
+            route.thread.as_deref(),
+            Some("T-a2"),
+            "prefers fetched head"
+        );
     }
 
     #[test]
@@ -978,10 +1004,10 @@ mod tests {
             }),
         );
         core.data.threads = Some(StudioThreadsDto { threads: vec![] }); // refresh not landed
-        // Slots = [New, SyntheticChain(T-new)]. The guarantee: you can move
-        // AWAY from the unfetched current chain before the refresh lands —
-        // forward from the synthetic current reaches "new conversation".
-        // (Returning to it relies on the refresh, which lands quickly.)
+                                                                        // Slots = [New, SyntheticChain(T-new)]. The guarantee: you can move
+                                                                        // AWAY from the unfetched current chain before the refresh lands —
+                                                                        // forward from the synthetic current reaches "new conversation".
+                                                                        // (Returning to it relies on the refresh, which lands quickly.)
         assert_eq!(
             core.seat.fold().input_route().chain_root.as_deref(),
             Some("T-new"),
@@ -1034,9 +1060,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::SubmitInput,
         });
-        let Some(StudioEffectKind::Invoke { params, .. }) =
-            effects.first().map(|e| &e.kind)
-        else {
+        let Some(StudioEffectKind::Invoke { params, .. }) = effects.first().map(|e| &e.kind) else {
             panic!("expected an Invoke effect");
         };
         assert_eq!(params["input"], "steer me");
@@ -1054,9 +1078,7 @@ mod tests {
         let effects = core.dispatch(StudioEvent::Ui {
             event: StudioUiEvent::SubmitInputInterrupt,
         });
-        let Some(StudioEffectKind::Invoke { params, .. }) =
-            effects.first().map(|e| &e.kind)
-        else {
+        let Some(StudioEffectKind::Invoke { params, .. }) = effects.first().map(|e| &e.kind) else {
             panic!("expected an Invoke effect");
         };
         assert_eq!(params["input"], "stop, do X");

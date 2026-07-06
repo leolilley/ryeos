@@ -1107,7 +1107,9 @@ fn bound_view_vm_keyed(
                     binding
                         .affordances
                         .iter()
-                        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(affordance_id.as_str()))
+                        .find(|a| {
+                            a.get("id").and_then(|v| v.as_str()) == Some(affordance_id.as_str())
+                        })
                         .is_some_and(|affordance| {
                             super::content::validate_affordance_placeholders(
                                 affordance,
@@ -1301,9 +1303,9 @@ fn bound_view_vm_keyed(
                 .sources
                 .iter()
                 .map(|source| {
-                    source
-                        .as_ref()
-                        .is_some_and(|source| expanded_rows.is_some_and(|set| set.contains(&source.key)))
+                    source.as_ref().is_some_and(|source| {
+                        expanded_rows.is_some_and(|set| set.contains(&source.key))
+                    })
                 })
                 .collect();
             let entry_details: Vec<Vec<StudioRowDetailVm>> = folded
@@ -1465,9 +1467,9 @@ fn affordance_hints(binding: &super::content::ViewBinding) -> Vec<String> {
 // Timeline entry building + the live cognition buffer render live in
 // `super::timeline`; re-exported crate-wide so the timeline arm above and the
 // tests below call them unqualified (via `use super::*`).
-pub(crate) use super::timeline::{append_live_delta, timeline_entries_indented};
 #[cfg(test)]
 pub(crate) use super::timeline::timeline_entries;
+pub(crate) use super::timeline::{append_live_delta, timeline_entries_indented};
 
 pub(crate) fn tone_from_name(name: Option<&str>) -> StudioTone {
     match name {
@@ -1555,12 +1557,23 @@ fn input_vm(
 /// `summary` (chain status + chain-wide usage totals, from chain_replay).
 /// Returns `None` when the source carries no `summary` — any non-chain timeline —
 /// so the header only appears where it means something.
-pub(crate) fn timeline_summary_entry(response: &serde_json::Value) -> Option<StudioTimelineEntryVm> {
+pub(crate) fn timeline_summary_entry(
+    response: &serde_json::Value,
+) -> Option<StudioTimelineEntryVm> {
     let summary = response.get("summary")?;
     let status = summary.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    let input = summary.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-    let output = summary.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-    let cost = summary.get("spend_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let input = summary
+        .get("input_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let output = summary
+        .get("output_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let cost = summary
+        .get("spend_usd")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
     let turns = summary.get("turns").and_then(|v| v.as_i64()).unwrap_or(0);
     let primary = format!("{status} · ↑{input} ↓{output} · ${cost:.4} · {turns} turns");
     Some(StudioTimelineEntryVm::Line {
@@ -2112,20 +2125,52 @@ fn help(core: &StudioCore) -> StudioHelpVm {
     StudioHelpVm {
         open: core.ui.help_open,
         entries: vec![
-            entry("Move", "↑ / ↓", "Move the point through rows; else move focus"),
-            entry("Move", "← / →", "Expand row/feed details, fold sections, or move focus"),
-            entry("Act", "Enter", "Activate the selected row (or steer-submit when typing)"),
-            entry("Act", "Alt+Enter", "Submit as an interrupt — cut the running thread's turn and redirect"),
-            entry("Act", "Tab / ⇧Tab", "Accept completion, else cycle the route target"),
+            entry(
+                "Move",
+                "↑ / ↓",
+                "Move the point through rows; else move focus",
+            ),
+            entry(
+                "Move",
+                "← / →",
+                "Expand row/feed details, fold sections, or move focus",
+            ),
+            entry(
+                "Act",
+                "Enter",
+                "Activate the selected row (or steer-submit when typing)",
+            ),
+            entry(
+                "Act",
+                "Alt+Enter",
+                "Submit as an interrupt — cut the running thread's turn and redirect",
+            ),
+            entry(
+                "Act",
+                "Tab / ⇧Tab",
+                "Accept completion, else cycle the route target",
+            ),
             entry("Act", "Esc", "Cancel a running thread; else close the lens"),
             entry("Lenses", "⌫ / Alt+←", "Return from a drill-in lens"),
-            entry("Input", "type", "The foot input is always live — text routes at the directive"),
-            entry("Lenses", "Ctrl+K", "Open the lens launcher (swap the center lens)"),
+            entry(
+                "Input",
+                "type",
+                "The foot input is always live — text routes at the directive",
+            ),
+            entry(
+                "Lenses",
+                "Ctrl+K",
+                "Open the lens launcher (swap the center lens)",
+            ),
             entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
             entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
             entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
             entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
-            entry("Layout", "Alt+T / Alt+B", "Toggle the top / bottom status bar"),
+            entry(
+                "Layout",
+                "Alt+T / Alt+B",
+                "Toggle the top / bottom status bar",
+            ),
             entry("App", "Alt+Q", "Close the focused lens"),
             entry("App", "Ctrl+C", "Quit"),
             entry("App", "?", "Show / hide this help"),
@@ -2692,7 +2737,15 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].cells,
-            ["T-ab", "directive", "directive:ops/base", "running", "fp:claude", "", "2026-06-29T00:00:00Z"]
+            [
+                "T-ab",
+                "directive",
+                "directive:ops/base",
+                "running",
+                "fp:claude",
+                "",
+                "2026-06-29T00:00:00Z"
+            ]
         );
         // Tone reuses the shared status→tone block the rows widget would.
         assert_eq!(rows[0].tone.as_deref(), Some("accent"));
@@ -2716,7 +2769,10 @@ mod tests {
         match timeline_summary_entry(&response).expect("summary present") {
             StudioTimelineEntryVm::Line { primary, tone, .. } => {
                 assert!(primary.contains("running"), "{primary}");
-                assert!(primary.contains("1200") && primary.contains("340"), "{primary}");
+                assert!(
+                    primary.contains("1200") && primary.contains("340"),
+                    "{primary}"
+                );
                 assert!(primary.contains("$0.0421"), "{primary}");
                 assert!(primary.contains("3 turns"), "{primary}");
                 assert_eq!(tone, StudioTone::Accent);
@@ -2913,14 +2969,21 @@ mod tests {
 
         // Flat cursor 1 = the second row; activation carries that row's record.
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key.clone(), index: 1 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key.clone(),
+                index: 1,
+            },
         });
         assert_eq!(
             selected_cells(&core),
             vec![vec!["T-cd".to_string(), "running".to_string()]]
         );
         match action_for_focused_row(&core).expect("table row activates") {
-            StudioAction::InvokeAffordance { affordance_id, record, .. } => {
+            StudioAction::InvokeAffordance {
+                affordance_id,
+                record,
+                ..
+            } => {
                 assert_eq!(affordance_id, "inspect");
                 assert_eq!(record["thread_id"], "T-cd");
             }
@@ -3007,9 +3070,14 @@ mod tests {
         };
         let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
         let key = core.workspace.focused_tile.0.to_string();
-        core.data.sources.insert(key.clone(), json!({ "events": events }));
+        core.data
+            .sources
+            .insert(key.clone(), json!({ "events": events }));
         core.dispatch(StudioEvent::Ui {
-            event: StudioUiEvent::SetTileCursor { tile_id: key, index: 0 },
+            event: StudioUiEvent::SetTileCursor {
+                tile_id: key,
+                index: 0,
+            },
         });
         core
     }
@@ -3122,8 +3190,10 @@ mod tests {
     #[test]
     fn append_live_delta_shows_working_indicator_when_head_runs_silently() {
         let mut core = StudioCore::default();
-        core.seat
-            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            json!({ "thread": "T-1" }),
+        );
         // Head thread is running but has emitted no streaming text yet.
         core.data.threads = Some(crate::studio::dto::StudioThreadsDto {
             threads: vec![json!({ "thread_id": "T-1", "status": "running" })],
@@ -3144,8 +3214,10 @@ mod tests {
     #[test]
     fn append_live_delta_no_indicator_when_head_thread_settled() {
         let mut core = StudioCore::default();
-        core.seat
-            .append_facet(crate::studio::seat::KEY_INPUT_ROUTE, json!({ "thread": "T-1" }));
+        core.seat.append_facet(
+            crate::studio::seat::KEY_INPUT_ROUTE,
+            json!({ "thread": "T-1" }),
+        );
         core.data.threads = Some(crate::studio::dto::StudioThreadsDto {
             threads: vec![json!({ "thread_id": "T-1", "status": "completed" })],
         });

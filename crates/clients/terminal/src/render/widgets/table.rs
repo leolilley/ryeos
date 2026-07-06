@@ -9,7 +9,9 @@ use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::primitives::fill_line;
 use super::super::text::{letterspace, truncate};
-use super::super::theme::{mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT};
+use super::super::theme::{
+    mix_toward, style_fg, style_muted, style_selected, tone_glyph, tone_style, ACCENT,
+};
 
 /// Cells sit two columns in, past the tone-glyph gutter.
 const GUTTER: usize = 2;
@@ -65,7 +67,11 @@ pub fn draw_table(
     // in the top half, then scroll so the cursor holds the halfway line —
     // clamped so the last page fills the view instead of trailing blank space.
     let selected_idx = rows.iter().position(|row| row.selected).unwrap_or(0);
-    let selected_line = rows.iter().take(selected_idx).map(row_height).sum::<usize>();
+    let selected_line = rows
+        .iter()
+        .take(selected_idx)
+        .map(row_height)
+        .sum::<usize>();
     let selected_height = rows.get(selected_idx).map(row_height).unwrap_or(1);
     let total_lines = rows.iter().map(row_height).sum::<usize>();
     let max_offset = total_lines.saturating_sub(rows_area);
@@ -73,7 +79,11 @@ pub fn draw_table(
     let offset = if selected_height > rows_area {
         selected_line
     } else {
-        centered_offset.max(selected_line.saturating_add(selected_height).saturating_sub(rows_area))
+        centered_offset.max(
+            selected_line
+                .saturating_add(selected_height)
+                .saturating_sub(rows_area),
+        )
     }
     .min(max_offset);
     let mut skipped = 0usize;
@@ -98,9 +108,17 @@ pub fn draw_table(
             style = shimmer_style(style, row.changed_at_ms, now_ms);
             fill_line(surface, left, y, width, style);
 
-            let glyph_style = if row.selected { style } else { tone_style(row.tone) };
+            let glyph_style = if row.selected {
+                style
+            } else {
+                tone_style(row.tone)
+            };
             let glyph = if row.expandable {
-                if row.expanded { "▾" } else { "▸" }
+                if row.expanded {
+                    "▾"
+                } else {
+                    "▸"
+                }
             } else {
                 tone_glyph(row.tone)
             };
@@ -128,7 +146,12 @@ pub fn draw_table(
                 } else {
                     style_muted()
                 };
-                surface.draw_text(left + GUTTER + i * col_w, y, &truncate(cell, cell_w), cell_style);
+                surface.draw_text(
+                    left + GUTTER + i * col_w,
+                    y,
+                    &truncate(cell, cell_w),
+                    cell_style,
+                );
             }
             y += 1;
         }
@@ -174,7 +197,13 @@ fn active_pulse_style(style: Style, tone: StudioTone, now_ms: u64) -> Style {
     style.fg(mix_toward(style.fg, ACCENT, wave))
 }
 
-fn draw_detail(surface: &mut TextSurface, left: usize, y: usize, width: usize, detail: &StudioRowDetailVm) {
+fn draw_detail(
+    surface: &mut TextSurface,
+    left: usize,
+    y: usize,
+    width: usize,
+    detail: &StudioRowDetailVm,
+) {
     fill_line(surface, left, y, width, style_fg());
     let label = format!("  {}: ", detail.field);
     surface.draw_text(left, y, &truncate(&label, width), style_muted());
@@ -230,7 +259,10 @@ mod tests {
     }
 
     fn columns() -> Vec<String> {
-        ["thread", "item", "status"].iter().map(|s| s.to_string()).collect()
+        ["thread", "item", "status"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     #[test]
@@ -335,16 +367,28 @@ mod tests {
         let mut rows = make();
         rows[1].selected = true;
         draw_table(&mut s, rect, &cols, &rows, 0);
-        let top: String = (1..5).map(|y| row_text(&s, 40, y)).collect::<Vec<_>>().join("\n");
-        assert!(top.contains("T-0"), "top-half cursor doesn't scroll: {top:?}");
+        let top: String = (1..5)
+            .map(|y| row_text(&s, 40, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            top.contains("T-0"),
+            "top-half cursor doesn't scroll: {top:?}"
+        );
 
         // Cursor past halfway → scrolls: early rows gone, selected on screen.
         let (mut s, rect) = surface(40, 5);
         let mut rows = make();
         rows[10].selected = true;
         draw_table(&mut s, rect, &cols, &rows, 0);
-        let body: String = (1..5).map(|y| row_text(&s, 40, y)).collect::<Vec<_>>().join("\n");
-        assert!(body.contains("T-10"), "selected row visible after scroll: {body:?}");
+        let body: String = (1..5)
+            .map(|y| row_text(&s, 40, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.contains("T-10"),
+            "selected row visible after scroll: {body:?}"
+        );
         assert!(!body.contains("T-0"), "early rows scrolled off: {body:?}");
     }
 
@@ -366,7 +410,10 @@ mod tests {
 
         let (mut s, rect) = surface(40, 6);
         draw_table(&mut s, rect, &cols, &rows, 0);
-        let body = (1..6).map(|y| row_text(&s, 40, y)).collect::<Vec<_>>().join("\n");
+        let body = (1..6)
+            .map(|y| row_text(&s, 40, y))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             body.contains("T-10"),
             "selected row remains visible despite expanded row above it: {body:?}"

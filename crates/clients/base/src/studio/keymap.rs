@@ -224,20 +224,14 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::Tab if context.input_can_accept_completion && event.modifiers.none() => {
             ui(StudioUiEvent::CompleteInput)
         }
-        StudioKey::Tab
-            if context.input_target_cycle.is_some() && event.modifiers.none() =>
-        {
+        StudioKey::Tab if context.input_target_cycle.is_some() && event.modifiers.none() => {
             ui(StudioUiEvent::CycleInputTarget { forward: true })
         }
-        StudioKey::Tab
-            if context.input_target_cycle.is_some() && event.modifiers.shift_only() =>
-        {
+        StudioKey::Tab if context.input_target_cycle.is_some() && event.modifiers.shift_only() => {
             ui(StudioUiEvent::CycleInputTarget { forward: false })
         }
         StudioKey::Tab
-            if context.input_visible
-                && context.input_has_completion
-                && event.modifiers.none() =>
+            if context.input_visible && context.input_has_completion && event.modifiers.none() =>
         {
             ui(StudioUiEvent::CompleteInput)
         }
@@ -483,7 +477,13 @@ fn selectable_of(view: &super::view_model::StudioViewVm) -> (usize, bool) {
         StudioViewVm::Sections { sections, .. } => {
             let points = sections
                 .iter()
-                .map(|section| if section.collapsed { 1 } else { section.rows.len() })
+                .map(|section| {
+                    if section.collapsed {
+                        1
+                    } else {
+                        section.rows.len()
+                    }
+                })
                 .sum();
             (points, false)
         }
