@@ -211,8 +211,10 @@ struct CostBreakdown {
 /// retry budget (`execution.retries`) is spent.
 ///
 /// Only a [`ProviderStreamError`](crate::provider_adapter::ProviderStreamError)
-/// is retryable — the adapter classifies these as pre-stream failures, so a
-/// retry cannot duplicate a persisted cognition_out. `never_retry` (status
+/// is retryable — the adapter classifies exactly the transient transport/
+/// provider classes (pre-stream send/status/timeout, and a stream that dies
+/// mid-read). Everything else — invalid model, auth, context overflow, a
+/// persistence-first append failure — stays fail-fast. `never_retry` (status
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
 /// (`base * 2^attempt`).
@@ -237,6 +239,11 @@ fn retry_backoff(
         // shared `execution.retries` budget so a burst-fanout connect blip backs
         // off and re-attempts instead of surfacing as a fatal generic error.
         Some(ProviderStreamError::Send { .. }) => true,
+        // The stream died mid-read (chunk timeout/reset). The request is
+        // idempotent; deltas persisted before the cut stay in the braid as the
+        // abandoned-partial record, delimited by the `provider_retry` event the
+        // caller appends before re-issuing.
+        Some(ProviderStreamError::MidStream { .. }) => execution.retry_mid_stream,
         None => false,
     };
     if !retryable {
@@ -572,17 +579,18 @@ impl Runner {
                             visible_tools_owned.push(build_directive_return_tool(outputs));
                         }
                     }
-                    // §1 retry loop. A retryable provider failure (a configured
-                    // HTTP status or a send timeout) is re-attempted with
-                    // exponential backoff. Both classes are classified at the
-                    // source as occurring STRICTLY BEFORE any SSE byte — the HTTP
-                    // status check and the send timeout both precede stream
-                    // consumption — so a retry can never duplicate an
-                    // already-persisted cognition_out. This is the explicit
-                    // persistence-first decision: retry ONLY errors before first
-                    // content; any failure surfacing after the stream opens is
-                    // not a `ProviderStreamError`, so `retry_backoff` returns
-                    // `None` and it routes to `State::Errored` unchanged.
+                    // §1 retry loop. A retryable provider failure — a configured
+                    // HTTP status, a send timeout/transport error, or a stream
+                    // that died mid-read — is re-attempted with exponential
+                    // backoff. The request is idempotent (same message array).
+                    // Pre-stream classes cannot duplicate a persisted
+                    // cognition_out; the mid-stream class leaves the already-
+                    // persisted deltas in the braid as the honest record of the
+                    // abandoned partial, delimited by the `provider_retry`
+                    // event appended below before the re-issue. Anything not
+                    // classified as a `ProviderStreamError` (invalid bytes, a
+                    // persistence-first append failure) routes to
+                    // `State::Errored` unchanged.
                     //
                     // Budget is re-checked before every attempt so a retry never
                     // pushes spend past the wall. `record_turn`/`emit_turn_start`
@@ -634,6 +642,19 @@ impl Runner {
                                             } => Some(*connect),
                                             _ => None,
                                         });
+                                    // A mid-stream cut abandons already-persisted
+                                    // partial output; carry how much so the braid
+                                    // quantifies what precedes this retry marker.
+                                    let mid_stream_persisted_out_events = e
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
+                                        )
+                                        .and_then(|pe| match pe {
+                                            crate::provider_adapter::ProviderStreamError::MidStream {
+                                                persisted_out_events,
+                                                ..
+                                            } => Some(*persisted_out_events),
+                                            _ => None,
+                                        });
                                     tracing::warn!(
                                         turn,
                                         attempt,
@@ -666,6 +687,8 @@ impl Runner {
                                                     "max_retries": self.execution.retries,
                                                     "backoff_ms": delay.as_millis() as u64,
                                                     "send_connect_phase": send_connect_phase,
+                                                    "mid_stream_persisted_out_events":
+                                                        mid_stream_persisted_out_events,
                                                     "error": format!("{e:#}"),
                                                 }),
                                             )
@@ -2506,14 +2529,40 @@ mod tests {
     }
 
     #[test]
-    fn retry_backoff_never_retries_post_stream_errors() {
-        // The persistence-first decision, guarded: any failure that is NOT a
-        // classified pre-stream `ProviderStreamError` (i.e. anything that could
-        // have occurred after cognition_out began persisting) is never retried,
-        // so a retry can never duplicate streamed content.
+    fn retry_backoff_never_retries_unclassified_errors() {
+        // Only errors the adapter classified as transient (a typed
+        // `ProviderStreamError`) are retryable. Anything unclassified — invalid
+        // bytes, a persistence-first append failure, parse defects — fails the
+        // turn immediately.
         let cfg = retry_cfg();
-        let e = anyhow::anyhow!("SSE parse failure mid-stream");
+        let e = anyhow::anyhow!("non-utf8 SSE chunk: invalid byte sequence");
         assert_eq!(retry_backoff(&e, 0, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_mid_stream_gated_by_retry_mid_stream() {
+        use std::time::Duration;
+        // A stream cut mid-read (chunk timeout/reset) is transient: retried by
+        // default under the shared budget, and disabled by the knob.
+        let mid_stream = || {
+            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream {
+                persisted_out_events: 42,
+                detail: "stream chunk error: operation timed out".into(),
+            })
+        };
+        let mut cfg = retry_cfg();
+        assert_eq!(
+            retry_backoff(&mid_stream(), 0, &cfg),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            retry_backoff(&mid_stream(), 1, &cfg),
+            Some(Duration::from_millis(2000))
+        );
+        // Still bounded by the retry budget.
+        assert_eq!(retry_backoff(&mid_stream(), 2, &cfg), None);
+        cfg.retry_mid_stream = false;
+        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
     }
 
     #[test]

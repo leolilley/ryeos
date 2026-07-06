@@ -301,6 +301,16 @@ pub struct ExecutionConfig {
     pub tool_preload: bool,
     #[serde(default)]
     pub retry_on_timeout: bool,
+    /// Retry a stream that dies MID-READ (chunk timeout, reset, dropped
+    /// connection) under the same `retries` budget. The request is idempotent
+    /// (same message array); deltas persisted before the cut stay in the braid
+    /// as the record of the abandoned partial, delimited by the
+    /// `provider_retry` event. On by default — a dropped stream is the same
+    /// transient transport class as a pre-stream connect failure, and without
+    /// this every long generation is one hiccup away from a dead thread. Set
+    /// `false` to fail a directive on the first mid-stream cut.
+    #[serde(default = "default_retry_mid_stream")]
+    pub retry_mid_stream: bool,
 }
 
 fn default_retries() -> u32 {
@@ -319,6 +329,10 @@ fn default_timeout() -> u64 {
     300
 }
 
+fn default_retry_mid_stream() -> bool {
+    true
+}
+
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
@@ -330,6 +344,7 @@ impl Default for ExecutionConfig {
             timeout_seconds: default_timeout(),
             tool_preload: false,
             retry_on_timeout: false,
+            retry_mid_stream: default_retry_mid_stream(),
         }
     }
 }
@@ -546,6 +561,10 @@ mod tests {
             cfg.backoff_base_ms, 1000,
             "omitted backoff defaults to 1s, not a 0ms hot loop"
         );
+        assert!(
+            cfg.retry_mid_stream,
+            "omitted retry_mid_stream defaults ON — a dropped stream is transient"
+        );
     }
 
     #[test]
@@ -555,6 +574,7 @@ mod tests {
         assert_eq!(parsed.retries, default.retries);
         assert_eq!(parsed.retry_status_codes, default.retry_status_codes);
         assert_eq!(parsed.backoff_base_ms, default.backoff_base_ms);
+        assert_eq!(parsed.retry_mid_stream, default.retry_mid_stream);
         assert_eq!(parsed.retries, 2);
     }
 }
