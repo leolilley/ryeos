@@ -3,6 +3,7 @@
 mod control;
 pub mod init;
 pub mod init_check;
+pub mod lifecycle_marker;
 pub mod metadata;
 pub mod start;
 pub mod status;

@@ -1105,6 +1105,18 @@ async fn lifecycle_preflight(app_root: &std::path::Path) -> Result<(), CliError>
                     ),
                 })
             }
+            ryeos_node::LifecycleStatus::Starting { pid, .. } => {
+                // Boot (projection catch-up after a deploy) runs for minutes,
+                // far past the busy-retry budget — settle immediately with
+                // the actual remediation: wait, don't start a second daemon.
+                return Err(CliError::Local {
+                    detail: format!(
+                        "RyeOS daemon (pid {pid}) is starting up; its control socket is \
+                         not available yet — wait for `ryeos node status` to report \
+                         running, then retry"
+                    ),
+                });
+            }
             ryeos_node::LifecycleStatus::Unresponsive { diagnostics, .. } => {
                 busy_message = diagnostics.message;
                 if attempt < BUSY_ATTEMPTS {

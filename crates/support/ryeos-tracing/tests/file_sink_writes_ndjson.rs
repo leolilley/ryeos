@@ -13,15 +13,11 @@ fn file_sink_writes_ndjson() {
 
     // Use a fresh subscriber (test binary has no global subscriber yet)
     // We directly test the SharedFileWriter + json layer.
-    let writer = std::sync::Arc::new(std::sync::Mutex::new(
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&trace_path)
-            .unwrap(),
-    ));
-
-    let file_writer = ryeos_tracing::subscriber::SharedFileWriter::new(writer);
+    let file_writer = ryeos_tracing::subscriber::SharedFileWriter::open(
+        &trace_path,
+        ryeos_tracing::subscriber::TRACE_ROTATE_BYTES,
+    )
+    .unwrap();
 
     let filter = tracing_subscriber::EnvFilter::new("info");
     let file_layer = tracing_subscriber::fmt::layer()

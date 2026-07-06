@@ -301,6 +301,18 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 }),
             ));
         }
+        Ok(LifecycleStatus::Starting { pid, started_at, .. }) => {
+            checks.push(check(
+                "daemon",
+                WARN,
+                serde_json::json!({
+                    "state": "starting",
+                    "pid": pid,
+                    "started_at": started_at,
+                    "note": "boot in progress (e.g. projection catch-up) — control socket not up yet; wait for readiness",
+                }),
+            ));
+        }
         Ok(LifecycleStatus::NotInitialized { .. }) => {
             // Covered by the init check; don't double-report.
             checks.push(check("daemon", NA, serde_json::json!({ "state": "not initialized" })));
@@ -688,6 +700,11 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
                 println!("pid: {pid}");
             }
             println!("likely busy; retry shortly (do not start a second daemon)");
+        }
+        LifecycleStatus::Starting { pid, started_at, .. } => {
+            println!("starting — daemon (pid {pid}) is booting, control socket not up yet");
+            println!("since: {started_at}");
+            println!("boot can take minutes after a deploy (projection catch-up); wait for readiness");
         }
     }
 }

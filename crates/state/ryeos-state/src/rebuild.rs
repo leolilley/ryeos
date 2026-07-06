@@ -30,6 +30,42 @@ pub struct CatchUpReport {
     pub events_projected: usize,
 }
 
+/// Time-based progress reporter for the rebuild/catch-up loops. These run
+/// synchronously on the daemon boot path and can grind for minutes on a big
+/// store; without a heartbeat the boot is indistinguishable from a hang from
+/// the outside (the control socket does not exist yet).
+struct RebuildProgress {
+    started: std::time::Instant,
+    next_note: std::time::Instant,
+}
+
+const REBUILD_PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl RebuildProgress {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            next_note: now + REBUILD_PROGRESS_EVERY,
+        }
+    }
+
+    fn note(&mut self, stage: &str, chains: usize, threads: usize, events: usize) {
+        if std::time::Instant::now() < self.next_note {
+            return;
+        }
+        tracing::info!(
+            stage,
+            chains,
+            threads,
+            events,
+            elapsed_s = self.started.elapsed().as_secs(),
+            "projection {stage} in progress"
+        );
+        self.next_note = std::time::Instant::now() + REBUILD_PROGRESS_EVERY;
+    }
+}
+
 /// Full rebuild: delete and recreate projection from CAS.
 ///
 /// Walks every signed chain head and projects all thread snapshots
@@ -41,6 +77,7 @@ pub fn rebuild_projection(
     refs_root: &Path,
 ) -> Result<RebuildReport> {
     let mut report = RebuildReport::default();
+    let mut progress = RebuildProgress::new();
 
     // Clear existing projection tables (schema will be re-created)
     let conn = projection.connection();
@@ -110,6 +147,12 @@ pub fn rebuild_projection(
         report.chains_rebuilt += 1;
         report.threads_restored += chain_report.threads;
         report.events_projected += chain_report.events;
+        progress.note(
+            "rebuild",
+            report.chains_rebuilt,
+            report.threads_restored,
+            report.events_projected,
+        );
     }
 
     Ok(report)
@@ -124,6 +167,7 @@ pub fn catch_up_projection(
     refs_root: &Path,
 ) -> Result<CatchUpReport> {
     let mut report = CatchUpReport::default();
+    let mut progress = RebuildProgress::new();
 
     let chains_dir = refs_root.join("generic/chains");
     if !chains_dir.is_dir() {
@@ -205,6 +249,12 @@ pub fn catch_up_projection(
         report.chains_updated += 1;
         report.threads_restored += chain_report.threads;
         report.events_projected += chain_report.events;
+        progress.note(
+            "catch-up",
+            report.chains_updated,
+            report.threads_restored,
+            report.events_projected,
+        );
     }
 
     Ok(report)

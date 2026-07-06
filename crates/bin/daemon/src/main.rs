@@ -18,7 +18,8 @@ use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
 use ryeos_executor::executor as service_executor;
 use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
-use ryeosd::{bootstrap, lifecycle_marker, reconcile, scheduler, uds};
+use ryeos_node::lifecycle_marker;
+use ryeosd::{bootstrap, reconcile, scheduler, uds};
 
 mod maintenance_schedule;
 

@@ -1,10 +1,15 @@
-//! Daemon lifecycle exit marker + startup disk-space check.
+//! Daemon boot/exit marker + startup disk-space check.
 //!
-//! A clean shutdown / handled signal writes a marker recording the reason. A
-//! `SIGKILL` or hard crash cannot write one — so on the next startup, a marker
-//! still in the `running` state whose pid is no longer alive is reported as an
-//! unclean exit (inferred crash). This turns "the daemon silently died" into a
-//! visible signal on the next `start`.
+//! The daemon writes a `running` marker at process start — before its
+//! control socket exists — and an `exited` marker on any handled shutdown.
+//! Two consumers:
+//!
+//! - The lifecycle status probe reads it to tell a *booting* daemon (live
+//!   pid, no socket yet) apart from a stopped one.
+//! - A `SIGKILL` or hard crash cannot write an exit marker — so on the next
+//!   startup, a marker still in the `running` state whose pid is no longer
+//!   alive is reported as an unclean exit (inferred crash). This turns "the
+//!   daemon silently died" into a visible signal on the next `start`.
 
 use std::path::{Path, PathBuf};
 
@@ -116,14 +121,30 @@ pub fn check_disk_space(state_dir: &Path) {
 }
 
 #[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
+pub fn process_alive(pid: u32) -> bool {
     // signal 0 performs error checking without sending a signal: 0 ⇒ the
     // process exists and we may signal it.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 #[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool {
+pub fn process_alive(_pid: u32) -> bool {
     false
+}
+
+/// Whether the marker's pid is alive AND still a `ryeosd`. A crash leaves a
+/// `running` marker behind, and the OS may recycle its pid onto an unrelated
+/// process — classifying that as a live daemon would block `ryeos start`
+/// indefinitely. Where the process name can't be inspected (no `/proc`),
+/// liveness alone decides. (`stop` has its own fail-closed variant of this
+/// check with per-reason errors; this one only classifies.)
+pub fn process_alive_as_ryeosd(pid: u32) -> bool {
+    if !process_alive(pid) {
+        return false;
+    }
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(comm) => comm.trim() == "ryeosd",
+        Err(_) => true,
+    }
 }
 
 #[cfg(unix)]

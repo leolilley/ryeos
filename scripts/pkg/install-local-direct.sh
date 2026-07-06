@@ -80,6 +80,9 @@ run_timeout() {
 # never restarts, leaving the old binary running against the swapped-out files.
 # Same drop-to-user reasoning as the populate/init steps below.
 invoking_user="${SUDO_USER:-$(id -un)}"
+# That user's home, resolved from passwd — NEVER $HOME, which is /root under
+# sudo and would silently point app-root fallbacks at root's data dir.
+invoking_user_home="$(getent passwd "$invoking_user" | cut -d: -f6)"
 
 # Run `ryeos <args>` with a timeout, as the invoking user when under sudo so it
 # targets that user's app-root. `timeout` wraps the external command (sudo or
@@ -184,7 +187,7 @@ publisher_fingerprint_from_trust_doc() {
 }
 
 operator_fingerprint() {
-    local key_path="${init_app_root:-$HOME/.local/share/ryeos}/.ai/config/keys/signing/private_key.pem"
+    local key_path="${init_app_root:-$invoking_user_home/.local/share/ryeos}/.ai/config/keys/signing/private_key.pem"
     [[ -s "$key_path" ]] || return 1
     openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
         | tail -c 32 \
@@ -225,37 +228,37 @@ refresh_installed_bundle_payload() {
 
     case "$name" in
         core)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
                 --owner "$owner" >/dev/null
             ;;
         standard)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
                 --owner "$owner" >/dev/null
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$share_dir/core" \
                 --registry-root "$share_dir/core" \
                 --registry-root "$share_dir/standard" \
                 --owner "$owner" >/dev/null
             ;;
         studio)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
                 --registry-root "$share_dir/standard" \
                 --owner "$owner" >/dev/null
             ;;
         web)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
                 --owner "$owner" >/dev/null
             ;;
         browser)
-            sudo env RYEOS_APP_ROOT="${init_app_root:-$HOME/.local/share/ryeos}" \
+            sudo env RYEOS_APP_ROOT="${init_app_root:-$invoking_user_home/.local/share/ryeos}" \
                 "$target_dir/ryeos-core-tools" build "$dest" \
                 --registry-root "$share_dir/core" \
                 --owner "$owner" >/dev/null
@@ -544,18 +547,18 @@ sudo chown -R root:root "$share_dir"
 if [[ $cleanup_shadows -eq 1 ]]; then
     echo "[install-local-direct] moving PATH shadows aside"
     stamp="$(date +%Y%m%d%H%M%S)"
-    user_backup_dir="$HOME/.local/bin/ryeos-shadow-backups-$stamp"
+    user_backup_dir="$invoking_user_home/.local/bin/ryeos-shadow-backups-$stamp"
     made_user_backup=0
     for b in "${required_bins[@]}" "${optional_bins[@]}"; do
         if [[ -e "/usr/local/bin/$b" || -L "/usr/local/bin/$b" ]]; then
             sudo mv "/usr/local/bin/$b" "/usr/local/bin/$b.bak.$stamp"
         fi
-        if [[ -e "$HOME/.local/bin/$b" || -L "$HOME/.local/bin/$b" ]]; then
+        if [[ -e "$invoking_user_home/.local/bin/$b" || -L "$invoking_user_home/.local/bin/$b" ]]; then
             if [[ $made_user_backup -eq 0 ]]; then
                 mkdir -p "$user_backup_dir"
                 made_user_backup=1
             fi
-            mv "$HOME/.local/bin/$b" "$user_backup_dir/$b"
+            mv "$invoking_user_home/.local/bin/$b" "$user_backup_dir/$b"
         fi
     done
 fi
@@ -573,12 +576,10 @@ if [[ $run_init -eq 1 ]]; then
     # user so ryeos's own app-root resolution (RYEOS_APP_ROOT > BaseDirs data dir) picks
     # the right node and writes user-owned state. Never init under sudo: $HOME would be
     # /root and XDG would be scrubbed — that is what silently sent the node to /root.
-    init_user="${SUDO_USER:-$(id -un)}"
-    init_user_home="$(getent passwd "$init_user" | cut -d: -f6)"
     init_as=()
-    [[ "$init_user" != "$(id -un)" ]] && init_as=(sudo -H -u "$init_user")
-    echo "[install-local-direct] running ryeos init as $init_user"
-    state_root="${init_app_root:-$init_user_home/.local/share/ryeos}"
+    [[ "$invoking_user" != "$(id -un)" ]] && init_as=(sudo -H -u "$invoking_user")
+    echo "[install-local-direct] running ryeos init as $invoking_user"
+    state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     for path in "$state_root/.ai/bundles"/*; do
         [[ -d "$path/.ai" ]] || continue
         name="$(basename "$path")"
@@ -621,7 +622,7 @@ if [[ $run_init -eq 1 ]]; then
     "${init_as[@]}" ryeos "${init_args[@]}" "${trust_args[@]}"
 
     echo "[install-local-direct] verifying initialized bundle state"
-    state_root="${init_app_root:-$init_user_home/.local/share/ryeos}"
+    state_root="${init_app_root:-$invoking_user_home/.local/share/ryeos}"
     for name in "${bundle_names[@]}"; do
         test -d "$state_root/.ai/bundles/$name/.ai" || \
             die "initialized $name bundle missing from $state_root"
@@ -667,8 +668,8 @@ if [[ $run_init -eq 1 ]]; then
         echo "[install-local-direct] verifying installed bundle signatures (doctor --strict)"
         verify_failed=0
         for name in "${bundle_names[@]}"; do
-            if [[ "$init_user" != "$(id -un)" ]]; then
-                sudo -H -u "$init_user" env RYEOS_APP_ROOT="$state_root" \
+            if [[ "$invoking_user" != "$(id -un)" ]]; then
+                sudo -H -u "$invoking_user" env RYEOS_APP_ROOT="$state_root" \
                     "$core_tools_bin" doctor "$share_dir/$name" --strict >/dev/null \
                     || { echo "[install-local-direct] doctor FAILED for bundle: $name" >&2; verify_failed=1; }
             else
@@ -693,7 +694,7 @@ if [[ $daemon_was_running -eq 1 ]]; then
     # `ryeos start` output is kept (not sunk to /dev/null) so the CLI's own
     # readiness diagnostic surfaces too. The 930s timeout stays slightly above
     # ryeos start's internal wait.
-    state_dir="${init_app_root:-$(getent passwd "$invoking_user" | cut -d: -f6)/.local/share/ryeos}/.ai/state"
+    state_dir="${init_app_root:-$invoking_user_home/.local/share/ryeos}/.ai/state"
     report_projection_rebuild "$state_dir" &
     rebuild_reporter_pid=$!
     if ! ryeos_user 930 start; then
@@ -710,7 +711,7 @@ echo "[install-local-direct] complete"
 echo "  ryeos:        $(command -v ryeos)"
 echo "  bundle set:   $bundle_set"
 echo "  bundle src:   $share_dir/{$bundle_names_csv}"
-echo "  app root:     ${init_app_root:-$HOME/.local/share/ryeos}"
+echo "  app root:     ${init_app_root:-$invoking_user_home/.local/share/ryeos}"
 if [[ $daemon_was_running -eq 1 ]]; then
     echo "  daemon:       restarted"
 fi
