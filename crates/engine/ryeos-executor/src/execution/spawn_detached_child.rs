@@ -161,7 +161,10 @@ pub async fn spawn_detached_child(
         original_pushed_head_ref: None,
         // The parent's state-root override carries to the child so its
         // state/callback anchor stays isolated with the parent's.
-        state_root: cap.provenance.state_root_override().map(|p| p.to_path_buf()),
+        state_root: cap
+            .provenance
+            .state_root_override()
+            .map(|p| p.to_path_buf()),
         current_site_id: parent.current_site_id.clone(),
         origin_site_id: parent.origin_site_id.clone(),
         requested_by: requested_by.clone(),

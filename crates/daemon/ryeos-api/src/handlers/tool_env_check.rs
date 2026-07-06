@@ -204,7 +204,10 @@ fn provider_auth_report(
 
     let project_root = std::path::PathBuf::from(project_path);
     let engine_roots = state.engine.resolution_roots(Some(project_root.clone()));
-    let effective_parsers = match state.engine.effective_parser_dispatcher(Some(&project_root)) {
+    let effective_parsers = match state
+        .engine
+        .effective_parser_dispatcher(Some(&project_root))
+    {
         Ok(parsers) => parsers,
         Err(e) => {
             return serde_json::json!({

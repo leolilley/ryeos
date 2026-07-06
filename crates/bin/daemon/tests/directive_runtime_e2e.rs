@@ -638,7 +638,11 @@ async fn poll_thread(
                     if let Some(t) = threads.into_iter().find(|t| pred(t)) {
                         let terminal = matches!(
                             t.status.as_str(),
-                            "completed" | "failed" | "cancelled" | "killed" | "timed_out"
+                            "completed"
+                                | "failed"
+                                | "cancelled"
+                                | "killed"
+                                | "timed_out"
                                 | "continued"
                         );
                         if !require_terminal || terminal {

@@ -252,7 +252,10 @@ pub async fn dispatch_runtime_method(
             // A self-finalizing follow child (the normal path) flips its waiter to
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
-                ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, chain_root_id);
+                ryeos_executor::execution::launch::kick_follow_resume_if_ready(
+                    state,
+                    chain_root_id,
+                );
                 ryeos_executor::execution::launch::kick_launch_window_for_terminal(
                     state,
                     chain_root_id,
@@ -799,7 +802,8 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode) {
+        match ryeos_app::cascade::stop_thread_and_descendants(&state.state_store, &thread_id, mode)
+        {
             Ok(report) => tracing::info!(
                 thread_id = %thread_id,
                 command_type = %command_type,
@@ -1307,7 +1311,11 @@ mod tests {
         (cbt.token, tat.token)
     }
 
-    fn follow_params(callback_token: &str, thread_auth_token: &str, child: &str) -> serde_json::Value {
+    fn follow_params(
+        callback_token: &str,
+        thread_auth_token: &str,
+        child: &str,
+    ) -> serde_json::Value {
         json!({
             "callback_token": callback_token,
             "thread_auth_token": thread_auth_token,
@@ -1385,7 +1393,7 @@ mod tests {
                     },
                     original_snapshot_hash: None,
                     original_pushed_head_ref: None,
-            state_root: None,
+                    state_root: None,
                     current_site_id: "site:test".into(),
                     origin_site_id: "site:test".into(),
                     requested_by: EffectivePrincipal::Local(Principal {
@@ -1427,7 +1435,10 @@ mod tests {
                 frontier_id: None,
             })
             .unwrap();
-        state.state_store.set_follow_child(wk, child, child).unwrap();
+        state
+            .state_store
+            .set_follow_child(wk, child, child)
+            .unwrap();
         state
             .state_store
             .set_follow_parent_successor(wk, successor)
@@ -1435,7 +1446,12 @@ mod tests {
         state.state_store.mark_follow_waiting(wk).unwrap();
     }
 
-    fn finalize_child(state: &AppState, child: &str, status: &str, result: Option<serde_json::Value>) {
+    fn finalize_child(
+        state: &AppState,
+        child: &str,
+        status: &str,
+        result: Option<serde_json::Value>,
+    ) {
         state
             .threads
             .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
@@ -1473,7 +1489,10 @@ mod tests {
             .state_store
             .mark_follow_child_terminal("CX", "CX", "completed", &json!({"success": true}))
             .unwrap();
-        state.state_store.mark_follow_resuming("wk-resuming").unwrap();
+        state
+            .state_store
+            .mark_follow_resuming("wk-resuming")
+            .unwrap();
 
         let actions = crate::reconcile::reconcile_follow(&state).unwrap();
         let resume_keys: Vec<&str> = actions
@@ -1643,18 +1662,16 @@ mod tests {
         arm_waiting_follow(&state, "wk-succ", "Ssucc");
 
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
-        let reason = match ryeos_executor::execution::launch::launch_successor(
-            state.clone(),
-            "Ssucc",
-        )
-        .await
-        .unwrap()
-        {
-            SuccessorLaunchOutcome::Skipped(r) => r,
-            SuccessorLaunchOutcome::Launched(_) => {
-                panic!("a budget-exhausted successor must not launch")
-            }
-        };
+        let reason =
+            match ryeos_executor::execution::launch::launch_successor(state.clone(), "Ssucc")
+                .await
+                .unwrap()
+            {
+                SuccessorLaunchOutcome::Skipped(r) => r,
+                SuccessorLaunchOutcome::Launched(_) => {
+                    panic!("a budget-exhausted successor must not launch")
+                }
+            };
         assert_eq!(reason, "budget_exhausted");
         assert_eq!(
             state
@@ -1732,7 +1749,11 @@ mod tests {
         let env = waiter
             .terminal_envelope
             .expect("recovered waiter must carry a terminal envelope");
-        assert_eq!(env["success"], json!(false), "degraded recovery is failure-shaped");
+        assert_eq!(
+            env["success"],
+            json!(false),
+            "degraded recovery is failure-shaped"
+        );
         assert_eq!(env["status"], json!("failed"));
         assert_eq!(
             env["result"]["child_status"],
@@ -1877,8 +1898,14 @@ mod tests {
                 frontier_id: None,
             })
             .unwrap();
-        state.state_store.set_follow_child("wk-res", "Cres", "Cres").unwrap();
-        state.state_store.set_follow_parent_successor("wk-res", "S").unwrap();
+        state
+            .state_store
+            .set_follow_child("wk-res", "Cres", "Cres")
+            .unwrap();
+        state
+            .state_store
+            .set_follow_parent_successor("wk-res", "S")
+            .unwrap();
         assert_eq!(
             state
                 .state_store
@@ -1927,7 +1954,10 @@ mod tests {
                 frontier_id: None,
             })
             .unwrap();
-        state.state_store.set_follow_child("wk-res2", "Cnc", "Cnc").unwrap();
+        state
+            .state_store
+            .set_follow_child("wk-res2", "Cnc", "Cnc")
+            .unwrap();
 
         let actions = crate::reconcile::reconcile_follow(&state).unwrap();
         assert!(
@@ -2004,7 +2034,10 @@ mod tests {
             .state_store
             .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
             .unwrap();
-        state.state_store.mark_follow_resuming("wk-unmarked").unwrap();
+        state
+            .state_store
+            .mark_follow_resuming("wk-unmarked")
+            .unwrap();
         assert!(matches!(
             state
                 .state_store
@@ -2246,7 +2279,10 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         let (cbt, _tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
         let resp = dispatch(
-            rpc("runtime.spawn_follow_child", follow_params(&cbt, "tat-bogus", "tool:echo")),
+            rpc(
+                "runtime.spawn_follow_child",
+                follow_params(&cbt, "tat-bogus", "tool:echo"),
+            ),
             &state,
         )
         .await;
@@ -2259,7 +2295,10 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         let (_cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.echo".into()]);
         let resp = dispatch(
-            rpc("runtime.spawn_follow_child", follow_params("cbt-bogus", &tat, "tool:echo")),
+            rpc(
+                "runtime.spawn_follow_child",
+                follow_params("cbt-bogus", &tat, "tool:echo"),
+            ),
             &state,
         )
         .await;
@@ -2274,7 +2313,10 @@ mod tests {
         // Point the cap at a chain root other than the parent row's.
         assert!(state.callback_tokens.set_chain_root(&cbt, "OTHER-CHAIN"));
         let resp = dispatch(
-            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            rpc(
+                "runtime.spawn_follow_child",
+                follow_params(&cbt, &tat, "tool:echo"),
+            ),
             &state,
         )
         .await;
@@ -2288,7 +2330,10 @@ mod tests {
         // Parent holds an unrelated cap, not execute over `tool:echo`.
         let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.other".into()]);
         let resp = dispatch(
-            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            rpc(
+                "runtime.spawn_follow_child",
+                follow_params(&cbt, &tat, "tool:echo"),
+            ),
             &state,
         )
         .await;
@@ -2319,7 +2364,10 @@ mod tests {
             std::time::Duration::from_secs(300),
         );
         let resp = dispatch(
-            rpc("runtime.spawn_follow_child", follow_params(&cbt.token, &tat.token, "tool:echo")),
+            rpc(
+                "runtime.spawn_follow_child",
+                follow_params(&cbt.token, &tat.token, "tool:echo"),
+            ),
             &state,
         )
         .await;
@@ -2335,7 +2383,10 @@ mod tests {
         // runtime check rejects — and still no waiter is created.
         let (cbt, tat) = setup_follow_parent(&state, vec!["ryeos.execute.tool.*".into()]);
         let resp = dispatch(
-            rpc("runtime.spawn_follow_child", follow_params(&cbt, &tat, "tool:echo")),
+            rpc(
+                "runtime.spawn_follow_child",
+                follow_params(&cbt, &tat, "tool:echo"),
+            ),
             &state,
         )
         .await;
@@ -3476,9 +3527,7 @@ mod tests {
 
     /// Predecessor `T-pred` + successor `T-succ` in chain `T-pred`, plus a token
     /// minted for the successor.
-    fn chain_with_successor(
-        state: &AppState,
-    ) -> ryeos_app::callback_token::CallbackCapability {
+    fn chain_with_successor(state: &AppState) -> ryeos_app::callback_token::CallbackCapability {
         state
             .threads
             .create_thread(&make_create_params("T-pred", "T-pred"))
@@ -3512,7 +3561,10 @@ mod tests {
             &state,
         )
         .await;
-        assert!(resp.error.is_none(), "chain read of predecessor must pass: {resp:?}");
+        assert!(
+            resp.error.is_none(),
+            "chain read of predecessor must pass: {resp:?}"
+        );
 
         // replay by predecessor thread_id, and by chain_root_id — both reads.
         for params in [
@@ -3794,14 +3846,20 @@ mod tests {
         let children = state.threads.list_children("T-parent").unwrap();
         let v = serde_json::to_value(&children).unwrap();
         let rows = v.as_array().expect("children array");
-        assert!(!rows.is_empty(), "parent has a child via upstream edge: {v:#?}");
+        assert!(
+            !rows.is_empty(),
+            "parent has a child via upstream edge: {v:#?}"
+        );
         for c in rows {
             assert!(
                 c["execution"]["supports_continuation"].is_boolean(),
                 "every child is decorated: {c:#?}"
             );
             // Flatten: thread fields stay at the top level.
-            assert!(c["thread_id"].is_string(), "flattened thread fields top-level");
+            assert!(
+                c["thread_id"].is_string(),
+                "flattened thread fields top-level"
+            );
         }
     }
 }

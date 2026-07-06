@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn merge_header_limits_rejects_negative_spend() {
         let base = LimitValues::default();
-        let err = merge_header_limits(&base, &serde_json::json!({ "spend_usd": -1.0 }))
-            .unwrap_err();
+        let err =
+            merge_header_limits(&base, &serde_json::json!({ "spend_usd": -1.0 })).unwrap_err();
         assert!(
             err.to_string().contains("must be finite and non-negative"),
             "got {err}"
@@ -440,12 +440,8 @@ mod tests {
         // HardLimits.depth is the depth LIMIT (from requested.depth, default 5),
         // NOT the current launch depth — current depth now travels separately in
         // EnvelopeRequest.depth.
-        let hard = compute_effective_limits(
-            None,
-            &LimitValues::default(),
-            &LimitCaps::default(),
-            None,
-        );
+        let hard =
+            compute_effective_limits(None, &LimitValues::default(), &LimitCaps::default(), None);
         assert_eq!(hard.depth, default_depth());
     }
 

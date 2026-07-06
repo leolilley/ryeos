@@ -335,7 +335,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                              the executed source — pick a path outside the project",
                             project_path.display()
                         ) })),
-                    ).into_response());
+                    )
+                        .into_response());
                 }
                 if let Err(e) = std::fs::create_dir_all(&path) {
                     return Ok((
@@ -344,8 +345,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     ).into_response());
                 }
                 let canonical_state = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                let canonical_project = std::fs::canonicalize(&project_path)
-                    .unwrap_or_else(|_| project_path.clone());
+                let canonical_project =
+                    std::fs::canonicalize(&project_path).unwrap_or_else(|_| project_path.clone());
                 if canonical_state.starts_with(&canonical_project) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
@@ -355,7 +356,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                              the executed source — pick a path outside the project",
                             project_path.display()
                         ) })),
-                    ).into_response());
+                    )
+                        .into_response());
                 }
                 Some(path)
             }

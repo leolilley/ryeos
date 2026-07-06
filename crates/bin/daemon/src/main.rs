@@ -17,9 +17,9 @@ use ryeos_app::thread_lifecycle::ThreadLifecycleService;
 use ryeos_app::{command_service, event_store_service, thread_lifecycle};
 use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
 use ryeos_executor::executor as service_executor;
+use ryeos_node::lifecycle_marker;
 use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
-use ryeos_node::lifecycle_marker;
 use ryeosd::{bootstrap, reconcile, scheduler, uds};
 
 mod maintenance_schedule;
@@ -668,12 +668,11 @@ async fn main() -> Result<()> {
             // build one. A tool-subprocess native_resume (no `runtime_ref`) keeps
             // that path.
             if intent.resume_context.runtime_ref.is_some() {
-                if let Err(err) =
-                    ryeos_executor::execution::launch::launch_existing_native_resume(
-                        st,
-                        &intent.thread_id,
-                    )
-                    .await
+                if let Err(err) = ryeos_executor::execution::launch::launch_existing_native_resume(
+                    st,
+                    &intent.thread_id,
+                )
+                .await
                 {
                     tracing::error!(
                         thread_id = %intent.thread_id,
@@ -885,20 +884,19 @@ fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Op
 /// Drive follow reconcile actions as detached tasks. Shared by the boot
 /// pass and the periodic recovery sweep; every launch is claim-guarded, so
 /// concurrent drives are benign skips.
-fn dispatch_follow_actions(
-    state: &AppState,
-    actions: Vec<reconcile::FollowReconcileAction>,
-) {
+fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowReconcileAction>) {
     for action in actions {
         let st = state.clone();
         tokio::spawn(async move {
             use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
             let (label, outcome) = match action {
                 reconcile::FollowReconcileAction::Resume { follow_key } => {
-                    let outcome = ryeos_executor::execution::launch::launch_follow_resume_successor(
-                        st, &follow_key,
-                    )
-                    .await;
+                    let outcome =
+                        ryeos_executor::execution::launch::launch_follow_resume_successor(
+                            st,
+                            &follow_key,
+                        )
+                        .await;
                     (format!("parent-resume {follow_key}"), outcome)
                 }
                 reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
@@ -925,7 +923,10 @@ fn drain_running_threads(state: &AppState) {
     // it marks running, so there is a brief `created` + live-pgid window. The
     // kill loop below only acts on rows with `Some(pgid)`, so unlaunched
     // `created` rows (no pgid) are untouched.
-    let threads = match state.state_store.list_threads_by_status(&["created", "running"]) {
+    let threads = match state
+        .state_store
+        .list_threads_by_status(&["created", "running"])
+    {
         Ok(threads) => threads,
         Err(err) => {
             tracing::warn!(error = %err, "failed to list running threads during shutdown");

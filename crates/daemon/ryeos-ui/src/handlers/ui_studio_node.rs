@@ -92,9 +92,10 @@ pub async fn handle_activity(
         { "label": format!("spend · {window}"), "value": format!("${:.4}", usage.spend_usd) },
     ]);
 
-    let events = state
-        .state_store
-        .latest_node_events(req.event_limit.clamp(1, MAX_EVENT_LIMIT), &req.exclude_types)?;
+    let events = state.state_store.latest_node_events(
+        req.event_limit.clamp(1, MAX_EVENT_LIMIT),
+        &req.exclude_types,
+    )?;
 
     Ok(serde_json::json!({
         "schema_version": "studio.node.activity.v1",
@@ -108,5 +109,7 @@ pub const ACTIVITY_DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "ui.studio.node.activity",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &[],
-    handler: |params, ctx, state| Box::pin(async move { handle_activity(params, ctx, state).await }),
+    handler: |params, ctx, state| {
+        Box::pin(async move { handle_activity(params, ctx, state).await })
+    },
 };

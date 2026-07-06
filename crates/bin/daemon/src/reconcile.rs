@@ -879,11 +879,19 @@ mod tests {
         let lm = || RuntimeLaunchMetadata::default().with_resume_context(ctx());
         // Already launched (running) — not a stranded `created` successor.
         assert!(!continuation_shape(&thread_detail(
-            "S", "running", Some("SRC"), None, Some(lm())
+            "S",
+            "running",
+            Some("SRC"),
+            None,
+            Some(lm())
         )));
         // No upstream link — a fresh root, not a continuation.
         assert!(!continuation_shape(&thread_detail(
-            "S", "created", None, None, Some(lm())
+            "S",
+            "created",
+            None,
+            None,
+            Some(lm())
         )));
         // No captured ResumeContext — not launchable as a continuation.
         assert!(!continuation_shape(&thread_detail(
@@ -903,13 +911,21 @@ mod tests {
         // launched as a continuation, not checkpoint-resumed as the same thread.
         let nr = native_resume_lm().with_resume_context(ctx());
         assert!(continuation_shape(&thread_detail(
-            "S", "created", Some("SRC"), None, Some(nr)
+            "S",
+            "created",
+            Some("SRC"),
+            None,
+            Some(nr)
         )));
         // But a RUNNING native_resume thread stays out — the `created` gate hands
         // crashed same-threads to the decide_resume (checkpoint) path.
         let nr_running = native_resume_lm().with_resume_context(ctx());
         assert!(!continuation_shape(&thread_detail(
-            "S", "running", Some("SRC"), None, Some(nr_running)
+            "S",
+            "running",
+            Some("SRC"),
+            None,
+            Some(nr_running)
         )));
     }
 
@@ -921,7 +937,11 @@ mod tests {
         // continuation successor — it is checkpoint-resumed as the same thread.
         let nr = native_resume_lm().with_resume_context(ctx());
         assert!(!continuation_shape(&thread_detail(
-            "R", "created", None, None, Some(nr)
+            "R",
+            "created",
+            None,
+            None,
+            Some(nr)
         )));
     }
 
@@ -1082,10 +1102,7 @@ mod tests {
     fn follow_waiter_staleness_is_age_based() {
         let now = 100 * FOLLOW_WAITER_STALE_MS;
         // Fresh (updated moments ago) is never stale.
-        assert!(!follow_waiter_is_stale(
-            &stale_test_waiter(now - 1),
-            now
-        ));
+        assert!(!follow_waiter_is_stale(&stale_test_waiter(now - 1), now));
         // Exactly at the window and beyond is stale.
         assert!(follow_waiter_is_stale(
             &stale_test_waiter(now - FOLLOW_WAITER_STALE_MS),
@@ -1093,6 +1110,9 @@ mod tests {
         ));
         assert!(follow_waiter_is_stale(&stale_test_waiter(0), now));
         // A clock skew (future update) is not stale — saturating avoids underflow.
-        assert!(!follow_waiter_is_stale(&stale_test_waiter(now + 5_000), now));
+        assert!(!follow_waiter_is_stale(
+            &stale_test_waiter(now + 5_000),
+            now
+        ));
     }
 }

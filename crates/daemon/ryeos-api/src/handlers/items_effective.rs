@@ -166,10 +166,7 @@ fn as_launched_block(state: &AppState, thread_id: &str, effective: &EffectiveIte
         effective.provenance.root.raw_content_digest.as_str(),
     );
     for anc in &effective.provenance.ancestors {
-        current.insert(
-            anc.resolved_ref.as_str(),
-            anc.raw_content_digest.as_str(),
-        );
+        current.insert(anc.resolved_ref.as_str(), anc.raw_content_digest.as_str());
     }
 
     let (root_json, root_changed) = digest_node_json(&digest.root, &current);

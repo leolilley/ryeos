@@ -795,7 +795,8 @@ impl StateStore {
         // write permit + lock held here serialize `create_continuation`, so this
         // check-then-create is atomic — a double-submit or race cannot mint
         // sibling successors (which would make `successor_thread_id` ambiguous).
-        if let Some(existing) = queries::continuation_successor(g.state_db.projection(), source_thread_id)?
+        if let Some(existing) =
+            queries::continuation_successor(g.state_db.projection(), source_thread_id)?
         {
             bail!("thread {source_thread_id} already continued as {existing}");
         }
@@ -1595,10 +1596,7 @@ impl StateStore {
     /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
     /// for a `chain_root_id` — the deep-watch summary of an execution and its
     /// continuations.
-    pub fn chain_usage_totals(
-        &self,
-        chain_root_id: &str,
-    ) -> Result<queries::ThreadUsageTotals> {
+    pub fn chain_usage_totals(&self, chain_root_id: &str) -> Result<queries::ThreadUsageTotals> {
         let g = self.lock()?;
         queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
     }
@@ -1635,10 +1633,7 @@ impl StateStore {
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list
     /// paths.
-    fn rows_to_list_items(
-        g: &Inner,
-        rows: Vec<queries::ThreadRow>,
-    ) -> Result<Vec<ThreadListItem>> {
+    fn rows_to_list_items(g: &Inner, rows: Vec<queries::ThreadRow>) -> Result<Vec<ThreadListItem>> {
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             let successor_thread_id = if is_terminal_status(&row.status) {
@@ -1895,7 +1890,8 @@ impl StateStore {
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        g.runtime_db.release_thread_launch_claim(thread_id, claim_id)
+        g.runtime_db
+            .release_thread_launch_claim(thread_id, claim_id)
     }
 
     /// Read the current launch claim, if any — distinguishes an unlaunched
@@ -2342,7 +2338,8 @@ impl StateStore {
         terminal_status: &str,
     ) -> Result<Vec<CommandRecord>> {
         let g = self.lock()?;
-        g.runtime_db.settle_open_commands(thread_id, terminal_status)
+        g.runtime_db
+            .settle_open_commands(thread_id, terminal_status)
     }
 
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational

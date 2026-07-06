@@ -93,7 +93,9 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ok.key, "fleet");
-        assert!(serde_json::from_value::<Request>(json!({"thread_id": "T-1", "key": "fleet"})).is_err());
+        assert!(
+            serde_json::from_value::<Request>(json!({"thread_id": "T-1", "key": "fleet"})).is_err()
+        );
         // deny_unknown_fields
         assert!(serde_json::from_value::<Request>(
             json!({"thread_id": "T-1", "key": "f", "value": "v", "x": 1})

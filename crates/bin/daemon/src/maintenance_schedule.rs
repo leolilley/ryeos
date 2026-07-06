@@ -102,9 +102,8 @@ fn apply_maintenance_schedules(node_dir: &Path, identity: &NodeIdentity) -> Resu
             );
             continue;
         }
-        write_maintenance_spec(node_dir, decl, identity).with_context(|| {
-            format!("apply maintenance schedule '{}'", decl.schedule_id)
-        })?;
+        write_maintenance_spec(node_dir, decl, identity)
+            .with_context(|| format!("apply maintenance schedule '{}'", decl.schedule_id))?;
         tracing::info!(
             schedule_id = %decl.schedule_id,
             item_ref = %decl.item_ref,
@@ -131,12 +130,19 @@ fn load_declaration(node_dir: &Path) -> Result<Option<MaintenanceDeclarationFile
         );
         return Ok(None);
     }
-    let raw = std::fs::read_to_string(&declaration_path)
-        .with_context(|| format!("read maintenance declaration {}", declaration_path.display()))?;
+    let raw = std::fs::read_to_string(&declaration_path).with_context(|| {
+        format!(
+            "read maintenance declaration {}",
+            declaration_path.display()
+        )
+    })?;
     let body_str = lillux::signature::strip_signature_lines(&raw);
-    serde_yaml::from_str(&body_str)
-        .map(Some)
-        .with_context(|| format!("parse maintenance declaration {}", declaration_path.display()))
+    serde_yaml::from_str(&body_str).map(Some).with_context(|| {
+        format!(
+            "parse maintenance declaration {}",
+            declaration_path.display()
+        )
+    })
 }
 
 fn write_maintenance_spec(
@@ -260,7 +266,10 @@ schedules:
         let spec_path = node_dir.join("schedules").join("maintenance-gc.yaml");
         let content = std::fs::read_to_string(&spec_path).unwrap();
         // Signed by the node.
-        assert!(content.starts_with("# ryeos:signed:"), "spec must be signed");
+        assert!(
+            content.starts_with("# ryeos:signed:"),
+            "spec must be signed"
+        );
         let body = lillux::signature::strip_signature_lines(&content);
         let parsed: serde_json::Value = serde_yaml::from_str(&body).unwrap();
         assert_eq!(parsed["item_ref"], "service:maintenance/gc");

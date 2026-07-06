@@ -26,8 +26,9 @@ use serde_json::{json, Value};
 async fn start_with_isolated_bundle(
     test_name: &str,
 ) -> (DaemonHarness, common::fast_fixture::FastFixture) {
-    let bundle =
-        ryeos_core_tools::test_support::isolated_core_bundle(&format!("service_data_e2e/{test_name}"));
+    let bundle = ryeos_core_tools::test_support::isolated_core_bundle(&format!(
+        "service_data_e2e/{test_name}"
+    ));
     DaemonHarness::start_fast_with(
         |state, _, fixture| common::fast_fixture::register_standard_bundle(state, fixture),
         move |cmd| {

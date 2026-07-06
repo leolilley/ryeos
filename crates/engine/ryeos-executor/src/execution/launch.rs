@@ -1020,11 +1020,11 @@ async fn run_claimed_thread_row_inner(
     // failure degrades cascade coverage but must not fail an otherwise-launchable
     // child (the child's own runtime row already exists).
     if let Some(parent_ctx) = parent_execution_context {
-        if let Err(e) =
-            state
-                .state_store
-                .record_child_link(&parent_ctx.parent_thread_id, &thread_id, "dispatch")
-        {
+        if let Err(e) = state.state_store.record_child_link(
+            &parent_ctx.parent_thread_id,
+            &thread_id,
+            "dispatch",
+        ) {
             tracing::warn!(
                 parent_thread_id = %parent_ctx.parent_thread_id,
                 child_thread_id = %thread_id,
@@ -1179,7 +1179,9 @@ async fn run_claimed_thread_row_inner(
             .timeout
             .as_ref()
             .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "directive-runtime/limits.yaml defaults or built-in default".to_string())
+            .unwrap_or_else(|| {
+                "directive-runtime/limits.yaml defaults or built-in default".to_string()
+            })
     };
     let turns_source = if parameters.get("max_steps").is_some() {
         "caller param `max_steps`".to_string()
@@ -1188,7 +1190,9 @@ async fn run_claimed_thread_row_inner(
             .max_steps
             .as_ref()
             .map(|policy| policy.source.describe())
-            .unwrap_or_else(|| "directive-runtime/limits.yaml defaults or built-in default".to_string())
+            .unwrap_or_else(|| {
+                "directive-runtime/limits.yaml defaults or built-in default".to_string()
+            })
     };
     tracing::info!(
         item_ref = %resolved.item_ref,
@@ -1388,8 +1392,8 @@ async fn run_claimed_thread_row_inner(
         })?;
         let prev_dir =
             ryeos_app::launch_metadata::daemon_checkpoint_dir(&state.config.app_root, prev);
-        let copied = ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir)
-            .map_err(|e| {
+        let copied =
+            ryeos_runtime::CheckpointWriter::copy_latest(&prev_dir, succ_dir).map_err(|e| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!("copy-forward checkpoint: {e}"))
             })?;
         if !copied {
@@ -1452,7 +1456,10 @@ async fn run_claimed_thread_row_inner(
         if let Some(ckpt) = checkpoint_dir.clone() {
             metadata = metadata.with_checkpoint_dir(ckpt);
         }
-        if let Err(e) = state.state_store.seed_launch_metadata(&thread_id, &metadata) {
+        if let Err(e) = state
+            .state_store
+            .seed_launch_metadata(&thread_id, &metadata)
+        {
             tracing::warn!(
                 thread_id = %thread_id,
                 error = %e,
@@ -1545,7 +1552,10 @@ async fn run_claimed_thread_row_inner(
     );
     // Carry the thread's authoritative chain root on the cap (it defaults to
     // thread_id / root until set here).
-    if !state.callback_tokens.set_chain_root(&cap.token, &chain_root_id) {
+    if !state
+        .callback_tokens
+        .set_chain_root(&cap.token, &chain_root_id)
+    {
         tracing::warn!(
             thread_id = %thread_id,
             "set_chain_root found no cap for the just-minted token; chain root left at default"
@@ -2523,7 +2533,9 @@ async fn launch_claimed_follow_child(
         .state_store
         .get_launch_metadata(&thread_id)?
         .and_then(|m| m.resume_context)
-        .ok_or_else(|| anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("follow child: {thread_id} has no seeded launch identity")
+        })?;
 
     let mut params =
         crate::execution::runner::execution_params_from_resume_context(state, &identity)?;
@@ -2546,7 +2558,10 @@ async fn launch_claimed_follow_child(
         .provenance
         .request_engine()
         .runtimes
-        .resolve_for_launch(identity.runtime_ref.as_deref(), &params.resolved.resolved_item.kind)
+        .resolve_for_launch(
+            identity.runtime_ref.as_deref(),
+            &params.resolved.resolved_item.kind,
+        )
         .map_err(|e| BuildAndLaunchError::Internal(anyhow::anyhow!(e)))?
         .yaml
         .required_envelope_fields
@@ -2627,13 +2642,17 @@ pub async fn launch_follow_child(
     let thread = match state.threads.get_thread(child_id) {
         Ok(Some(t)) => t,
         Ok(None) => {
-            let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(child_id, &claim_id);
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "follow child: thread not found: {child_id}"
             )));
         }
         Err(e) => {
-            let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(child_id, &claim_id);
             return Err(e.into());
         }
     };
@@ -2643,7 +2662,9 @@ pub async fn launch_follow_child(
     if ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
         .is_some_and(|s| s.is_terminal())
     {
-        let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+        let _ = state
+            .state_store
+            .release_thread_launch_claim(child_id, &claim_id);
         return Ok(SuccessorLaunchOutcome::Skipped("terminal"));
     }
 
@@ -2654,14 +2675,18 @@ pub async fn launch_follow_child(
     // pgid; a dead pgid (crashed) falls through to relaunch.
     if let Some(pgid) = thread.runtime.pgid {
         if ryeos_app::process::pgid_alive(pgid) {
-            let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+            let _ = state
+                .state_store
+                .release_thread_launch_claim(child_id, &claim_id);
             return Ok(SuccessorLaunchOutcome::Skipped("live_process"));
         }
     }
 
     let result =
         launch_claimed_follow_child(&state, thread, provenance_override, parent_context).await;
-    let _ = state.state_store.release_thread_launch_claim(child_id, &claim_id);
+    let _ = state
+        .state_store
+        .release_thread_launch_claim(child_id, &claim_id);
 
     match result {
         Ok(native) => Ok(SuccessorLaunchOutcome::Launched(native)),
@@ -2834,10 +2859,11 @@ pub fn sweep_launch_windows(state: &AppState) {
     match state.state_store.launch_window_keys_with_queue() {
         Ok(keys) => {
             for key in keys {
-                match state
-                    .state_store
-                    .launch_window_admit(&key, global_live_fanout_limit(), now_ms)
-                {
+                match state.state_store.launch_window_admit(
+                    &key,
+                    global_live_fanout_limit(),
+                    now_ms,
+                ) {
                     Ok(admitted) => {
                         for id in admitted {
                             tracing::info!(
@@ -3394,18 +3420,19 @@ mod tests {
     fn capability_policy_exact_pinned_requires_equality() {
         // Equal set (order-insensitive, across both sources) → ok.
         let pinned = caps(&["b", "a"]);
-        let out = apply_policy(&["a"], &["b"], CapabilityPolicy::ExactPinned(&pinned), "")
-            .unwrap();
+        let out = apply_policy(&["a"], &["b"], CapabilityPolicy::ExactPinned(&pinned), "").unwrap();
         assert_eq!(out, caps(&["a", "b"]));
         // Drift (narrower OR wider) → rejected.
         let narrower = caps(&["a"]);
-        assert!(
-            apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&narrower), "").is_err()
-        );
+        assert!(apply_policy(
+            &["a", "b"],
+            &[],
+            CapabilityPolicy::ExactPinned(&narrower),
+            ""
+        )
+        .is_err());
         let wider = caps(&["a", "b", "c"]);
-        assert!(
-            apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&wider), "").is_err()
-        );
+        assert!(apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&wider), "").is_err());
     }
 
     // ── Follow-child hybrid: source-aware bounding ──────────────────────
@@ -3456,13 +3483,7 @@ mod tests {
         // parent has only the exact execute.tool.echo; a child-declared wildcard
         // execute.tool.* is wider than the parent grant → rejected.
         let parent = caps(&["ryeos.execute.tool.echo"]);
-        assert!(apply_policy(
-            &["ryeos.execute.tool.*"],
-            &[],
-            hybrid(&parent),
-            CHILD_EXEC
-        )
-        .is_err());
+        assert!(apply_policy(&["ryeos.execute.tool.*"], &[], hybrid(&parent), CHILD_EXEC).is_err());
     }
 
     #[test]
@@ -3829,6 +3850,9 @@ mod tests {
             0,
             "forged params must not affect launch depth"
         );
-        assert_eq!(prompt_inputs_from_parameters(&params), json!({"task": "keep this"}));
+        assert_eq!(
+            prompt_inputs_from_parameters(&params),
+            json!({"task": "keep this"})
+        );
     }
 }

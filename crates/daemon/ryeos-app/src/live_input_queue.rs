@@ -223,11 +223,20 @@ mod tests {
     #[test]
     fn enqueue_then_drain_is_fifo() {
         let q = LiveInputQueue::new();
-        assert_eq!(q.enqueue("T-1", steer("a")), EnqueueOutcome::Accepted { pending: 1 });
-        assert_eq!(q.enqueue("T-1", steer("b")), EnqueueOutcome::Accepted { pending: 2 });
+        assert_eq!(
+            q.enqueue("T-1", steer("a")),
+            EnqueueOutcome::Accepted { pending: 1 }
+        );
+        assert_eq!(
+            q.enqueue("T-1", steer("b")),
+            EnqueueOutcome::Accepted { pending: 2 }
+        );
         let drained = q.drain("T-1");
         assert_eq!(
-            drained.iter().map(|s| s.content.as_str()).collect::<Vec<_>>(),
+            drained
+                .iter()
+                .map(|s| s.content.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
         // Drained — nothing left, entry still present.
@@ -243,9 +252,18 @@ mod tests {
     #[test]
     fn backpressure_refuses_without_enqueue() {
         let q = LiveInputQueue::with_bound(2);
-        assert!(matches!(q.enqueue("T", steer("1")), EnqueueOutcome::Accepted { .. }));
-        assert!(matches!(q.enqueue("T", steer("2")), EnqueueOutcome::Accepted { .. }));
-        assert_eq!(q.enqueue("T", steer("3")), EnqueueOutcome::Full { pending: 2 });
+        assert!(matches!(
+            q.enqueue("T", steer("1")),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        assert!(matches!(
+            q.enqueue("T", steer("2")),
+            EnqueueOutcome::Accepted { .. }
+        ));
+        assert_eq!(
+            q.enqueue("T", steer("3")),
+            EnqueueOutcome::Full { pending: 2 }
+        );
         assert_eq!(q.pending_len("T"), 2);
     }
 
@@ -274,11 +292,14 @@ mod tests {
     fn restore_front_preserves_fifo_and_prepends() {
         let q = LiveInputQueue::new();
         q.enqueue("T", steer("c")); // already pending
-        // Simulate a failed persist of an earlier drain of [a, b].
+                                    // Simulate a failed persist of an earlier drain of [a, b].
         q.restore_front("T", vec![steer("a"), steer("b")]);
         let drained = q.drain("T");
         assert_eq!(
-            drained.iter().map(|s| s.content.as_str()).collect::<Vec<_>>(),
+            drained
+                .iter()
+                .map(|s| s.content.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b", "c"]
         );
     }
@@ -306,11 +327,17 @@ mod tests {
             EnqueueOutcome::Accepted { pending: 2 }
         );
         // ...but the next is refused: the in-flight item still counts.
-        assert_eq!(q.enqueue("T", steer("c")), EnqueueOutcome::Full { pending: 2 });
+        assert_eq!(
+            q.enqueue("T", steer("c")),
+            EnqueueOutcome::Full { pending: 2 }
+        );
         // Restoring the drained item returns to exactly the bound, never above.
         q.restore_front("T", drained);
         assert_eq!(q.pending_len("T"), 2);
-        assert_eq!(q.enqueue("T", steer("d")), EnqueueOutcome::Full { pending: 2 });
+        assert_eq!(
+            q.enqueue("T", steer("d")),
+            EnqueueOutcome::Full { pending: 2 }
+        );
     }
 
     #[test]
@@ -320,7 +347,10 @@ mod tests {
         q.enqueue("T", steer("2"));
         let drained = q.drain("T");
         // In-flight still counts → at cap.
-        assert_eq!(q.enqueue("T", steer("3")), EnqueueOutcome::Full { pending: 2 });
+        assert_eq!(
+            q.enqueue("T", steer("3")),
+            EnqueueOutcome::Full { pending: 2 }
+        );
         // Persisted (or discarded): release the reservation.
         q.ack_drained("T", drained.len());
         assert!(matches!(

@@ -256,15 +256,25 @@ async fn thread_tail_descriptor_round_trip() {
         )
         .await
         .expect("post threads.tail");
-    assert_eq!(status, reqwest::StatusCode::OK, "threads.tail body={body:#}");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "threads.tail body={body:#}"
+    );
 
     let stream = body
         .get("result")
         .and_then(|r| r.get("stream"))
         .unwrap_or_else(|| panic!("no result.stream descriptor in {body:#}"));
-    assert_eq!(stream.get("transport").and_then(|v| v.as_str()), Some("sse"));
+    assert_eq!(
+        stream.get("transport").and_then(|v| v.as_str()),
+        Some("sse")
+    );
     assert_eq!(stream.get("method").and_then(|v| v.as_str()), Some("GET"));
-    assert_eq!(stream.get("follow").and_then(|v| v.as_str()), Some("thread"));
+    assert_eq!(
+        stream.get("follow").and_then(|v| v.as_str()),
+        Some("thread")
+    );
     let path = stream
         .get("path")
         .and_then(|v| v.as_str())
@@ -333,7 +343,11 @@ async fn thread_tail_descriptor_defaults_to_braid() {
         )
         .await
         .expect("post threads.tail");
-    assert_eq!(status, reqwest::StatusCode::OK, "threads.tail body={body:#}");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "threads.tail body={body:#}"
+    );
 
     let stream = body
         .get("result")
@@ -366,7 +380,8 @@ async fn thread_tail_descriptor_denied_for_non_owner() {
     });
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let audience = format!("fp:{node_fp}");
-    let headers = build_ryeos_signed_auth_headers(&other_sk, "POST", "/execute", &body_bytes, &audience);
+    let headers =
+        build_ryeos_signed_auth_headers(&other_sk, "POST", "/execute", &body_bytes, &audience);
 
     let url = format!("http://{}/execute", h.bind);
     let mut req = reqwest::Client::new()

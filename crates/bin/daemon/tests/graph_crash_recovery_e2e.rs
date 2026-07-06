@@ -223,8 +223,7 @@ fn count_step_started_for_node(events: &[(String, Value)], node: &str) -> usize 
     events
         .iter()
         .filter(|(ty, payload)| {
-            ty == "graph_step_started"
-                && payload.get("node").and_then(|v| v.as_str()) == Some(node)
+            ty == "graph_step_started" && payload.get("node").and_then(|v| v.as_str()) == Some(node)
         })
         .count()
 }

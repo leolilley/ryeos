@@ -158,8 +158,7 @@ fn count_step_started_for_node(events: &[(String, String, Value)], node: &str) -
     events
         .iter()
         .filter(|(_, ty, payload)| {
-            ty == "graph_step_started"
-                && payload.get("node").and_then(|v| v.as_str()) == Some(node)
+            ty == "graph_step_started" && payload.get("node").and_then(|v| v.as_str()) == Some(node)
         })
         .count()
 }
@@ -167,7 +166,11 @@ fn count_step_started_for_node(events: &[(String, String, Value)], node: &str) -
 /// Fire `/execute` for `item_ref` as a detached background request. The first
 /// segment settles `continued` and returns quickly; the rest of the chain runs
 /// server-side, so the caller polls the projection for the terminal.
-fn spawn_execute(h: &DaemonHarness, project_path: &Path, item_ref: &str) -> tokio::task::JoinHandle<()> {
+fn spawn_execute(
+    h: &DaemonHarness,
+    project_path: &Path,
+    item_ref: &str,
+) -> tokio::task::JoinHandle<()> {
     let url = format!("http://{}/execute", h.bind);
     let body = json!({
         "item_ref": item_ref,
@@ -297,7 +300,8 @@ async fn graph_retry_attempt_count_survives_a_segment_cut() {
     .expect("start daemon with standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_retry_segment_graph(project.path(), &fixture.publisher).expect("plant retry segment graph");
+    plant_retry_segment_graph(project.path(), &fixture.publisher)
+        .expect("plant retry segment graph");
 
     let exec = spawn_execute(&h, project.path(), "graph:retry_segment");
 
@@ -328,6 +332,12 @@ async fn graph_retry_attempt_count_survives_a_segment_cut() {
         .iter()
         .find(|(_, ty, _)| ty == "graph_node_retry")
         .expect("one retry event");
-    assert_eq!(retry_event.2.get("attempt").and_then(|v| v.as_u64()), Some(1));
-    assert_eq!(retry_event.2.get("attempts").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(
+        retry_event.2.get("attempt").and_then(|v| v.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        retry_event.2.get("attempts").and_then(|v| v.as_u64()),
+        Some(2)
+    );
 }

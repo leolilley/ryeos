@@ -476,9 +476,8 @@ pub fn list_threads_query(
         params.push(requested_by);
     }
     if let (Some((key, _)), Some(value_bytes)) = (&filter.facet, &facet_value_bytes) {
-        conditions.push(
-            "thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)",
-        );
+        conditions
+            .push("thread_id IN (SELECT thread_id FROM thread_facets WHERE key = ? AND value = ?)");
         params.push(key);
         params.push(value_bytes);
     }
@@ -496,8 +495,7 @@ pub fn list_threads_query(
     } else {
         format!("WHERE {}", conditions.join(" AND "))
     };
-    let sql =
-        format!("SELECT {THREAD_COLUMNS} FROM threads {where_clause} {order} LIMIT ?");
+    let sql = format!("SELECT {THREAD_COLUMNS} FROM threads {where_clause} {order} LIMIT ?");
     params.push(&limit);
     let mut stmt = db
         .connection()
@@ -1328,17 +1326,29 @@ mod tests {
         project_cont_edge(&db, "K", "root", "A", 1, Some("turn_limit"), None);
         project_cont_edge(&db, "K", "A", "B", 2, Some("turn_limit"), None);
         project_cont_edge(&db, "K", "B", "C", 3, Some("turn_limit"), None);
-        assert_eq!(consecutive_machine_continuation_depth(&db, "C", 100).unwrap(), 3);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db, "C", 100).unwrap(),
+            3
+        );
         // The cap bounds the walk.
-        assert_eq!(consecutive_machine_continuation_depth(&db, "C", 2).unwrap(), 2);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db, "C", 2).unwrap(),
+            2
+        );
         // A chain root (no upstream) has depth 0.
-        assert_eq!(consecutive_machine_continuation_depth(&db, "root", 100).unwrap(), 0);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db, "root", 100).unwrap(),
+            0
+        );
         // An old machine edge with a MISSING reason still counts as machine.
         let db_m = test_db();
         insert_thread(&db_m, "r", "Km", ThreadStatus::Continued);
         insert_thread_with_upstream(&db_m, "s", "Km", ThreadStatus::Created, Some("r"));
         project_cont_edge(&db_m, "Km", "r", "s", 1, None, None);
-        assert_eq!(consecutive_machine_continuation_depth(&db_m, "s", 100).unwrap(), 1);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db_m, "s", 100).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1349,7 +1359,10 @@ mod tests {
         insert_thread(&db, "parent", "K", ThreadStatus::Running);
         insert_thread_with_upstream(&db, "child", "K", ThreadStatus::Created, Some("parent"));
         // no continuation edge projected for parent
-        assert_eq!(consecutive_machine_continuation_depth(&db, "child", 100).unwrap(), 0);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db, "child", 100).unwrap(),
+            0
+        );
 
         // An upstream that continued to a DIFFERENT successor must not count for
         // this thread.
@@ -1357,7 +1370,10 @@ mod tests {
         insert_thread(&db2, "p", "K2", ThreadStatus::Continued);
         insert_thread_with_upstream(&db2, "x", "K2", ThreadStatus::Created, Some("p"));
         project_cont_edge(&db2, "K2", "p", "OTHER", 1, Some("turn_limit"), None); // p → OTHER, not x
-        assert_eq!(consecutive_machine_continuation_depth(&db2, "x", 100).unwrap(), 0);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db2, "x", 100).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1378,7 +1394,10 @@ mod tests {
         );
         project_cont_edge(&db, "K", "a", "c", 2, Some("turn_limit"), None);
         // from c: c←a machine (1); a←r operator (verified) → stop. depth 1.
-        assert_eq!(consecutive_machine_continuation_depth(&db, "c", 100).unwrap(), 1);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db, "c", 100).unwrap(),
+            1
+        );
 
         // A machine link SPOOFING reason "operator_follow_up" WITHOUT a fingerprint
         // must NOT reset — it counts as machine, so the cap cannot be bypassed.
@@ -1398,7 +1417,10 @@ mod tests {
         );
         project_cont_edge(&db2, "K2", "a", "c", 2, Some("turn_limit"), None);
         // from c: c←a machine (1); a←r spoofed-operator-no-fp → counts machine (2).
-        assert_eq!(consecutive_machine_continuation_depth(&db2, "c", 100).unwrap(), 2);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db2, "c", 100).unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -1421,7 +1443,10 @@ mod tests {
         );
         project_cont_edge(&db, "K", "a", "c", 2, Some("turn_limit"), None);
         // from c: c←a machine (1); a←r follow-resume → stop. depth 1.
-        assert_eq!(consecutive_machine_continuation_depth(&db, "c", 100).unwrap(), 1);
+        assert_eq!(
+            consecutive_machine_continuation_depth(&db, "c", 100).unwrap(),
+            1
+        );
     }
 
     fn project_usage_event(
@@ -1757,7 +1782,10 @@ mod tests {
         project_usage_event(&db, "chain-A", "T-successor", 2, 150, 15);
 
         let totals = sum_thread_usage_latest_by_chain(&db, "chain-A").unwrap();
-        assert_eq!(totals.thread_count, 1, "completed predecessor must be superseded");
+        assert_eq!(
+            totals.thread_count, 1,
+            "completed predecessor must be superseded"
+        );
         assert_eq!(totals.input_tokens, 150);
         assert_eq!(totals.output_tokens, 15);
     }
@@ -2002,14 +2030,20 @@ mod tests {
         // Watch: active (non-terminal) before terminal, newest-first per bucket.
         let watch = list_threads_sorted(&db, 10, None, ThreadSort::Watch).unwrap();
         assert_eq!(
-            watch.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            watch
+                .iter()
+                .map(|r| r.thread_id.as_str())
+                .collect::<Vec<_>>(),
             ["T-new-run", "T-old-run", "T-new-done", "T-old-done"]
         );
 
         // Default order is unchanged: oldest-first by created_at.
         let default = list_threads_filtered(&db, 10, None).unwrap();
         assert_eq!(
-            default.iter().map(|r| r.thread_id.as_str()).collect::<Vec<_>>(),
+            default
+                .iter()
+                .map(|r| r.thread_id.as_str())
+                .collect::<Vec<_>>(),
             ["T-old-run", "T-old-done", "T-new-run", "T-new-done"]
         );
 
@@ -2023,7 +2057,13 @@ mod tests {
     }
 
     /// Raw insert controlling kind and requested_by too, for filter assertions.
-    fn insert_thread_full(db: &ProjectionDb, id: &str, status: &str, kind: &str, requested_by: &str) {
+    fn insert_thread_full(
+        db: &ProjectionDb,
+        id: &str,
+        status: &str,
+        kind: &str,
+        requested_by: &str,
+    ) {
         db.connection()
             .execute(
                 "INSERT INTO threads \

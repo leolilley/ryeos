@@ -142,8 +142,8 @@ fn sweep_one_fires_file(
     dry_run: bool,
     result: &mut GcResult,
 ) -> Result<()> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let original_len = raw.len() as u64;
 
     // Group lines by fire_id, preserving first-seen order. Malformed or
@@ -225,8 +225,11 @@ fn sweep_one_fires_file(
         // Oldest first.
         terminal_refs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let to_drop = terminal_count - max_count;
-        let drop_orders: std::collections::HashSet<usize> =
-            terminal_refs.iter().take(to_drop).map(|(_, o)| *o).collect();
+        let drop_orders: std::collections::HashSet<usize> = terminal_refs
+            .iter()
+            .take(to_drop)
+            .map(|(_, o)| *o)
+            .collect();
         let mut kept: Vec<Group> = Vec::with_capacity(retained.len());
         for g in retained {
             if g.terminal && drop_orders.contains(&g.order) {
@@ -347,8 +350,14 @@ mod tests {
         sweep_fire_jsonl(state_dir, 3650, 2, false, &mut result).unwrap();
 
         let out = fs::read_to_string(&fires).unwrap();
-        assert!(out.contains("s@4") && out.contains("s@3"), "newest kept: {out}");
-        assert!(!out.contains("s@0") && !out.contains("s@1") && !out.contains("s@2"), "oldest dropped: {out}");
+        assert!(
+            out.contains("s@4") && out.contains("s@3"),
+            "newest kept: {out}"
+        );
+        assert!(
+            !out.contains("s@0") && !out.contains("s@1") && !out.contains("s@2"),
+            "oldest dropped: {out}"
+        );
         assert_eq!(result.deleted_fire_records, 3);
     }
 

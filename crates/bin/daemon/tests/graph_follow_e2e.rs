@@ -159,9 +159,9 @@ fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let mut stmt = match conn.prepare(
-        "SELECT thread_id, event_type, payload FROM events ORDER BY chain_seq ASC",
-    ) {
+    let mut stmt = match conn
+        .prepare("SELECT thread_id, event_type, payload FROM events ORDER BY chain_seq ASC")
+    {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -514,7 +514,9 @@ async fn graph_follow_child_failure_routes_parent_on_error() {
         };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
-        body.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()),
+        body.get("result")
+            .and_then(|r| r.get("status"))
+            .and_then(|v| v.as_str()),
         Some("continued"),
         "parent must suspend at the follow node; body={body:#}"
     );
@@ -691,7 +693,9 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
         };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
-        body.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()),
+        body.get("result")
+            .and_then(|r| r.get("status"))
+            .and_then(|v| v.as_str()),
         Some("continued"),
         "parent must suspend at the first follow node; body={body:#}"
     );
@@ -726,11 +730,15 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
 
     // Both children ran their work nodes to completion.
     assert!(
-        threads_that_ran(&events, "worka").into_iter().any(|t| thread_has_event(&events, &t, "thread_completed")),
+        threads_that_ran(&events, "worka")
+            .into_iter()
+            .any(|t| thread_has_event(&events, &t, "thread_completed")),
         "child_a must run `worka` to completion; events={events:#?}"
     );
     assert!(
-        threads_that_ran(&events, "workb").into_iter().any(|t| thread_has_event(&events, &t, "thread_completed")),
+        threads_that_ran(&events, "workb")
+            .into_iter()
+            .any(|t| thread_has_event(&events, &t, "thread_completed")),
         "child_b must run `workb` to completion; events={events:#?}"
     );
 
@@ -745,18 +753,38 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
                 .map(|n| (tid.clone(), n.to_string()))
         })
         .collect();
-    assert_eq!(suspends.len(), 2, "exactly two follow suspends; got {suspends:?}");
-    let fetch1 = suspends.iter().find(|(_, n)| n == "fetch1").expect("a fetch1 suspend");
-    let fetch2 = suspends.iter().find(|(_, n)| n == "fetch2").expect("a fetch2 suspend");
-    assert_eq!(fetch1.0, parent_tid, "fetch1 suspends the original parent thread");
-    assert_ne!(fetch1.0, fetch2.0, "fetch2 suspends a DISTINCT resumed successor thread");
+    assert_eq!(
+        suspends.len(),
+        2,
+        "exactly two follow suspends; got {suspends:?}"
+    );
+    let fetch1 = suspends
+        .iter()
+        .find(|(_, n)| n == "fetch1")
+        .expect("a fetch1 suspend");
+    let fetch2 = suspends
+        .iter()
+        .find(|(_, n)| n == "fetch2")
+        .expect("a fetch2 suspend");
+    assert_eq!(
+        fetch1.0, parent_tid,
+        "fetch1 suspends the original parent thread"
+    );
+    assert_ne!(
+        fetch1.0, fetch2.0,
+        "fetch2 suspends a DISTINCT resumed successor thread"
+    );
 }
 
 // ══ #25 daemon e2e: followed child cost appears in the resumed parent ══════════
 
 /// Plant the mock `chat_completions` provider (the mock returns a fixed
 /// `usage: {prompt_tokens: 10, completion_tokens: 5}` on every call).
-fn plant_mock_provider(root: &Path, mock_base_url: &str, signer: &SigningKey) -> anyhow::Result<()> {
+fn plant_mock_provider(
+    root: &Path,
+    mock_base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
     let dir = root.join(".ai/config/ryeos-runtime/model-providers");
     std::fs::create_dir_all(&dir)?;
     let body = format!(
@@ -888,7 +916,9 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
         };
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     assert_eq!(
-        body.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()),
+        body.get("result")
+            .and_then(|r| r.get("status"))
+            .and_then(|v| v.as_str()),
         Some("continued"),
         "parent must suspend at the follow node; body={body:#}"
     );

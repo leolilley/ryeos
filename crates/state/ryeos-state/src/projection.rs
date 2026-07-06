@@ -327,7 +327,15 @@ fn schema_spec_fingerprint(spec: &sqlite_schema::SchemaSpec) -> u64 {
     let mut indexes: Vec<String> = spec
         .indexes
         .iter()
-        .map(|i| format!("I:{}:{}:{}:{}", i.name, i.table, i.columns.join(","), i.unique))
+        .map(|i| {
+            format!(
+                "I:{}:{}:{}:{}",
+                i.name,
+                i.table,
+                i.columns.join(","),
+                i.unique
+            )
+        })
         .collect();
     indexes.sort();
     parts.extend(tables);
@@ -3061,12 +3069,7 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
                      VALUES (?, ?, ?, ?)
                      ON CONFLICT(thread_id, key)
                      DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    rusqlite::params![
-                        &event.thread_id,
-                        key,
-                        value.as_bytes(),
-                        &event.ts,
-                    ],
+                    rusqlite::params![&event.thread_id, key, value.as_bytes(), &event.ts,],
                 )
                 .context("failed to project thread facet")?;
         }
@@ -3294,9 +3297,19 @@ mod tests {
         };
 
         // Old terminal job (+ attempt), a recent terminal job, and an active job.
-        insert_job("old", "completed", "2026-01-01T00:00:00Z", Some("2026-01-01T00:00:00Z"));
+        insert_job(
+            "old",
+            "completed",
+            "2026-01-01T00:00:00Z",
+            Some("2026-01-01T00:00:00Z"),
+        );
         insert_attempt("old-a", "old", "2026-01-01T00:00:00Z");
-        insert_job("recent", "failed", "2026-06-30T00:00:00Z", Some("2026-06-30T00:00:00Z"));
+        insert_job(
+            "recent",
+            "failed",
+            "2026-06-30T00:00:00Z",
+            Some("2026-06-30T00:00:00Z"),
+        );
         insert_job("active", "running", "2026-01-01T00:00:00Z", None);
 
         let (jobs, attempts) = db

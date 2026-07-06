@@ -57,8 +57,7 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
     .expect("load live core + standard kind schemas");
     let kind_profiles = Arc::new(KindProfileRegistry::build(Some(&kinds)));
 
-    let identity =
-        NodeIdentity::create(&tmp.path().join("identity").join("node-key.pem")).unwrap();
+    let identity = NodeIdentity::create(&tmp.path().join("identity").join("node-key.pem")).unwrap();
     let signer = Arc::new(NodeIdentitySigner::from_identity(&identity));
     let state_store = Arc::new(
         StateStore::new(
@@ -158,8 +157,7 @@ fn thread_list_reflects_real_kind_continuation_authority() {
     let fact = |id: &str, key: &str| {
         rows.iter()
             .find(|r| r["thread_id"] == id)
-            .unwrap_or_else(|| panic!("row {id} missing from list: {listing:#?}"))["execution"]
-            [key]
+            .unwrap_or_else(|| panic!("row {id} missing from list: {listing:#?}"))["execution"][key]
             .clone()
     };
 

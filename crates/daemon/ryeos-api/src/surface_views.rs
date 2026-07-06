@@ -65,10 +65,7 @@ pub fn embed_views_with(
 
     // `views` is never authored inline; anything non-object there is
     // malformed. Reset it so per-ref insertion below cannot panic.
-    if composed_value
-        .get("views")
-        .is_some_and(|v| !v.is_object())
-    {
+    if composed_value.get("views").is_some_and(|v| !v.is_object()) {
         composed_value["views"] = Value::Object(serde_json::Map::new());
     }
 
@@ -96,8 +93,8 @@ pub fn embed_surface_views(
     composed_value: &mut Value,
 ) -> Vec<(String, String)> {
     embed_views_with(composed_value, |view_ref| {
-        let item_ref = CanonicalRef::parse(view_ref)
-            .map_err(|e| format!("invalid view ref: {e}"))?;
+        let item_ref =
+            CanonicalRef::parse(view_ref).map_err(|e| format!("invalid view ref: {e}"))?;
         engine
             .effective_item(EffectiveItemRequest {
                 item_ref,

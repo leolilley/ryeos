@@ -41,7 +41,10 @@ fn create_running_directive(state: &AppState, thread_id: &str, requested_by: &st
         usage_subject: None,
         usage_subject_asserted_by: None,
     };
-    state.state_store.create_thread(&rec).expect("create thread");
+    state
+        .state_store
+        .create_thread(&rec)
+        .expect("create thread");
     state
         .state_store
         .mark_thread_running(thread_id, None)
@@ -130,7 +133,10 @@ async fn live_input_persists_into_running_thread_then_finalize_closes_the_queue(
 
     // 2. The runtime polls: the input is persisted as a durable cognition_in.
     assert!(poll_and_persist(&state, tid), "running → persisted");
-    assert_eq!(cognition_in_contents(&state, tid), vec!["steer me".to_string()]);
+    assert_eq!(
+        cognition_in_contents(&state, tid),
+        vec!["steer me".to_string()]
+    );
 
     // 3. Finalize (any terminal status) closes the queue.
     let params: ThreadFinalizeParams =
@@ -152,7 +158,10 @@ async fn live_input_persists_into_running_thread_then_finalize_closes_the_queue(
         .threads
         .append_thread_events(tid, tid, &cognition_in_batch("late"))
         .expect("append after terminal");
-    assert!(after.is_none(), "terminal thread → running-guard rejects append");
+    assert!(
+        after.is_none(),
+        "terminal thread → running-guard rejects append"
+    );
     assert_eq!(
         cognition_in_contents(&state, tid),
         vec!["steer me".to_string()],
@@ -187,7 +196,10 @@ async fn poll_before_terminal_persists_but_after_terminal_discards() {
 
     // The queued inputs were cleared at close; a poll now yields nothing and
     // nothing is persisted.
-    assert!(!poll_and_persist(&state, tid), "closed queue → nothing to persist");
+    assert!(
+        !poll_and_persist(&state, tid),
+        "closed queue → nothing to persist"
+    );
     assert!(
         cognition_in_contents(&state, tid).is_empty(),
         "no cognition_in persisted for a thread that finalized before its inputs were polled"
