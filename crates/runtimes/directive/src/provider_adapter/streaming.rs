@@ -981,6 +981,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
     let mut accumulated_text = String::new();
     let mut accumulated_reasoning = String::new();
     let mut accumulated_tools: Vec<ToolCall> = Vec::new();
+    let mut accumulated_tool_arg_lens: HashMap<String, usize> = HashMap::new();
     let mut last_usage: Option<TokenUsage> = None;
     let mut last_finish: Option<String> = None;
     // Per-stream tool-call accumulator keyed by index; survives
@@ -1143,6 +1144,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                         arguments,
                         malformed_args,
                     } => {
+                        accumulated_tool_arg_lens
+                            .insert(tool_arg_len_key(id, name), arguments.to_string().len());
                         accumulated_tools.push(ToolCall {
                             id: id.clone(),
                             name: name.clone(),
@@ -1171,6 +1174,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                         delta,
                         total_len,
                     } => {
+                        accumulated_tool_arg_lens.insert(tool_arg_len_key(id, name), *total_len);
                         callback
                             .append_event(
                                 "cognition_out",
@@ -1202,6 +1206,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                 }
                 all_events.push(ev);
             }
+            enforce_per_turn_output_cap(
+                execution.max_output_tokens_per_turn,
+                accumulated_text.len(),
+                accumulated_reasoning.len(),
+                accumulated_tool_arg_lens.values().copied().sum(),
+                last_usage.as_ref(),
+                persisted_out_events,
+            )?;
         }
     }
 
@@ -1239,6 +1251,8 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                     arguments,
                     malformed_args,
                 } => {
+                    accumulated_tool_arg_lens
+                        .insert(tool_arg_len_key(id, name), arguments.to_string().len());
                     accumulated_tools.push(ToolCall {
                         id: id.clone(),
                         name: name.clone(),
@@ -1266,6 +1280,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                     delta,
                     total_len,
                 } => {
+                    accumulated_tool_arg_lens.insert(tool_arg_len_key(id, name), *total_len);
                     callback
                         .append_event(
                             "cognition_out",
@@ -1296,6 +1311,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             }
             all_events.push(ev);
         }
+        enforce_per_turn_output_cap(
+            execution.max_output_tokens_per_turn,
+            accumulated_text.len(),
+            accumulated_reasoning.len(),
+            accumulated_tool_arg_lens.values().copied().sum(),
+            last_usage.as_ref(),
+            persisted_out_events,
+        )?;
     }
 
     let content = if accumulated_text.is_empty() {
@@ -1346,6 +1369,40 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         },
         events: all_events,
     })
+}
+
+fn tool_arg_len_key(id: &Option<String>, name: &str) -> String {
+    id.as_deref().unwrap_or(name).to_string()
+}
+
+fn enforce_per_turn_output_cap(
+    cap_tokens: u64,
+    text_bytes: usize,
+    reasoning_bytes: usize,
+    tool_arg_bytes: usize,
+    last_usage: Option<&TokenUsage>,
+    persisted_out_events: usize,
+) -> Result<()> {
+    if cap_tokens == 0 {
+        return Ok(());
+    }
+
+    let output_bytes = text_bytes
+        .saturating_add(reasoning_bytes)
+        .saturating_add(tool_arg_bytes);
+    let estimated_tokens = (output_bytes as u64).div_ceil(4);
+    let usage_tokens = last_usage.map(|usage| usage.output_tokens).unwrap_or(0);
+    let observed_tokens = estimated_tokens.max(usage_tokens);
+
+    if observed_tokens >= cap_tokens {
+        return Err(anyhow!(
+            "per-turn output cap exceeded: observed {observed_tokens} tokens >= cap {cap_tokens} \
+             ({output_bytes} bytes accumulated, provider_usage_output_tokens={usage_tokens}, \
+             persisted_out_events={persisted_out_events}); likely model degeneration — failing turn without retry"
+        ));
+    }
+
+    Ok(())
 }
 
 /// Pull provider-side metadata (usage totals, finish_reason) out of a
@@ -1622,6 +1679,30 @@ fn inject_system_prompt(body: &mut Value, system: &str, provider: &ProviderConfi
 mod tests {
     use super::*;
     use ryeos_tracing::test as trace_test;
+
+    #[test]
+    fn per_turn_output_cap_allows_disabled_and_under_cap() {
+        enforce_per_turn_output_cap(0, 1_000_000, 0, 0, None, 0).unwrap();
+        enforce_per_turn_output_cap(10, 20, 4, 12, None, 3).unwrap();
+    }
+
+    #[test]
+    fn per_turn_output_cap_trips_on_estimated_bytes() {
+        let err = enforce_per_turn_output_cap(10, 40, 0, 0, None, 2).unwrap_err();
+        assert!(err.to_string().contains("per-turn output cap exceeded"));
+        assert!(err.downcast_ref::<ProviderStreamError>().is_none());
+    }
+
+    #[test]
+    fn per_turn_output_cap_trips_on_provider_usage() {
+        let usage = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 10,
+        };
+        let err = enforce_per_turn_output_cap(10, 0, 0, 0, Some(&usage), 0).unwrap_err();
+        assert!(err.to_string().contains("provider_usage_output_tokens=10"));
+        assert!(err.downcast_ref::<ProviderStreamError>().is_none());
+    }
 
     #[test]
     fn sse_event_typed_anthropic() {

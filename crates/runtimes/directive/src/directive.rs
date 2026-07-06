@@ -297,6 +297,12 @@ pub struct ExecutionConfig {
     pub backoff_base_ms: u64,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// Runtime-side backstop for a single model turn's generated output. This
+    /// is independent of provider `max_tokens` request fields, which are
+    /// template/provider dependent and may be absent or ignored. `0` disables
+    /// the backstop.
+    #[serde(default = "default_max_output_tokens_per_turn")]
+    pub max_output_tokens_per_turn: u64,
     #[serde(default)]
     pub tool_preload: bool,
     #[serde(default)]
@@ -329,6 +335,10 @@ fn default_timeout() -> u64 {
     300
 }
 
+fn default_max_output_tokens_per_turn() -> u64 {
+    32_768
+}
+
 fn default_retry_mid_stream() -> bool {
     true
 }
@@ -342,6 +352,7 @@ impl Default for ExecutionConfig {
             never_retry: vec![],
             backoff_base_ms: default_backoff_base_ms(),
             timeout_seconds: default_timeout(),
+            max_output_tokens_per_turn: default_max_output_tokens_per_turn(),
             tool_preload: false,
             retry_on_timeout: false,
             retry_mid_stream: default_retry_mid_stream(),
@@ -540,7 +551,10 @@ mod tests {
         // message rather than injecting an empty stimulus.
         let blank: DirectiveHeader = serde_yaml::from_str("return_nudge: \"  \"").unwrap();
         assert!(blank.return_nudge.enabled());
-        assert!(blank.return_nudge.message(&outs).contains("directive_return"));
+        assert!(blank
+            .return_nudge
+            .message(&outs)
+            .contains("directive_return"));
     }
 
     // A config that omits the retry knobs must inherit the same sane values
@@ -565,6 +579,11 @@ mod tests {
             cfg.retry_mid_stream,
             "omitted retry_mid_stream defaults ON — a dropped stream is transient"
         );
+        assert_eq!(
+            cfg.max_output_tokens_per_turn,
+            default_max_output_tokens_per_turn(),
+            "omitted per-turn output cap defaults to the runtime backstop, not 0"
+        );
     }
 
     #[test]
@@ -574,6 +593,10 @@ mod tests {
         assert_eq!(parsed.retries, default.retries);
         assert_eq!(parsed.retry_status_codes, default.retry_status_codes);
         assert_eq!(parsed.backoff_base_ms, default.backoff_base_ms);
+        assert_eq!(
+            parsed.max_output_tokens_per_turn,
+            default.max_output_tokens_per_turn
+        );
         assert_eq!(parsed.retry_mid_stream, default.retry_mid_stream);
         assert_eq!(parsed.retries, 2);
     }

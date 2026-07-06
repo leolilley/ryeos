@@ -264,10 +264,15 @@ fn normalize_hook_dispatch_result(
     let is_native_runtime_envelope = obj.contains_key("success")
         && obj.contains_key("status")
         && obj.contains_key("result")
-        && (obj.contains_key("outputs") || obj.contains_key("warnings") || obj.contains_key("cost"));
+        && (obj.contains_key("outputs")
+            || obj.contains_key("warnings")
+            || obj.contains_key("cost"));
     if is_native_runtime_envelope {
         let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        let status = obj.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let status = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         if !success || status != "completed" {
             let message = obj
                 .get("error")
@@ -461,7 +466,10 @@ impl Runner {
                 reasoning_content: None,
             });
         }
-        tracing::info!(folded = inputs.len(), "folded operator inputs as cognition_in");
+        tracing::info!(
+            folded = inputs.len(),
+            "folded operator inputs as cognition_in"
+        );
         Ok(true)
     }
 
@@ -1120,6 +1128,7 @@ impl Runner {
                         content: String,
                         raw_size: u64,
                         result_guard_truncated: bool,
+                        duplicate_of: Option<String>,
                         truncated_reason_override: Option<&'static str>,
                     }
 
@@ -1177,6 +1186,7 @@ impl Runner {
                                     raw_size: body_str.len() as u64,
                                     content: body_str,
                                     result_guard_truncated: false,
+                                    duplicate_of: None,
                                     truncated_reason_override: Some("error_envelope"),
                                 }
                             } else {
@@ -1217,31 +1227,31 @@ impl Runner {
                                                 Vec::new()
                                             });
                                         let raw_size = raw_bytes.len() as u64;
-                                        let processed_bytes =
-                                            self.result_guard.process_bytes(&raw_bytes);
-                                        let result_guard_truncated =
-                                            processed_bytes.len() != raw_bytes.len();
+                                        let guarded = self.result_guard.process_bytes(&raw_bytes);
                                         let content =
-                                            String::from_utf8_lossy(&processed_bytes).to_string();
+                                            String::from_utf8_lossy(&guarded.bytes).to_string();
                                         ToolResult {
                                             tool: tool_name.clone(),
                                             content,
                                             raw_size,
-                                            result_guard_truncated,
+                                            result_guard_truncated: guarded.truncated,
+                                            duplicate_of: guarded.duplicate_of,
                                             truncated_reason_override: None,
                                         }
                                     }
                                     Err(e) => {
-                                        let body_str =
-                                            serde_json::to_string(&json!({"error": format!("{e:#}")}))
-                                                .unwrap_or_else(|_| {
-                                                    "{\"error\":\"dispatch failed\"}".to_string()
-                                                });
+                                        let body_str = serde_json::to_string(
+                                            &json!({"error": format!("{e:#}")}),
+                                        )
+                                        .unwrap_or_else(|_| {
+                                            "{\"error\":\"dispatch failed\"}".to_string()
+                                        });
                                         ToolResult {
                                             tool: tool_name.clone(),
                                             raw_size: body_str.len() as u64,
                                             content: body_str,
                                             result_guard_truncated: false,
+                                            duplicate_of: None,
                                             truncated_reason_override: Some("error_envelope"),
                                         }
                                     }
@@ -1256,6 +1266,7 @@ impl Runner {
                                 raw_size: body_str.len() as u64,
                                 content: body_str,
                                 result_guard_truncated: false,
+                                duplicate_of: None,
                                 truncated_reason_override: Some("error_envelope"),
                             }
                         }
@@ -1293,6 +1304,7 @@ impl Runner {
                             truncated,
                             truncated_reason,
                             tool_result.raw_size,
+                            tool_result.duplicate_of.as_deref(),
                         )
                         .await
                     {
@@ -1382,6 +1394,7 @@ impl Runner {
                                         false,
                                         None,
                                         outputs_size,
+                                        None,
                                     )
                                     .await
                                 {
@@ -1445,6 +1458,7 @@ impl Runner {
                             false,
                             Some("error_envelope"),
                             failure_size,
+                            None,
                         )
                         .await
                     {
@@ -2149,7 +2163,10 @@ mod tests {
         assert_eq!(context["event"]["usage"]["input_tokens"], 10);
         assert_eq!(context["event"]["usage"]["output_tokens"], 5);
         assert_eq!(context["event"]["budget_remaining"]["spend_usd"], 0.75);
-        assert_eq!(context["event"]["budget_remaining"]["spend_unlimited"], false);
+        assert_eq!(
+            context["event"]["budget_remaining"]["spend_unlimited"],
+            false
+        );
         assert_eq!(context["event"]["declared_outputs"], json!([]));
     }
 
@@ -2463,8 +2480,14 @@ mod tests {
         use std::time::Duration;
         let cfg = retry_cfg();
         let e = status_err(429);
-        assert_eq!(retry_backoff(&e, 0, &cfg), Some(Duration::from_millis(1000)));
-        assert_eq!(retry_backoff(&e, 1, &cfg), Some(Duration::from_millis(2000)));
+        assert_eq!(
+            retry_backoff(&e, 0, &cfg),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            retry_backoff(&e, 1, &cfg),
+            Some(Duration::from_millis(2000))
+        );
         // Retry budget spent once attempt reaches `retries`.
         assert_eq!(retry_backoff(&e, 2, &cfg), None);
     }
