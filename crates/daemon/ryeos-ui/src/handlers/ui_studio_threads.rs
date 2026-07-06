@@ -36,6 +36,19 @@ fn string_filter(params: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn string_list_filter(params: &Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
@@ -71,11 +84,24 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         active_only: params.get("active").and_then(|v| v.as_bool()).unwrap_or(false),
     };
 
+    let exclude_item_prefixes = string_list_filter(&params, "exclude_item_prefixes");
+    let query_limit = if exclude_item_prefixes.is_empty() {
+        limit
+    } else {
+        MAX_THREAD_LIST_LIMIT
+    };
+
     // Route through the lifecycle layer so each row carries daemon-authored
     // execution facts (`execution.supports_continuation`) the studio gates on.
-    let threads = state
-        .threads
-        .list_thread_views_query(limit, &filter, sort)?;
+    let mut threads = state.threads.list_thread_views_query(query_limit, &filter, sort)?;
+    if !exclude_item_prefixes.is_empty() {
+        threads.retain(|row| {
+            !exclude_item_prefixes
+                .iter()
+                .any(|prefix| row.item.item_ref.starts_with(prefix))
+        });
+        threads.truncate(limit);
+    }
 
     Ok(serde_json::json!({
         "threads": threads,

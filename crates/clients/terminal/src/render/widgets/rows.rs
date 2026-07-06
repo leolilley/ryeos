@@ -2,7 +2,7 @@
 //! full-width selection.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioRowVm};
+use ryeos_client_base::studio::view_model::{StudioRowDetailVm, StudioRowVm, StudioTone};
 use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::primitives::fill_line;
@@ -41,6 +41,7 @@ pub fn draw_rows(
         } else {
             style_fg()
         };
+        style = active_pulse_style(style, row.tone, now_ms);
         style = shimmer_style(style, row.changed_at_ms, now_ms);
         fill_line(surface, rect.x as usize, y, width, style);
         let glyph_style = if row.selected {
@@ -100,6 +101,20 @@ fn shimmer_style(style: Style, changed_at_ms: Option<u64>, now_ms: u64) -> Style
     }
     let weight = 0.35 * (1.0 - age as f32 / 1_200.0);
     style.fg(mix_toward(style.fg, ACCENT, weight))
+}
+
+fn active_pulse_style(style: Style, tone: StudioTone, now_ms: u64) -> Style {
+    if tone != StudioTone::Accent {
+        return style;
+    }
+    let phase = (now_ms / 180) % 8;
+    let wave = match phase {
+        0 | 7 => 0.08,
+        1 | 6 => 0.14,
+        2 | 5 => 0.20,
+        _ => 0.26,
+    };
+    style.fg(mix_toward(style.fg, ACCENT, wave))
 }
 
 fn draw_detail(surface: &mut TextSurface, left: usize, y: usize, width: usize, detail: &StudioRowDetailVm) {

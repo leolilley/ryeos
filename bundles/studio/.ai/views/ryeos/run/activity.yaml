@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T05:31:39Z:df23b909b2316c81924f2223967a7fa541e6afebb0879b9609f7a8162a477d88:4eYwMPDgbwm6JPARDuQDXg825fzOnGjiSbiyl6TmJgTvHw1p+4d2LZT6Y2TP86UIecgt0Fxgw8JweKvRyWBkAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T06:29:41Z:9b59f1709186d7c3fd16ea2566606c8f09e05a6a0bbf682b3fd966e3f937c3c3:0b9Wp33xe/zcfV2PpAMS5bqn+ni+SUzaL2xMk4jZzLFakux4/WW58P/GoJztjgRQ/mu3n14GN49WbcXeJtV/Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: run-activity
 version: "1.0.0"
 description: >-
@@ -16,9 +16,14 @@ source:
     active: true
     sort: newest
     limit: 60
+    exclude_item_prefixes:
+      - service:ui/studio/
+      - surface:ryeos/studio/
   collection: threads
 projections:
   columns:
+    - label: id
+      field: thread_id
     - label: item
       field: item_ref
     - label: stage
