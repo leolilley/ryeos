@@ -245,9 +245,9 @@ pub enum StudioUiEvent {
         section: usize,
         collapsed: bool,
     },
-    /// Expand/collapse the selected row in the focused rows/table lens. The
-    /// reducer resolves the selected record to a stable row key; keymaps never
-    /// carry row identity.
+    /// Expand/collapse the selected row or timeline entry in the focused lens.
+    /// The reducer resolves the selected record/event to a stable key; keymaps
+    /// never carry row identity.
     ExpandSelectedRow {
         expand: bool,
     },

@@ -52,7 +52,7 @@ pub async fn run(
     // The braid is the truth; this is it arriving now. Retargets abort
     // the old tail and open a new one.
     let (tail_tx, mut tail_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
-    let mut tail_thread: Option<String> = None;
+    let mut tail_chain: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let start_effects = core.dispatch(StudioEvent::Start {
@@ -140,21 +140,26 @@ pub async fn run(
             tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
         }
 
-        // Reconcile the SSE tail with the route facet.
-        let desired = core.seat.fold().input_route().thread;
-        if desired != tail_thread {
+        // Reconcile the SSE tail with the route facet. The timeline source is
+        // scoped by `input.route.chain_root`, so tail the same braid live; keep
+        // the moving route head separately as the live-buffer owner.
+        let route = core.seat.fold().input_route();
+        let desired_chain = route.chain_root.clone().or_else(|| route.thread.clone());
+        let desired_thread = route.thread.clone().or_else(|| desired_chain.clone());
+        if desired_chain != tail_chain {
             if let Some(task) = tail_task.take() {
                 task.abort();
             }
-            tail_thread = desired.clone();
-            if let Some(thread_id) = desired {
+            tail_chain = desired_chain.clone();
+            if let Some(chain_root_id) = desired_chain {
                 tail_task = Some(hints::spawn_thread_tail(
                     client.clone(),
-                    thread_id,
+                    chain_root_id,
                     tail_tx.clone(),
                 ));
             }
         }
+        let tail_thread = desired_thread;
 
         tokio::select! {
             maybe_event = events.next() => {

@@ -5,7 +5,9 @@
 //! into history when the point walks back off the tail.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioTimelineEntryVm, StudioTone};
+use ryeos_client_base::studio::view_model::{
+    StudioRowDetailVm, StudioTimelineEntryVm, StudioTone,
+};
 use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::super::primitives::fill_line;
@@ -56,6 +58,9 @@ pub fn draw_timeline(
     entries: &[StudioTimelineEntryVm],
     entry_indents: &[u8],
     selected: Option<usize>,
+    entry_expandable: &[bool],
+    entry_expanded: &[bool],
+    entry_details: &[Vec<StudioRowDetailVm>],
 ) {
     let width = rect.w as usize;
     let height = rect.h as usize;
@@ -63,7 +68,15 @@ pub fn draw_timeline(
         return;
     }
     let mut lines = Vec::new();
-    push_timeline_lines(&mut lines, entries, entry_indents, width);
+    push_timeline_lines(
+        &mut lines,
+        entries,
+        entry_indents,
+        width,
+        entry_expandable,
+        entry_expanded,
+        entry_details,
+    );
 
     let visible = lines.len().min(height);
     // Default bottom-anchored (the tail). If the point sits above the
@@ -105,6 +118,9 @@ fn push_timeline_lines(
     entries: &[StudioTimelineEntryVm],
     entry_indents: &[u8],
     width: usize,
+    entry_expandable: &[bool],
+    entry_expanded: &[bool],
+    entry_details: &[Vec<StudioRowDetailVm>],
 ) {
     if entries.is_empty() {
         lines.push(FeedLine::plain(
@@ -119,12 +135,15 @@ fn push_timeline_lines(
         // nest one level under the node. Prefix every line this entry emits with
         // two spaces per level, so the braid reads as a call tree. Panic-safe: a
         // missing/short indent vector degrades to depth 0 (flat).
+        let depth = entry_indents.get(index).copied().unwrap_or(0) as usize;
+        let indent_cols = (depth * 2).min(width.saturating_sub(1));
+        let entry_width = width.saturating_sub(indent_cols).max(1);
         let first_line = lines.len();
         match entry {
             StudioTimelineEntryVm::Block { text, tone } => {
                 // The braid stores the raw cognition prose; the lens typesets
                 // it (block-level markdown). Inline spans are a later pass.
-                push_markdown_block(lines, text, *tone, width, index);
+                push_markdown_block(lines, text, *tone, entry_width, index);
                 // Padding between blocks — not part of the entry's point.
                 lines.push(FeedLine::plain(String::new(), style_fg(), None));
             }
@@ -135,7 +154,7 @@ fn push_timeline_lines(
                 ..
             } => {
                 lines.push(FeedLine::plain(
-                    join_with_right_meta(tone_glyph(*tone), primary, meta.as_deref(), width),
+                    join_with_right_meta(tone_glyph(*tone), primary, meta.as_deref(), entry_width),
                     tone_style(*tone),
                     Some(index),
                 ));
@@ -159,14 +178,14 @@ fn push_timeline_lines(
                     tone_style(*tone)
                 };
                 lines.push(FeedLine::plain(
-                    join_with_right_meta(glyph, summary, meta.as_deref(), width),
+                    join_with_right_meta(glyph, summary, meta.as_deref(), entry_width),
                     style,
                     Some(index),
                 ));
             }
             StudioTimelineEntryVm::Separator { label } => {
                 let label = format!(" {label} ");
-                let rule_len = width.saturating_sub(display_width(&label));
+                let rule_len = entry_width.saturating_sub(display_width(&label));
                 let left = rule_len / 2;
                 let right = rule_len.saturating_sub(left);
                 lines.push(FeedLine::plain(
@@ -180,10 +199,37 @@ fn push_timeline_lines(
         // columns per level), applied as a draw-time x-offset rather than baked
         // into the text — so a per-keystroke re-render never re-allocates the
         // line strings. Panic-safe: a missing indent degrades to flat (depth 0).
-        let depth = entry_indents.get(index).copied().unwrap_or(0) as usize;
-        if depth > 0 {
+        if indent_cols > 0 {
             for line in &mut lines[first_line..] {
-                line.indent = depth * 2;
+                line.indent = indent_cols;
+            }
+        }
+        if entry_expandable.get(index).copied().unwrap_or(false)
+            && entry_expanded.get(index).copied().unwrap_or(false)
+        {
+            for detail in entry_details.get(index).into_iter().flatten() {
+                let label = if detail.field.is_empty() {
+                    "detail".to_string()
+                } else {
+                    detail.field.clone()
+                };
+                let detail_indent = (indent_cols + 2).min(width.saturating_sub(1));
+                let detail_width = width.saturating_sub(detail_indent).max(1);
+                let body = format!("{label}: {}", detail.value);
+                for (i, wrapped) in wrap_words(&body, detail_width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let prefix = if i == 0 { "↳ " } else { "  " };
+                    lines.push(FeedLine::plain(
+                        format!("{prefix}{wrapped}"),
+                        style_muted(),
+                        Some(index),
+                    ));
+                    if let Some(line) = lines.last_mut() {
+                        line.indent = detail_indent;
+                    }
+                }
             }
         }
     }
@@ -473,7 +519,7 @@ mod tests {
             w: 20,
             h: 4,
         };
-        draw_timeline(&mut surface, rect, &entries, &[], None);
+        draw_timeline(&mut surface, rect, &entries, &[], None, &[], &[], &[]);
         // The bottom row shows the newest entry — the feed tails.
         assert!(
             row_text(&surface, 20, 3).contains("entry 9"),
@@ -493,7 +539,7 @@ mod tests {
             h: 4,
         };
         // Point on the oldest entry — far above the tail; the feed scrolls up.
-        draw_timeline(&mut surface, rect, &entries, &[], Some(0));
+        draw_timeline(&mut surface, rect, &entries, &[], Some(0), &[], &[], &[]);
         assert!(
             row_text(&surface, 20, 0).contains("entry 0"),
             "scrolled to reveal the selected oldest entry: {:?}",

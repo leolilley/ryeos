@@ -201,10 +201,22 @@ fn draw_view(surface: &mut TextSurface, rect: Rect, view: &StudioViewVm, now_ms:
         entries,
         entry_indents,
         selected,
+        entry_expandable,
+        entry_expanded,
+        entry_details,
         ..
     } = view
     {
-        widgets::timeline::draw_timeline(surface, rect, entries, entry_indents, *selected);
+        widgets::timeline::draw_timeline(
+            surface,
+            rect,
+            entries,
+            entry_indents,
+            *selected,
+            entry_expandable,
+            entry_expanded,
+            entry_details,
+        );
         return;
     }
     if let StudioViewVm::Rows { columns, rows, .. } = view {

@@ -27,6 +27,17 @@ use super::event::StudioAction;
 use super::model::StudioCore;
 use super::view_model::{tone_from_name, StudioTone};
 
+/// Detail source for one rendered timeline entry. Kept parallel to
+/// `StudioTimelineEntryVm`/indents so the view-model layer can apply a
+/// content-declared `projections.expand.fields` block without teaching the
+/// timeline entry enum about row expansion. `None` means the rendered entry is
+/// structural or coalesced prose with no single source event to expand.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TimelineEntrySource {
+    pub key: String,
+    pub raw: Value,
+}
+
 /// Accumulated live cognition text for one head thread, shown as a
 /// trailing in-progress block until the durable snapshot catches up.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -97,6 +108,8 @@ pub(crate) struct FoldedTimeline {
     pub sections: Vec<usize>,
     /// Call-tree indent depth per *visible* entry (parallel to `entries`).
     pub indents: Vec<u8>,
+    /// Detail sources per *visible* entry (parallel to `entries`).
+    pub sources: Vec<Option<TimelineEntrySource>>,
     /// Sections that *can* be folded — those headed by a real `Separator`.
     pub collapsible: std::collections::BTreeSet<usize>,
 }
@@ -109,6 +122,7 @@ pub(crate) struct FoldedTimeline {
 pub(crate) fn fold_timeline(
     full: Vec<StudioTimelineEntryVm>,
     full_indents: Vec<u8>,
+    full_sources: Vec<Option<TimelineEntrySource>>,
     collapsed: &std::collections::BTreeSet<usize>,
 ) -> FoldedTimeline {
     let section_of = timeline_sections(&full);
@@ -124,6 +138,7 @@ pub(crate) fn fold_timeline(
     let mut entries = Vec::new();
     let mut sections = Vec::new();
     let mut indents = Vec::new();
+    let mut sources = Vec::new();
     for (i, entry) in full.into_iter().enumerate() {
         let sec = section_of[i];
         let folded = collapsed.contains(&sec) && collapsible.contains(&sec);
@@ -143,11 +158,13 @@ pub(crate) fn fold_timeline(
         entries.push(entry);
         sections.push(sec);
         indents.push(full_indents.get(i).copied().unwrap_or(0));
+        sources.push(full_sources.get(i).cloned().unwrap_or(None));
     }
     FoldedTimeline {
         entries,
         sections,
         indents,
+        sources,
         collapsible,
     }
 }
@@ -171,9 +188,14 @@ pub(crate) fn timeline_entries(records: Vec<ProjectedRecord>) -> Vec<StudioTimel
 /// tool calls and cognition never nest each other.
 pub(crate) fn timeline_entries_indented(
     records: Vec<ProjectedRecord>,
-) -> (Vec<StudioTimelineEntryVm>, Vec<u8>) {
+) -> (
+    Vec<StudioTimelineEntryVm>,
+    Vec<u8>,
+    Vec<Option<TimelineEntrySource>>,
+) {
     let mut entries = Vec::new();
     let mut indents: Vec<u8> = Vec::new();
+    let mut sources: Vec<Option<TimelineEntrySource>> = Vec::new();
     let mut depth: u8 = 0;
     let mut pending_flow: Option<(String, StudioTone)> = None;
     let mut pending_pairs = std::collections::BTreeMap::<String, usize>::new();
@@ -215,8 +237,8 @@ pub(crate) fn timeline_entries_indented(
             // Execution milestones (lifecycle, usage, forks) read as an
             // execution, not as bare default-projection lines.
             if let Some(entry) = execution_entry(&record, &stimulus) {
-                flush_flow(&mut pending_flow, &mut entries);
-                entries.push(entry);
+                flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                push_entry(&mut entries, &mut sources, entry, Some(&record));
                 break 'record;
             }
             // Paired runtime exchanges (graph steps, tool calls) have multiple
@@ -227,8 +249,14 @@ pub(crate) fn timeline_entries_indented(
             // payload fields directly and pair start with settle so the tail
             // remains useful regardless of producer.
             if let Some(kind) = paired_runtime_kind(&record) {
-                flush_flow(&mut pending_flow, &mut entries);
-                apply_paired_runtime_entry(kind, record, &mut entries, &mut pending_pairs);
+                flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                apply_paired_runtime_entry(
+                    kind,
+                    record,
+                    &mut entries,
+                    &mut sources,
+                    &mut pending_pairs,
+                );
                 break 'record;
             }
             // `cognition_in` arrives in two shapes: the run-opening *stimulus*
@@ -246,14 +274,19 @@ pub(crate) fn timeline_entries_indented(
                     .map(str::trim)
                     .filter(|content| !content.is_empty())
                 {
-                    flush_flow(&mut pending_flow, &mut entries);
-                    entries.push(StudioTimelineEntryVm::Line {
-                        primary: content.to_string(),
-                        meta: None,
-                        tone: StudioTone::Accent,
-                        action: None,
-                        secondary_action: None,
-                    });
+                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                    push_entry(
+                        &mut entries,
+                        &mut sources,
+                        StudioTimelineEntryVm::Line {
+                            primary: content.to_string(),
+                            meta: None,
+                            tone: StudioTone::Accent,
+                            action: None,
+                            secondary_action: None,
+                        },
+                        Some(&record),
+                    );
                     break 'record;
                 }
             }
@@ -263,16 +296,26 @@ pub(crate) fn timeline_entries_indented(
             // `cognition_in` folds in. Read from the raw event because `cognition_out`
             // is projected by role, not a FeedEventType.
             if is_interrupted_cognition_out(&record) {
-                flush_flow(&mut pending_flow, &mut entries);
+                flush_flow(&mut pending_flow, &mut entries, &mut sources);
                 if !record.primary.trim().is_empty() {
-                    entries.push(StudioTimelineEntryVm::Block {
-                        text: record.primary.clone(),
-                        tone: tone_from_name(record.tone.as_deref()),
-                    });
+                    push_entry(
+                        &mut entries,
+                        &mut sources,
+                        StudioTimelineEntryVm::Block {
+                            text: record.primary.clone(),
+                            tone: tone_from_name(record.tone.as_deref()),
+                        },
+                        Some(&record),
+                    );
                 }
-                entries.push(StudioTimelineEntryVm::Separator {
-                    label: "interrupted".to_string(),
-                });
+                push_entry(
+                    &mut entries,
+                    &mut sources,
+                    StudioTimelineEntryVm::Separator {
+                        label: "interrupted".to_string(),
+                    },
+                    Some(&record),
+                );
                 break 'record;
             }
             match record.role {
@@ -291,27 +334,41 @@ pub(crate) fn timeline_entries_indented(
                     }
                 }
                 TimelineRole::Boundary => {
-                    flush_flow(&mut pending_flow, &mut entries);
-                    entries.push(StudioTimelineEntryVm::Separator {
-                        label: record.primary,
-                    });
+                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                    push_entry(
+                        &mut entries,
+                        &mut sources,
+                        StudioTimelineEntryVm::Separator {
+                            label: record.primary.clone(),
+                        },
+                        Some(&record),
+                    );
                 }
                 TimelineRole::PairOpen => {
-                    flush_flow(&mut pending_flow, &mut entries);
-                    let key = record.pair_key.unwrap_or_default();
+                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                    let key = record.pair_key.clone().unwrap_or_default();
                     let index = entries.len();
-                    entries.push(StudioTimelineEntryVm::Pair {
-                        summary: record.primary,
-                        meta: record.meta,
-                        tone: tone_from_name(record.tone.as_deref()),
-                        pending: true,
-                    });
+                    push_entry(
+                        &mut entries,
+                        &mut sources,
+                        StudioTimelineEntryVm::Pair {
+                            summary: record.primary.clone(),
+                            meta: record.meta.clone(),
+                            tone: tone_from_name(record.tone.as_deref()),
+                            pending: true,
+                        },
+                        Some(&record),
+                    );
+                    if let Some(source) = sources.get_mut(index) {
+                        *source = Some(entry_source_with_key(&record, format!("pair:{key}")));
+                    }
                     pending_pairs.insert(key, index);
                 }
                 TimelineRole::PairClose => {
-                    flush_flow(&mut pending_flow, &mut entries);
+                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
                     let Some(key) = record.pair_key.as_deref() else {
-                        entries.push(line_entry(record));
+                        let entry = line_entry(record.clone());
+                        push_entry(&mut entries, &mut sources, entry, Some(&record));
                         break 'record;
                     };
                     if let Some(index) = pending_pairs.remove(key) {
@@ -322,25 +379,31 @@ pub(crate) fn timeline_entries_indented(
                             ..
                         }) = entries.get_mut(index)
                         {
-                            *meta = record.meta;
+                            *meta = record.meta.clone();
                             *tone = tone_from_name(record.tone.as_deref());
                             *pending = false;
                         }
+                        if let Some(source) = sources.get_mut(index) {
+                            *source = Some(entry_source_with_key(&record, format!("pair:{key}")));
+                        }
                     } else {
-                        entries.push(line_entry(record));
+                        let entry = line_entry(record.clone());
+                        push_entry(&mut entries, &mut sources, entry, Some(&record));
                     }
                 }
                 TimelineRole::Line => {
-                    flush_flow(&mut pending_flow, &mut entries);
-                    entries.push(line_entry(record));
+                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                    let entry = line_entry(record.clone());
+                    push_entry(&mut entries, &mut sources, entry, Some(&record));
                 }
             }
         }
         indents.resize(entries.len(), d);
     }
-    flush_flow(&mut pending_flow, &mut entries);
+    flush_flow(&mut pending_flow, &mut entries, &mut sources);
     indents.resize(entries.len(), depth);
-    (entries, indents)
+    sources.resize(entries.len(), None);
+    (entries, indents, sources)
 }
 
 /// Append the transient live cognition stream as a trailing block, if the
@@ -379,10 +442,54 @@ pub(crate) fn append_live_delta(core: &StudioCore, entries: &mut Vec<StudioTimel
 fn flush_flow(
     pending_flow: &mut Option<(String, StudioTone)>,
     entries: &mut Vec<StudioTimelineEntryVm>,
+    sources: &mut Vec<Option<TimelineEntrySource>>,
 ) {
     if let Some((text, tone)) = pending_flow.take() {
-        entries.push(StudioTimelineEntryVm::Block { text, tone });
+        push_entry(entries, sources, StudioTimelineEntryVm::Block { text, tone }, None);
     }
+}
+
+fn push_entry(
+    entries: &mut Vec<StudioTimelineEntryVm>,
+    sources: &mut Vec<Option<TimelineEntrySource>>,
+    entry: StudioTimelineEntryVm,
+    record: Option<&ProjectedRecord>,
+) {
+    let index = entries.len();
+    sources.push(record.map(|record| entry_source(record, index)));
+    entries.push(entry);
+}
+
+fn entry_source(record: &ProjectedRecord, index: usize) -> TimelineEntrySource {
+    entry_source_with_key(record, timeline_entry_key(&record.raw, index))
+}
+
+fn entry_source_with_key(record: &ProjectedRecord, key: String) -> TimelineEntrySource {
+    TimelineEntrySource {
+        key,
+        raw: record.raw.clone(),
+    }
+}
+
+pub(crate) fn timeline_entry_key(record: &Value, index: usize) -> String {
+    if let Some(seq) = record.get("chain_seq").and_then(Value::as_u64) {
+        return format!("chain_seq:{seq}");
+    }
+    for field in ["event_id", "id"] {
+        if let Some(value) = record
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return format!("{field}:{value}");
+        }
+    }
+    let event_type = record
+        .get("event_type")
+        .and_then(Value::as_str)
+        .unwrap_or("event");
+    let thread = record.get("thread_id").and_then(Value::as_str).unwrap_or("");
+    format!("{event_type}:{thread}:index:{index}")
 }
 
 fn line_entry(record: ProjectedRecord) -> StudioTimelineEntryVm {
@@ -867,6 +974,7 @@ fn apply_paired_runtime_entry(
     kind: FeedEventType,
     record: ProjectedRecord,
     entries: &mut Vec<StudioTimelineEntryVm>,
+    sources: &mut Vec<Option<TimelineEntrySource>>,
     pending_pairs: &mut std::collections::BTreeMap<String, usize>,
 ) {
     let payload = record.raw.get("payload").unwrap_or(&Value::Null);
@@ -874,12 +982,20 @@ fn apply_paired_runtime_entry(
         FeedEventType::GraphStepStarted => {
             let key = format!("step:{}", graph_step_key(payload));
             let index = entries.len();
-            entries.push(StudioTimelineEntryVm::Pair {
-                summary: graph_step_summary(payload),
-                meta: graph_step_meta(payload),
-                tone: StudioTone::Accent,
-                pending: true,
-            });
+            push_entry(
+                entries,
+                sources,
+                StudioTimelineEntryVm::Pair {
+                    summary: graph_step_summary(payload),
+                    meta: graph_step_meta(payload),
+                    tone: StudioTone::Accent,
+                    pending: true,
+                },
+                Some(&record),
+            );
+            if let Some(source) = sources.get_mut(index) {
+                *source = Some(entry_source_with_key(&record, key.clone()));
+            }
             pending_pairs.insert(key, index);
         }
         FeedEventType::GraphStepCompleted => {
@@ -898,25 +1014,41 @@ fn apply_paired_runtime_entry(
                     *existing_tone = tone;
                     *pending = false;
                 }
+                if let Some(source) = sources.get_mut(index) {
+                    *source = Some(entry_source_with_key(&record, key));
+                }
             } else {
-                entries.push(StudioTimelineEntryVm::Line {
-                    primary: graph_step_summary(payload),
-                    meta,
-                    tone,
-                    action: None,
-                    secondary_action: None,
-                });
+                push_entry(
+                    entries,
+                    sources,
+                    StudioTimelineEntryVm::Line {
+                        primary: graph_step_summary(payload),
+                        meta,
+                        tone,
+                        action: None,
+                        secondary_action: None,
+                    },
+                    Some(&record),
+                );
             }
         }
         FeedEventType::ToolCallStart => {
             let key = format!("tool:{}", tool_call_key(payload));
             let index = entries.len();
-            entries.push(StudioTimelineEntryVm::Pair {
-                summary: tool_call_summary(payload, &record),
-                meta: tool_call_start_meta(payload, &record),
-                tone: StudioTone::Accent,
-                pending: true,
-            });
+            push_entry(
+                entries,
+                sources,
+                StudioTimelineEntryVm::Pair {
+                    summary: tool_call_summary(payload, &record),
+                    meta: tool_call_start_meta(payload, &record),
+                    tone: StudioTone::Accent,
+                    pending: true,
+                },
+                Some(&record),
+            );
+            if let Some(source) = sources.get_mut(index) {
+                *source = Some(entry_source_with_key(&record, key.clone()));
+            }
             pending_pairs.insert(key, index);
         }
         FeedEventType::ToolCallResult => {
@@ -935,14 +1067,22 @@ fn apply_paired_runtime_entry(
                     *existing_tone = tone;
                     *pending = false;
                 }
+                if let Some(source) = sources.get_mut(index) {
+                    *source = Some(entry_source_with_key(&record, key));
+                }
             } else {
-                entries.push(StudioTimelineEntryVm::Line {
-                    primary: tool_call_summary(payload, &record),
-                    meta,
-                    tone,
-                    action: None,
-                    secondary_action: None,
-                });
+                push_entry(
+                    entries,
+                    sources,
+                    StudioTimelineEntryVm::Line {
+                        primary: tool_call_summary(payload, &record),
+                        meta,
+                        tone,
+                        action: None,
+                        secondary_action: None,
+                    },
+                    Some(&record),
+                );
             }
         }
         _ => {}
@@ -1171,11 +1311,12 @@ impl StudioCore {
         event_type: &str,
         payload: &Value,
     ) -> Vec<StudioEffect> {
+        let event_payload = event_payload(payload);
         let live_text = match event_type {
-            "cognition_out" => payload.get("delta").and_then(|d| d.as_str()),
-            "token_delta" => payload
+            "cognition_out" => live_cognition_out_text(event_payload),
+            "token_delta" => event_payload
                 .get("delta")
-                .or_else(|| payload.get("text"))
+                .or_else(|| event_payload.get("text"))
                 .and_then(|t| t.as_str()),
             // Ephemeral, non-text progress: nothing durable changed.
             "cognition_reasoning"
@@ -1219,6 +1360,22 @@ impl StudioCore {
     fn clear_live_delta(&mut self) {
         self.data.live_delta = None;
     }
+}
+
+fn live_cognition_out_text(payload: &Value) -> Option<&str> {
+    payload
+        .get("delta")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("tool_use_partial")
+                .and_then(|partial| partial.get("delta"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn event_payload(frame_payload: &Value) -> &Value {
+    frame_payload.get("payload").unwrap_or(frame_payload)
 }
 
 #[cfg(test)]
@@ -1445,7 +1602,7 @@ mod tests {
         // Both turns are headed by separators → both foldable.
         let mut collapsed = std::collections::BTreeSet::new();
         collapsed.insert(1);
-        let folded = fold_timeline(full, Vec::new(), &collapsed);
+        let folded = fold_timeline(full, Vec::new(), Vec::new(), &collapsed);
 
         assert!(folded.collapsible.contains(&0) && folded.collapsible.contains(&1));
         // turn 1 stays open (header + body); turn 2 keeps only its marked header.
@@ -1463,7 +1620,7 @@ mod tests {
         let full = vec![block("a"), block("b")];
         let mut collapsed = std::collections::BTreeSet::new();
         collapsed.insert(0);
-        let folded = fold_timeline(full, Vec::new(), &collapsed);
+        let folded = fold_timeline(full, Vec::new(), Vec::new(), &collapsed);
         assert!(folded.collapsible.is_empty());
         assert_eq!(
             folded.entries.len(),
@@ -1517,7 +1674,7 @@ mod tests {
         // A graph braid reads as a call tree: a tool call between a node's start
         // and completed nests one level under that node; sibling nodes stay at
         // the root. The indent vector stays parallel to the coalesced entries.
-        let (entries, indents) = timeline_entries_indented(vec![
+        let (entries, indents, _) = timeline_entries_indented(vec![
             raw_record(json!({ "event_type": "graph_step_started",
                 "payload": { "graph_run_id": "g1", "step": 1, "node": "study" } })),
             raw_record(json!({ "event_type": "tool_call_start",

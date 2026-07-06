@@ -349,6 +349,19 @@ pub enum StudioViewVm {
         /// key toggles. `None` when the point is in unfoldable content.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fold_section: Option<usize>,
+        /// Whether each visible entry can be expanded in place (parallel to
+        /// `entries`). Timeline expansion uses the same local state as row
+        /// expansion, keyed by the source event's stable identity.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entry_expandable: Vec<bool>,
+        /// Whether each visible entry is currently expanded (parallel to
+        /// `entries`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entry_expanded: Vec<bool>,
+        /// Detail rows for each visible entry (parallel to `entries`). Empty
+        /// vectors mean either collapsed or not expandable.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entry_details: Vec<Vec<StudioRowDetailVm>>,
     },
     Map {
         scene: StudioSceneModel,
@@ -944,7 +957,10 @@ fn backdrop_scene(core: &StudioCore) -> Option<StudioSceneModel> {
         .as_ref()
         .map(|dimension| dimension.threads.active_count)
         .unwrap_or_default();
-    let active_component = ((active_threads.max(0) as f32) * 0.25).clamp(0.0, 1.0);
+    // Keep project-local background activity from making the crystal race in
+    // busy workspaces. Active threads should lift the scene slightly; transient
+    // activity pulses carry the stronger "something just happened" signal.
+    let active_component = ((active_threads.max(0) as f32) * 0.06).clamp(0.0, 0.24);
     scene.energy = active_component.max(core.runtime.activity_pulse.clamp(0.0, 1.0));
     Some(scene)
 }
@@ -1239,7 +1255,7 @@ fn bound_view_vm_keyed(
             }
         }
         ("timeline", Some(response)) => {
-            let (mut full, mut full_indents) =
+            let (mut full, mut full_indents, mut full_sources) =
                 timeline_entries_indented(super::content::project_records(binding, response));
             // Deep-watch header: a chain execution summary line at the top of the
             // braid, from the source's `summary` (chain_replay). Absent for any
@@ -1249,14 +1265,20 @@ fn bound_view_vm_keyed(
             if let Some(summary) = timeline_summary_entry(response) {
                 full.insert(0, summary);
                 full_indents.insert(0, 0);
+                full_sources.insert(0, None);
             }
             append_live_delta(core, &mut full);
             full_indents.resize(full.len(), 0);
+            full_sources.resize(full.len(), None);
             // Apply the operator's folds, then project over the VISIBLE list so
             // the cursor, scroll, and point all address what's actually shown.
             let empty = std::collections::BTreeSet::new();
-            let folded =
-                super::timeline::fold_timeline(full, full_indents, collapsed.unwrap_or(&empty));
+            let folded = super::timeline::fold_timeline(
+                full,
+                full_indents,
+                full_sources,
+                collapsed.unwrap_or(&empty),
+            );
             // The feed reads the tile cursor as distance-from-bottom: 0 keeps
             // the point on the newest entry (so it follows the live tail),
             // larger values walk back into history. Empty feed → no point.
@@ -1269,6 +1291,36 @@ fn bound_view_vm_keyed(
                 let section = folded.sections.get(i).copied()?;
                 folded.collapsible.contains(&section).then_some(section)
             });
+            let expand_fields = super::content::expand_fields(binding);
+            let entry_expandable: Vec<bool> = folded
+                .sources
+                .iter()
+                .map(|source| source.is_some() && !expand_fields.is_empty())
+                .collect();
+            let entry_expanded: Vec<bool> = folded
+                .sources
+                .iter()
+                .map(|source| {
+                    source
+                        .as_ref()
+                        .is_some_and(|source| expanded_rows.is_some_and(|set| set.contains(&source.key)))
+                })
+                .collect();
+            let entry_details: Vec<Vec<StudioRowDetailVm>> = folded
+                .sources
+                .iter()
+                .zip(entry_expanded.iter())
+                .map(|(source, expanded)| {
+                    if !*expanded {
+                        Vec::new()
+                    } else {
+                        source
+                            .as_ref()
+                            .map(|source| detail_vm(&source.raw, &expand_fields))
+                            .unwrap_or_default()
+                    }
+                })
+                .collect();
             StudioViewVm::Timeline {
                 title,
                 provenance: Some(view_ref.to_string()),
@@ -1277,6 +1329,9 @@ fn bound_view_vm_keyed(
                 entry_indents: folded.indents,
                 selected,
                 fold_section,
+                entry_expandable,
+                entry_expanded,
+                entry_details,
             }
         }
         ("table", Some(response)) => {
@@ -1500,7 +1555,7 @@ fn input_vm(
 /// `summary` (chain status + chain-wide usage totals, from chain_replay).
 /// Returns `None` when the source carries no `summary` — any non-chain timeline —
 /// so the header only appears where it means something.
-fn timeline_summary_entry(response: &serde_json::Value) -> Option<StudioTimelineEntryVm> {
+pub(crate) fn timeline_summary_entry(response: &serde_json::Value) -> Option<StudioTimelineEntryVm> {
     let summary = response.get("summary")?;
     let status = summary.get("status").and_then(|v| v.as_str()).unwrap_or("");
     let input = summary.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -2058,7 +2113,7 @@ fn help(core: &StudioCore) -> StudioHelpVm {
         open: core.ui.help_open,
         entries: vec![
             entry("Move", "↑ / ↓", "Move the point through rows; else move focus"),
-            entry("Move", "← / →", "Fold / unfold the section under the point; else move focus"),
+            entry("Move", "← / →", "Expand row/feed details, fold sections, or move focus"),
             entry("Act", "Enter", "Activate the selected row (or steer-submit when typing)"),
             entry("Act", "Alt+Enter", "Submit as an interrupt — cut the running thread's turn and redirect"),
             entry("Act", "Tab / ⇧Tab", "Accept completion, else cycle the route target"),

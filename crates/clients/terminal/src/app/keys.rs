@@ -24,19 +24,27 @@ pub fn handle_key(core: &mut StudioCore, key: KeyEvent) -> Vec<StudioEffect> {
         && !event.modifiers.alt
         && !event.modifiers.meta
         && !event.modifiers.shift;
+    let context = key_context(core);
     if no_mods && matches!(event.key, StudioKey::ArrowLeft | StudioKey::ArrowRight) {
-        if let Some((tile_id, section)) = focused_fold_section(core) {
-            let collapsed = matches!(event.key, StudioKey::ArrowLeft);
-            return core.dispatch(StudioEvent::Ui {
-                event: StudioUiEvent::SetFold {
-                    tile_id,
-                    section,
-                    collapsed,
-                },
-            });
+        let expansion_wins = match event.key {
+            StudioKey::ArrowRight => context.focused_row_expandable && !context.focused_row_expanded,
+            StudioKey::ArrowLeft => context.focused_row_expandable && context.focused_row_expanded,
+            _ => false,
+        };
+        if !expansion_wins {
+            if let Some((tile_id, section)) = focused_fold_section(core) {
+                let collapsed = matches!(event.key, StudioKey::ArrowLeft);
+                return core.dispatch(StudioEvent::Ui {
+                    event: StudioUiEvent::SetFold {
+                        tile_id,
+                        section,
+                        collapsed,
+                    },
+                });
+            }
         }
     }
-    let command = studio_key_command(event, key_context(core));
+    let command = studio_key_command(event, context);
     core.apply_key_command(command)
 }
 

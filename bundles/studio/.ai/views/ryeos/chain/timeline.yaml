@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T08:15:07Z:ca6ad265531d83aef525ea476648ef7e40bba624b8ed4dde7872893b0a408fbf:AzuL89qklFmntACCuSAHp7bdBFu7iPgy7rGirifGIjK7YJBJz9/SjK9FSyS6149gAW+oT5OwEdhlWtEwChsKAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T05:58:35Z:9241c2f679e0a5a5f1cf27849682b7966c60185e29a2347c1308ce6081a48a08:BfORiQY6jktfqHAsJ5JuLPY3rFwPIssCl6GXP77Zwa36sGu3QWYuNQS8lp/EkE6cwaL64RU+VbocfZNopfp/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: chain-timeline
 version: "1.0.0"
 description: Event braid timeline for the input route's conversation chain
@@ -10,6 +10,23 @@ source:
     chain_root_id: "@facet:input.route.chain_root"
   collection: events
 projections:
+  expand:
+    fields:
+      - event_type
+      - thread_id
+      - chain_root_id
+      - chain_seq
+      - payload.graph_run_id
+      - payload.node
+      - payload.step
+      - payload.item_id
+      - payload.tool
+      - payload.status
+      - payload.error
+      - payload.result_size_bytes
+      - payload.truncated_reason
+      - payload.uri
+      - payload.content_hash
   event_kinds:
     cognition_out:
       primary: payload.content

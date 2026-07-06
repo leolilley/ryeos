@@ -67,9 +67,9 @@ pub struct StudioKeyContext {
     /// The head thread is mid-execution — esc interrupts it instead of
     /// closing the focused tile.
     pub head_thread_running: bool,
-    /// The focused rows/table lens has an expandable selected row.
+    /// The focused rows/table/timeline lens has an expandable selected point.
     pub focused_row_expandable: bool,
-    /// The focused expandable row is currently open.
+    /// The focused expandable point is currently open.
     pub focused_row_expanded: bool,
 }
 

@@ -1178,9 +1178,6 @@ impl StudioCore {
         let tile_id = self.workspace.focused_tile;
         let tile = self.workspace.tiles.get(&tile_id)?;
         let binding = self.views.get(&tile.view.view_ref)?;
-        if !matches!(binding.widget.as_str(), "rows" | "table") {
-            return None;
-        }
         let fields = super::content::expand_fields(binding);
         if fields.is_empty() {
             return None;
@@ -1244,6 +1241,36 @@ impl StudioCore {
                     .enumerate()
                     .nth(cursor)
                     .map(|(index, record)| (row_key(&record.raw, index), record.raw))
+            }
+            "timeline" => {
+                let (mut entries, mut indents, mut sources) =
+                    super::timeline::timeline_entries_indented(super::content::project_records(
+                        binding, response,
+                    ));
+                if let Some(summary) = super::view_model::timeline_summary_entry(response) {
+                    entries.insert(0, summary);
+                    indents.insert(0, 0);
+                    sources.insert(0, None);
+                }
+                // `append_live_delta` can add non-expandable transient entries.
+                super::timeline::append_live_delta(self, &mut entries);
+                indents.resize(entries.len(), 0);
+                sources.resize(entries.len(), None);
+                let collapsed = match &tile.local {
+                    ViewLocalState::GenericList { collapsed, .. } => collapsed,
+                    ViewLocalState::None => return None,
+                };
+                let folded = super::timeline::fold_timeline(entries, indents, sources, collapsed);
+                let selected = folded.entries.len().checked_sub(1).map(|last| {
+                    let distance = cursor.min(last);
+                    last - distance
+                })?;
+                folded
+                    .sources
+                    .get(selected)
+                    .cloned()
+                    .flatten()
+                    .map(|source| (source.key, source.raw))
             }
             _ => None,
         }

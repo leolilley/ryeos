@@ -35,8 +35,15 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        let line_w = display_width(&line);
         let word_w = display_width(word);
+        if word_w > width {
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            out.extend(wrap_long_word(word, width));
+            continue;
+        }
+        let line_w = display_width(&line);
         if line_w > 0 && line_w + 1 + word_w > width {
             out.push(line);
             line = String::new();
@@ -51,6 +58,26 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     }
     if out.is_empty() {
         out.push(String::new());
+    }
+    out
+}
+
+fn wrap_long_word(word: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0;
+    for ch in word.chars() {
+        let ch_w = ch.width().unwrap_or(0);
+        if !line.is_empty() && line_w + ch_w > width {
+            out.push(std::mem::take(&mut line));
+            line_w = 0;
+        }
+        line.push(ch);
+        line_w += ch_w;
+    }
+    if !line.is_empty() {
+        out.push(line);
     }
     out
 }
