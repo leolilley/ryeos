@@ -1194,8 +1194,12 @@ pub(crate) async fn dispatch_method(
             socket_path: state.config.uds_path.clone(),
             token: cap.token.clone(),
         };
-        let runtime_config =
-            method_runtime_config_snapshot(kind, &method_decl.runtime_config, &engine_roots, state)?;
+        let runtime_config = method_runtime_config_snapshot(
+            kind,
+            &method_decl.runtime_config,
+            &engine_roots,
+            state,
+        )?;
 
         let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
             schema_version: 1,
@@ -1797,8 +1801,15 @@ fn service_params_with_project_path(
     let Some(obj) = params.as_object_mut() else {
         return params;
     };
-    obj.entry("project_path".to_string())
-        .or_insert_with(|| Value::String(project_path.to_string_lossy().into_owned()));
+    let fill_project_path = obj.get("project_path").is_none_or(|value| {
+        value.is_null() || value.as_str().is_some_and(|path| path.trim().is_empty())
+    });
+    if fill_project_path {
+        obj.insert(
+            "project_path".to_string(),
+            Value::String(project_path.to_string_lossy().into_owned()),
+        );
+    }
     params
 }
 
@@ -2457,15 +2468,17 @@ fn resolve_method_dispatch_target(
     // The wrapper's method_dispatch config (surfaced via the kind-schema
     // `path_value` rule). Its absence means the terminal selected method
     // dispatch but the wrapper never configured it.
-    let cfg_value = wrapper.metadata.extra.get("method_dispatch").ok_or_else(|| {
-        DispatchError::SchemaMisconfigured {
+    let cfg_value = wrapper
+        .metadata
+        .extra
+        .get("method_dispatch")
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
             kind: wrapper.kind.clone(),
             detail: format!(
                 "tool `{wrapper_ref}` routes to the method-dispatch terminal but declares no \
                  top-level `method_dispatch:` block"
             ),
-        }
-    })?;
+        })?;
     let cfg: MethodDispatchConfig = serde_json::from_value(cfg_value.clone()).map_err(|e| {
         DispatchError::SchemaMisconfigured {
             kind: wrapper.kind.clone(),
@@ -2474,13 +2487,12 @@ fn resolve_method_dispatch_target(
     })?;
 
     // Target ref from the `ref` argument.
-    let raw_ref = params
-        .get("ref")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DispatchError::MethodInvalidArg {
+    let raw_ref = params.get("ref").and_then(Value::as_str).ok_or_else(|| {
+        DispatchError::MethodInvalidArg {
             method: cfg.method.clone(),
             reason: format!("tool `{wrapper_ref}` requires a string `ref` argument"),
-        })?;
+        }
+    })?;
     let target_ref = resolve_method_target_ref(raw_ref, cfg.ref_kind.as_deref(), &wrapper_ref)?;
     let target_canonical = CanonicalRef::parse(&target_ref)
         .map_err(|e| DispatchError::InvalidRef(target_ref.clone(), e.to_string()))?;
@@ -3350,7 +3362,11 @@ mod tests {
         // `result` (dropped), so the feed shows the reason, not a bare "failed".
         for status in ["failed", "killed", "timed_out"] {
             let p = finalize_params("T-x", status, Some(serde_json::json!({ "error": "boom" })));
-            assert_eq!(p.error, Some(serde_json::json!({ "error": "boom" })), "{status}");
+            assert_eq!(
+                p.error,
+                Some(serde_json::json!({ "error": "boom" })),
+                "{status}"
+            );
             assert!(p.result.is_none(), "{status}");
         }
 
@@ -3358,7 +3374,11 @@ mod tests {
         // the old `status == "completed"` compare would have misrouted.
         for status in ["completed", "continued", "cancelled"] {
             let p = finalize_params("T-y", status, Some(serde_json::json!({ "ok": true })));
-            assert_eq!(p.result, Some(serde_json::json!({ "ok": true })), "{status}");
+            assert_eq!(
+                p.result,
+                Some(serde_json::json!({ "ok": true })),
+                "{status}"
+            );
             assert!(p.error.is_none(), "{status}");
         }
     }
@@ -3548,6 +3568,30 @@ metadata:
         );
 
         assert_eq!(params["project_path"], "/explicit");
+    }
+
+    #[test]
+    fn service_project_path_overwrites_empty_opt_in_param() {
+        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
+        let params = service_params_with_project_path(
+            json!({"project_path": ""}),
+            &verified,
+            Path::new("/tmp/project"),
+        );
+
+        assert_eq!(params["project_path"], "/tmp/project");
+    }
+
+    #[test]
+    fn service_project_path_overwrites_null_opt_in_param() {
+        let verified = verified_service_with_schema(Some(json!({"project_path": "string"})));
+        let params = service_params_with_project_path(
+            json!({"project_path": null}),
+            &verified,
+            Path::new("/tmp/project"),
+        );
+
+        assert_eq!(params["project_path"], "/tmp/project");
     }
 
     #[test]

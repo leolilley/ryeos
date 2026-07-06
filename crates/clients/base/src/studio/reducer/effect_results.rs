@@ -1,8 +1,11 @@
-use super::dto::{StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFileSpaceDto, StudioFilesDto, StudioItemsDto, StudioOpenProjectDto, StudioThreadsDto, StudioTopologyDto};
+use super::dto::{
+    StudioAddProjectDto, StudioDimensionDto, StudioFileReadDto, StudioFileSpaceDto, StudioFilesDto,
+    StudioItemsDto, StudioOpenProjectDto, StudioThreadsDto, StudioTopologyDto,
+};
 use super::effect::{StudioEffect, StudioEffectKind, StudioEffectResult, StudioEffectResultKind};
 use super::model::StudioCore;
-use super::view_model::{StudioTone};
 use super::parse_tile_id;
+use super::view_model::StudioTone;
 
 impl StudioCore {
     pub(crate) fn apply_effect_result(&mut self, result: StudioEffectResult) -> Vec<StudioEffect> {
@@ -137,10 +140,12 @@ impl StudioCore {
             self.clear_focused_input();
             let degraded = outcome.notice.is_some();
             self.notice(
-                outcome.notice.unwrap_or_else(|| match outcome.thread_id.as_deref() {
-                    Some(id) => format!("Input delivered to {id}."),
-                    None => "Input delivered.".to_string(),
-                }),
+                outcome
+                    .notice
+                    .unwrap_or_else(|| match outcome.thread_id.as_deref() {
+                        Some(id) => format!("Input delivered to {id}."),
+                        None => "Input delivered.".to_string(),
+                    }),
                 if degraded {
                     StudioTone::Warn
                 } else {
@@ -312,50 +317,7 @@ impl StudioCore {
                 return vec![self.emit(StudioEffectKind::FetchProjects)];
             }
             StudioEffectResultKind::ProjectOpened => {
-                let opened = match serde_json::from_value::<StudioOpenProjectDto>(data) {
-                    Ok(opened) => opened,
-                    Err(error) => {
-                        self.notice(
-                            format!("RyeOS could not read project_open response: {error}"),
-                            StudioTone::Danger,
-                        );
-                        return Vec::new();
-                    }
-                };
-                let project_root = opened.session.project_root.or_else(|| {
-                    (!opened.project.root.is_empty()).then_some(opened.project.root.clone())
-                });
-                if let Some(session) = &mut self.data.session {
-                    if !opened.session.session_id.is_empty() {
-                        session.session_id = opened.session.session_id;
-                    }
-                    session.project_path = project_root;
-                    session.read_only = opened.session.read_only;
-                }
-                if let Some(projects) = &mut self.data.projects {
-                    for project in &mut projects.projects {
-                        if project.local_id == opened.project.local_id {
-                            *project = opened.project.clone();
-                            break;
-                        }
-                    }
-                }
-                self.data.dimension = None;
-                self.data.topology = None;
-                self.data.items = None;
-                self.data.file_space = None;
-                self.data.tile_items.clear();
-                self.data.tile_file_space.clear();
-                self.data.files = None;
-                self.data.tile_files.clear();
-                self.data.file_read = None;
-                self.pending_effects
-                    .retain(|_, kind| !effect_depends_on_project_binding(kind));
-                self.notice(
-                    format!("Opened project {}.", opened.project.name),
-                    StudioTone::Good,
-                );
-                return self.initial_effects();
+                return self.apply_project_opened(data);
             }
             StudioEffectResultKind::Threads => {
                 self.apply_parsed::<StudioThreadsDto>(data, "threads", |core, threads| {
@@ -420,6 +382,57 @@ impl StudioCore {
 
         self.bump_generation();
         Vec::new()
+    }
+
+    fn apply_project_opened(&mut self, data: serde_json::Value) -> Vec<StudioEffect> {
+        let opened = match serde_json::from_value::<StudioOpenProjectDto>(data) {
+            Ok(opened) => opened,
+            Err(error) => {
+                self.notice(
+                    format!("RyeOS could not read project_open response: {error}"),
+                    StudioTone::Danger,
+                );
+                return Vec::new();
+            }
+        };
+        let project_root =
+            opened.session.project_root.clone().or_else(|| {
+                (!opened.project.root.is_empty()).then_some(opened.project.root.clone())
+            });
+        if let Some(session) = &mut self.data.session {
+            if !opened.session.session_id.is_empty() {
+                session.session_id = opened.session.session_id.clone();
+                session.read_only = opened.session.read_only;
+            }
+            session.project_path = project_root;
+        }
+        if let Some(projects) = &mut self.data.projects {
+            for project in &mut projects.projects {
+                project.current = project.local_id == opened.project.local_id;
+                if project.current {
+                    *project = opened.project.clone();
+                    project.current = true;
+                }
+            }
+        }
+        self.data.dimension = None;
+        self.data.topology = None;
+        self.data.items = None;
+        self.data.file_space = None;
+        self.data.tile_items.clear();
+        self.data.tile_file_space.clear();
+        self.data.files = None;
+        self.data.tile_files.clear();
+        self.data.sources.clear();
+        self.data.source_epoch.clear();
+        self.data.file_read = None;
+        self.pending_effects
+            .retain(|_, kind| !effect_depends_on_project_binding(kind));
+        self.notice(
+            format!("Opened project {}.", opened.project.name),
+            StudioTone::Good,
+        );
+        self.initial_effects()
     }
 
     pub(crate) fn apply_parsed<T>(
@@ -734,8 +747,12 @@ mod tests {
             ..Default::default()
         };
         let mut core = StudioCore::new(session, BrowserViewport::default(), 0);
-        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'r' } });
-        core.dispatch(StudioEvent::Ui { event: StudioUiEvent::InsertInputChar { ch: 'u' } });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InsertInputChar { ch: 'r' },
+        });
+        core.dispatch(StudioEvent::Ui {
+            event: StudioUiEvent::InsertInputChar { ch: 'u' },
+        });
         assert_eq!(
             core.focused_input_buffer().map(|b| b.text.clone()),
             Some("ru".to_string())
@@ -782,8 +799,16 @@ mod tests {
         );
         // The notice reads as a cancel, not a false launch.
         let notice = core.ui.notices.last().expect("a notice");
-        assert!(notice.message.contains("Cancelled"), "got {:?}", notice.message);
-        assert!(!notice.message.contains("launched"), "got {:?}", notice.message);
+        assert!(
+            notice.message.contains("Cancelled"),
+            "got {:?}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("launched"),
+            "got {:?}",
+            notice.message
+        );
     }
 
     #[test]
@@ -1570,7 +1595,11 @@ mod tests {
             },
         );
         let route = core.seat.fold().input_route();
-        assert_eq!(route.thread.as_deref(), Some("T-other"), "stale result must not retarget");
+        assert_eq!(
+            route.thread.as_deref(),
+            Some("T-other"),
+            "stale result must not retarget"
+        );
         assert!(
             core.ui
                 .notices
@@ -1596,7 +1625,10 @@ mod tests {
             |_| {},
         );
         let route = core.seat.fold().input_route();
-        assert_eq!(route.thread, None, "no operator follow-up → route not retargeted");
+        assert_eq!(
+            route.thread, None,
+            "no operator follow-up → route not retargeted"
+        );
         assert_eq!(route.chain_root, None);
     }
 
@@ -1642,8 +1674,16 @@ mod tests {
             },
         });
         let route = core.seat.fold().input_route();
-        assert_eq!(route.thread.as_deref(), Some("T-2"), "head advances to the newest turn");
-        assert_eq!(route.chain_root.as_deref(), Some("T-1"), "root is preserved across the braid");
+        assert_eq!(
+            route.thread.as_deref(),
+            Some("T-2"),
+            "head advances to the newest turn"
+        );
+        assert_eq!(
+            route.chain_root.as_deref(),
+            Some("T-1"),
+            "root is preserved across the braid"
+        );
     }
 
     #[test]
@@ -1659,7 +1699,11 @@ mod tests {
             }),
             |_| {},
         );
-        assert_eq!(focused_input_text(&core), "hold this", "refused delivery keeps the buffer");
+        assert_eq!(
+            focused_input_text(&core),
+            "hold this",
+            "refused delivery keeps the buffer"
+        );
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread, None, "refused → no ratchet");
         assert_eq!(route.chain_root, None);
@@ -1683,8 +1727,11 @@ mod tests {
         let route = core.seat.fold().input_route();
         assert_eq!(route.thread, None, "submitted → no ratchet");
         assert!(
-            core.ui.notices.iter().any(|n| n.message.contains("interrupt degraded to steer")
-                && n.tone == StudioTone::Warn),
+            core.ui
+                .notices
+                .iter()
+                .any(|n| n.message.contains("interrupt degraded to steer")
+                    && n.tone == StudioTone::Warn),
             "a degraded submitted delivery surfaces its notice as a warning"
         );
     }

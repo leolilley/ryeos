@@ -680,29 +680,17 @@ impl StudioCore {
     /// Hint arrival: semantic hook for transient "look" notices. Visual pulse
     /// state is layered on this entry point; refetches are content-bound via
     /// `refresh.on_hint`.
-    pub fn note_hint(
-        &mut self,
-        kind: &str,
-        payload: &serde_json::Value,
-    ) -> Vec<StudioEffect> {
+    pub fn note_hint(&mut self, kind: &str, payload: &serde_json::Value) -> Vec<StudioEffect> {
         match kind {
-            "activity" => {
-                let count = payload
-                    .get("event_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0) as f32;
-                self.runtime.activity_pulse = (self.runtime.activity_pulse
-                    + 0.3
-                    + 0.05 * (1.0 + count).ln())
-                .min(1.0);
-            }
             "thread" => {
-                self.runtime.activity_pulse = (self.runtime.activity_pulse + 0.2).min(1.0);
                 if payload
                     .get("event_type")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|event| {
-                        matches!(event, "thread_failed" | "thread_killed" | "thread_timed_out")
+                        matches!(
+                            event,
+                            "thread_failed" | "thread_killed" | "thread_timed_out"
+                        )
                     })
                 {
                     self.runtime.attention_until_ms = self.runtime.now_ms.saturating_add(3_000);
@@ -711,6 +699,10 @@ impl StudioCore {
             _ => {}
         }
         self.effects_for_hint(kind)
+    }
+
+    pub(crate) fn bump_activity_pulse(&mut self, amount: f32) {
+        self.runtime.activity_pulse = (self.runtime.activity_pulse + amount).min(1.0);
     }
 
     pub fn wants_fast_ticks(&self) -> bool {
@@ -790,20 +782,22 @@ impl StudioCore {
         if binding.widget == "sections" {
             let sections = binding.sections.clone();
             let fold = self.seat.fold();
-            let resolved: Vec<(String, super::content::SourceBinding, serde_json::Value)> = sections
-                .iter()
-                .enumerate()
-                .map(|(index, section)| {
-                    let params = super::content::resolve_params(&section.source.params, |key| {
-                        fold.get(key).cloned()
-                    });
-                    (
-                        super::content::section_source_key(&source_key, index),
-                        section.source.clone(),
-                        params,
-                    )
-                })
-                .collect();
+            let resolved: Vec<(String, super::content::SourceBinding, serde_json::Value)> =
+                sections
+                    .iter()
+                    .enumerate()
+                    .map(|(index, section)| {
+                        let params =
+                            super::content::resolve_params(&section.source.params, |key| {
+                                fold.get(key).cloned()
+                            });
+                        (
+                            super::content::section_source_key(&source_key, index),
+                            section.source.clone(),
+                            params,
+                        )
+                    })
+                    .collect();
             // Keep prior section responses while refetching. `source_epoch`
             // drops stale responses, and hint-driven activity refreshes would
             // otherwise blank a sections view every coalesced activity tick.
@@ -1055,9 +1049,13 @@ impl StudioCore {
                     .as_ref()?
                     .completion
                     .as_ref()?;
-                let response = self.data.sources.get(
-                    &super::content::completion_source_key(view_ref, &key.input_id),
-                )?;
+                let response = self
+                    .data
+                    .sources
+                    .get(&super::content::completion_source_key(
+                        view_ref,
+                        &key.input_id,
+                    ))?;
                 let records = super::content::completion_records(completion, response);
                 super::tokenize::accept_slash_completion(records, &text, cursor).map(|_| ())
             })
@@ -1070,7 +1068,13 @@ impl StudioCore {
         let mention_can_accept = focused
             .as_ref()
             .and_then(|(key, view_ref)| {
-                let mentions = self.views.get(view_ref)?.input.as_ref()?.mentions.as_ref()?;
+                let mentions = self
+                    .views
+                    .get(view_ref)?
+                    .input
+                    .as_ref()?
+                    .mentions
+                    .as_ref()?;
                 let (_, partial) = super::tokenize::active_mention(&text, cursor)?;
                 let response = self
                     .data
@@ -1081,9 +1085,8 @@ impl StudioCore {
             })
             .is_some();
         let input_can_accept_completion = slash_can_accept || mention_can_accept;
-        let (focused_row_expandable, focused_row_expanded) = self
-            .focused_row_expand_state()
-            .unwrap_or((false, false));
+        let (focused_row_expandable, focused_row_expanded) =
+            self.focused_row_expand_state().unwrap_or((false, false));
 
         super::keymap::StudioKeyContext {
             launcher_open: self.ui.launcher.open,
@@ -1154,7 +1157,9 @@ impl StudioCore {
         if new_rows.is_empty() {
             return;
         }
-        let old_rows = old.map(|value| projected_row_signatures(binding, value)).unwrap_or_default();
+        let old_rows = old
+            .map(|value| projected_row_signatures(binding, value))
+            .unwrap_or_default();
         let now_ms = self.runtime.now_ms;
         let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
             return;
@@ -1163,15 +1168,20 @@ impl StudioCore {
             return;
         };
         let mut live = std::collections::BTreeSet::new();
+        let mut changed = false;
         for (key, signature) in new_rows {
             live.insert(key.clone());
             if old_rows.get(&key) != Some(&signature) {
                 changed_rows.insert(key, now_ms);
+                changed = true;
             }
         }
         changed_rows.retain(|key, changed_at| {
             live.contains(key) && now_ms.saturating_sub(*changed_at) <= 2_000
         });
+        if changed {
+            self.bump_activity_pulse(0.35);
+        }
     }
 
     pub(crate) fn focused_row_expand_state(&self) -> Option<(bool, bool)> {

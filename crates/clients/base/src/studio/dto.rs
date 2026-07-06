@@ -160,6 +160,7 @@ pub mod follow_role {
 /// sync with the daemon `thread_lifecycle::follow_display_state`.
 pub mod follow_display_state {
     pub const SUSPENDED: &str = "suspended";
+    pub const RESUME_QUEUED: &str = "resume_queued";
     pub const RESUMED: &str = "resumed";
 }
 
@@ -329,6 +330,8 @@ pub struct StudioKnownProjectDto {
     pub tags: Vec<String>,
     #[serde(default)]
     pub exists: bool,
+    #[serde(default)]
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

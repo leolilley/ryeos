@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-05T01:09:58Z:79441374673bedda1b4722437627b52a6762d87d6e6e40059048282c57b38633:yUDiWO/TWlqALltl62jdN0nba9EHKWx0k/XcQ/NaZZfy634Unvgh0PoYw775ZNv/9AC4Ono9IqMAseHggeZVAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T07:48:45Z:7db4fe45caa5b7c226af9a1843e9e09f9c7ed593a3f29a3d777f94c43ccc1861:5JpQXOsOSDl9hS10K79rTpZN5IIDbas6RtWHAZ8hsg/E8nCQ9So6T7SWjKS/pEFSEyVDTCT4WFPOmmDs6/jhAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: studio-lens
 version: "1.0.0"
 description: >-
@@ -36,6 +36,8 @@ backdrop: view:ryeos/backdrop/prism
 # The full lens set — swap the single center lens to reach any of these.
 library:
   - view:ryeos/run/activity
+  - view:ryeos/run/all-activity
+  - view:ryeos/projects/list
   - view:ryeos/node/activity
   - view:ryeos/chain/timeline
   - view:ryeos/studio/status

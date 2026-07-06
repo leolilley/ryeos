@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T09:54:36Z:e68abaa57d13f7c69ac1dfd58f4e7b1b87b3a664371f917df064495c76e23594:1H9jvg9ptFrK2ANKQ3vuWzA282pi1oDRy3BHCJFW4ylVvGvsiizwJskVIIm7/gGdCKWWzIyZk23RG/V9Kr8OCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T07:34:24Z:e1468b733f08fb184d03f6b00c0377b577aaba864788fa9c9142b98772f9aba5:WzSquosyV0dqDEssuGCiPjf1IIYP/cFAQGlxnejCoGDgW3RHYtudH9yw2Zm/58HyuwkY+Jpb+lLaBmRKcJQdAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: thread-detail
 version: "1.0.0"
 description: >-
@@ -31,6 +31,19 @@ sections:
           cancelled: warn
           completed: good
         default: neutral
+
+  # Project: the launch project context, when the thread carries one. This is
+  # display/scoping metadata for local Studio sessions, not an authorization
+  # boundary; old/system rows may be empty.
+  - title: Project
+    source:
+      ref: service:ui/studio/thread/inspect
+      params:
+        thread_id: "@facet:selection.thread"
+      collection: thread
+    projection:
+      primary: project.path
+      meta: project.name
 
   # Follow: the graph `follow:` lineage, present only when this thread issued or
   # resumed a follow. Sourced from the daemon-emitted labeled-rows `follow`

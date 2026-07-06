@@ -5,6 +5,7 @@
 //! a studio-friendly view with status and item_ref data. Browser-session
 //! auth means the studio always sees all threads (admin context).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -14,9 +15,9 @@ use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::state::AppState;
+use ryeos_app::thread_lifecycle::ThreadListView;
 use ryeos_engine::contracts::ProjectContext;
 use ryeos_executor::executor::ServiceAvailability;
-
 
 fn default_limit() -> usize {
     100
@@ -50,7 +51,7 @@ fn string_list_filter(params: &Value, key: &str) -> Vec<String> {
 }
 
 pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
-    crate::seat_auth::require_seat_caller(&ctx, &state)?;
+    let caller = crate::seat_auth::require_seat_caller(&ctx, &state)?;
 
     let limit = params
         .get("limit")
@@ -81,24 +82,35 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
         facet: string_filter(&params, "facet_key").zip(string_filter(&params, "facet_value")),
         // `active: true` narrows to the agent's live (non-terminal) threads —
         // the activity view's landing filter.
-        active_only: params.get("active").and_then(|v| v.as_bool()).unwrap_or(false),
+        active_only: params
+            .get("active")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     };
 
     let exclude_item_prefixes = string_list_filter(&params, "exclude_item_prefixes");
-    let query_limit = if exclude_item_prefixes.is_empty() {
-        limit
-    } else {
+    let project_filter = project_filter(&params, caller.project_root())?;
+    let needs_post_filter = !exclude_item_prefixes.is_empty() || project_filter.is_some();
+    let query_limit = if needs_post_filter {
         MAX_THREAD_LIST_LIMIT
+    } else {
+        limit
     };
 
     // Route through the lifecycle layer so each row carries daemon-authored
     // execution facts (`execution.supports_continuation`) the studio gates on.
-    let mut threads = state.threads.list_thread_views_query(query_limit, &filter, sort)?;
-    if !exclude_item_prefixes.is_empty() {
+    let mut threads = state
+        .threads
+        .list_thread_views_query(query_limit, &filter, sort)?;
+    if needs_post_filter {
         threads.retain(|row| {
-            !exclude_item_prefixes
+            let item_allowed = !exclude_item_prefixes
                 .iter()
-                .any(|prefix| row.item.item_ref.starts_with(prefix))
+                .any(|prefix| row.item.item_ref.starts_with(prefix));
+            let project_allowed = project_filter
+                .as_ref()
+                .is_none_or(|project| row_matches_project(row, project));
+            item_allowed && project_allowed
         });
         threads.truncate(limit);
     }
@@ -106,6 +118,47 @@ pub async fn handle(params: Value, ctx: HandlerContext, state: Arc<AppState>) ->
     Ok(serde_json::json!({
         "threads": threads,
     }))
+}
+
+fn project_filter(params: &Value, caller_project_root: Option<&str>) -> Result<Option<PathBuf>> {
+    let project_path = string_filter(params, "project_path");
+    match string_filter(params, "project").as_deref() {
+        Some("current") => project_path
+            .as_deref()
+            .or(caller_project_root)
+            .map(canonicalize_project_filter)
+            .transpose(),
+        Some(path) => canonicalize_existing_dir(path).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn canonicalize_project_filter(path: &str) -> Result<PathBuf> {
+    Ok(canonicalize_existing_dir(path).unwrap_or_else(|_| PathBuf::from(path)))
+}
+
+fn canonicalize_existing_dir(path: &str) -> Result<PathBuf> {
+    let canonical = Path::new(path).canonicalize()?;
+    Ok(canonical)
+}
+
+fn row_matches_project(row: &ThreadListView, project: &Path) -> bool {
+    if let Some(row_project) = &row.project {
+        return Path::new(&row_project.path)
+            .canonicalize()
+            .is_ok_and(|path| path == project);
+    }
+    is_effectively_active(row)
+}
+
+fn is_effectively_active(row: &ThreadListView) -> bool {
+    row.follow
+        .as_ref()
+        .is_some_and(|follow| follow.role == "suspended_parent")
+        || !matches!(
+            row.item.status.as_str(),
+            "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+        )
 }
 
 #[derive(serde::Deserialize)]
@@ -173,7 +226,12 @@ pub async fn handle_inspect(
         ]);
     }
     if is_rollup {
-        let facet = |key: &str| facets_map.get(key).cloned().unwrap_or_else(|| "0".to_string());
+        let facet = |key: &str| {
+            facets_map
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| "0".to_string())
+        };
         let spend = facets_map
             .get("cost.spend")
             .and_then(|value| value.parse::<f64>().ok())
@@ -306,7 +364,10 @@ fn follow_rows(follow: Option<&ryeos_app::thread_lifecycle::FollowFact>) -> Valu
         rows.extend(row("child chain", f.child_chain_root_id.clone()));
         rows.extend(row("child thread", f.child_thread_id.clone()));
         rows.extend(row("child status", f.child_terminal_status.clone()));
-        rows.extend(row("resume successor", f.parent_successor_thread_id.clone()));
+        rows.extend(row(
+            "resume successor",
+            f.parent_successor_thread_id.clone(),
+        ));
     }
     Value::Array(rows)
 }
@@ -394,7 +455,10 @@ mod tests {
 
     #[test]
     fn compact_limits_handles_non_object() {
-        assert_eq!(compact_limits(&serde_json::json!("unbounded")), "\"unbounded\"");
+        assert_eq!(
+            compact_limits(&serde_json::json!("unbounded")),
+            "\"unbounded\""
+        );
         assert_eq!(compact_limits(&serde_json::json!({})), "{}");
     }
 

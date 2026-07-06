@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T08:36:51Z:68227b9ededa58956969b5c41a5f591a61ae9019698aee4262010ea6c700dde8:/EOPbjen0910FnaFiPAIRL0GZmk4vfm8wo8nzDAAECQm+LDk8pi4y2YaOH+LNNEdvojE8EUBS5A4eeNEzfh9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: projects/list
+version: "1.0.0"
+description: List registered project roots for the current UI operator.
+endpoint: ui.projects.list
+availability: daemon_only

@@ -89,6 +89,17 @@ impl StudioCore {
                 args,
                 notice,
             }) => {
+                if item_ref == "service:projects/open"
+                    || item_ref == "service:ui/projects/open"
+                    || item_ref == "service:ui/studio/projects/open"
+                {
+                    if let Some(local_id) = args.get("local_id").and_then(serde_json::Value::as_str)
+                    {
+                        return vec![self.emit(StudioEffectKind::OpenProject {
+                            local_id: local_id.to_string(),
+                        })];
+                    }
+                }
                 vec![self.emit(StudioEffectKind::Invoke {
                     target: super::effect::InvokeRef::Ref { item_ref },
                     params: args,
@@ -205,7 +216,10 @@ impl StudioCore {
     /// Resolve the atlas arrangement a `SetAtlas*` event targets: `Some(tile)`
     /// → that tile's per-tile arrangement, created from the default on first
     /// touch; `None` → the ambient backdrop atlas.
-    pub(crate) fn atlas_target_mut(&mut self, tile_id: &Option<String>) -> &mut crate::atlas::AtlasUiStateVm {
+    pub(crate) fn atlas_target_mut(
+        &mut self,
+        tile_id: &Option<String>,
+    ) -> &mut crate::atlas::AtlasUiStateVm {
         match tile_id {
             Some(id) => self.ui.tile_atlas.entry(id.clone()).or_default(),
             None => &mut self.ui.atlas,

@@ -445,7 +445,12 @@ fn flush_flow(
     sources: &mut Vec<Option<TimelineEntrySource>>,
 ) {
     if let Some((text, tone)) = pending_flow.take() {
-        push_entry(entries, sources, StudioTimelineEntryVm::Block { text, tone }, None);
+        push_entry(
+            entries,
+            sources,
+            StudioTimelineEntryVm::Block { text, tone },
+            None,
+        );
     }
 }
 
@@ -488,7 +493,10 @@ pub(crate) fn timeline_entry_key(record: &Value, index: usize) -> String {
         .get("event_type")
         .and_then(Value::as_str)
         .unwrap_or("event");
-    let thread = record.get("thread_id").and_then(Value::as_str).unwrap_or("");
+    let thread = record
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     format!("{event_type}:{thread}:index:{index}")
 }
 
@@ -668,12 +676,18 @@ fn execution_entry(
     let event = feed_event_type(record)?;
     let (primary, meta, tone) = match event {
         FeedEventType::ThreadCompleted => ("completed".to_string(), None, StudioTone::Good),
-        FeedEventType::ThreadFailed => (terminal_reason("failed", payload), None, StudioTone::Danger),
-        FeedEventType::ThreadCancelled => ("cancelled".to_string(), None, StudioTone::Warn),
-        FeedEventType::ThreadKilled => (terminal_reason("killed", payload), None, StudioTone::Danger),
-        FeedEventType::ThreadTimedOut => {
-            (terminal_reason("timed out", payload), None, StudioTone::Warn)
+        FeedEventType::ThreadFailed => {
+            (terminal_reason("failed", payload), None, StudioTone::Danger)
         }
+        FeedEventType::ThreadCancelled => ("cancelled".to_string(), None, StudioTone::Warn),
+        FeedEventType::ThreadKilled => {
+            (terminal_reason("killed", payload), None, StudioTone::Danger)
+        }
+        FeedEventType::ThreadTimedOut => (
+            terminal_reason("timed out", payload),
+            None,
+            StudioTone::Warn,
+        ),
         // A dispatch fork: the parent stepped into a child execution (a
         // directive/sub-graph node running as a child thread). Name the node
         // being stepped into (`↘ study`) so the entry reads as a call into a
@@ -723,7 +737,9 @@ fn execution_entry(
             StudioTone::Accent,
         ),
         FeedEventType::GraphCompleted => {
-            let status = payload.and_then(|p| p.get("status")).and_then(Value::as_str);
+            let status = payload
+                .and_then(|p| p.get("status"))
+                .and_then(Value::as_str);
             (
                 match status {
                     Some(status) => format!("graph {status}"),
@@ -734,7 +750,9 @@ fn execution_entry(
             )
         }
         FeedEventType::GraphBranchTaken => {
-            let target = payload.and_then(|p| p.get("target")).and_then(Value::as_str);
+            let target = payload
+                .and_then(|p| p.get("target"))
+                .and_then(Value::as_str);
             (
                 match target {
                     Some(target) => format!("branch → {target}"),
@@ -855,9 +873,7 @@ fn retry_action(
 /// marker) contributes — the safe, correlated source for retry input (thread
 /// records / launch metadata are deliberately NOT used: they can hold
 /// arbitrary sensitive parameters).
-fn stimulus_by_thread(
-    records: &[ProjectedRecord],
-) -> std::collections::BTreeMap<String, String> {
+fn stimulus_by_thread(records: &[ProjectedRecord]) -> std::collections::BTreeMap<String, String> {
     let mut map = std::collections::BTreeMap::new();
     for record in records {
         if feed_event_type(record) != Some(FeedEventType::CognitionIn) {
@@ -1330,6 +1346,7 @@ impl StudioCore {
         if let Some(text) = live_text {
             if !text.is_empty() {
                 self.ingest_live_text(thread_id, text);
+                self.bump_activity_pulse(0.18);
                 self.bump_generation();
             }
             return Vec::new();
@@ -1337,6 +1354,7 @@ impl StudioCore {
         // Durable milestone (settled turn, tool boundary, lifecycle): the
         // braid snapshot now carries it — drop the live buffer and refetch.
         self.clear_live_delta();
+        self.bump_activity_pulse(0.2);
         self.effects_for_hint("thread")
     }
 
@@ -1363,15 +1381,12 @@ impl StudioCore {
 }
 
 fn live_cognition_out_text(payload: &Value) -> Option<&str> {
-    payload
-        .get("delta")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            payload
-                .get("tool_use_partial")
-                .and_then(|partial| partial.get("delta"))
-                .and_then(Value::as_str)
-        })
+    payload.get("delta").and_then(Value::as_str).or_else(|| {
+        payload
+            .get("tool_use_partial")
+            .and_then(|partial| partial.get("delta"))
+            .and_then(Value::as_str)
+    })
 }
 
 fn event_payload(frame_payload: &Value) -> &Value {
@@ -1443,7 +1458,9 @@ mod tests {
         }));
         let entries = timeline_entries(vec![rec]);
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0], StudioTimelineEntryVm::Separator { label } if label == "interrupted"));
+        assert!(
+            matches!(&entries[0], StudioTimelineEntryVm::Separator { label } if label == "interrupted")
+        );
     }
 
     #[test]
@@ -1639,7 +1656,13 @@ mod tests {
             "event_type": "child_thread_spawned",
             "payload": { "child_thread_id": "T-child", "node": "study" }
         }));
-        let Some(StudioTimelineEntryVm::Line { primary, meta, action, .. }) = entry else {
+        let Some(StudioTimelineEntryVm::Line {
+            primary,
+            meta,
+            action,
+            ..
+        }) = entry
+        else {
             panic!("expected a forked-subthread line");
         };
         assert_eq!(primary, "↘ study", "the entry names the node stepped into");
@@ -1662,7 +1685,10 @@ mod tests {
             "event_type": "child_thread_spawned",
             "payload": { "child_thread_id": "T-child" }
         }));
-        let Some(StudioTimelineEntryVm::Line { primary, action, .. }) = entry else {
+        let Some(StudioTimelineEntryVm::Line {
+            primary, action, ..
+        }) = entry
+        else {
             panic!("expected a forked-subthread line");
         };
         assert_eq!(primary, "forked subthread");
@@ -1688,7 +1714,11 @@ mod tests {
             raw_record(json!({ "event_type": "graph_step_completed",
                 "payload": { "graph_run_id": "g1", "step": 2, "node": "options" } })),
         ]);
-        assert_eq!(entries.len(), 3, "study + explore + options, pairs coalesced");
+        assert_eq!(
+            entries.len(),
+            3,
+            "study + explore + options, pairs coalesced"
+        );
         assert_eq!(indents.len(), entries.len(), "indents parallel to entries");
         assert_eq!(
             indents,
@@ -1707,13 +1737,23 @@ mod tests {
             "event_type": "graph_follow_suspended",
             "payload": { "node": "fetch", "item_id": "root", "step": 3 }
         }));
-        let Some(StudioTimelineEntryVm::Line { primary, meta, tone, action, .. }) = entry else {
+        let Some(StudioTimelineEntryVm::Line {
+            primary,
+            meta,
+            tone,
+            action,
+            ..
+        }) = entry
+        else {
             panic!("expected a suspend milestone line");
         };
         assert_eq!(primary, "suspended · following child");
         assert_eq!(meta.as_deref(), Some("fetch"));
         assert!(matches!(tone, StudioTone::Accent));
-        assert!(action.is_none(), "the suspend event carries no child ref to drill into");
+        assert!(
+            action.is_none(),
+            "the suspend event carries no child ref to drill into"
+        );
     }
 
     #[test]
@@ -1770,7 +1810,10 @@ mod tests {
                 "payload": { "error": { "message": "boom" } }
             });
             let entry = exec(raw.clone());
-            let Some(StudioTimelineEntryVm::Line { primary, action, .. }) = entry else {
+            let Some(StudioTimelineEntryVm::Line {
+                primary, action, ..
+            }) = entry
+            else {
                 panic!("expected a terminal line for {event_type}");
             };
             match action {
@@ -1811,8 +1854,9 @@ mod tests {
         });
         // failed + known stimulus → retry pre-fills that turn's own input,
         // retargeted at the selected failed thread.
-        let Some(StudioTimelineEntryVm::Line { secondary_action, .. }) =
-            execution_entry(&raw_record(failed.clone()), &stimulus)
+        let Some(StudioTimelineEntryVm::Line {
+            secondary_action, ..
+        }) = execution_entry(&raw_record(failed.clone()), &stimulus)
         else {
             panic!("expected a failed line");
         };
@@ -1827,8 +1871,11 @@ mod tests {
 
         // failed but stimulus unknown (marker-only turn / missing) → inspect
         // only, no retry input to offer.
-        let Some(StudioTimelineEntryVm::Line { action, secondary_action, .. }) =
-            execution_entry(&raw_record(failed), &std::collections::BTreeMap::new())
+        let Some(StudioTimelineEntryVm::Line {
+            action,
+            secondary_action,
+            ..
+        }) = execution_entry(&raw_record(failed), &std::collections::BTreeMap::new())
         else {
             panic!("expected a failed line");
         };
@@ -1844,8 +1891,11 @@ mod tests {
                 "chain_root_id": "R-1",
                 "payload": {}
             });
-            let Some(StudioTimelineEntryVm::Line { action, secondary_action, .. }) =
-                execution_entry(&raw_record(raw), &stimulus)
+            let Some(StudioTimelineEntryVm::Line {
+                action,
+                secondary_action,
+                ..
+            }) = execution_entry(&raw_record(raw), &stimulus)
             else {
                 panic!("expected a terminal line for {event_type}");
             };
@@ -1882,7 +1932,10 @@ mod tests {
         let entries = timeline_entries(records);
         let retry = entries.iter().find_map(|entry| match entry {
             StudioTimelineEntryVm::Line {
-                secondary_action: Some(StudioAction::PrefillRetryTurn { input, thread_id, .. }),
+                secondary_action:
+                    Some(StudioAction::PrefillRetryTurn {
+                        input, thread_id, ..
+                    }),
                 ..
             } => Some((thread_id.clone(), input.clone())),
             _ => None,

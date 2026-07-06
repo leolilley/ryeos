@@ -1,22 +1,18 @@
-# ryeos:signed:2026-07-06T07:48:45Z:dae9210e03699e79384f19ed90b27eba7cd72bc08bdd5dc23c2b053ff1d49cf2:4NTgHmliZnWg6o4fUKnVZzqeltasMUJlU0hCRo4ANS3muTXMrcyZPByzHshUv2NCMmKqbUdmf5VndgNXE4HDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-name: run-activity
+# ryeos:signed:2026-07-06T08:06:08Z:8fbfcfc9fb801dec416cd2aa7bd5c5ee1da6e0575d3900102b6eaa5b3fd53a03:qLRP+v5WuJa8+mALtxCkg9x4woV6VpC+HeCWlscRXz7xdy3YqGlk0SW4wOTeXYZqnPBdwS7a+yjc0sK7Rg/WDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: run-all-activity
 version: "1.0.0"
 description: >-
-  The current project's live activity: active threads plus graph follow parents
-  suspended on live children, newest first. Enter steps into a thread's braid
-  (which in turn shows that thread's own children as drill-ins). The landing
-  lens, in place of the flat thread list.
+  Machine-wide live activity across registered project contexts. Use this when
+  the daemon is running threads from more than one cwd and the current-project
+  activity lens is intentionally scoped too narrowly.
 
 widget: table
 source:
   ref: service:ui/studio/threads/list
   params:
-    # Only live threads — the settled history is not activity. Newest first.
     active: true
-    project: current
-    project_path: ""
     sort: newest
-    limit: 60
+    limit: 120
     exclude_item_prefixes:
       - service:ui/studio/
       - surface:ryeos/studio/
@@ -57,9 +53,6 @@ projections:
       timed_out: warn
       completed: good
     default: neutral
-# Enter steps into the thread's braid: aim the route at the thread (both thread +
-# chain_root so the braid resolves) and swap the single center lens to its
-# timeline, which renders the thread's own children as drill-ins.
 selection:
   activate: watch
 affordances:
@@ -72,8 +65,6 @@ affordances:
         thread: "{record.thread_id}"
         chain_root: "{record.chain_root_id}"
       open_view: view:ryeos/chain/timeline
-      # Step INTO the braid (returnable via Backspace), pushing activity onto the
-      # drill stack so the operator can walk back up to the live view.
       drill: true
 refresh:
   on_hint: [thread, activity]

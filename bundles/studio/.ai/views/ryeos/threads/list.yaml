@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T05:31:39Z:471f3ac48ad6523214a8e3f17554482e3e45a11cb25dff43fb0be763690ec656:gAizOtGtvenTjxg2vTiKorDnRBJ2f7IP4qEhszy5Af/emYxTARQLQeUNVdT8Tdt1M39+bj3Ta4fopCnzNEiHDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T07:34:24Z:cc732ee77f2f12115c1f46ee399cb98cead1f882a3ad8f85fbb6a86e681a31bf:VSbiK1CqkruGIqsqZIGebTwB9lFRraHTBQQRgYkNiQBpWX0OjxuyekaqNoJpftmi8kR/UZ9lsGrAsK2VrgK8Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
@@ -21,6 +21,8 @@ projections:
       field: kind
     - label: item
       field: item_ref
+    - label: project
+      field: project.name
     - label: status
       field: status
     - label: source
@@ -38,11 +40,12 @@ projections:
         field: follow.display_state
         map:
           suspended: warn
+          resume_queued: neutral
           resumed: good
     - label: created
       field: created_at
   expand:
-    fields: [thread_id, chain_root_id, item_ref, current_node.node, follow.child_thread_id, error]
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
   tone:
     field: status
     map:

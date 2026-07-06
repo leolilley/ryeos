@@ -144,16 +144,18 @@ pub struct UpdateConfigRequest {
 }
 
 pub async fn handle_projects_list(
-    _params: Value,
+    params: Value,
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> Result<Value> {
-    require_seat_caller(&ctx, &state)?;
+    let caller = require_seat_caller(&ctx, &state)?;
+    let project_path = string_param(&params, "project_path");
+    let current_project = project_path.as_deref().or_else(|| caller.project_root());
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     Ok(json!({
         "version": projects.version,
-        "projects": projects.projects.into_iter().map(project_view).collect::<Vec<_>>()
+        "projects": projects.projects.into_iter().map(|project| project_view(project, current_project)).collect::<Vec<_>>()
     }))
 }
 
@@ -180,7 +182,7 @@ pub async fn handle_projects_add(
         }
         let entry = existing.clone();
         store.write_projects(&projects)?;
-        return Ok(json!({ "project": project_view(entry), "created": false }));
+        return Ok(json!({ "project": project_view(entry, Some(&root_text)), "created": false }));
     }
 
     let entry = ProjectEntry {
@@ -197,7 +199,7 @@ pub async fn handle_projects_add(
     projects.projects.sort_by(|a, b| a.name.cmp(&b.name));
     store.write_projects(&projects)?;
 
-    Ok(json!({ "project": project_view(entry), "created": true }))
+    Ok(json!({ "project": project_view(entry, Some(&root_text)), "created": true }))
 }
 
 pub async fn handle_projects_forget(
@@ -257,7 +259,7 @@ pub async fn handle_projects_resolve(
         .into_iter()
         .find(|p| p.local_id == req.local_id)
         .ok_or(HandlerError::NotFound)?;
-    Ok(json!({ "project": project_view(project) }))
+    Ok(json!({ "project": project_view(project, None) }))
 }
 
 pub async fn handle_projects_open(
@@ -269,8 +271,6 @@ pub async fn handle_projects_open(
         return Err(HandlerError::Forbidden("session is read-only".into()).into());
     }
     let req: OpenProjectRequest = parse_request(params)?;
-    let session_id = session_id_from_context(&ctx)
-        .ok_or_else(|| HandlerError::Forbidden("browser session required".into()))?;
     let store = locked_principal_store(&ctx, &state).await?;
     let projects = store.load_projects()?;
     let project = projects
@@ -281,21 +281,30 @@ pub async fn handle_projects_open(
 
     let canonical = canonical_project_root(&project.root)?;
     let root = canonical.display().to_string();
-    let updated_session = get_ui_state(&state)
-        .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
-        .browser_sessions
-        .set_project_root(session_id, Some(root.clone()))
-        .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
-
     let recent = store.touch_recent_project(&project.local_id)?;
 
-    Ok(json!({
-        "project": project_view(ProjectEntry { root, ..project }),
-        "session": {
+    let session = if let Some(session_id) = session_id_from_context(&ctx) {
+        let updated_session = get_ui_state(&state)
+            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?
+            .browser_sessions
+            .set_project_root(session_id, Some(root.clone()))
+            .ok_or(HandlerError::Forbidden("session expired or invalid".into()))?;
+        json!({
             "session_id": updated_session.session_id,
             "project_root": updated_session.project_root,
             "read_only": updated_session.read_only,
-        },
+        })
+    } else {
+        json!({
+            "session_id": "",
+            "project_root": root.clone(),
+            "read_only": false,
+        })
+    };
+
+    Ok(json!({
+        "project": project_view(ProjectEntry { root: root.clone(), ..project }, Some(&root)),
+        "session": session,
         "recent": recent.recent_projects,
     }))
 }
@@ -532,8 +541,9 @@ fn inferred_project_name(root: &Path) -> String {
         .to_string()
 }
 
-fn project_view(project: ProjectEntry) -> Value {
+fn project_view(project: ProjectEntry, current_project: Option<&str>) -> Value {
     let exists = Path::new(&project.root).is_dir();
+    let current = current_project.is_some_and(|current| same_existing_dir(current, &project.root));
     json!({
         "local_id": project.local_id,
         "name": project.name,
@@ -541,7 +551,27 @@ fn project_view(project: ProjectEntry) -> Value {
         "added_at": project.added_at,
         "tags": project.tags,
         "exists": exists,
+        "current": current,
     })
+}
+
+fn string_param(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn same_existing_dir(left: &str, right: &str) -> bool {
+    let Ok(left) = Path::new(left).canonicalize() else {
+        return false;
+    };
+    let Ok(right) = Path::new(right).canonicalize() else {
+        return false;
+    };
+    left == right
 }
 
 macro_rules! descriptor {
@@ -560,30 +590,90 @@ macro_rules! descriptor {
 
 descriptor!(
     PROJECTS_LIST_DESCRIPTOR,
+    "service:projects/list",
+    "projects.list",
+    handle_projects_list
+);
+descriptor!(
+    PROJECTS_ADD_DESCRIPTOR,
+    "service:projects/add",
+    "projects.add",
+    handle_projects_add
+);
+descriptor!(
+    PROJECTS_FORGET_DESCRIPTOR,
+    "service:projects/forget",
+    "projects.forget",
+    handle_projects_forget
+);
+descriptor!(
+    PROJECTS_RESOLVE_DESCRIPTOR,
+    "service:projects/resolve",
+    "projects.resolve",
+    handle_projects_resolve
+);
+descriptor!(
+    PROJECTS_OPEN_DESCRIPTOR,
+    "service:projects/open",
+    "projects.open",
+    handle_projects_open
+);
+descriptor!(
+    UI_PROJECTS_LIST_DESCRIPTOR,
+    "service:ui/projects/list",
+    "ui.projects.list",
+    handle_projects_list
+);
+descriptor!(
+    UI_PROJECTS_ADD_DESCRIPTOR,
+    "service:ui/projects/add",
+    "ui.projects.add",
+    handle_projects_add
+);
+descriptor!(
+    UI_PROJECTS_FORGET_DESCRIPTOR,
+    "service:ui/projects/forget",
+    "ui.projects.forget",
+    handle_projects_forget
+);
+descriptor!(
+    UI_PROJECTS_RESOLVE_DESCRIPTOR,
+    "service:ui/projects/resolve",
+    "ui.projects.resolve",
+    handle_projects_resolve
+);
+descriptor!(
+    UI_PROJECTS_OPEN_DESCRIPTOR,
+    "service:ui/projects/open",
+    "ui.projects.open",
+    handle_projects_open
+);
+descriptor!(
+    STUDIO_PROJECTS_LIST_DESCRIPTOR,
     "service:ui/studio/projects/list",
     "ui.studio.projects.list",
     handle_projects_list
 );
 descriptor!(
-    PROJECTS_ADD_DESCRIPTOR,
+    STUDIO_PROJECTS_ADD_DESCRIPTOR,
     "service:ui/studio/projects/add",
     "ui.studio.projects.add",
     handle_projects_add
 );
 descriptor!(
-    PROJECTS_FORGET_DESCRIPTOR,
+    STUDIO_PROJECTS_FORGET_DESCRIPTOR,
     "service:ui/studio/projects/forget",
     "ui.studio.projects.forget",
     handle_projects_forget
 );
 descriptor!(
-    PROJECTS_RESOLVE_DESCRIPTOR,
+    STUDIO_PROJECTS_RESOLVE_DESCRIPTOR,
     "service:ui/studio/projects/resolve",
     "ui.studio.projects.resolve",
     handle_projects_resolve
 );
 descriptor!(
-    PROJECTS_OPEN_DESCRIPTOR,
+    STUDIO_PROJECTS_OPEN_DESCRIPTOR,
     "service:ui/studio/projects/open",
     "ui.studio.projects.open",
     handle_projects_open
@@ -653,13 +743,16 @@ mod tests {
 
     #[test]
     fn project_view_marks_missing_roots_without_mutating_registry_entry() {
-        let value = project_view(ProjectEntry {
-            local_id: "prj_1".into(),
-            name: "Missing".into(),
-            root: "/definitely/missing/ryeos/project".into(),
-            added_at: "2026-05-30T00:00:00Z".into(),
-            tags: vec![],
-        });
+        let value = project_view(
+            ProjectEntry {
+                local_id: "prj_1".into(),
+                name: "Missing".into(),
+                root: "/definitely/missing/ryeos/project".into(),
+                added_at: "2026-05-30T00:00:00Z".into(),
+                tags: vec![],
+            },
+            None,
+        );
         assert_eq!(value["exists"], false);
         assert_eq!(value["root"], "/definitely/missing/ryeos/project");
     }
