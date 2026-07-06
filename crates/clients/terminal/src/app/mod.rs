@@ -106,7 +106,7 @@ pub async fn run(
     // Session hints: transient "look" signals; bound views declaring
     // `refresh.on_hint` refetch their sources. This replaces polling —
     // content decides its own liveness.
-    let (hint_tx, mut hint_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (hint_tx, mut hint_rx) = tokio::sync::mpsc::unbounded_channel::<hints::HintMessage>();
     hints::spawn_hint_listener(client.clone(), hint_tx.clone());
 
     let mut events = EventStream::new();
@@ -130,7 +130,7 @@ pub async fn run(
             dirty = false;
         }
 
-        let want_tick_ms = if core.workspace.center_is_empty() {
+        let want_tick_ms = if core.wants_fast_ticks() {
             TICK_BACKDROP_MS
         } else {
             TICK_TILES_MS
@@ -204,8 +204,8 @@ pub async fn run(
                     dirty = true;
                 }
             }
-            Some(kind) = hint_rx.recv() => {
-                let effects = core.effects_for_hint(&kind);
+            Some((kind, payload)) = hint_rx.recv() => {
+                let effects = core.note_hint(&kind, &payload);
                 if !effects.is_empty() {
                     dispatch_effects(&mut core, &client, effects).await;
                     dirty = true;

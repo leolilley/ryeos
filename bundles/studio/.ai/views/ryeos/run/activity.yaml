@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T10:13:48Z:fb26cc7c05ab9a2469853ddcea6736cd3bbb6a7906a017bea2f31502beb19da4:Uf6eO/EccfVVBwuxzsfGuE/FiHA6p1mg/1178I4KFP9CQXlSscaryORUU661Xx1HhlvMon/XYw6HOKxwJaobCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T05:31:39Z:df23b909b2316c81924f2223967a7fa541e6afebb0879b9609f7a8162a477d88:4eYwMPDgbwm6JPARDuQDXg825fzOnGjiSbiyl6TmJgTvHw1p+4d2LZT6Y2TP86UIecgt0Fxgw8JweKvRyWBkAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: run-activity
 version: "1.0.0"
 description: >-
@@ -27,6 +27,8 @@ projections:
       field: status
     - label: started
       field: created_at
+  expand:
+    fields: [thread_id, chain_root_id, item_ref, current_node.node, error]
   tone:
     field: status
     map:
@@ -59,4 +61,4 @@ affordances:
       # drill stack so the operator can walk back up to the live view.
       drill: true
 refresh:
-  on_hint: thread
+  on_hint: [thread, activity]

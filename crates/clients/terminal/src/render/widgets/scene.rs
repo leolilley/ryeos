@@ -57,7 +57,7 @@ use ryeos_client_base::studio::view_model::StudioTone;
 use ryeos_client_base::text_surface::{Color, Style, TextSurface};
 
 use super::super::text::display_width;
-use super::super::theme::{ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN};
+use super::super::theme::{mix_toward, ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN};
 
 // Glyph palette for later reaches (all single-cell-width, monospace-safe):
 //   deeper dots:   ˙ . · : ∙ • ●           — the default ramp below
@@ -566,19 +566,6 @@ fn phase_for(id: &str, index: usize) -> u64 {
         hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
     }
     hash % BREATHE.len() as u64
-}
-
-/// Blend `from` toward `to` by `t` (0 = untouched, 1 = fully `to`).
-/// Theme constants in, theme blends out — non-RGB colours pass through.
-fn mix_toward(from: Color, to: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    match (from, to) {
-        (Color::Rgb(r, g, b), Color::Rgb(tr, tg, tb)) => {
-            let mix = |a: u8, b: u8| ((a as f32) * (1.0 - t) + (b as f32) * t).round() as u8;
-            Color::Rgb(mix(r, tr), mix(g, tg), mix(b, tb))
-        }
-        _ => from,
-    }
 }
 
 /// Draw a text object centred horizontally on its projected column,

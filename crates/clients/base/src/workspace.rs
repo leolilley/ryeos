@@ -10,7 +10,7 @@ use crate::layout::{layout_rects, LayoutTree, Rect, SplitAxis};
 use crate::surface::{ArrangeSpec, InsertSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -48,7 +48,16 @@ pub enum ViewLocalState {
         /// Feed sections (turns) the operator has folded shut, by section
         /// index. Only the timeline lens uses this; row lists leave it empty.
         #[serde(default)]
-        collapsed: std::collections::BTreeSet<usize>,
+        collapsed: BTreeSet<usize>,
+        /// Rows expanded in place, keyed by stable record identity. Tables and
+        /// rows widgets use this; feeds ignore it.
+        #[serde(default)]
+        expanded_rows: BTreeSet<String>,
+        /// Rows whose projected content changed recently, keyed by stable
+        /// record identity and timestamped in runtime ms. Renderers use this
+        /// as a transient shimmer signal.
+        #[serde(default)]
+        changed_rows: BTreeMap<String, u64>,
     },
     #[default]
     None,
@@ -80,7 +89,9 @@ impl ViewSpec {
         ViewLocalState::GenericList {
             cursor: 0,
             scroll: 0,
-            collapsed: std::collections::BTreeSet::new(),
+            collapsed: BTreeSet::new(),
+            expanded_rows: BTreeSet::new(),
+            changed_rows: BTreeMap::new(),
         }
     }
 

@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::serve;
@@ -444,37 +445,66 @@ async fn main() -> Result<()> {
     };
     let webhook_dedupe = Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
 
-    // Session hints: thread lifecycle events fan out to every live UI
-    // session as transient `thread.hint` notices (never persisted —
-    // hints say "look", the braid says what happened).
+    // Session hints: lifecycle events fan out immediately; mid-run braid
+    // activity coalesces into lossy `activity` hints. Hints are never
+    // persisted — they say "look", the braid says what happened.
     {
         let hub = app_state.event_streams.clone();
         let ui = ui_state_for_hints.clone();
         tokio::spawn(async move {
             let mut rx = hub.subscribe_all();
+            let mut activity_tick = tokio::time::interval(Duration::from_millis(750));
+            activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut pending_activity: HashMap<String, u64> = HashMap::new();
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if !ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
-                            &event.event_type,
-                        ) {
+                tokio::select! {
+                    recv = rx.recv() => {
+                        match recv {
+                            Ok(event) => {
+                                if ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
+                                    &event.event_type,
+                                ) {
+                                    let payload = serde_json::json!({
+                                        "kind": "thread",
+                                        "thread_id": event.thread_id,
+                                        "chain_root_id": event.chain_root_id,
+                                        "event_type": event.event_type,
+                                    });
+                                    for session_id in ui.browser_sessions.session_ids() {
+                                        ui.session_bus.publish(
+                                            &session_id,
+                                            "thread.hint",
+                                            payload.clone(),
+                                        );
+                                    }
+                                } else if !event.event_type.starts_with("seat.") {
+                                    *pending_activity.entry(event.thread_id).or_insert(0) += 1;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    _ = activity_tick.tick() => {
+                        if pending_activity.is_empty() {
                             continue;
                         }
+                        let thread_ids = pending_activity.keys().cloned().collect::<Vec<_>>();
+                        let event_count = pending_activity.values().sum::<u64>();
+                        pending_activity.clear();
+                        let payload = serde_json::json!({
+                            "kind": "activity",
+                            "thread_ids": thread_ids,
+                            "event_count": event_count,
+                        });
                         for session_id in ui.browser_sessions.session_ids() {
                             ui.session_bus.publish(
                                 &session_id,
                                 "thread.hint",
-                                serde_json::json!({
-                                    "kind": "thread",
-                                    "thread_id": event.thread_id,
-                                    "chain_root_id": event.chain_root_id,
-                                    "event_type": event.event_type,
-                                }),
+                                payload.clone(),
                             );
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });

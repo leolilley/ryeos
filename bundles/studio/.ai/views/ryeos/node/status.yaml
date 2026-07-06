@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T23:38:36Z:2677a5e1e76a574ba25a768c9f697c9396f29d7b1e19f924db25e0a56201d353:b77+Oi5MGStBSn4t/g8/+5b6hwyT0bQg1GeW/u51kdeUuNebVsO7Dol3bEH5/OOyIYKAWVPzgiU7Iv0vJVw0Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T05:31:39Z:d84455bdb7a953b6914f11b79faee31102a04961cebcc98cba6b512f9621db21:RuZmFfa6tWwa87NSlz2guD8PZ3ED1VQGlE45GKniZRy4GXb5E9ZaG3WVMBWywFOiBSn7dmM8YJAldDEi//xnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: node-status
 version: "1.0.0"
 description: Node status detail (provenance first)
@@ -16,4 +16,4 @@ projections:
     - active_threads
     - bind
 refresh:
-  on_hint: thread
+  on_hint: [thread, activity]

@@ -67,6 +67,10 @@ pub struct StudioKeyContext {
     /// The head thread is mid-execution — esc interrupts it instead of
     /// closing the focused tile.
     pub head_thread_running: bool,
+    /// The focused rows/table lens has an expandable selected row.
+    pub focused_row_expandable: bool,
+    /// The focused expandable row is currently open.
+    pub focused_row_expanded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -134,6 +138,7 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
         StudioKey::ArrowRight if event.modifiers.ctrl_only() => {
             cycle_tab(StudioStackMoveDirection::Down)
         }
+        StudioKey::ArrowLeft if event.modifiers.alt_only() => ui(StudioUiEvent::PopLens),
         // Esc interrupts a running head thread (chat convention); otherwise it
         // closes the focused tile.
         StudioKey::Escape if event.modifiers.none() && context.head_thread_running => {
@@ -179,13 +184,29 @@ pub fn studio_key_command(event: StudioKeyEvent, context: StudioKeyContext) -> S
             delta: 1,
             fallback_direction: FocusDirection::Down,
         },
+        StudioKey::ArrowRight
+            if event.modifiers.none()
+                && context.focused_row_expandable
+                && !context.focused_row_expanded =>
+        {
+            ui(StudioUiEvent::ExpandSelectedRow { expand: true })
+        }
+        StudioKey::ArrowLeft
+            if event.modifiers.none()
+                && context.focused_row_expandable
+                && context.focused_row_expanded =>
+        {
+            ui(StudioUiEvent::ExpandSelectedRow { expand: false })
+        }
         StudioKey::ArrowLeft if event.modifiers.none() => focus(FocusDirection::Left),
         StudioKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
-        StudioKey::Backspace if context.input_visible && event.modifiers.none() => {
+        StudioKey::Backspace
+            if context.input_visible && context.input_has_text && event.modifiers.none() =>
+        {
             ui(StudioUiEvent::DeleteInputChar)
         }
-        // Backspace outside an input steps back up the execution-drill stack —
-        // the "return" from a step-in. A no-op at the top of the tree.
+        // Backspace with no text to edit steps back up the execution-drill
+        // stack — the "return" from a step-in. A no-op at the top of the tree.
         StudioKey::Backspace if event.modifiers.none() => ui(StudioUiEvent::PopLens),
         // A live filter with multiple target fields owns Tab to cycle the field
         // (it has no completion or route-target, so Tab is otherwise free here).
@@ -491,6 +512,16 @@ mod tests {
         }
     }
 
+    fn alt_arrow(key: StudioKey) -> StudioKeyEvent {
+        StudioKeyEvent {
+            key,
+            modifiers: StudioKeyModifiers {
+                alt: true,
+                ..Default::default()
+            },
+        }
+    }
+
     fn ctrl(ch: char) -> StudioKeyEvent {
         StudioKeyEvent {
             key: StudioKey::Char(ch),
@@ -534,6 +565,8 @@ mod tests {
             input_can_accept_completion: false,
             input_target_cycle: None,
             head_thread_running: false,
+            focused_row_expandable: false,
+            focused_row_expanded: false,
         }
     }
 
@@ -549,6 +582,8 @@ mod tests {
             input_can_accept_completion: false,
             input_target_cycle: None,
             head_thread_running: false,
+            focused_row_expandable: false,
+            focused_row_expanded: false,
         }
     }
 
@@ -624,7 +659,7 @@ mod tests {
             }
         ));
         assert!(matches!(
-            studio_key_command(key(StudioKey::Backspace), context(false, true)),
+            studio_key_command(key(StudioKey::Backspace), context_typing()),
             StudioKeyCommand::Ui {
                 event: StudioUiEvent::DeleteInputChar
             }
@@ -941,6 +976,59 @@ mod tests {
         assert_eq!(
             studio_key_command(shift_enter(), context(false, false)),
             StudioKeyCommand::Ignore,
+        );
+    }
+
+    #[test]
+    fn backspace_pops_empty_input_but_edits_non_empty_input() {
+        assert_eq!(
+            studio_key_command(key(StudioKey::Backspace), context(false, true)),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::PopLens
+            },
+        );
+        assert_eq!(
+            studio_key_command(key(StudioKey::Backspace), context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::DeleteInputChar
+            },
+        );
+    }
+
+    #[test]
+    fn alt_left_pops_lens_even_while_typing() {
+        assert_eq!(
+            studio_key_command(alt_arrow(StudioKey::ArrowLeft), context_typing()),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::PopLens
+            },
+        );
+    }
+
+    #[test]
+    fn arrows_expand_and_collapse_selected_expandable_row_before_focus() {
+        let collapsed = StudioKeyContext {
+            focused_row_expandable: true,
+            focused_row_expanded: false,
+            ..context(false, true)
+        };
+        assert_eq!(
+            studio_key_command(key(StudioKey::ArrowRight), collapsed),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::ExpandSelectedRow { expand: true }
+            }
+        );
+
+        let expanded = StudioKeyContext {
+            focused_row_expandable: true,
+            focused_row_expanded: true,
+            ..context(false, true)
+        };
+        assert_eq!(
+            studio_key_command(key(StudioKey::ArrowLeft), expanded),
+            StudioKeyCommand::Ui {
+                event: StudioUiEvent::ExpandSelectedRow { expand: false }
+            }
         );
     }
 }

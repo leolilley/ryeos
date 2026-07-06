@@ -53,7 +53,15 @@ impl StudioCore {
                 payload,
             } => self.apply_thread_tail(&thread_id, &event_type, &payload),
             StudioEvent::Tick { now_ms } => {
+                let dt_ms = now_ms.saturating_sub(self.runtime.last_tick_ms);
+                self.runtime.last_tick_ms = now_ms;
                 self.runtime.now_ms = now_ms;
+                if self.runtime.activity_pulse > 0.0 {
+                    self.runtime.activity_pulse *= 0.9_f32.powf(dt_ms as f32 / 250.0);
+                    if self.runtime.activity_pulse < 0.005 {
+                        self.runtime.activity_pulse = 0.0;
+                    }
+                }
                 // The frame clock advances `generation` so generation-keyed
                 // motion (the backdrop twinkle, via the generic scene
                 // renderer) steps each tick. The loop already repaints on
@@ -399,6 +407,12 @@ impl StudioCore {
                     return Vec::new();
                 };
                 if self.set_tile_fold(tile_id, section, collapsed) {
+                    self.bump_generation();
+                }
+                Vec::new()
+            }
+            StudioUiEvent::ExpandSelectedRow { expand } => {
+                if self.set_focused_row_expanded(expand) {
                     self.bump_generation();
                 }
                 Vec::new()

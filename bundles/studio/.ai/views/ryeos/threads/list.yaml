@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-04T08:15:07Z:f7a668e5c012425441f63d654c266e79ac90bce628738c06ada011c86022fe1f:9caphGHFnmwBgx26sX/aSYOqpJvBYmWp/g/tFU4y/rpXGonWv02ZV4QECXQz6hKqnEHwcWp/pt7aTx8RnHMhDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T05:31:39Z:471f3ac48ad6523214a8e3f17554482e3e45a11cb25dff43fb0be763690ec656:gAizOtGtvenTjxg2vTiKorDnRBJ2f7IP4qEhszy5Af/emYxTARQLQeUNVdT8Tdt1M39+bj3Ta4fopCnzNEiHDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the studio threads source
@@ -41,6 +41,8 @@ projections:
           resumed: good
     - label: created
       field: created_at
+  expand:
+    fields: [thread_id, chain_root_id, item_ref, current_node.node, follow.child_thread_id, error]
   tone:
     field: status
     map:
@@ -130,4 +132,4 @@ input:
       - { param: requested_by, label: source }
     debounce_ms: 120
 refresh:
-  on_hint: thread
+  on_hint: [thread, activity]

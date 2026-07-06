@@ -264,6 +264,8 @@ impl StudioCore {
                         .get(tile_id)
                         .map_or(true, |&latest| result_id >= latest);
                     if is_latest {
+                        let old = self.data.sources.get(tile_id).cloned();
+                        self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
                     }
                     self.bump_generation();

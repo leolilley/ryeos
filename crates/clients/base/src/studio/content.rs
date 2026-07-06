@@ -535,6 +535,32 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
         .unwrap_or_default()
 }
 
+/// Fields a rows/table view exposes when a row is expanded in place. The
+/// vocabulary is content-owned (`projections.expand.fields`), while Rust only
+/// knows "field label/value lines".
+pub fn expand_fields(binding: &ViewBinding) -> Vec<String> {
+    binding
+        .projections
+        .get("expand")
+        .and_then(|expand| expand.get("fields"))
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn expanded_detail(record: &Value, fields: &[String]) -> Vec<(String, String)> {
+    fields
+        .iter()
+        .filter_map(|field| Some((field.clone(), field_text(record, field)?)))
+        .collect()
+}
+
 /// One projected table row: a cell per column (in column order), the per-cell
 /// tones (parallel to `cells`; `None` where the column declares no tone or
 /// the record misses its field), the row tone, and the raw record kept for
@@ -917,7 +943,8 @@ pub fn target_without_route_error(binding: &ViewBinding) -> Option<String> {
 }
 
 /// The closed set of `refresh:` rule keys a view may declare. A view refetches
-/// on a facet write (`on_facet`) or a hint (`on_hint`).
+/// on a facet write (`on_facet`) or a hint (`on_hint`). `on_hint` may be a
+/// single hint kind or a list of hint kinds.
 pub const REFRESH_KEYS: &[&str] = &["on_facet", "on_hint"];
 
 /// Returns a degradation reason when a `refresh:` rule names a key outside the
@@ -1387,7 +1414,9 @@ mod tests {
     fn known_refresh_keys_parse() {
         let surface = json!({ "views": {
             "view:ryeos/okrefresh": { "widget": "text",
-                "refresh": { "on_facet": "selection", "on_hint": "thread" } }
+                "refresh": { "on_facet": "selection", "on_hint": "thread" } },
+            "view:ryeos/okrefresh-list": { "widget": "text",
+                "refresh": { "on_hint": ["thread", "activity"] } }
         }});
         let b = views_from_surface(Some(&surface));
         let b = b.get("view:ryeos/okrefresh").expect("present");
@@ -1395,6 +1424,28 @@ mod tests {
             b.degraded.is_none(),
             "known refresh keys parse cleanly: {:?}",
             b.degraded
+        );
+        let b = b.get("view:ryeos/okrefresh-list").expect("present");
+        assert!(
+            b.degraded.is_none(),
+            "list-form on_hint parses cleanly: {:?}",
+            b.degraded
+        );
+    }
+
+    #[test]
+    fn expand_fields_parse_from_projection_content() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "projections": {
+                "columns": [{ "label": "thread", "field": "thread_id" }],
+                "expand": { "fields": ["thread_id", "chain_root_id"] }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            expand_fields(&binding),
+            vec!["thread_id".to_string(), "chain_root_id".to_string()]
         );
     }
 
