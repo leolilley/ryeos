@@ -1809,7 +1809,8 @@ impl ProjectionDb {
     /// epoch. Callers with CAS/refs access should rebuild the projection when
     /// `reset` is true.
     pub fn open_with_status(path: &Path) -> anyhow::Result<ProjectionOpenResult> {
-        let conn = Connection::open(path).context("failed to open projection database")?;
+        let conn =
+            open_projection_connection(path).context("failed to open projection database")?;
 
         let spec = projection_schema_spec();
 
@@ -1848,7 +1849,8 @@ impl ProjectionDb {
             close_connection(conn)?;
             reset_projection_files(path, stored_epoch, current_epoch)?;
 
-            let conn = Connection::open(path).context("failed to reopen projection database")?;
+            let conn =
+                open_projection_connection(path).context("failed to reopen projection database")?;
             init_current_projection_schema(&conn, &spec, path)?;
             return Ok(ProjectionOpenResult {
                 db: Self { conn },
@@ -2634,6 +2636,13 @@ impl ProjectionDb {
     }
 }
 
+fn open_projection_connection(path: &Path) -> anyhow::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .context("failed to set projection synchronous=NORMAL")?;
+    Ok(conn)
+}
+
 fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
     validate_non_empty_label("job_id", job_id)?;
     if job_id.len() > 128
@@ -3331,6 +3340,12 @@ mod tests {
             stored_projection_schema_epoch(db.connection()).unwrap(),
             projection_schema_epoch()
         );
+
+        let synchronous: i64 = db
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "projection DB must use synchronous=NORMAL");
     }
 
     #[test]
@@ -3381,6 +3396,12 @@ mod tests {
             stored_projection_schema_epoch(opened.db.connection()).unwrap(),
             projection_schema_epoch()
         );
+        let synchronous: i64 = opened
+            .db
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "reopened projection DB must use NORMAL");
         assert!(reset_backups(&path).is_empty());
     }
 
@@ -3407,6 +3428,15 @@ mod tests {
             opened.db.connection(),
             "thread_usage_subjects"
         ));
+        let synchronous: i64 = opened
+            .db
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "post-epoch-reset projection DB must use NORMAL"
+        );
         assert!(!table_exists(opened.db.connection(), "sentinel"));
         assert_eq!(reset_backups(&path).len(), 1);
     }
