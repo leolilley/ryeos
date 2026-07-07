@@ -1,23 +1,21 @@
-# ryeos:signed:2026-07-07T01:38:02Z:2be638fadb412ced1f84caf64ebc2a45beca11a3be9d59879e4a291b89855b10:ShaIwMCT3hyJQtpNyx3ok5GiTveshvmkZCNKlVdzxnoGo51duVS/59LcXhqO1lTIkDzZ1BxuuTwFDtm8FB1ZBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:07:39Z:3dd20f5be4d045f8cb98f551c76a49c4342b2c88e950f71939b4a6703bb10103:/O8veFceKCwdpnoOdzSo2smqqnuOIYeJwwed6PTyRClG5pqdj1G6wetuzOGTgiX793U9dZNCtRq0+h3bk9JcBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: backdrop-prism-shards
 version: "1.0.0"
 description: >-
-  A second RyeOS backdrop: the same filled prism scene, authored as four
-  clipped shards that ease apart and rejoin. Each shard remains a generic
-  `fill` object using the prism SDF; `clip` carves the object-local slice
-  and `break` offsets it on a loop.
+  A second RyeOS backdrop: the same filled prism scene, authored as two
+  clipped outer halves plus a small inner core. Each half remains a
+  generic `fill` object using the prism SDF; `clip` carves the object-local
+  slice and `break` offsets it around the core on a loop.
 
 widget: scene
 body:
   sweep: { period: 56, width: 4.2 }
-  screen_offset: [0.0, -0.08]
+  screen_offset: [0.02, -0.08]
   objects:
-    - { kind: fill, shape: prism, id: prism/shard-left, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -3.0, x_max: -1.05 }, break: { away: [-2.9, 0.55], period: 132, phase: 0 }, color: "#d65d0e", tone: accent, opacity: 0.92, spin: 0.42, orbit: 0.72 }
-    - { kind: fill, shape: prism, id: prism/inner, position: [0.0, 0.0], scale: [0.9, 1.15, 0.85], break: { away: [0.0, -0.2], period: 132, phase: 0 }, color: "#fabd2f", tone: warn, opacity: 0.98, spin: -0.92, orbit: 0.72 }
-    - { kind: fill, shape: prism, id: prism/shard-core, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -1.15, x_max: 0.85 }, break: { away: [-0.45, -0.22], period: 132, phase: 0 }, color: "#fe8019", tone: accent, opacity: 0.96, spin: 0.58, orbit: 0.72 }
-    - { kind: fill, shape: prism, id: prism/shard-right, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: 0.75, x_max: 3.0 }, break: { away: [2.75, 0.62], period: 132, phase: 0 }, color: "#d65d0e", tone: accent, opacity: 0.9, spin: 0.74, orbit: 0.72 }
-    - { kind: fill, shape: prism, id: prism/core-shine, position: [0.0, 0.2], scale: [0.55, 1.8, 0.55], reveal: { period: 132, phase: 0, floor: 0.0, sharpness: 3.4 }, color: "#fabd2f", tone: warn, opacity: 0.88, spin: 1.15, fit: false }
+    - { kind: fill, shape: prism, id: prism/inner, position: [0.0, 0.0], scale: [0.9, 1.15, 0.85], color: "#fabd2f", tone: warn, opacity: 0.98, spin: -0.72, fit: false }
+    - { kind: fill, shape: prism, id: prism/half-left, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -3.0, x_max: 0.04 }, break: { away: [-2.2, 0.0], period: 132, phase: 0 }, color: "#d65d0e", tone: accent, opacity: 0.94, spin: 0.48 }
+    - { kind: fill, shape: prism, id: prism/half-right, position: [0.0, 0.4], scale: [3.0, 3.6, 2.6], clip: { x_min: -0.04, x_max: 3.0 }, break: { away: [2.2, 0.0], period: 132, phase: 0 }, color: "#fe8019", tone: accent, opacity: 0.94, spin: 0.68 }
 
     - { kind: particle, position: [-11.0, 4.0], scale: 0.4, color: "#a89984", tone: neutral, opacity: 0.7, glyph: diamond, orbit: 0.5, fit: false }
     - { kind: particle, position: [10.0, 3.4], scale: 0.5, color: "#d5c4a1", tone: neutral, opacity: 0.7, glyph: diamond, orbit: -0.6, fit: false }
