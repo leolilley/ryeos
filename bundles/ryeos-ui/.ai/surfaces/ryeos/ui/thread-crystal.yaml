@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:20:06Z:5cd4e6d67cfa929fedc2f4ab42de7412647433d4dc708002b020ac7f3e195ffc:tOUCMA8XpVPSnEgqvo2VSuQBU/Duwf04YlW1lsu7TknKfFxtatXeysOrOq0wqDzcWrbyjzWkZtTCuMyEJw8xAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:28bb1340997473cf02f7bb136afb6c3622aa9abd1ec52c3a61cd6b32d7a40bc8:pJNRfhpZKKY3tdLskkWZ8LQVMYZCz/S42iX0Kb3hZ5Fsi9UNDaDlnDHOT4oOYkembxTMDwN1GJZRj1WEsNGGDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-thread-crystal
 version: "1.0.0"
@@ -24,9 +24,9 @@ backdrop: view:ryeos/backdrop/prism-shards
 
 library:
   - view:ryeos/thread/transcript
-  - view:ryeos/threads/live
+  - view:ryeos/run/activity
+  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
-  - view:ryeos/node/threads/live
   - view:ryeos/node/events
   - view:ryeos/input
   - view:ryeos/node/status

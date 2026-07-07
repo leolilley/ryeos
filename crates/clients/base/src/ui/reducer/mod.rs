@@ -197,6 +197,9 @@ impl RyeOsCore {
                 };
                 if self.workspace.tiles.contains_key(&tile_id) {
                     self.workspace.focused_tile = tile_id;
+                    self.ui.focus_target = Some(super::model::RyeOsFocusTarget::WorkspaceTile {
+                        tile_id: self.workspace.focused_tile.0.to_string(),
+                    });
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
                         tile_id: tile_id.0.to_string(),
                     });
@@ -206,6 +209,9 @@ impl RyeOsCore {
             }
             RyeOsUiEvent::FocusDirection { direction } => {
                 if self.workspace.focus_in_direction(direction) {
+                    self.ui.focus_target = Some(super::model::RyeOsFocusTarget::WorkspaceTile {
+                        tile_id: self.workspace.focused_tile.0.to_string(),
+                    });
                     self.push_motion(RyeOsMotionEventVm::FocusChanged {
                         tile_id: self.workspace.focused_tile.0.to_string(),
                     });
@@ -233,6 +239,26 @@ impl RyeOsCore {
                 self.ui.overlay.query = query;
                 self.ui.overlay.selected = 0;
                 self.bump_generation();
+                Vec::new()
+            }
+            RyeOsUiEvent::FocusInput => {
+                let Some(edge) = self.default_input_edge() else {
+                    return Vec::new();
+                };
+                self.ui.focus_target = Some(super::model::RyeOsFocusTarget::Dock { edge });
+                self.bump_generation();
+                Vec::new()
+            }
+            RyeOsUiEvent::BlurInput => {
+                if matches!(
+                    self.ui.focus_target.as_ref(),
+                    Some(super::model::RyeOsFocusTarget::Dock { .. })
+                ) {
+                    self.ui.focus_target = Some(super::model::RyeOsFocusTarget::WorkspaceTile {
+                        tile_id: self.workspace.focused_tile.0.to_string(),
+                    });
+                    self.bump_generation();
+                }
                 Vec::new()
             }
             RyeOsUiEvent::InsertInputChar { ch } => {
@@ -427,6 +453,9 @@ impl RyeOsCore {
                 affordance_id,
                 record,
             } => self.invoke_affordance(&view_ref, &affordance_id, &record),
+            RyeOsAction::OpenOverlay { overlay_id } => self.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::OpenOverlay { overlay_id },
+            }),
             RyeOsAction::OpenView { view } => {
                 let mut effects = self.open_view(view.clone());
                 if let Some(hash) = route_for_view(&view) {
@@ -974,19 +1003,19 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_overlay_toggles_through_the_view_model() {
+    fn help_overlay_toggles_through_the_view_model() {
         let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
         assert!(build_view_model(&core).overlays.is_empty());
 
         core.dispatch(RyeOsEvent::Ui {
             event: RyeOsUiEvent::OpenOverlay {
-                overlay_id: "shortcuts".to_string(),
+                overlay_id: "help".to_string(),
             },
         });
         let vm = build_view_model(&core);
         assert_eq!(
             vm.overlays.first().map(|overlay| overlay.id.as_str()),
-            Some("shortcuts")
+            Some("help")
         );
         assert!(!vm.overlays[0].items.is_empty());
 

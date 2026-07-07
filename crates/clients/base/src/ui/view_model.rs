@@ -263,6 +263,8 @@ pub struct RyeOsDockTileVm {
 pub struct RyeOsInputVm {
     pub text: String,
     pub cursor: usize,
+    #[serde(default)]
+    pub focused: bool,
     /// Target strip: `target_label` if authored, else derived from the
     /// bound submit target.
     pub route_label: String,
@@ -509,6 +511,8 @@ pub struct RyeOsOverlayVm {
     pub id: String,
     pub title: String,
     pub widget: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
     pub query: String,
     pub selected: usize,
     pub hint: String,
@@ -1540,6 +1544,10 @@ fn input_vm(
     let buffer = core.ui.input_buffers.get(&key.storage_key());
     let text = buffer.map(|b| b.text.clone()).unwrap_or_default();
     let cursor = buffer.map(|b| b.cursor).unwrap_or(0);
+    let focused = core
+        .focused_input_instance()
+        .as_ref()
+        .is_some_and(|(focused_key, _)| focused_key.storage_key() == key.storage_key());
 
     let route = core.seat.fold().input_route();
     let route_label = input
@@ -1577,6 +1585,7 @@ fn input_vm(
         input.submits_to_route() && (text.starts_with('/') || route.has_target());
     let has_affordance_target = input.submit_affordance().is_some();
     RyeOsInputVm {
+        focused,
         cursor,
         route_label,
         placeholder,
@@ -2143,6 +2152,84 @@ pub(crate) fn command_overlay_items_for(core: &RyeOsCore) -> Vec<RyeOsOverlayAct
     items
 }
 
+fn help_overlay_items() -> Vec<RyeOsOverlayItemVm> {
+    let topic = |category: &str, primary: &str, secondary: &str| RyeOsOverlayItemVm {
+        category: category.to_string(),
+        primary: primary.to_string(),
+        secondary: secondary.to_string(),
+        meta: String::new(),
+        enabled: false,
+        action: None,
+        secondary_action: None,
+    };
+    let overlay =
+        |category: &str, primary: &str, secondary: &str, overlay_id: &str| RyeOsOverlayItemVm {
+            category: category.to_string(),
+            primary: primary.to_string(),
+            secondary: secondary.to_string(),
+            meta: String::new(),
+            enabled: true,
+            action: Some(RyeOsAction::OpenOverlay {
+                overlay_id: overlay_id.to_string(),
+            }),
+            secondary_action: None,
+        };
+    let view =
+        |category: &str, primary: &str, secondary: &str, view_ref: &str| RyeOsOverlayItemVm {
+            category: category.to_string(),
+            primary: primary.to_string(),
+            secondary: secondary.to_string(),
+            meta: String::new(),
+            enabled: true,
+            action: Some(RyeOsAction::OpenView {
+                view: ViewSpec {
+                    view_ref: view_ref.to_string(),
+                },
+            }),
+            secondary_action: None,
+        };
+    vec![
+        overlay("Start", "Views", "Open the view launcher", "views"),
+        overlay("Start", "Commands", "Open context commands", "commands"),
+        overlay("Start", "Shortcuts", "Open the shortcut table", "shortcuts"),
+        topic(
+            "Start",
+            "Input",
+            "The foot input stays open while views move",
+        ),
+        view(
+            "Work",
+            "Projects",
+            "Registered project contexts",
+            "view:ryeos/projects/list",
+        ),
+        view(
+            "Work",
+            "Project activity",
+            "Live activity for the active project",
+            "view:ryeos/run/activity",
+        ),
+        view(
+            "Work",
+            "All-project activity",
+            "Live activity across registered projects",
+            "view:ryeos/run/all-activity",
+        ),
+        view(
+            "Threads",
+            "Transcript",
+            "Full transcript for the routed thread",
+            "view:ryeos/thread/transcript",
+        ),
+        view(
+            "Threads",
+            "Thread detail",
+            "Detail lens for a selected thread",
+            "view:ryeos/threads/detail",
+        ),
+    ]
+}
+
 fn inspect_action_for_focused_row(core: &RyeOsCore) -> Option<RyeOsAction> {
     match action_for_focused_row(core)? {
         action @ (RyeOsAction::InspectItem { .. }
@@ -2195,13 +2282,16 @@ fn overlays(core: &RyeOsCore) -> Vec<RyeOsOverlayVm> {
     let Some(active) = core.ui.overlay.active.as_deref() else {
         return Vec::new();
     };
-    let (title, widget, hint, _source_ref) = overlay_definition(core, active);
+    let Some((title, widget, hint, _source_ref, columns)) = overlay_definition(core, active) else {
+        return Vec::new();
+    };
     let items = active_overlay_items(core);
     let selected = core.ui.overlay.selected.min(items.len().saturating_sub(1));
     vec![RyeOsOverlayVm {
         id: active.to_string(),
         title,
         widget,
+        columns,
         query: core.ui.overlay.query.clone(),
         selected,
         hint,
@@ -2209,7 +2299,10 @@ fn overlays(core: &RyeOsCore) -> Vec<RyeOsOverlayVm> {
     }]
 }
 
-fn overlay_definition(core: &RyeOsCore, id: &str) -> (String, String, String, String) {
+fn overlay_definition(
+    core: &RyeOsCore,
+    id: &str,
+) -> Option<(String, String, String, String, Vec<String>)> {
     let declared = core
         .data
         .session
@@ -2218,11 +2311,8 @@ fn overlay_definition(core: &RyeOsCore, id: &str) -> (String, String, String, St
         .and_then(|value| serde_json::from_value::<SurfaceSpec>(value.clone()).ok())
         .and_then(|surface| surface.overlays.get(id).cloned());
     if let Some(spec) = declared {
-        let source_ref = spec
-            .source
-            .map(|source| source.item_ref)
-            .unwrap_or_else(|| format!("runtime:{id}"));
-        return (
+        let source_ref = spec.source.map(|source| source.item_ref)?;
+        return Some((
             if spec.title.is_empty() {
                 id.to_string()
             } else {
@@ -2235,41 +2325,49 @@ fn overlay_definition(core: &RyeOsCore, id: &str) -> (String, String, String, St
             },
             spec.hint,
             source_ref,
-        );
+            spec.columns,
+        ));
     }
-    match id {
+    Some(match id {
         "views" => (
             "Views".to_string(),
             "palette".to_string(),
             "type to filter views · enter to open · shift+enter for new tile".to_string(),
             "runtime:views/launchable".to_string(),
+            Vec::new(),
         ),
         "commands" => (
             "Commands".to_string(),
             "palette".to_string(),
             "type to filter commands · enter to run · esc to close".to_string(),
             "runtime:commands/available".to_string(),
+            Vec::new(),
+        ),
+        "help" => (
+            "Help".to_string(),
+            "table".to_string(),
+            "type to filter help · esc to close".to_string(),
+            "runtime:help".to_string(),
+            vec!["Topic".to_string(), "Open".to_string()],
         ),
         "shortcuts" => (
             "Shortcuts".to_string(),
             "table".to_string(),
             "type to filter shortcuts · esc to close".to_string(),
             "runtime:shortcuts".to_string(),
+            vec!["Keys".to_string(), "Action".to_string()],
         ),
-        _ => (
-            id.to_string(),
-            "palette".to_string(),
-            "esc to close".to_string(),
-            format!("runtime:{id}"),
-        ),
-    }
+        _ => return None,
+    })
 }
 
 pub(crate) fn active_overlay_items(core: &RyeOsCore) -> Vec<RyeOsOverlayItemVm> {
     let Some(active) = core.ui.overlay.active.as_deref() else {
         return Vec::new();
     };
-    let (_, _, _, source_ref) = overlay_definition(core, active);
+    let Some((_, _, _, source_ref, _)) = overlay_definition(core, active) else {
+        return Vec::new();
+    };
     let query = core.ui.overlay.query.trim().to_lowercase();
     overlay_source_items(core, &source_ref)
         .into_iter()
@@ -2290,6 +2388,7 @@ fn overlay_source_items(core: &RyeOsCore, source_ref: &str) -> Vec<RyeOsOverlayI
             .into_iter()
             .map(overlay_item_from_action_item)
             .collect(),
+        "runtime:help" => help_overlay_items(),
         "runtime:shortcuts" => shortcut_overlay_items(),
         "runtime:views/launchable" => view_overlay_items(core)
             .into_iter()
@@ -2383,8 +2482,15 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
             "Open the view overlay (swap the center lens)",
         ),
         entry("Commands", "Ctrl+P", "Open the command overlay"),
+        entry("Help", "Ctrl+H", "Open the help overlay"),
+        entry("Shortcuts", "Ctrl+/", "Open the shortcuts overlay"),
         entry("Backdrop", "Ctrl+S", "Toggle backdrop break"),
         entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
+        entry(
+            "Move",
+            "Ctrl+U / Ctrl+D",
+            "Jump the focused rows by half a screen",
+        ),
         entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
         entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),
         entry("Layout", "Alt+M", "Toggle the focused tile master / full"),
@@ -2395,7 +2501,6 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
         ),
         entry("App", "Alt+Q", "Close the focused lens"),
         entry("App", "Ctrl+C", "Quit"),
-        entry("App", "?", "Show shortcut overlay"),
     ]
 }
 

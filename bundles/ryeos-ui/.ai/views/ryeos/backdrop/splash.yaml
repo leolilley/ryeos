@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T01:27:48Z:cde1d97a0b9a2054c98a09b34b7c227bab66d9cbde0c6497cd917bd216b8f670:j86tIk5hGA+3rj/v3ds9377pWxmV5GOFDtGNd59QT8AIPHWGmH0x+F8FEUwioZElSMfScjuloP+GVnBwrc6EDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T03:16:41Z:bd98f78e8858c453609c1076377ad7a90111a62c5d75a4b18be9a9af6282ce77:49BW36wHlSvNoROflN/f/hPAj2v6JV82D2oOD4dBIm2fY+2Q+G0YUf3IGWC0kJz1X3sL9UJrEG6uMH7d82VLBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: backdrop-splash
 version: "1.0.0"
@@ -15,4 +15,4 @@ body:
     - ""
     - { text: "portable verified execution", tone: neutral }
     - ""
-    - { text: "ctrl+k views · ctrl+c quit", tone: neutral }
+    - { text: "ctrl+h help · ctrl+/ shortcuts", tone: neutral }

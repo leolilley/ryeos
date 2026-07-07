@@ -97,6 +97,13 @@ pub struct RyeOsOverlayState {
     pub selected: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RyeOsFocusTarget {
+    WorkspaceTile { tile_id: String },
+    Dock { edge: RyeOsDockEdge },
+}
+
 /// Buffer state only — ephemera, never braided. Where text LANDS is the
 /// `input.route` facet on the seat braid (`ui::seat`), not a field
 /// here.
@@ -295,6 +302,8 @@ pub struct RyeOsUiState {
     pub files: RyeOsFilesState,
     #[serde(default)]
     pub overlay: RyeOsOverlayState,
+    #[serde(default)]
+    pub focus_target: Option<RyeOsFocusTarget>,
     /// Transient input buffers, keyed layout-neutrally by
     /// `InputBufferKey::storage_key()`. A buffer belongs to a view
     /// instance, not a placement; the same view rendered twice has
@@ -334,6 +343,7 @@ impl Default for RyeOsUiState {
             filters: RyeOsFilters::default(),
             files: RyeOsFilesState::default(),
             overlay: RyeOsOverlayState::default(),
+            focus_target: None,
             input_buffers: BTreeMap::new(),
             docks: RyeOsDockState::default(),
             atlas: AtlasUiStateVm::default(),
@@ -991,13 +1001,39 @@ impl RyeOsCore {
             .collect()
     }
 
-    /// The view instance that currently owns input, if any. Input follows
-    /// the focused view instance: the focused center tile if it declares
-    /// `input`, otherwise a visible slot that declares `input` (bottom
-    /// first — initial focus is a frame policy, not an input-special
-    /// placement). Returns the buffer key and the resolved view ref.
+    /// The currently selected UI target. `None` means the workspace's
+    /// focused tile remains selected.
+    pub fn focus_target(&self) -> RyeOsFocusTarget {
+        self.ui
+            .focus_target
+            .clone()
+            .unwrap_or_else(|| RyeOsFocusTarget::WorkspaceTile {
+                tile_id: self.workspace.focused_tile.0.to_string(),
+            })
+    }
+
+    /// The view instance that currently owns input, if any. Input follows the
+    /// selected UI target: a dock view, or a workspace tile when that tile
+    /// declares `input`.
     pub fn focused_input_instance(&self) -> Option<(InputBufferKey, String)> {
-        // Focused center tile first.
+        if let RyeOsFocusTarget::Dock { edge } = self.focus_target() {
+            let view_ref = self
+                .ui
+                .docks
+                .slot(edge)
+                .filter(|slot| slot.visible)
+                .map(|slot| match &slot.content {
+                    RyeOsDockContent::View { view_ref } => view_ref.clone(),
+                })?;
+            if let Some(input) = self.views.get(&view_ref).and_then(|b| b.input.as_ref()) {
+                return Some((
+                    InputBufferKey::new(dock_source_key(edge), view_ref.clone(), input.id.clone()),
+                    view_ref,
+                ));
+            }
+            return None;
+        }
+
         let focused = self.workspace.focused_tile;
         if let Some(ViewSpec { view_ref }) =
             self.workspace.tiles.get(&focused).map(|tile| &tile.view)
@@ -1009,16 +1045,18 @@ impl RyeOsCore {
                 ));
             }
         }
-        // Then visible slots, bottom-first as initial-focus frame policy.
-        for (edge, view_ref) in self.ordered_slot_views() {
-            if let Some(input) = self.views.get(&view_ref).and_then(|b| b.input.as_ref()) {
-                return Some((
-                    InputBufferKey::new(dock_source_key(edge), view_ref.clone(), input.id.clone()),
-                    view_ref,
-                ));
-            }
-        }
         None
+    }
+
+    pub fn default_input_edge(&self) -> Option<RyeOsDockEdge> {
+        self.ordered_slot_views()
+            .into_iter()
+            .find_map(|(edge, view_ref)| {
+                self.views
+                    .get(&view_ref)
+                    .and_then(|binding| binding.input.as_ref())
+                    .map(|_| edge)
+            })
     }
 
     fn ordered_slot_views(&self) -> Vec<(RyeOsDockEdge, String)> {
@@ -1124,7 +1162,9 @@ impl RyeOsCore {
 
         super::keymap::RyeOsKeyContext {
             overlay_open: self.ui.overlay.active.is_some(),
-            input_visible: focused.is_some(),
+            input_visible: focused.is_some() || self.default_input_edge().is_some(),
+            input_focused: focused.is_some(),
+            input_blurrable: matches!(self.focus_target(), RyeOsFocusTarget::Dock { .. }),
             input_has_text: !text.is_empty(),
             input_is_live_filter: input.is_some_and(|i| i.is_live_filter()),
             input_filter_fields: input
@@ -1714,8 +1754,14 @@ mod tests {
         // No input view embedded yet: no instance owns input.
         assert!(!core.has_focused_input());
         with_input_view(&mut core);
-        // The visible bottom slot binds the input view -> it owns input.
-        let (key, view_ref) = core.focused_input_instance().expect("bottom owns input");
+        // The visible bottom slot is available, but does not own input until
+        // focus explicitly moves there.
+        assert!(!core.has_focused_input());
+        assert_eq!(core.default_input_edge(), Some(RyeOsDockEdge::Bottom));
+        core.dispatch(super::super::event::RyeOsEvent::Ui {
+            event: super::super::event::RyeOsUiEvent::FocusInput,
+        });
+        let (key, view_ref) = core.focused_input_instance().expect("input focused");
         assert_eq!(view_ref, "view:ryeos/input");
         assert_eq!(key.view_instance_id, "dock:bottom");
         assert_eq!(key.input_id, "line");

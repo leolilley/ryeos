@@ -41,6 +41,11 @@ pub struct RyeOsKeyEvent {
 pub struct RyeOsKeyContext {
     pub overlay_open: bool,
     pub input_visible: bool,
+    /// The focused view instance owns an input buffer.
+    pub input_focused: bool,
+    /// The focused input was reached as a dock/input focus and can return to
+    /// the prior view with Esc.
+    pub input_blurrable: bool,
     /// The focused input has a non-empty buffer. Plain Enter then submits
     /// (the chat convention) rather than activating a row — terminals
     /// can't reliably send Shift+Enter, so it can't be the only submit.
@@ -80,6 +85,9 @@ pub enum RyeOsKeyCommand {
         delta: i32,
         fallback_direction: FocusDirection,
     },
+    MoveFocusedRowPage {
+        direction: i32,
+    },
     InsertOverlayChar {
         ch: char,
     },
@@ -116,6 +124,17 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 overlay_id: "commands".to_string(),
             })
         }
+        RyeOsKey::Char(c) if event.modifiers.ctrl_only() && c.eq_ignore_ascii_case(&'h') => {
+            ui(RyeOsUiEvent::OpenOverlay {
+                overlay_id: "help".to_string(),
+            })
+        }
+        RyeOsKey::Char('/') if event.modifiers.ctrl_only() => ui(RyeOsUiEvent::OpenOverlay {
+            overlay_id: "shortcuts".to_string(),
+        }),
+        RyeOsKey::Backspace if event.modifiers.ctrl_only() => ui(RyeOsUiEvent::OpenOverlay {
+            overlay_id: "help".to_string(),
+        }),
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'q') => {
             action(RyeOsAction::CloseFocused)
         }
@@ -127,6 +146,14 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         }
         RyeOsKey::Char(c) if event.modifiers.alt_only() && c.eq_ignore_ascii_case(&'b') => {
             action(RyeOsAction::ToggleBottomStatusBar)
+        }
+        RyeOsKey::Char(c)
+            if event.modifiers.none()
+                && c.eq_ignore_ascii_case(&'i')
+                && context.input_visible
+                && !context.input_focused =>
+        {
+            ui(RyeOsUiEvent::FocusInput)
         }
         RyeOsKey::Char(c)
             if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
@@ -151,6 +178,9 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             cycle_tab(RyeOsStackMoveDirection::Down)
         }
         RyeOsKey::ArrowLeft if event.modifiers.alt_only() => ui(RyeOsUiEvent::PopLens),
+        RyeOsKey::Escape if event.modifiers.none() && context.input_blurrable => {
+            ui(RyeOsUiEvent::BlurInput)
+        }
         // Esc interrupts a running head thread (chat convention); otherwise it
         // closes the focused tile.
         RyeOsKey::Escape if event.modifiers.none() && context.head_thread_running => {
@@ -161,7 +191,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         // in-flight cognition and redirect); plain Enter steers. Checked first so
         // the modifier wins over the plain-submit arm below.
         RyeOsKey::Enter
-            if context.input_visible
+            if context.input_focused
                 && context.input_has_text
                 && !context.input_is_live_filter
                 && event.modifiers.alt_only() =>
@@ -173,7 +203,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         // send it. An empty input lets plain Enter activate a row — as does a
         // live filter (it applies live; Enter opens the narrowed selection).
         RyeOsKey::Enter
-            if context.input_visible
+            if context.input_focused
                 && context.input_has_text
                 && !context.input_is_live_filter
                 && (event.modifiers.none() || event.modifiers.shift_only()) =>
@@ -181,7 +211,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             ui(RyeOsUiEvent::SubmitInput)
         }
         RyeOsKey::Enter
-            if context.input_visible
+            if context.input_focused
                 && !context.input_is_live_filter
                 && event.modifiers.shift_only() =>
         {
@@ -196,6 +226,12 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             delta: 1,
             fallback_direction: FocusDirection::Down,
         },
+        RyeOsKey::Char(c) if event.modifiers.ctrl_only() && c.eq_ignore_ascii_case(&'u') => {
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: -1 }
+        }
+        RyeOsKey::Char(c) if event.modifiers.ctrl_only() && c.eq_ignore_ascii_case(&'d') => {
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: 1 }
+        }
         RyeOsKey::ArrowRight
             if event.modifiers.none()
                 && context.focused_row_expandable
@@ -213,7 +249,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::ArrowLeft if event.modifiers.none() => focus(FocusDirection::Left),
         RyeOsKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
         RyeOsKey::Backspace
-            if context.input_visible && context.input_has_text && event.modifiers.none() =>
+            if context.input_focused && context.input_has_text && event.modifiers.none() =>
         {
             ui(RyeOsUiEvent::DeleteInputChar)
         }
@@ -222,10 +258,16 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         RyeOsKey::Backspace if event.modifiers.none() => ui(RyeOsUiEvent::PopLens),
         // A live filter with multiple target fields owns Tab to cycle the field
         // (it has no completion or route-target, so Tab is otherwise free here).
-        RyeOsKey::Tab if context.input_filter_fields && event.modifiers.none() => {
+        RyeOsKey::Tab
+            if context.input_focused && context.input_filter_fields && event.modifiers.none() =>
+        {
             ui(RyeOsUiEvent::CycleFilterField { forward: true })
         }
-        RyeOsKey::Tab if context.input_filter_fields && event.modifiers.shift_only() => {
+        RyeOsKey::Tab
+            if context.input_focused
+                && context.input_filter_fields
+                && event.modifiers.shift_only() =>
+        {
             ui(RyeOsUiEvent::CycleFilterField { forward: false })
         }
         // Tab precedence (central interaction policy, capability + buffer
@@ -233,31 +275,35 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         //   1. completion that can accept now (`/foo⇥`) wins;
         //   2. else route-chain targeting cycles (Tab fwd, Shift+Tab back);
         //   3. else a declared-but-not-acceptable completion is the fallback.
-        RyeOsKey::Tab if context.input_can_accept_completion && event.modifiers.none() => {
+        RyeOsKey::Tab
+            if context.input_focused
+                && context.input_can_accept_completion
+                && event.modifiers.none() =>
+        {
             ui(RyeOsUiEvent::CompleteInput)
         }
-        RyeOsKey::Tab if context.input_target_cycle.is_some() && event.modifiers.none() => {
+        RyeOsKey::Tab
+            if context.input_focused
+                && context.input_target_cycle.is_some()
+                && event.modifiers.none() =>
+        {
             ui(RyeOsUiEvent::CycleInputTarget { forward: true })
         }
-        RyeOsKey::Tab if context.input_target_cycle.is_some() && event.modifiers.shift_only() => {
+        RyeOsKey::Tab
+            if context.input_focused
+                && context.input_target_cycle.is_some()
+                && event.modifiers.shift_only() =>
+        {
             ui(RyeOsUiEvent::CycleInputTarget { forward: false })
         }
         RyeOsKey::Tab
-            if context.input_visible && context.input_has_completion && event.modifiers.none() =>
+            if context.input_focused && context.input_has_completion && event.modifiers.none() =>
         {
             ui(RyeOsUiEvent::CompleteInput)
         }
         RyeOsKey::Char('c') if event.modifiers.ctrl_only() => RyeOsKeyCommand::Quit,
-        // `?` opens the keys overlay — but only with an empty input, so it
-        // still types into a message you're composing (the chat convention;
-        // the always-present foot input owns plain chars otherwise).
-        RyeOsKey::Char('?') if event.modifiers.none() && !context.input_has_text => {
-            ui(RyeOsUiEvent::OpenOverlay {
-                overlay_id: "shortcuts".to_string(),
-            })
-        }
         RyeOsKey::Char(ch)
-            if context.input_visible
+            if context.input_focused
                 && !event.modifiers.ctrl
                 && !event.modifiers.alt
                 && !event.modifiers.meta =>
@@ -358,6 +404,10 @@ impl super::model::RyeOsCore {
                 delta,
                 fallback_direction,
             } => self.move_focused_row_or_focus(delta, fallback_direction),
+            RyeOsKeyCommand::MoveFocusedRowPage { direction } => {
+                let page = (self.runtime.viewport.height as i32 / 2).max(6);
+                self.move_focused_row(direction.signum() * page).1
+            }
             RyeOsKeyCommand::InsertOverlayChar { ch } => {
                 let mut query = self.ui.overlay.query.clone();
                 query.push(ch);
@@ -414,10 +464,13 @@ impl super::model::RyeOsCore {
         // walks back into history — the opposite sense from a top-down row
         // list.
         let step = if is_feed { -delta } else { delta };
+        let magnitude = step.unsigned_abs() as usize;
         let next = if step < 0 {
-            current.saturating_sub(1)
+            current.saturating_sub(magnitude)
         } else {
-            (current + 1).min(count.saturating_sub(1))
+            current
+                .saturating_add(magnitude)
+                .min(count.saturating_sub(1))
         };
         if next == current {
             return (false, Vec::new());
@@ -563,6 +616,45 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_h_opens_the_help_overlay() {
+        assert!(matches!(
+            ryeos_key_command(ctrl('h'), context(false, true)),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "help"
+        ));
+    }
+
+    #[test]
+    fn ctrl_slash_opens_the_shortcuts_overlay() {
+        assert!(matches!(
+            ryeos_key_command(ctrl('/'), context(false, true)),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "shortcuts"
+        ));
+    }
+
+    #[test]
+    fn ctrl_backspace_also_opens_the_help_overlay() {
+        assert!(matches!(
+            ryeos_key_command(
+                RyeOsKeyEvent {
+                    key: RyeOsKey::Backspace,
+                    modifiers: RyeOsKeyModifiers {
+                        ctrl: true,
+                        ..Default::default()
+                    },
+                },
+                context(false, true),
+            ),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::OpenOverlay { overlay_id }
+            } if overlay_id == "help"
+        ));
+    }
+
+    #[test]
     fn ctrl_s_toggles_backdrop_break() {
         assert!(matches!(
             ryeos_key_command(ctrl('s'), context(false, true)),
@@ -573,22 +665,58 @@ mod tests {
     }
 
     #[test]
-    fn question_mark_opens_shortcuts_only_when_input_is_empty() {
-        assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Char('?')), context(false, true)),
-            RyeOsKeyCommand::Ui {
-                event: RyeOsUiEvent::OpenOverlay { overlay_id }
-            } if overlay_id == "shortcuts"
-        ));
+    fn ctrl_u_and_ctrl_d_jump_rows_by_page() {
+        assert_eq!(
+            ryeos_key_command(ctrl('u'), context(false, true)),
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: -1 }
+        );
+        assert_eq!(
+            ryeos_key_command(ctrl('d'), context(false, true)),
+            RyeOsKeyCommand::MoveFocusedRowPage { direction: 1 }
+        );
+    }
 
-        let mut composing = context(false, true);
-        composing.input_has_text = true;
+    #[test]
+    fn i_focuses_input_from_view_mode() {
         assert!(matches!(
-            ryeos_key_command(key(RyeOsKey::Char('?')), composing),
+            ryeos_key_command(key(RyeOsKey::Char('i')), context(false, true)),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::FocusInput
+            }
+        ));
+    }
+
+    #[test]
+    fn escape_blurs_focused_input() {
+        let mut ctx = context(false, true);
+        ctx.input_focused = true;
+        ctx.input_blurrable = true;
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::Escape), ctx),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::BlurInput
+            }
+        ));
+    }
+
+    #[test]
+    fn question_mark_types_into_focused_input() {
+        let mut ctx = context(false, true);
+        ctx.input_focused = true;
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::Char('?')), ctx),
             RyeOsKeyCommand::Ui {
                 event: RyeOsUiEvent::InsertInputChar { ch: '?' }
             }
         ));
+    }
+
+    #[test]
+    fn question_mark_does_not_type_when_input_is_not_focused() {
+        assert_eq!(
+            ryeos_key_command(key(RyeOsKey::Char('?')), context(false, true)),
+            RyeOsKeyCommand::Ignore
+        );
     }
 
     #[test]

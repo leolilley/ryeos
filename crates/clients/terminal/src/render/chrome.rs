@@ -426,6 +426,7 @@ mod tests {
         };
         let input = RyeOsInputVm {
             cursor: 3,
+            focused: false,
             route_label: String::new(),
             placeholder: "filter…".into(),
             hint: String::new(),

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:20:06Z:f1203bc4a5bf39566b755b909073bd873f83bc21ebf2dbf24dc7d3d38b7ef15b:2zbrx8VCw5DgjIjSG5ay6IMx1JHpbhZTukH788XjZh/pYiuuwRJOheReMM2260GlJPa6QpWhEH6+n+r5sGWQCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T03:16:41Z:10de297c353e83944f1ffb12f69cbd41e2ac1aea838b655905179d31fc85fa37:bB3zWcex87EczEcHuhpfQMyXVpu5cO3ciguMLOf7H0gU9htywRIAYuahy2ijFPxiWM4636yEXlFrYrvuimKQAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-lens
 version: "1.0.0"
@@ -36,28 +36,23 @@ backdrop: view:ryeos/backdrop/prism-shards
 
 # The full lens set — swap the single center lens to reach any of these.
 library:
-  - view:ryeos/threads/live
-  - view:ryeos/threads/live-all
+  - view:ryeos/run/activity
+  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
   - view:ryeos/thread/transcript
+  - view:ryeos/threads/detail
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
-  - view:ryeos/node/threads/live
-  - view:ryeos/node/threads/history
   - view:ryeos/node/events
   - view:ryeos/node/remotes
   - view:ryeos/node/bundles
   - view:ryeos/node/gc
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/projects/list
   - view:ryeos/node/activity
   - view:ryeos/chain/timeline
   - view:ryeos/ui/status
   - view:ryeos/input
-  - view:ryeos/threads/list
-  - view:ryeos/threads/detail
   - view:ryeos/item/inspector
   - view:ryeos/items/space
   - view:ryeos/item/explain
@@ -76,7 +71,8 @@ library:
 overlays:
   views:
     title: Views
-    widget: palette
+    widget: table
+    columns: [View, Description]
     source: { ref: "runtime:views/launchable" }
     hint: "type to filter views · enter to open"
   commands:
@@ -84,9 +80,16 @@ overlays:
     widget: palette
     source: { ref: "runtime:commands/available" }
     hint: "type to filter commands · enter to run"
+  help:
+    title: Help
+    widget: table
+    columns: [Topic, Open]
+    source: { ref: "runtime:help" }
+    hint: "type to filter help · esc to close"
   shortcuts:
     title: Shortcuts
     widget: table
+    columns: [Keys, Action]
     source: { ref: "runtime:shortcuts" }
     hint: "type to filter shortcuts · esc to close"
 

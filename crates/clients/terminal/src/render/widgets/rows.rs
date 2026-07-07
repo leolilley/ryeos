@@ -34,7 +34,14 @@ pub fn draw_rows(
         surface.draw_text(rect.x as usize, y, "no rows loaded", style_muted());
         return;
     }
-    for row in rows {
+    let selected_idx = rows.iter().position(|row| row.selected).unwrap_or(0);
+    let visible_rows = bottom.saturating_sub(y);
+    let max_offset = rows.len().saturating_sub(visible_rows);
+    let offset = selected_idx
+        .saturating_sub(visible_rows / 2)
+        .min(max_offset);
+
+    for row in rows.iter().skip(offset) {
         if y >= bottom {
             break;
         }

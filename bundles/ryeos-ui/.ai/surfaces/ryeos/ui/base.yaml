@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:20:06Z:ae7c519fb35848bd457d7d33c95fec369b1a3087c341179d7b6a492b9ffa0206:dyWCTH1PK6JZj3UwtaS7XO03p4X/g6w+28ROkVswUekgieMaSnptLhBPblUMmTqsPiFr5qVhVJi5aelchE/qCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T03:16:41Z:3669774d8c0f87f3aae4e1b9ee3e91208d7863b2e1901dea340615be27fe5871:Wex/mbCkwA7JGCSicPd0fjRLI/nZRylQsb5towatYn4ZW7wzsJ194pWVFbq667Pr4j3NQBD/+YPPzzwVc1LTBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-base
 version: "1.0.0"
@@ -29,24 +29,20 @@ library:
   - view:ryeos/backdrop/prism-shards
   - view:ryeos/backdrop/splash
   - view:ryeos/input
-  - view:ryeos/threads/live
-  - view:ryeos/threads/live-all
+  - view:ryeos/run/activity
+  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
   - view:ryeos/thread/transcript
+  - view:ryeos/threads/detail
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
-  - view:ryeos/node/threads/live
-  - view:ryeos/node/threads/history
   - view:ryeos/node/events
   - view:ryeos/node/remotes
   - view:ryeos/node/bundles
   - view:ryeos/node/gc
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/projects/list
   - view:ryeos/node/activity
-  - view:ryeos/threads/list
   - view:ryeos/item/inspector
   - view:ryeos/chain/timeline
   - view:ryeos/remotes/list
@@ -62,7 +58,8 @@ library:
 overlays:
   views:
     title: Views
-    widget: palette
+    widget: table
+    columns: [View, Description]
     source: { ref: "runtime:views/launchable" }
     hint: "type to filter views · enter to open · shift+enter for new tile"
   commands:
@@ -70,9 +67,16 @@ overlays:
     widget: palette
     source: { ref: "runtime:commands/available" }
     hint: "type to filter commands · enter to run"
+  help:
+    title: Help
+    widget: table
+    columns: [Topic, Open]
+    source: { ref: "runtime:help" }
+    hint: "type to filter help · esc to close"
   shortcuts:
     title: Shortcuts
     widget: table
+    columns: [Keys, Action]
     source: { ref: "runtime:shortcuts" }
     hint: "type to filter shortcuts · esc to close"
 

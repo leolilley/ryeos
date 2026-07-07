@@ -11,7 +11,7 @@ use super::text::{display_width, truncate};
 use super::theme::{ACCENT, BG, FG, GOOD, MUTED, PANEL};
 
 const CAT_W: usize = 12;
-const KEY_W: usize = 16;
+const TABLE_PRIMARY_W: usize = 24;
 
 pub fn draw_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     match overlay.widget.as_str() {
@@ -55,11 +55,27 @@ fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
     let rect = Rect::new(x as u16, y as u16, w as u16, h as u16);
     draw_panel(surface, rect, &overlay.title);
     draw_prompt(surface, x, y + 1, w, &overlay.query);
-    surface.draw_text(x + 2, y + 3, "Keys", Style::new().fg(GOOD).bg(PANEL).bold());
+    let first_header = overlay
+        .columns
+        .first()
+        .map(String::as_str)
+        .unwrap_or("Keys");
+    let second_header = overlay
+        .columns
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or("Action");
+    let first_w = TABLE_PRIMARY_W;
     surface.draw_text(
-        x + 2 + KEY_W,
+        x + 2,
         y + 3,
-        "Action",
+        first_header,
+        Style::new().fg(GOOD).bg(PANEL).bold(),
+    );
+    surface.draw_text(
+        x + 2 + first_w,
+        y + 3,
+        second_header,
         Style::new().fg(GOOD).bg(PANEL).bold(),
     );
     let start = scroll_start(overlay.selected, rows, overlay.items.len());
@@ -74,13 +90,13 @@ fn draw_table_overlay(surface: &mut TextSurface, overlay: &RyeOsOverlayVm) {
         surface.draw_text(
             x + 2,
             ry,
-            &truncate(&item.primary, KEY_W.saturating_sub(1)),
+            &truncate(&item.primary, first_w.saturating_sub(1)),
             Style::new().fg(fg).bg(bg).bold(),
         );
         surface.draw_text(
-            x + 2 + KEY_W,
+            x + 2 + first_w,
             ry,
-            &truncate(&item.secondary, w.saturating_sub(KEY_W + 5)),
+            &truncate(&item.secondary, w.saturating_sub(first_w + 5)),
             Style::new().fg(if selected { BG } else { MUTED }).bg(bg),
         );
     }
@@ -168,9 +184,7 @@ fn draw_palette_row(
 }
 
 fn scroll_start(selected: usize, rows: usize, total: usize) -> usize {
-    if total <= rows || selected < rows {
-        0
-    } else {
-        (selected + 1 - rows).min(total - rows)
-    }
+    selected
+        .saturating_sub(rows / 2)
+        .min(total.saturating_sub(rows))
 }

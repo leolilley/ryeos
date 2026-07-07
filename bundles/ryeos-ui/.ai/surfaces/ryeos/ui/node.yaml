@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:20:06Z:034dd1749ea12ec1bbedce077fdf48d651c981c942f3ae05320e1bfa6a05f73d:rjFNZN1IV5DeGUktGjmlD1ADCqfO84oakY658MpBBdk6tdncOIzjcY+JFHTgBdY0LiAOJiQ3W/Iyl/Vk3k0lAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:10134432897ea64cb6887eee27b2c029b28cf7554f625b133012372f5b694615:UI4z+bHqhuqnKsIb3H2TJMgoBk7poRbDJbwu8cm6sqAr45Q63+6u3Ld15GA+cIxFsXhaxTEoQKL1EeDrIzMMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-node
 version: "1.0.0"
@@ -11,7 +11,7 @@ tiling:
   insert: end
 
 tiles:
-  - "view:ryeos/node/threads/live"
+  - "view:ryeos/run/all-activity"
   - "view:ryeos/projects/list"
   - "view:ryeos/node/events"
 
@@ -26,8 +26,9 @@ style:
 backdrop: view:ryeos/backdrop/prism-shards
 
 library:
-  - view:ryeos/node/threads/live
-  - view:ryeos/node/threads/history
+  - view:ryeos/run/all-activity
+  - view:ryeos/run/activity
+  - view:ryeos/threads/history
   - view:ryeos/node/events
   - view:ryeos/projects/list
   - view:ryeos/node/remotes
@@ -35,6 +36,7 @@ library:
   - view:ryeos/node/gc
   - view:ryeos/node/status
   - view:ryeos/thread/transcript
+  - view:ryeos/threads/detail
   - view:ryeos/input
   - view:ryeos/backdrop/prism
 

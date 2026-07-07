@@ -123,6 +123,8 @@ pub struct SurfaceOverlaySpec {
     pub source: Option<SurfaceOverlaySourceSpec>,
     #[serde(default)]
     pub hint: String,
+    #[serde(default)]
+    pub columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

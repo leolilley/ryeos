@@ -1,12 +1,11 @@
-# ryeos:signed:2026-07-06T12:24:56Z:7ce33dd399c47b8d15dbd88e77e27ee61db2e33948062b485572ed397d0a0869:4VAX0PbGPm/ZaPGBMJrqrX/MmMV3sLMqp8m1+AdDCXA5EcokRPulkUtPBI9AOefI06zRtdOPnO/5XyM23WzDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:235cd199d3ff409c27a6b55aba179aca3e78fe6dc0a240dd5286eaba775c506a:rgtCGWqWx+LaDbLHwRFImsZOm1/SdL8Ok0O8SVIQwhsuoUsXGQ1uLgHNwZaNtGWWdiIKn0u9LJcu5e2mO6wDCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
-name: run-activity
+name: project-activity
 version: "1.0.0"
 description: >-
-  The current project's live activity: active threads plus graph follow parents
-  suspended on live children, newest first. Enter steps into a thread's braid
-  (which in turn shows that thread's own children as drill-ins). The landing
-  lens, in place of the flat thread list.
+  Live activity for the active project: running threads plus graph follow
+  parents suspended on live children, newest first. Enter steps into a thread's
+  transcript, with Backspace returning to this project activity lens.
 
 widget: table
 source:

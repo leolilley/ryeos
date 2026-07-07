@@ -77,14 +77,25 @@ pub fn draw_timeline(
     );
 
     let visible = lines.len().min(height);
-    // Default bottom-anchored (the tail). If the point sits above the
-    // window, scroll up just enough to reveal its first line.
+    // Default bottom-anchored (the tail). Once the point is on an entry, use
+    // the same midpoint scroll behavior as rows and tables.
     let mut start = lines.len().saturating_sub(visible);
     if let Some(sel) = selected {
         if let Some(first) = lines.iter().position(|line| line.entry == Some(sel)) {
-            if first < start {
-                start = first;
+            let last = lines
+                .iter()
+                .rposition(|line| line.entry == Some(sel))
+                .unwrap_or(first);
+            let selected_height = last.saturating_sub(first).saturating_add(1);
+            let max_start = lines.len().saturating_sub(visible);
+            start = if selected_height > visible {
+                first
+            } else {
+                first
+                    .saturating_sub(visible / 2)
+                    .max(last.saturating_add(1).saturating_sub(visible))
             }
+            .min(max_start);
         }
     }
 
@@ -553,6 +564,24 @@ mod tests {
         assert!(
             (0..20).any(|x| surface.get(x, 1).bg != PANEL),
             "non-selected rows are not highlighted"
+        );
+    }
+
+    #[test]
+    fn selected_entry_holds_midpoint_when_possible() {
+        let entries: Vec<_> = (0..10).map(|i| line(&format!("entry {i}"))).collect();
+        let mut surface = TextSurface::new(20, 5);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 5,
+        };
+        draw_timeline(&mut surface, rect, &entries, &[], Some(5), &[], &[], &[]);
+        assert!(
+            row_text(&surface, 20, 2).contains("entry 5"),
+            "selected midpoint row: {:?}",
+            row_text(&surface, 20, 2)
         );
     }
 }

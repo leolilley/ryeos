@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:09:32Z:0ecd8eb74632edae73576712a98973b114d5626d6d8a0c4e825361c9201cab5b:dHn9z7veouehlK4xiq2qKhZrAhwFmK9pR2Pa21QYc9hcAaRTftp1a3mVZprUTcDyFiiwIWRebeFN1+MGAxpZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:2debd2ac35f02df3970159f196191c2317af80641c8399c88900e19526f4ba28:hOhC8BqK77Awb98qA2lRkjCKvr7JVjVxuFfzG4PQ6ONROcCamsQp/MUliaiYW/pSLjOCJ8KNa3EuJPlq+dgeDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-workbench
 version: "1.0.0"
@@ -24,23 +24,19 @@ style:
 library:
   - view:ryeos/graph/topology
   - view:ryeos/atlas
-  - view:ryeos/threads/live
-  - view:ryeos/threads/live-all
+  - view:ryeos/run/activity
+  - view:ryeos/run/all-activity
   - view:ryeos/threads/history
   - view:ryeos/thread/transcript
+  - view:ryeos/threads/detail
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
-  - view:ryeos/node/threads/live
-  - view:ryeos/node/threads/history
   - view:ryeos/node/events
   - view:ryeos/node/remotes
   - view:ryeos/node/bundles
   - view:ryeos/node/gc
-  - view:ryeos/run/activity
-  - view:ryeos/run/all-activity
   - view:ryeos/projects/list
-  - view:ryeos/threads/list
   - view:ryeos/item/inspector
   - view:ryeos/chain/timeline
   - view:ryeos/remotes/list

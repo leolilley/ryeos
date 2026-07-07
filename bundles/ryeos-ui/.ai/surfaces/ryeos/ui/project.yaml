@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:20:06Z:aae9e3b0a80a96364ffd78397e3f0a2820431934a1ccb08b8a79c7927bf20ad3:rnPxS1DYrzDIeQ2KWfR7ii/PBPPqDtAc2iJd1c9rAMKpKb/2/twnR2BzP4wOtzGyviSBLqyfjZz2IHtxqEL2BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:679e675d8299dae9ed5fc8f572888ba061c60078257641a98932364c7d688d2f:ODuJ3ilzrLo5qkMcJPvwY/9+KIrFCCmyLGhr6DsKE+ZZKeSbhvtc6NJxH+QObGib3BEJd/9smG8c9PbDOVUrBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-project
 version: "1.0.0"
@@ -13,7 +13,7 @@ tiling:
 tiles:
   - "view:ryeos/project/files"
   - "view:ryeos/project/items"
-  - "view:ryeos/threads/live"
+  - "view:ryeos/run/activity"
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
@@ -29,9 +29,10 @@ library:
   - view:ryeos/project/files
   - view:ryeos/project/items
   - view:ryeos/project/schedules
-  - view:ryeos/threads/live
+  - view:ryeos/run/activity
   - view:ryeos/threads/history
   - view:ryeos/thread/transcript
+  - view:ryeos/threads/detail
   - view:ryeos/item/inspector
   - view:ryeos/item/explain
   - view:ryeos/input

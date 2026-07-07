@@ -1,8 +1,10 @@
-# ryeos:signed:2026-07-06T12:24:56Z:dbde49a835e8b08819335de265c14410ef3a9f89b9cd1deaa6c675e759838b81:iHagU9pYriEParLMdodGrii46hdbtnKLWR1OuKWcj4BbxeZJtQ35i0705o3SCEBt88Ks/fJ69QcUPyM23ZYECQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:19a2cb8298b725c97af0ba3788a3417d6d430f1605ceeb31710642a0c65163c1:RGhdy6l11Dopwzj6PTIJVIQ/lrkVlk+uC1B5uYbRYLVaI5pzl1nLNv08L52K8/vpm+kR6FBn2QQzcm6fVtsVDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
-name: threads-history
+name: thread-history
 version: "1.0.0"
-description: Historical thread list across the RyeOS UI thread source
+description: >-
+  Thread history across the RyeOS UI thread source. This is the settled and
+  watchable record view; live execution belongs in the activity lenses.
 
 widget: table
 source:

@@ -32,6 +32,9 @@ pub enum RyeOsAction {
     OpenNewView {
         view: ViewSpec,
     },
+    OpenOverlay {
+        overlay_id: String,
+    },
     CloseFocused,
     CloseTile {
         tile_id: String,
@@ -193,6 +196,8 @@ pub enum RyeOsUiEvent {
     SetOverlayQuery {
         query: String,
     },
+    FocusInput,
+    BlurInput,
     InsertInputChar {
         ch: char,
     },

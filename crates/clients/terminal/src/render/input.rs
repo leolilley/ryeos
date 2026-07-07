@@ -38,13 +38,14 @@ pub fn draw_input_tile(
     // The box sits flush on the page background — no PANEL fill.
     fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
     if let Some(border) = border {
+        let border_fg = if input.focused { ACCENT } else { FG };
         surface.draw_box(
             x,
             y,
             x + w - 1,
             y + h - 1,
             border,
-            Style::new().fg(FG).bg(BG),
+            Style::new().fg(border_fg).bg(BG),
         );
     }
 
@@ -198,6 +199,7 @@ mod tests {
     fn input_vm(route_label: &str) -> RyeOsInputVm {
         RyeOsInputVm {
             cursor: 0,
+            focused: false,
             route_label: route_label.to_string(),
             placeholder: String::new(),
             hint: String::new(),

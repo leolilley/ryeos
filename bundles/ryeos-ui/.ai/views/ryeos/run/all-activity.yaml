@@ -1,11 +1,10 @@
-# ryeos:signed:2026-07-06T12:24:56Z:bc5fb35d57c437c80a435b1735cc60c3da897c4adea7cd93f587c5a8f95bacb4:iFtN9y8CqkIyx8vzgoIlgu7hFM6oOFNCFkI7j7CNxYR8B122J2T2wuh9XkaIsTt+YyJGeCyYvvxXUMc52Nv9Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T02:51:18Z:696a9a780a6aa6ac8b325fdb5baf0a9755d4b52aaa01717cb30ec09f6185a213:LHsCn85Lzyuz0kdMB3dtKkGAGzpQ5NhgD8P4aQCTTS9yoLkr8tH6coKyeZvm0hy/oswIBtegANOJHtGZH8YOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
-name: run-all-activity
+name: all-project-activity
 version: "1.0.0"
 description: >-
-  Machine-wide live activity across registered project contexts. Use this when
-  the daemon is running threads from more than one cwd and the current-project
-  activity lens is intentionally scoped too narrowly.
+  Live activity across every registered project context on this node. Use this
+  when the active project is too narrow and you need the whole execution field.
 
 widget: table
 source:
