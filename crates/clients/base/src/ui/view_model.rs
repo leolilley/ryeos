@@ -962,6 +962,7 @@ fn backdrop_scene(core: &RyeOsCore) -> Option<RyeOsSceneModel> {
         return None;
     }
     let mut scene = super::scene_model::scene_from_body(&binding.body, core.generation);
+    scene.break_amount = core.ui.backdrop_break_amount.clamp(0.0, 1.0);
     // The backdrop breathes with the node: live threads lift the scene's
     // energy, so the empty center visibly quickens while cognition runs
     // and settles back to calm when the node idles.
@@ -2063,9 +2064,9 @@ fn focused_row_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
 fn context_command_items(core: &RyeOsCore) -> Vec<RyeOsOverlayActionItem> {
     let mut items = Vec::new();
     items.push(RyeOsOverlayActionItem {
-        label: "Toggle crystal shards".to_string(),
-        hint: "switch backdrop between prism and sharded prism".to_string(),
-        action: RyeOsAction::ToggleBackdropShards,
+        label: "Toggle backdrop break".to_string(),
+        hint: "toggle the current backdrop scene between together and apart".to_string(),
+        action: RyeOsAction::ToggleBackdropBreak,
         secondary_action: None,
         enabled: true,
     });
@@ -2382,7 +2383,7 @@ fn shortcut_entries() -> Vec<RyeOsShortcutEntryVm> {
             "Open the view overlay (swap the center lens)",
         ),
         entry("Commands", "Ctrl+P", "Open the command overlay"),
-        entry("Backdrop", "Ctrl+S", "Toggle the crystal shard backdrop"),
+        entry("Backdrop", "Ctrl+S", "Toggle backdrop break"),
         entry("Lenses", "Ctrl+← / →", "Switch workspace tab"),
         entry("Layout", "Ctrl+↑ / ↓", "Move the focused tile in the stack"),
         entry("Layout", "Ctrl+⇧+arrows", "Resize the focused tile"),

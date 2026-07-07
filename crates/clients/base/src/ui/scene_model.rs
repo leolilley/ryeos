@@ -28,6 +28,16 @@ pub struct RyeOsSceneModel {
     /// in and shapes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sweep: Option<SceneSweep>,
+    /// Normalized screen-space offset `[x, y]` applied after fitting and
+    /// centering. Content uses this to compose a scene with surrounding
+    /// views without changing object coordinates or motion orbits.
+    #[serde(default)]
+    pub screen_offset: [f32; 2],
+    /// Multiplier for content-declared `break` offsets. This lets scene
+    /// state hold sharded content together or apart without changing the
+    /// scene view or resetting generation-keyed motion.
+    #[serde(default = "default_break_amount")]
+    pub break_amount: f32,
 }
 
 /// A scene-level light sweep: a band of brightness `width` wide (scene
@@ -180,8 +190,14 @@ impl Default for RyeOsSceneModel {
             atlas: None,
             energy: 0.0,
             sweep: None,
+            screen_offset: [0.0, 0.0],
+            break_amount: default_break_amount(),
         }
     }
+}
+
+fn default_break_amount() -> f32 {
+    1.0
 }
 
 use super::model::RyeOsCore;
@@ -566,6 +582,9 @@ pub fn scene_from_body(body: &serde_json::Value, generation: u64) -> RyeOsSceneM
             .unwrap_or(4.0);
         scene.sweep = Some(SceneSweep { period, width });
     }
+    if let Some(offset) = read_xy(body.get("screen_offset")) {
+        scene.screen_offset = offset;
+    }
     let Some(objects) = body.get("objects").and_then(serde_json::Value::as_array) else {
         return scene;
     };
@@ -644,6 +663,19 @@ fn read_position(v: Option<&serde_json::Value>) -> [f32; 3] {
             .unwrap_or(0.0)
     };
     [get(0), get(1), get(2)]
+}
+
+fn read_xy(v: Option<&serde_json::Value>) -> Option<[f32; 2]> {
+    let arr = v.and_then(serde_json::Value::as_array)?;
+    let x = arr
+        .first()
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32)?;
+    let y = arr
+        .get(1)
+        .and_then(serde_json::Value::as_f64)
+        .map(|value| value as f32)?;
+    Some([x, y])
 }
 
 /// A scalar scale -> uniform `[s, s, s]`; an array `[sx, sy, sz]` passes

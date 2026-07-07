@@ -48,7 +48,7 @@ pub enum RyeOsAction {
     },
     ToggleTopStatusBar,
     ToggleBottomStatusBar,
-    ToggleBackdropShards,
+    ToggleBackdropBreak,
     ToggleDock {
         edge: RyeOsDockEdge,
     },

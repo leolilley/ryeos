@@ -62,6 +62,7 @@ impl RyeOsCore {
                         self.runtime.activity_pulse = 0.0;
                     }
                 }
+                self.advance_backdrop_break(dt_ms);
                 // The frame clock advances `generation` so generation-keyed
                 // motion (the backdrop twinkle, via the generic scene
                 // renderer) steps each tick. The loop already repaints on
@@ -495,10 +496,8 @@ impl RyeOsCore {
                 self.bump_generation();
                 Vec::new()
             }
-            RyeOsAction::ToggleBackdropShards => {
-                if self.toggle_backdrop_shards() {
-                    self.bump_generation();
-                }
+            RyeOsAction::ToggleBackdropBreak => {
+                self.toggle_backdrop_break();
                 Vec::new()
             }
             RyeOsAction::ToggleDock { edge } => {
@@ -714,37 +713,26 @@ impl RyeOsCore {
         }
     }
 
-    fn toggle_backdrop_shards(&mut self) -> bool {
-        const PRISM: &str = "view:ryeos/backdrop/prism";
-        const SHARDS: &str = "view:ryeos/backdrop/prism-shards";
-        let current = self
-            .data
-            .session
-            .as_ref()
-            .and_then(|session| session.effective_surface.as_ref())
-            .and_then(serde_json::Value::as_object)
-            .and_then(|surface| surface.get("backdrop"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(PRISM);
-        let next = if current == SHARDS { PRISM } else { SHARDS };
-        if !self.views.contains_key(next) {
-            self.notice(format!("{next} is not loaded."), RyeOsTone::Warn);
-            return false;
-        }
-        let Some(surface) = self
-            .data
-            .session
-            .as_mut()
-            .and_then(|session| session.effective_surface.as_mut())
-            .and_then(serde_json::Value::as_object_mut)
-        else {
-            return false;
+    fn toggle_backdrop_break(&mut self) {
+        self.ui.backdrop_break_target = if self.ui.backdrop_break_target >= 0.5 {
+            0.0
+        } else {
+            1.0
         };
-        surface.insert(
-            "backdrop".to_string(),
-            serde_json::Value::String(next.to_string()),
-        );
-        true
+        self.bump_generation();
+    }
+
+    fn advance_backdrop_break(&mut self, dt_ms: u64) {
+        let target = self.ui.backdrop_break_target.clamp(0.0, 1.0);
+        let current = self.ui.backdrop_break_amount.clamp(0.0, 1.0);
+        let delta = target - current;
+        if delta.abs() < 0.001 {
+            self.ui.backdrop_break_amount = target;
+            return;
+        }
+        let step = (dt_ms as f32 / 520.0).clamp(0.04, 0.22);
+        self.ui.backdrop_break_amount =
+            (current + delta.signum() * step.min(delta.abs())).clamp(0.0, 1.0);
     }
 
     pub(crate) fn has_pending_invoke(

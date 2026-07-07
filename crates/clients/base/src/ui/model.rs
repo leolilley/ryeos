@@ -322,6 +322,10 @@ pub struct RyeOsUiState {
     pub top_status_visible: bool,
     #[serde(default = "default_true")]
     pub bottom_status_visible: bool,
+    #[serde(default)]
+    pub backdrop_break_amount: f32,
+    #[serde(default)]
+    pub backdrop_break_target: f32,
 }
 
 impl Default for RyeOsUiState {
@@ -343,6 +347,8 @@ impl Default for RyeOsUiState {
             // works if we decide on content later.
             top_status_visible: false,
             bottom_status_visible: false,
+            backdrop_break_amount: 0.0,
+            backdrop_break_target: 0.0,
         }
     }
 }

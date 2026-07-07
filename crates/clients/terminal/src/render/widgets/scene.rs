@@ -121,12 +121,16 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel
     let scale = fit_scale.min(width_scale);
     let center_x = (bounds.min_x + bounds.max_x) / 2.0;
     let center_y = (bounds.min_y + bounds.max_y) / 2.0;
+    let screen_col_offset = scene.screen_offset[0] * w as f32;
+    let screen_row_offset = scene.screen_offset[1] * h as f32;
     let project = |position: [f32; 3]| -> Option<(usize, usize)> {
         let x = (position[0] - scene.camera.target[0] - center_x) * zoom;
         // +y is up in scene space; rows grow downward, so flip.
         let y = (position[1] - scene.camera.target[1] - center_y) * zoom;
-        let col = (rect.x as f32 + (w - 1) as f32 / 2.0 + x * scale * CELL_ASPECT).round();
-        let row = (rect.y as f32 + (h - 1) as f32 / 2.0 - y * scale).round();
+        let col =
+            (rect.x as f32 + (w - 1) as f32 / 2.0 + screen_col_offset + x * scale * CELL_ASPECT)
+                .round();
+        let row = (rect.y as f32 + (h - 1) as f32 / 2.0 + screen_row_offset - y * scale).round();
         if col < rect.x as f32
             || row < rect.y as f32
             || col > (rect.x as usize + w - 1) as f32
@@ -175,7 +179,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel
         // Orbiting objects revolve on the squashed ring; everything else
         // sits where declared. `depth` is the ring front-ness (1 = front,
         // 0 = passing behind the scene's mass).
-        let (position, depth) = orbited_position(object, scene.generation, pace);
+        let (position, depth) = orbited_position(object, scene, pace);
         let Some((col, row)) = project(position) else {
             continue;
         };
@@ -207,7 +211,7 @@ pub fn draw_scene(surface: &mut TextSurface, rect: Rect, scene: &RyeOsSceneModel
                         Some(speed) => orbit_point(end, speed, scene.generation, pace).0,
                         None => end,
                     };
-                    let offset = break_offset(object, scene.generation, pace);
+                    let offset = break_offset(object, scene, pace);
                     end[0] += offset[0];
                     end[1] += offset[1];
                     end[2] += offset[2];
@@ -267,27 +271,36 @@ const ORBIT_SQUASH: f32 = 0.45;
 /// renders the scene exactly as authored. Break motion is folded into the
 /// point before orbiting so split shards can revolve around the center
 /// instead of only pulsing in fixed columns.
-fn orbited_position(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> ([f32; 3], f32) {
-    let offset = break_offset(object, generation, pace);
+fn orbited_position(
+    object: &RyeOsSceneObjectVm,
+    scene: &RyeOsSceneModel,
+    pace: u64,
+) -> ([f32; 3], f32) {
+    let offset = break_offset(object, scene, pace);
     let position = [
         object.position[0] + offset[0],
         object.position[1] + offset[1],
         object.position[2] + offset[2],
     ];
     match object.orbit {
-        Some(speed) => orbit_point(position, speed, generation, pace),
+        Some(speed) => orbit_point(position, speed, scene.generation, pace),
         None => (position, 1.0),
     }
 }
 
-fn break_offset(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> [f32; 3] {
+fn break_offset(object: &RyeOsSceneObjectVm, scene: &RyeOsSceneModel, pace: u64) -> [f32; 3] {
     let Some(motion) = object.break_motion else {
         return [0.0, 0.0, 0.0];
     };
     let period = motion.period.max(4);
-    let step = generation.wrapping_mul(pace).wrapping_add(motion.phase) % period;
+    let step = scene
+        .generation
+        .wrapping_mul(pace)
+        .wrapping_add(motion.phase)
+        % period;
     let progress = step as f32 / period as f32;
-    let eased = 0.5 - 0.5 * (progress * std::f32::consts::TAU).cos();
+    let eased =
+        (0.5 - 0.5 * (progress * std::f32::consts::TAU).cos()) * scene.break_amount.clamp(0.0, 1.0);
     [
         motion.away[0] * eased,
         motion.away[1] * eased,
@@ -354,7 +367,7 @@ fn particle_cell(
             (1.0 - ((d - band).abs() / width.max(0.001))).max(0.0)
         })
         .unwrap_or(0.0);
-    let reveal = reveal_multiplier(object, scene.generation, pace);
+    let reveal = reveal_multiplier(object, scene, pace);
     // Ring depth dims the back half of an orbit — a mote passing behind
     // the scene's mass glows faintly through it, never occludes it.
     let intensity = ((breathe * (0.55 + 0.25 * energy)) + boost * 0.65 + energy * 0.10)
@@ -426,17 +439,18 @@ fn draw_fill(
     let soft = 1.0 / (scale * cell_aspect * zoom).max(0.001);
     let ramp = ramp_for(object);
     let noise_amp = 0.10 + 0.12 * energy;
-    let opacity =
-        object.opacity.clamp(0.1, 1.0) * reveal_multiplier(object, scene.generation, pace);
-    let (position, _depth) = orbited_position(object, scene.generation, pace);
+    let opacity = object.opacity.clamp(0.1, 1.0) * reveal_multiplier(object, scene, pace);
+    let (position, _depth) = orbited_position(object, scene, pace);
 
     for row in 0..h {
         for col in 0..w {
             // Inverse of `project`: cell → scene coordinates.
-            let x = (col as f32 - (w - 1) as f32 / 2.0) / (scale * cell_aspect * zoom)
+            let x = (col as f32 - (w - 1) as f32 / 2.0 - scene.screen_offset[0] * w as f32)
+                / (scale * cell_aspect * zoom)
                 + center.0
                 + scene.camera.target[0];
-            let y = ((h - 1) as f32 / 2.0 - row as f32) / (scale * zoom)
+            let y = ((h - 1) as f32 / 2.0 + scene.screen_offset[1] * h as f32 - row as f32)
+                / (scale * zoom)
                 + center.1
                 + scene.camera.target[1];
             let lx = x - position[0];
@@ -495,17 +509,21 @@ fn draw_fill(
     }
 }
 
-fn reveal_multiplier(object: &RyeOsSceneObjectVm, generation: u64, pace: u64) -> f32 {
+fn reveal_multiplier(object: &RyeOsSceneObjectVm, scene: &RyeOsSceneModel, pace: u64) -> f32 {
     let Some(reveal) = object.reveal else {
         return 1.0;
     };
     let period = reveal.period.max(4);
-    let step = generation.wrapping_mul(pace).wrapping_add(reveal.phase) % period;
+    let step = scene
+        .generation
+        .wrapping_mul(pace)
+        .wrapping_add(reveal.phase)
+        % period;
     let progress = step as f32 / period as f32;
     let closed = 0.5 + 0.5 * (progress * std::f32::consts::TAU).cos();
     let sharpness = reveal.sharpness.max(0.1);
     let floor = reveal.floor.clamp(0.0, 1.0);
-    floor + (1.0 - floor) * closed.powf(sharpness)
+    (floor + (1.0 - floor) * closed.powf(sharpness)) * scene.break_amount.clamp(0.0, 1.0)
 }
 
 /// Prism SDF + shading: a hexagonal crystal column (radius `r`, body

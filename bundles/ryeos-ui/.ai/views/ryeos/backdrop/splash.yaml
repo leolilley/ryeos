@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-06T13:35:41Z:b4d5e4776c94e791b1fb2a8740cb42ac3f889d6ea641958c15cee9d73a3942cb:3dQ1rQbyOVfyIf5vrtSoXeFZjn86yVAeGP1XYcbtb5XCQ2NlbGNRl4Lzch/DwrkTA+QX0MEu+z+F+6r7ezVSCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-07T01:27:48Z:cde1d97a0b9a2054c98a09b34b7c227bab66d9cbde0c6497cd917bd216b8f670:j86tIk5hGA+3rj/v3ds9377pWxmV5GOFDtGNd59QT8AIPHWGmH0x+F8FEUwioZElSMfScjuloP+GVnBwrc6EDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: backdrop-splash
 version: "1.0.0"
@@ -8,7 +8,7 @@ widget: text
 presentation:
   chrome: none
   background: transparent
-  position: { x: 0.5, y: 0.9 }
+  position: { x: 0.525, y: 0.9 }
 body:
   lines:
     - { text: "RYE OS", tone: accent }

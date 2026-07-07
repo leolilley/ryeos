@@ -132,7 +132,7 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
             if (event.modifiers.ctrl_only() || event.modifiers.alt_only())
                 && c.eq_ignore_ascii_case(&'s') =>
         {
-            action(RyeOsAction::ToggleBackdropShards)
+            action(RyeOsAction::ToggleBackdropBreak)
         }
         RyeOsKey::ArrowUp if event.modifiers.ctrl_shift() => resize(FocusDirection::Up),
         RyeOsKey::ArrowDown if event.modifiers.ctrl_shift() => resize(FocusDirection::Down),
@@ -563,11 +563,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_toggles_backdrop_shards() {
+    fn ctrl_s_toggles_backdrop_break() {
         assert!(matches!(
             ryeos_key_command(ctrl('s'), context(false, true)),
             RyeOsKeyCommand::Action {
-                action: RyeOsAction::ToggleBackdropShards
+                action: RyeOsAction::ToggleBackdropBreak
             }
         ));
     }
