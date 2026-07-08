@@ -568,9 +568,33 @@ def command_gc(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "removed_sessions": removed_sessions, "removed_invites": removed_invites}
 
 
+def command_list_principals(data: dict[str, Any]) -> dict[str, Any]:
+    """Read-only roster of accounts in the realm. Returns id/display_name/roles/
+    disabled only — never passphrases or any secret material. Skips unreadable
+    entries rather than failing the whole listing."""
+    realm_dir = resolve_realm_dir(data)
+    principals: list[dict[str, Any]] = []
+    for path in sorted((realm_dir / "principals").glob("*.json")):
+        try:
+            p = read_json_file(path)
+        except Exception:
+            continue
+        if not p:
+            continue
+        roles = p.get("roles", [])
+        principals.append({
+            "id": p.get("id", path.stem),
+            "display_name": p.get("display_name", p.get("id", path.stem)),
+            "roles": roles if isinstance(roles, list) else [],
+            "disabled": bool(p.get("disabled", False)),
+        })
+    return {"ok": True, "principals": principals}
+
+
 COMMANDS = {
     "set-policy": command_set_policy,
     "create-principal": command_create_principal,
+    "list-principals": command_list_principals,
     "create-invite": command_create_invite,
     "login": command_login,
     "verify-session": verify_session,
