@@ -1,0 +1,45 @@
+version: "0.1.0"
+category: "tv-tracker-authoring"
+name: "author-directive"
+executor_id: "@subprocess"
+description: "Re-author the signed base chat directive apps/tv-tracker/ai_chat_base via the daemon runtime.author_item callback, to manage which context docs its context.system references (add/remove/reorder). Generic over content; the daemon signs (this wrapper never holds a key). Authority is scoped to exactly this one directive."
+
+# Requests authoring authority for EXACTLY the base chat directive. The daemon
+# mints only ryeos.author.directive.apps/tv-tracker/ai_chat_base into this tool's
+# callback token, so it can never author any other directive or item.
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        item_authoring:
+          - kind: directive
+            namespace: apps/tv-tracker/ai_chat_base
+
+config:
+  command: "bin:core/ryeos-core-tools"
+  args:
+    - "author-item"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    item_ref:
+      type: string
+      enum: ["directive:apps/tv-tracker/ai_chat_base"]   # early failure; daemon authority is the real boundary
+    content:
+      type: string
+      description: "Full unsigned directive markdown (frontmatter + body). The backend rewrites frontmatter via a YAML parser, mutating only context.system. Must not contain a signature line or ryeos:authored: marker."
+    mode:
+      type: string
+      enum: ["create", "upsert"]
+      default: "upsert"
+    format_ext:
+      type: string
+      default: ".md"
+    expected_digest:
+      type: string
+      description: "CAS guard — the incumbent authored content_digest. Required for guarded saves once the directive is initialized (re-authored once)."
+  required: [item_ref, content]

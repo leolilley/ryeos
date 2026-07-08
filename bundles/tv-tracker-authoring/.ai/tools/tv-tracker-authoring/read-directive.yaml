@@ -1,0 +1,29 @@
+version: "0.1.0"
+category: "tv-tracker-authoring"
+name: "read-directive"
+executor_id: "@subprocess"
+description: "Read the raw signed source of the base chat directive apps/tv-tracker/ai_chat_base (resolve + verify + read the on-disk file). Read-only — no authoring authority. Returns fetch report incl. raw content + signature_status, so the backend can parse context.system and detect the authored/signed CAS state."
+
+config:
+  command: "bin:core/ryeos-core-tools"
+  args:
+    - "fetch"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 20
+
+config_schema:
+  type: object
+  properties:
+    item_ref:
+      type: string
+      enum: ["directive:apps/tv-tracker/ai_chat_base"]
+    with_content:
+      type: boolean
+      default: true
+    verify:
+      type: boolean
+      default: true
+    project_path:
+      type: string
+  required: [item_ref]

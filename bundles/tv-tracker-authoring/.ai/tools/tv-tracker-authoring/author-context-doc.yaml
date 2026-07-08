@@ -1,0 +1,50 @@
+version: "0.1.0"
+category: "tv-tracker-authoring"
+name: "author-context-doc"
+executor_id: "@subprocess"
+description: "Author a signed tv-tracker context doc under apps/tv-tracker/context/* via the daemon runtime.author_item callback. Generic over the doc slug; the daemon signs (this wrapper never holds a key). Authority is bounded to the context/* subtree — it cannot touch the base Identity/AnalysisBehavior/ChatInstructions docs or anything else."
+
+# Requests the wildcard context subtree. This wildcard MUST match the manifest
+# declaration verbatim (wildcard-vs-wildcard is identity-only). The daemon mints
+# ryeos.author.knowledge.apps/tv-tracker/context/* into this tool's callback
+# token; a concrete item_ref like knowledge:apps/tv-tracker/context/foo is then
+# glob-matched against it. The backend is the real ref allow-list — never pass a
+# browser-supplied ref straight through.
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        item_authoring:
+          - kind: knowledge
+            namespace: apps/tv-tracker/context/*
+
+config:
+  command: "bin:core/ryeos-core-tools"
+  args:
+    - "author-item"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 30
+
+config_schema:
+  type: object
+  properties:
+    item_ref:
+      type: string
+      # Early failure only; the daemon authority (context/* wildcard) is the real
+      # boundary. Slug is lowercase kebab; no nesting beyond one level.
+      pattern: "^knowledge:apps/tv-tracker/context/[a-z0-9][a-z0-9-]*$"
+    content:
+      type: string
+      description: "Unsigned item body. Must not contain a signature line or ryeos:authored: marker."
+    mode:
+      type: string
+      enum: ["create", "upsert"]
+      default: "upsert"
+    format_ext:
+      type: string
+      default: ".md"
+    expected_digest:
+      type: string
+      description: "CAS guard — the incumbent authored content_digest. Required for guarded saves."
+  required: [item_ref, content]

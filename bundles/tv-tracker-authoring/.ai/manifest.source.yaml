@@ -4,11 +4,18 @@ description: "Operator authoring wrappers for tv-tracker context/prompt knowledg
 requires_kinds:
   - tool
 uses_kinds: []
-# Upper bound is EXACTLY the three editable context docs — no wildcard. Each
-# wrapper tool below requests exactly one of these, so the daemon mints only that
-# single ryeos.author.knowledge.<doc> cap into that wrapper's per-thread callback
-# token. A route bug or bad item_ref cannot author any other item, because the
-# minted authority — not the caller's intent — is what the daemon enforces.
+# Authoring authority, tightest possible for each need:
+#   - The three legacy base context docs are each pinned CONCRETELY (per-doc
+#     wrappers below request exactly one). A route bug or bad item_ref cannot
+#     touch any other item — the minted authority, not the caller's intent, is
+#     what the daemon enforces.
+#   - apps/tv-tracker/context/*  — the dynamic doc-set namespace. Operators add
+#     arbitrarily-named context docs here; a single wildcard grant authorizes the
+#     whole subtree (the daemon glob-matches the concrete author target against
+#     it). Deliberately NOT apps/tv-tracker/* — that would expose every knowledge
+#     doc under the app, not just the prompt context set.
+#   - directive apps/tv-tracker/ai_chat_base — re-author the base chat directive
+#     to manage which docs its context.system references (add/remove/reorder).
 runtime_authority:
   item_authoring:
     - kind: knowledge
@@ -17,3 +24,7 @@ runtime_authority:
       namespace: apps/tv-tracker/AnalysisBehavior
     - kind: knowledge
       namespace: apps/tv-tracker/ChatInstructions
+    - kind: knowledge
+      namespace: apps/tv-tracker/context/*
+    - kind: directive
+      namespace: apps/tv-tracker/ai_chat_base
