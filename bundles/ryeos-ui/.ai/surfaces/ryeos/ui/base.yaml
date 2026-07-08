@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-07T04:10:28Z:71534ed8df2446ac944a420b57e8d7a4665ae5590fc06ea5c3aaa0c34800c6cd:Ne8xKDXpdD8BI8iCy7L9AOa1TJTdy0Iis7XmlWzz7iI90samX4hvyXgWy4ekjfgDdcxSlk1Wn8BkpOxhNdG8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-08T06:03:18Z:83a512c246eb7d0020e6aa0a0be16afa9e4c12d14827605f9b043d095d87c9f9:cb4zdKUFzFZiyDi5qh8GCYZMNFcfVGGAut/o5x/zZ/5oQqXuA/3Ngxc0yR1/Vw/qrITMXv0EE6oTstcy33RNAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 # ryeos:unsigned
 name: ryeos-ui-base
 version: "1.0.0"
@@ -15,7 +15,7 @@ tiles:
 
 slots:
   bottom: { content: "view:ryeos/input", open: true, size: 7 }
-  top:    { content: "view:ryeos/node/status", open: false, size: 6 }
+  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
   left: { content: "view:ryeos/threads/history", open: false, size: 32 }
   right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
 

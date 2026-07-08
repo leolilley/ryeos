@@ -247,6 +247,8 @@ pub struct RyeOsDockTileVm {
     pub edge: RyeOsDockEdge,
     pub title: String,
     pub size: u16,
+    #[serde(default)]
+    pub focused: bool,
     /// The bound view (every slot is a view instance; input is no longer a
     /// dock-content variant).
     pub view: RyeOsViewVm,
@@ -1010,54 +1012,11 @@ fn surface_uses_backdrop_underlay(core: &RyeOsCore) -> bool {
 
 fn dock_plane_vm(core: &RyeOsCore) -> RyeOsDockPlaneVm {
     RyeOsDockPlaneVm {
-        top: notice_dock_tile_vm(core)
-            .or_else(|| dock_tile_vm(core, RyeOsDockEdge::Top, core.ui.docks.top.as_ref())),
+        top: dock_tile_vm(core, RyeOsDockEdge::Top, core.ui.docks.top.as_ref()),
         bottom: dock_tile_vm(core, RyeOsDockEdge::Bottom, core.ui.docks.bottom.as_ref()),
         left: dock_tile_vm(core, RyeOsDockEdge::Left, core.ui.docks.left.as_ref()),
         right: dock_tile_vm(core, RyeOsDockEdge::Right, core.ui.docks.right.as_ref()),
     }
-}
-
-fn notice_dock_tile_vm(core: &RyeOsCore) -> Option<RyeOsDockTileVm> {
-    if core.ui.notices.is_empty() {
-        return None;
-    }
-    let rows: Vec<RyeOsRowVm> = core
-        .ui
-        .notices
-        .iter()
-        .rev()
-        .take(4)
-        .map(|notice| RyeOsRowVm {
-            id: notice.id.clone(),
-            primary: notice.message.clone(),
-            secondary: None,
-            meta: None,
-            kind: None,
-            action: None,
-            tone: notice.tone,
-            selected: false,
-            expandable: false,
-            expanded: false,
-            detail: Vec::new(),
-            changed_at_ms: None,
-        })
-        .collect();
-    let size = (rows.len() as u16).saturating_add(2).clamp(3, 6);
-    Some(RyeOsDockTileVm {
-        edge: RyeOsDockEdge::Top,
-        title: "status".to_string(),
-        size,
-        view: RyeOsViewVm::Rows {
-            title: "status".to_string(),
-            columns: Vec::new(),
-            total_rows: core.ui.notices.len(),
-            provenance: None,
-            affordance_hints: Vec::new(),
-            rows,
-        },
-        input: None,
-    })
 }
 
 fn dock_tile_vm(
@@ -1071,22 +1030,53 @@ fn dock_tile_vm(
     }
     let RyeOsDockContent::View { view_ref } = &state.content;
     let source_key = super::model::dock_source_key(edge);
+    let focused = matches!(
+        core.focus_target(),
+        super::model::RyeOsFocusTarget::Dock { edge: focused } if focused == edge
+    );
+    let (cursor, collapsed, expanded_rows, changed_rows) = dock_selected_state(core, &source_key);
     Some(RyeOsDockTileVm {
         edge,
         title: view_ref.rsplit('/').next().unwrap_or(view_ref).to_string(),
         size: state.size,
+        focused,
         view: bound_view_vm_keyed(
             core,
             &source_key,
-            None,
-            None,
-            None,
-            None,
+            cursor,
+            collapsed,
+            expanded_rows,
+            changed_rows,
             view_ref,
             &core.ui.atlas,
         ),
         input: instance_input_vm(core, &source_key, view_ref),
     })
+}
+
+type RowStateRefs<'a> = (
+    Option<usize>,
+    Option<&'a std::collections::BTreeSet<usize>>,
+    Option<&'a std::collections::BTreeSet<String>>,
+    Option<&'a std::collections::BTreeMap<String, u64>>,
+);
+
+fn dock_selected_state<'a>(core: &'a RyeOsCore, source_key: &str) -> RowStateRefs<'a> {
+    match core.ui.dock_local.get(source_key) {
+        Some(crate::workspace::ViewLocalState::GenericList {
+            cursor,
+            collapsed,
+            expanded_rows,
+            changed_rows,
+            ..
+        }) => (
+            Some(*cursor),
+            Some(collapsed),
+            Some(expanded_rows),
+            Some(changed_rows),
+        ),
+        _ => (None, None, None, None),
+    }
 }
 
 /// The input prompt VM for a view instance, if its binding declares an
@@ -1508,9 +1498,10 @@ fn bound_view_vm_keyed(
             }
         }
         ("key_value" | "text", Some(response)) => {
-            let rows: Vec<RyeOsRowVm> = super::content::project_detail(binding, response)
+            let mut rows: Vec<RyeOsRowVm> = super::content::project_detail(binding, response)
                 .into_iter()
-                .map(|(key, value)| RyeOsRowVm {
+                .enumerate()
+                .map(|(index, (key, value))| RyeOsRowVm {
                     id: format!("{view_ref}#{key}"),
                     primary: format!("{key}: {value}"),
                     secondary: None,
@@ -1518,13 +1509,15 @@ fn bound_view_vm_keyed(
                     kind: None,
                     action: None,
                     tone: RyeOsTone::Neutral,
-                    selected: false,
+                    selected: cursor == Some(index),
                     expandable: false,
                     expanded: false,
                     detail: Vec::new(),
                     changed_at_ms: None,
                 })
                 .collect();
+            let notice_start = rows.len();
+            rows.extend(status_notice_rows(core, view_ref, notice_start, cursor));
             RyeOsViewVm::Rows {
                 title,
                 columns: Vec::new(),
@@ -1565,6 +1558,45 @@ fn activate_affordance(binding: &super::content::ViewBinding) -> Option<String> 
                     .is_ok()
                 })
         })
+}
+
+fn status_notice_rows(
+    core: &RyeOsCore,
+    view_ref: &str,
+    start_index: usize,
+    cursor: Option<usize>,
+) -> Vec<RyeOsRowVm> {
+    if !is_status_view_ref(view_ref) {
+        return Vec::new();
+    }
+    core.ui
+        .notices
+        .iter()
+        .rev()
+        .take(4)
+        .enumerate()
+        .map(|(offset, notice)| RyeOsRowVm {
+            id: format!("{view_ref}#{}", notice.id),
+            primary: notice.message.clone(),
+            secondary: None,
+            meta: Some("notice".to_string()),
+            kind: None,
+            action: None,
+            tone: notice.tone,
+            selected: cursor == Some(start_index + offset),
+            expandable: false,
+            expanded: false,
+            detail: Vec::new(),
+            changed_at_ms: None,
+        })
+        .collect()
+}
+
+fn is_status_view_ref(view_ref: &str) -> bool {
+    matches!(
+        view_ref.strip_prefix("view:").unwrap_or(view_ref),
+        "ryeos/node/status" | "ryeos/ui/status"
+    )
 }
 
 fn row_render_window(total: usize, cursor: Option<usize>) -> (usize, usize) {
@@ -2861,8 +2893,29 @@ mod tests {
     }
 
     #[test]
-    fn notices_project_as_transient_top_dock_view() {
-        let mut core = RyeOsCore::default();
+    fn status_view_in_top_dock_includes_notice_rows() {
+        let session = crate::ui::model::BrowserSession {
+            session_id: "S-status".to_string(),
+            surface_ref: "surface:ryeos/ryeos/base".to_string(),
+            effective_surface: Some(json!({
+                "name": "ryeos-base",
+                "slots": {
+                    "top": { "content": "view:ryeos/node/status", "open": true, "size": 3 }
+                },
+                "views": {
+                    "view:ryeos/node/status": {
+                        "widget": "key_value",
+                        "source": { "ref": "service:system/status" },
+                        "projections": { "detail": ["version"] }
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        let mut core = RyeOsCore::new(session, crate::ui::model::BrowserViewport::default(), 0);
+        core.data
+            .sources
+            .insert("dock:top".to_string(), json!({ "version": "0.1.0" }));
         core.notice(
             "Queued behind active thread · 2 staged inputs.",
             RyeOsTone::Accent,
@@ -2873,20 +2926,22 @@ mod tests {
             .workspace
             .docks
             .top
-            .expect("notices should claim the top dock");
+            .expect("authored top status slot should render");
         assert_eq!(dock.edge, RyeOsDockEdge::Top);
         assert_eq!(dock.title, "status");
         assert_eq!(dock.size, 3);
         match dock.view {
             RyeOsViewVm::Rows { rows, .. } => {
-                assert_eq!(rows.len(), 1);
-                assert_eq!(
-                    rows[0].primary,
-                    "Queued behind active thread · 2 staged inputs."
-                );
-                assert!(!rows[0].selected);
+                assert!(rows.iter().any(|row| row.primary == "version: 0.1.0"));
+                let notice = rows
+                    .iter()
+                    .find(|row| row.primary == "Queued behind active thread · 2 staged inputs.")
+                    .expect("notice should be part of the status view");
+                assert_eq!(notice.meta.as_deref(), Some("notice"));
+                assert_eq!(notice.tone, RyeOsTone::Accent);
+                assert!(!notice.selected);
             }
-            other => panic!("expected rows notice dock, got {other:?}"),
+            other => panic!("expected rows status dock, got {other:?}"),
         }
     }
 

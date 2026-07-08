@@ -311,6 +311,8 @@ pub struct RyeOsUiState {
     #[serde(default)]
     pub input_buffers: BTreeMap<String, RyeOsInputState>,
     #[serde(default)]
+    pub dock_local: BTreeMap<String, ViewLocalState>,
+    #[serde(default)]
     pub docks: RyeOsDockState,
     /// Ambient/backdrop atlas state — the empty-center `namespace_atlas`
     /// background. Surface-level, not a tile. Per-tile Atlas tiles keep
@@ -345,6 +347,7 @@ impl Default for RyeOsUiState {
             overlay: RyeOsOverlayState::default(),
             focus_target: None,
             input_buffers: BTreeMap::new(),
+            dock_local: BTreeMap::new(),
             docks: RyeOsDockState::default(),
             atlas: AtlasUiStateVm::default(),
             tile_atlas: BTreeMap::new(),

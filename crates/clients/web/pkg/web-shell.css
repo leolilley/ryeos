@@ -1818,6 +1818,10 @@ body,
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.ryeos-dock-tile.focused {
+  border-color: var(--ryeos-accent);
+}
+
 .ryeos-dock-tile.left {
   grid-column: 1;
   grid-row: 1 / 4;

@@ -57,7 +57,7 @@ use ryeos_client_base::ui::scene_model::{
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
 use super::super::text::display_width;
-use super::super::theme::{ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN, mix_toward};
+use super::super::theme::{mix_toward, ACCENT, BG, DANGER, FG, FG_SOFT, GOOD, MUTED, WARN};
 
 // Glyph palette for later reaches (all single-cell-width, monospace-safe):
 //   deeper dots:   ˙ . · : ∙ • ●           — the default ramp below
