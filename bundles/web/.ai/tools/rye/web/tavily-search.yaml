@@ -1,0 +1,38 @@
+category: "rye/web"
+version: "1.0.0"
+tool_type: "subprocess"
+executor_id: "@subprocess"
+description: "Search the web via Tavily — a fast, reliable search API built for LLM use. Returns ranked result titles, URLs, and snippets. Requires TAVILY_API_KEY."
+
+# Resolved from host env by name (vault > host env > .env) and injected into the
+# tool subprocess env. Dispatch fails clearly if the key is not configured.
+required_secrets:
+  - TAVILY_API_KEY
+
+config:
+  command: "bin:ryeos-web-tools"
+  args:
+    - "tavily"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 20
+
+config_schema:
+  type: object
+  properties:
+    query:
+      type: string
+      description: "Search query"
+      minLength: 1
+    num_results:
+      type: integer
+      minimum: 1
+      maximum: 20
+      default: 10
+      description: "Maximum number of results to return"
+    search_depth:
+      type: string
+      enum: ["basic", "advanced"]
+      default: "basic"
+      description: "Tavily search depth. basic is fast; advanced is deeper but slower."
+  required: [query]

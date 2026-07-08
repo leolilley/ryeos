@@ -31,7 +31,9 @@ fn main() -> ExitCode {
 fn run() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let Some(command) = args.next() else {
-        anyhow::bail!("missing command; expected `search --stdin-json` or `fetch --stdin-json`");
+        anyhow::bail!(
+            "missing command; expected `search`, `tavily`, or `fetch` with `--stdin-json`"
+        );
     };
     if !args.any(|arg| arg == "--stdin-json") {
         anyhow::bail!("{command} requires --stdin-json");
@@ -43,11 +45,15 @@ fn run() -> anyhow::Result<()> {
             "{}",
             serde_json::to_string(&ryeos_web_tools::search::execute_json(&raw)?)?
         ),
+        "tavily" => println!(
+            "{}",
+            serde_json::to_string(&ryeos_web_tools::tavily::execute_json(&raw)?)?
+        ),
         "fetch" => println!(
             "{}",
             serde_json::to_string(&ryeos_web_tools::fetch::execute_json(&raw)?)?
         ),
-        _ => anyhow::bail!("unknown command `{command}`; expected `search` or `fetch`"),
+        _ => anyhow::bail!("unknown command `{command}`; expected `search`, `tavily`, or `fetch`"),
     }
     Ok(())
 }
