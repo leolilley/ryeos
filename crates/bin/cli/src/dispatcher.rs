@@ -16,6 +16,7 @@ use crate::lifecycle_commands;
     name = "ryeos",
     about = "CLI for Rye OS",
     version,
+    disable_help_flag = true,
     disable_help_subcommand = true,
     trailing_var_arg = true
 )]
@@ -53,10 +54,14 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    if should_show_shell_home(&cli.rest, std::io::stdout().is_terminal())
-        && std::env::var_os("RYEOSD_URL").is_none()
-    {
-        return crate::shell_home::run(&app_root, cli.project.as_deref(), cli.debug).await;
+    if should_show_shell_screen(&cli.rest, std::io::stdout().is_terminal()) {
+        return crate::shell_home::run(
+            &app_root,
+            cli.project.as_deref(),
+            shell_screen_for(&cli.rest),
+            cli.debug,
+        )
+        .await;
     }
 
     // Load the verified node-config snapshot once per invocation; help,
@@ -73,8 +78,8 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // `ryeos help` → top-level help
-    if cli.rest == ["help"] {
+    // `ryeos help --all` / `ryeos commands` → exhaustive command reference.
+    if cli.rest == ["help", "--all"] || cli.rest == ["commands"] {
         crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
         return Ok(());
     }
@@ -235,8 +240,17 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-fn should_show_shell_home(rest: &[String], stdout_is_tty: bool) -> bool {
-    rest.is_empty() && stdout_is_tty
+fn should_show_shell_screen(rest: &[String], stdout_is_tty: bool) -> bool {
+    stdout_is_tty
+        && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
+}
+
+fn shell_screen_for(rest: &[String]) -> crate::shell_home::ShellScreen {
+    if rest == ["help"] || rest == ["--help"] || rest == ["-h"] {
+        crate::shell_home::ShellScreen::Help
+    } else {
+        crate::shell_home::ShellScreen::Home
+    }
 }
 
 /// Parse a stream descriptor from an `/execute` response into `(path, braid)`.

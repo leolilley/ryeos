@@ -17,25 +17,41 @@ use crate::transport::signing::Signer;
 const SHELL_HOME_VERSION: u32 = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellScreen {
+    Home,
+    Help,
+}
+
 pub async fn run(
     app_root: &Path,
     explicit_project: Option<&Path>,
+    screen: ShellScreen,
     debug: bool,
 ) -> std::result::Result<(), CliError> {
     let app_root_key = normalize_path_for_key(app_root);
     let app_root_path = PathBuf::from(&app_root_key);
     let project = resolve_project_for_display(explicit_project);
     let signer = resolve_operator(app_root);
+    let remote_url = remote_daemon_url();
+    let cache_enabled = remote_url.is_none();
     let mut rendered_lines = 0;
 
-    if let (Some(operator), true) = (signer.operator_principal_id.as_ref(), project.cacheable) {
+    if let (Some(operator), true, true) = (
+        signer.operator_principal_id.as_ref(),
+        project.cacheable,
+        cache_enabled,
+    ) {
         let resolver = AppRootPrincipalResolver {
             root: app_root_path.clone(),
         };
         if let Ok(store) = PrincipalStore::resolve_with(&resolver, operator) {
             let path = store.paths().ryeos_shell_home();
             match load_optional_shell_home(&path) {
-                Ok(Some(cached)) if cache_matches(&cached, &app_root_key, operator, &project.key) => {
+                Ok(Some(cached))
+                    if cache_matches(&cached, &app_root_key, operator, &project.key, screen) =>
+                {
                     rendered_lines = render(&cached, RenderMode::Cached, rendered_lines)?;
                 }
                 Ok(_) => {}
@@ -46,19 +62,33 @@ pub async fn run(
 
     if rendered_lines == 0 {
         rendered_lines = render(
-            &loading_projection(&app_root_key, signer.operator_principal_id.as_deref(), &project),
+            &loading_projection(
+                &app_root_key,
+                signer.operator_principal_id.as_deref(),
+                &project,
+                screen,
+            ),
             RenderMode::Live,
             rendered_lines,
         )?;
     }
 
-    let live = build_live_projection(app_root, &app_root_key, &project, &signer).await;
+    let live = build_live_projection(
+        app_root,
+        &app_root_key,
+        &project,
+        &signer,
+        screen,
+        remote_url.as_deref(),
+    )
+    .await;
     render(&live, RenderMode::Live, rendered_lines)?;
 
-    if let (Some(operator), true, true) = (
+    if let (Some(operator), true, true, true) = (
         signer.operator_principal_id.as_ref(),
         project.cacheable,
         signer.cache_writable,
+        cache_enabled,
     ) {
         let resolver = AppRootPrincipalResolver {
             root: app_root_path,
@@ -207,6 +237,13 @@ fn normalize_path_for_key(path: &Path) -> String {
         .to_string()
 }
 
+fn remote_daemon_url() -> Option<String> {
+    std::env::var("RYEOSD_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn load_optional_shell_home(path: &Path) -> AnyhowResult<Option<ShellHomeFile>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_yaml::from_str(&raw)
@@ -222,8 +259,10 @@ fn cache_matches(
     app_root: &str,
     operator_principal_id: &str,
     project_root: &Option<String>,
+    screen: ShellScreen,
 ) -> bool {
     cached.version == SHELL_HOME_VERSION
+        && cached.screen == screen
         && cached.app_root == app_root
         && cached.operator_principal_id == operator_principal_id
         && &cached.project_root == project_root
@@ -233,15 +272,17 @@ fn loading_projection(
     app_root: &str,
     operator_principal_id: Option<&str>,
     project: &ProjectDisplay,
+    screen: ShellScreen,
 ) -> ShellHomeFile {
     ShellHomeFile {
         version: SHELL_HOME_VERSION,
+        screen,
         generated_at: lillux::time::iso8601_now(),
         app_root: app_root.to_string(),
         operator_principal_id: operator_principal_id.unwrap_or("missing").to_string(),
         project_root: project.key.clone(),
         source: ShellHomeSource {
-            lifecycle: SourceStatus::loading(),
+            node: SourceStatus::loading(),
             node_config: SourceStatus::loading(),
         },
         sections: ShellHomeSections {
@@ -252,9 +293,9 @@ fn loading_projection(
             project: Some(ShellProjectSummary::from_project(project)),
             commands: ShellCommandSummary {
                 count: None,
-                detail: Some("loading verified command snapshot".to_string()),
+                detail: Some(loading_command_detail(screen).to_string()),
             },
-            actions: default_actions(false),
+            actions: screen_actions(screen, false),
         },
     }
 }
@@ -264,8 +305,19 @@ async fn build_live_projection(
     app_root_key: &str,
     project: &ProjectDisplay,
     signer: &OperatorState,
+    screen: ShellScreen,
+    remote_url: Option<&str>,
 ) -> ShellHomeFile {
-    let (node, lifecycle_status) = lifecycle_summary(app_root).await;
+    let (node, node_status) = match remote_url {
+        Some(remote_url) => (
+            ShellNodeSummary {
+                status: "remote override".to_string(),
+                detail: Some(format!("RYEOSD_URL={remote_url}")),
+            },
+            SourceStatus::live(),
+        ),
+        None => lifecycle_summary(app_root).await,
+    };
     let snapshot = crate::node_descriptors::load_verified_snapshot(app_root);
     let (node_config_status, command_count, has_tui_command) = match snapshot {
         Ok(snapshot) => {
@@ -297,6 +349,7 @@ async fn build_live_projection(
 
     ShellHomeFile {
         version: SHELL_HOME_VERSION,
+        screen,
         generated_at: lillux::time::iso8601_now(),
         app_root: app_root_key.to_string(),
         operator_principal_id: signer
@@ -305,7 +358,7 @@ async fn build_live_projection(
             .unwrap_or_else(|| "missing".to_string()),
         project_root: project.key.clone(),
         source: ShellHomeSource {
-            lifecycle: lifecycle_status,
+            node: node_status,
             node_config: node_config_status,
         },
         sections: ShellHomeSections {
@@ -317,7 +370,7 @@ async fn build_live_projection(
                     .is_none()
                     .then(|| "run `ryeos node doctor` for diagnostics".to_string()),
             },
-            actions: default_actions(has_tui_command),
+            actions: screen_actions(screen, has_tui_command),
         },
     }
 }
@@ -398,24 +451,11 @@ async fn lifecycle_summary(app_root: &Path) -> (ShellNodeSummary, SourceStatus) 
     }
 }
 
-fn default_actions(has_tui_command: bool) -> Vec<ShellAction> {
-    let mut actions = vec![
-        ShellAction {
-            label: "help".to_string(),
-            command: "help".to_string(),
-            description: "command reference".to_string(),
-        },
-        ShellAction {
-            label: "status".to_string(),
-            command: "node status".to_string(),
-            description: "show local node lifecycle status".to_string(),
-        },
-        ShellAction {
-            label: "doctor".to_string(),
-            command: "node doctor".to_string(),
-            description: "diagnose local node startup and config".to_string(),
-        },
-    ];
+fn screen_actions(screen: ShellScreen, has_tui_command: bool) -> Vec<ShellAction> {
+    let mut actions = match screen {
+        ShellScreen::Home => home_actions(),
+        ShellScreen::Help => help_actions(),
+    };
     if has_tui_command {
         actions.insert(
             0,
@@ -429,10 +469,68 @@ fn default_actions(has_tui_command: bool) -> Vec<ShellAction> {
     actions
 }
 
+fn home_actions() -> Vec<ShellAction> {
+    vec![
+        ShellAction {
+            label: "help".to_string(),
+            command: "help".to_string(),
+            description: "open the compact shell help screen".to_string(),
+        },
+        ShellAction {
+            label: "status".to_string(),
+            command: "node status".to_string(),
+            description: "show local node lifecycle status".to_string(),
+        },
+        ShellAction {
+            label: "doctor".to_string(),
+            command: "node doctor".to_string(),
+            description: "diagnose local node startup and config".to_string(),
+        },
+    ]
+}
+
+fn help_actions() -> Vec<ShellAction> {
+    vec![
+        ShellAction {
+            label: "open".to_string(),
+            command: "help <command>".to_string(),
+            description: "show focused help for one command".to_string(),
+        },
+        ShellAction {
+            label: "list".to_string(),
+            command: "commands".to_string(),
+            description: "print the full verified command list".to_string(),
+        },
+        ShellAction {
+            label: "all".to_string(),
+            command: "help --all".to_string(),
+            description: "print the exhaustive CLI reference".to_string(),
+        },
+        ShellAction {
+            label: "status".to_string(),
+            command: "node status".to_string(),
+            description: "show local node lifecycle status".to_string(),
+        },
+        ShellAction {
+            label: "doctor".to_string(),
+            command: "node doctor".to_string(),
+            description: "diagnose local node startup and config".to_string(),
+        },
+    ]
+}
+
+fn loading_command_detail(screen: ShellScreen) -> &'static str {
+    match screen {
+        ShellScreen::Home => "loading verified command snapshot",
+        ShellScreen::Help => "loading shell help and verified command snapshot",
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShellHomeFile {
     version: u32,
+    screen: ShellScreen,
     generated_at: String,
     app_root: String,
     operator_principal_id: String,
@@ -444,7 +542,7 @@ struct ShellHomeFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShellHomeSource {
-    lifecycle: SourceStatus,
+    node: SourceStatus,
     node_config: SourceStatus,
 }
 
@@ -587,8 +685,14 @@ fn render_lines(home: &ShellHomeFile, mode: RenderMode) -> Vec<String> {
         RenderMode::Live => "live",
     };
     let mut lines = Vec::new();
-    lines.push("RYE OS".to_string());
-    lines.push("portable verified execution".to_string());
+    lines.push(match home.screen {
+        ShellScreen::Home => "RYE OS".to_string(),
+        ShellScreen::Help => "RYE OS HELP".to_string(),
+    });
+    lines.push(match home.screen {
+        ShellScreen::Home => "portable verified execution".to_string(),
+        ShellScreen::Help => "compact shell help".to_string(),
+    });
     lines.push(String::new());
     lines.push(format!(
         "{:<9} {}{}",
@@ -618,9 +722,9 @@ fn render_lines(home: &ShellHomeFile, mode: RenderMode) -> Vec<String> {
     ));
     lines.push(format!("{:<9} {} · {}", "source", source, home.generated_at));
     lines.push(format!(
-        "{:<9} lifecycle {} · node config {}",
+        "{:<9} node {} · node config {}",
         "state",
-        home.source.lifecycle.state.label(),
+        home.source.node.state.label(),
         home.source.node_config.state.label()
     ));
     lines.push(String::new());
