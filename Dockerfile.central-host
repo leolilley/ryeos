@@ -27,19 +27,27 @@ COPY . .
 # `--build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)`.
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
-ARG RELEASE_BUILD=0
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
 
-RUN if [ "$RELEASE_BUILD" = "1" ]; then rm -rf /build/target; fi
-
+# Cargo's target dir lives in a BuildKit cache shared with Dockerfile.standard.
+# The central-host bundle set is a superset of standard, so this avoids
+# recompiling the common binaries during release image publishing.
 RUN --mount=type=secret,id=publisher-key \
+    --mount=type=cache,id=ryeos-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-cargo-target,target=/build/target-cache,sharing=locked \
     test -s /run/secrets/publisher-key && \
+    CARGO_TARGET_DIR=/build/target-cache \
     ./scripts/populate-bundles.sh \
       --key /run/secrets/publisher-key \
       --owner ryeos-official \
       --bundle-set central-host \
-      --all
+      --all && \
+    mkdir -p /build/target/release && \
+    cp /build/target-cache/release/ryeosd /build/target/release/ryeosd && \
+    cp /build/target-cache/release/ryeos /build/target/release/ryeos && \
+    cp /build/target-cache/release/ryeos-core-tools /build/target/release/ryeos-core-tools
 
 FROM debian:trixie-slim
 

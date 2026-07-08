@@ -116,14 +116,14 @@ jobs:
           load: true
           push: false
           pull: true
-          no-cache: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
           # Injected into the binary at compile time (.git is dockerignored, so
           # the in-container git fallback can't resolve the SHA) and onto the
           # image as OCI labels via the Dockerfile ARGs.
           build-args: |
             VCS_REF=${{ steps.source.outputs.sha }}
             BUILD_DATE=${{ steps.ver.outputs.build_date }}
-            RELEASE_BUILD=1
           tags: |
             ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
           secrets: |
@@ -187,11 +187,11 @@ jobs:
           load: true
           push: false
           pull: true
-          no-cache: true
+          cache-from: type=gha,scope=ryeos-release-image
+          cache-to: type=gha,scope=ryeos-release-image,mode=max
           build-args: |
             VCS_REF=${{ steps.source.outputs.sha }}
             BUILD_DATE=${{ steps.ver.outputs.build_date }}
-            RELEASE_BUILD=1
           tags: |
             ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
           secrets: |
