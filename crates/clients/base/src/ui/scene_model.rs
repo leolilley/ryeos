@@ -101,9 +101,8 @@ pub struct RyeOsSceneObjectVm {
     /// generic SDF.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip: Option<SceneClipVm>,
-    /// Local-space SDF holes for a fill shape. Cutouts let content carve
-    /// voids out of generic filled solids without introducing renderer
-    /// cases for a particular scene.
+    /// Local-space SDF holes for a fill shape. The `amount` controls whether
+    /// the hole is static or opens with the scene break amount.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<SceneCutoutVm>,
     /// Looping offset motion: the object eases from its authored
@@ -143,6 +142,17 @@ pub struct SceneCutoutVm {
     pub position: [f32; 3],
     #[serde(default)]
     pub scale: [f32; 3],
+    #[serde(default)]
+    pub amount: SceneCutoutAmountVm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SceneCutoutAmountVm {
+    #[default]
+    Static,
+    Break,
+    BreakSpin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -740,6 +750,11 @@ fn read_cutouts(v: Option<&serde_json::Value>) -> Vec<SceneCutoutVm> {
                         .map(str::to_string),
                     position: read_position(item.get("position")),
                     scale: read_scale(item.get("scale")),
+                    amount: match item.get("amount").and_then(serde_json::Value::as_str) {
+                        Some("break") => SceneCutoutAmountVm::Break,
+                        Some("break_spin") => SceneCutoutAmountVm::BreakSpin,
+                        _ => SceneCutoutAmountVm::Static,
+                    },
                 })
                 .collect()
         })

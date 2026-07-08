@@ -1,5 +1,5 @@
 version: "0.1.0"
-category: "apps/tv-tracker"
+category: "tv-tracker-authoring"
 name: "author-identity-context-doc"
 executor_id: "@subprocess"
 description: "Author the signed tv-tracker Identity context doc via the daemon runtime.author_item callback. Authority is scoped to this one doc; the daemon signs (this wrapper never holds a key)."

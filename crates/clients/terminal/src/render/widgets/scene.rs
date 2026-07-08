@@ -52,7 +52,7 @@
 use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Color, Style, TextSurface};
 use ryeos_client_base::ui::scene_model::{
-    RyeOsSceneModel, RyeOsSceneObjectKind, RyeOsSceneObjectVm,
+    RyeOsSceneModel, RyeOsSceneObjectKind, RyeOsSceneObjectVm, SceneCutoutAmountVm,
 };
 use ryeos_client_base::ui::view_model::RyeOsTone;
 
@@ -439,7 +439,7 @@ fn draw_fill(
     let soft = 1.0 / (scale * cell_aspect * zoom).max(0.001);
     let ramp = ramp_for(object);
     let noise_amp = 0.10 + 0.12 * energy;
-    let opacity = object.opacity.clamp(0.1, 1.0) * reveal_multiplier(object, scene, pace);
+    let opacity = object.opacity.clamp(0.0, 1.0) * reveal_multiplier(object, scene, pace);
     let (position, _depth) = orbited_position(object, scene, pace);
 
     for row in 0..h {
@@ -458,7 +458,7 @@ fn draw_fill(
             if !local_clip_allows(object, lx, ly) {
                 continue;
             }
-            if local_cutout_blocks(object, lx, ly, light_az, spin) {
+            if local_cutout_blocks(object, scene, lx, ly, light_az, spin) {
                 continue;
             }
 
@@ -531,25 +531,33 @@ fn reveal_multiplier(object: &RyeOsSceneObjectVm, scene: &RyeOsSceneModel, pace:
 
 fn local_cutout_blocks(
     object: &RyeOsSceneObjectVm,
+    scene: &RyeOsSceneModel,
     lx: f32,
     ly: f32,
     light_az: f32,
     spin: f32,
 ) -> bool {
     object.cutouts.iter().any(|cutout| {
+        let amount = match cutout.amount {
+            SceneCutoutAmountVm::Static => 1.0,
+            SceneCutoutAmountVm::Break => scene.break_amount.clamp(0.0, 1.0),
+            SceneCutoutAmountVm::BreakSpin => {
+                let facing = 0.5 + 0.5 * spin.cos();
+                let gate = ((facing - 0.22) / 0.38).clamp(0.0, 1.0);
+                scene.break_amount.clamp(0.0, 1.0) * gate
+            }
+        };
+        if amount <= 0.03 {
+            return false;
+        }
         let x = lx - cutout.position[0];
         let y = ly - cutout.position[1];
+        let sx = cutout.scale[0] * amount;
+        let sy = cutout.scale[1] * amount;
+        let sz = cutout.scale[2] * amount;
         let (sd, _) = match cutout.shape.as_deref() {
-            Some("sphere") => sphere_sample(cutout.scale[0], x, y, light_az),
-            _ => prism_sample(
-                cutout.scale[0],
-                cutout.scale[1],
-                cutout.scale[2],
-                x,
-                y,
-                light_az,
-                spin,
-            ),
+            Some("sphere") => sphere_sample(sx, x, y, light_az),
+            _ => prism_sample(sx, sy, sz, x, y, light_az, spin),
         };
         sd <= 0.0
     })

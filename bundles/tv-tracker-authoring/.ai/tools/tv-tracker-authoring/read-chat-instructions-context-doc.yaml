@@ -1,8 +1,8 @@
 version: "0.1.0"
-category: "apps/tv-tracker"
-name: "read-analysis-behavior-context-doc"
+category: "tv-tracker-authoring"
+name: "read-chat-instructions-context-doc"
 executor_id: "@subprocess"
-description: "Read the raw signed source of the tv-tracker AnalysisBehavior context doc (resolve + verify + read the on-disk file). Read-only — no authoring authority. Returns fetch report incl. raw content + signature_status."
+description: "Read the raw signed source of the tv-tracker ChatInstructions context doc (resolve + verify + read the on-disk file). Read-only — no authoring authority. Returns fetch report incl. raw content + signature_status."
 
 config:
   command: "bin:core/ryeos-core-tools"
@@ -17,7 +17,7 @@ config_schema:
   properties:
     item_ref:
       type: string
-      enum: ["knowledge:apps/tv-tracker/AnalysisBehavior"]
+      enum: ["knowledge:apps/tv-tracker/ChatInstructions"]
     with_content:
       type: boolean
       default: true
