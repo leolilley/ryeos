@@ -15,6 +15,7 @@ use crate::error::{CliError, CliTransportError};
 use crate::transport::signing::Signer;
 
 const TTY_HOME_VERSION: u32 = 1;
+const TTY_CONFIG_VERSION: u32 = 1;
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +23,12 @@ const DEFAULT_TERMINAL_WIDTH: usize = 80;
 pub enum TtyScreen {
     Home,
     Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TtyEntryKind {
+    Bare,
+    ExplicitScreen,
 }
 
 pub async fn run(
@@ -32,6 +39,11 @@ pub async fn run(
 ) -> std::result::Result<(), CliError> {
     let app_root_key = normalize_path_for_key(app_root);
     let app_root_path = PathBuf::from(&app_root_key);
+    let entry_kind = match screen {
+        TtyScreen::Home => TtyEntryKind::Bare,
+        TtyScreen::Help => TtyEntryKind::ExplicitScreen,
+    };
+    let screen = configured_screen(&app_root_path, screen, entry_kind, debug);
     let project = resolve_project_for_display(explicit_project);
     let signer = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
@@ -245,6 +257,56 @@ fn remote_daemon_url() -> Option<String> {
 }
 
 fn load_optional_tty_home(path: &Path) -> AnyhowResult<Option<TtyHomeFile>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_yaml::from_str(&raw)
+            .map(Some)
+            .with_context(|| format!("parse {}", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn configured_screen(
+    app_root: &Path,
+    default: TtyScreen,
+    entry_kind: TtyEntryKind,
+    debug: bool,
+) -> TtyScreen {
+    if entry_kind != TtyEntryKind::Bare {
+        return default;
+    }
+
+    let resolver = AppRootPrincipalResolver {
+        root: app_root.to_path_buf(),
+    };
+    let store = match PrincipalStore::resolve_with(
+        &resolver,
+        ryeos_app::principal::LOCAL_PRINCIPAL_ID,
+    ) {
+        Ok(store) => store,
+        Err(err) => {
+            debug_warn(debug, format!("resolve tty config path: {err:#}"));
+            return default;
+        }
+    };
+    match load_optional_tty_config(&store.paths().ryeos_tty_config()) {
+        Ok(Some(config)) if config.version == TTY_CONFIG_VERSION => config.bare_action.screen(),
+        Ok(Some(config)) => {
+            debug_warn(
+                debug,
+                format!("ignore tty config version {}", config.version),
+            );
+            default
+        }
+        Ok(None) => default,
+        Err(err) => {
+            debug_warn(debug, format!("ignore tty config: {err:#}"));
+            default
+        }
+    }
+}
+
+fn load_optional_tty_config(path: &Path) -> AnyhowResult<Option<TtyConfigFile>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_yaml::from_str(&raw)
             .map(Some)
@@ -537,6 +599,27 @@ struct TtyHomeFile {
     project_root: Option<String>,
     source: TtyHomeSource,
     sections: TtyHomeSections,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TtyConfigFile {
+    version: u32,
+    bare_action: TtyBareAction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum TtyBareAction {
+    Screen { screen: TtyScreen },
+}
+
+impl TtyBareAction {
+    fn screen(&self) -> TtyScreen {
+        match self {
+            Self::Screen { screen } => *screen,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
