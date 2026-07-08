@@ -6,7 +6,7 @@ entry_type: implementation_guide
 version: "0.1.0"
 description: Gate a list view's affordances per row on record facts (a `when:` predicate), so conditional actions render only where they mean something.
 tags:
-  - studio
+  - ryeos-ui
   - views
   - affordances
 ```
@@ -27,7 +27,7 @@ at a suspended parent's followed child chain
 (`{record.follow.child_thread_id}`). On non-follow rows the follow fact is
 absent, both merge fields resolve to null, and activation does nothing.
 The deferral is noted inline at that affordance in
-`bundles/studio/.ai/views/ryeos/threads/list.yaml`.
+`bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml`.
 
 ## Design
 

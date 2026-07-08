@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-06T12:32:28Z:059e624377755c852255d428bba6b47f2b805246b2e2469c94a18a1c805dc6df:UqAqjkWe00GyzY84ZORufjbU2drmwBrRLW4MRr9lp9wJfM2sl+WtELho0tMkwUPenRrM9JDhkNPrhv3QgncfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/projects/forget
+path: /ui/api/ryeos-ui/projects/forget
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/projects/forget"

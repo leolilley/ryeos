@@ -261,7 +261,10 @@ const STDERR_TAIL_CAP: usize = 8 * 1024;
 /// stray diagnostics are visible interactively without persisting the body.
 fn base_metadata(result: &lillux::SubprocessResult) -> Value {
     let mut meta = serde_json::Map::new();
-    meta.insert("duration_ms".to_owned(), serde_json::json!(result.duration_ms));
+    meta.insert(
+        "duration_ms".to_owned(),
+        serde_json::json!(result.duration_ms),
+    );
     meta.insert("exit_code".to_owned(), serde_json::json!(result.exit_code));
     meta.insert("pid".to_owned(), serde_json::json!(result.pid));
     if !result.stderr.is_empty() {
@@ -613,7 +616,10 @@ mod tests {
 
         // Exit 0 but the result says it failed → marked Failed.
         assert_eq!(completion.status, ThreadTerminalStatus::Failed);
-        let error = completion.error.as_ref().expect("soft failure carries error");
+        let error = completion
+            .error
+            .as_ref()
+            .expect("soft failure carries error");
         assert_eq!(error["soft_failure"], true);
         assert_eq!(error["exit_code"], 0);
         // The tool's real error — only ever written to stderr — is retained.
@@ -677,7 +683,9 @@ mod tests {
 
     #[test]
     fn result_reports_failure_predicate() {
-        assert!(result_reports_failure(&serde_json::json!({"success": false})));
+        assert!(result_reports_failure(
+            &serde_json::json!({"success": false})
+        ));
         assert!(result_reports_failure(
             &serde_json::json!({"error": "boom"})
         ));
@@ -685,7 +693,9 @@ mod tests {
             &serde_json::json!({"errors": ["a"]})
         ));
         // Healthy / absent / null-error shapes are NOT failures.
-        assert!(!result_reports_failure(&serde_json::json!({"success": true})));
+        assert!(!result_reports_failure(
+            &serde_json::json!({"success": true})
+        ));
         assert!(!result_reports_failure(
             &serde_json::json!({"error": null, "errors": []})
         ));
@@ -698,7 +708,7 @@ mod tests {
     #[test]
     fn truncate_tail_keeps_the_end() {
         let s = "abcdefghij"; // 10 bytes
-        // Short input is returned whole.
+                              // Short input is returned whole.
         assert_eq!(truncate_tail_for_error(s, 100), s);
         // Long input keeps the LAST max_len bytes plus a marker.
         let out = truncate_tail_for_error(s, 4);
@@ -850,9 +860,5 @@ fn truncate_tail_for_error(s: &str, max_len: usize) -> String {
     while start < s.len() && !s.is_char_boundary(start) {
         start += 1;
     }
-    format!(
-        "… (truncated, {} bytes total)\n{}",
-        s.len(),
-        &s[start..]
-    )
+    format!("… (truncated, {} bytes total)\n{}", s.len(), &s[start..])
 }

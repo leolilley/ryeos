@@ -1,0 +1,108 @@
+# ryeos:signed:2026-07-08T01:26:03Z:1d959d69d25c6f8641cae59231eb8aa4d248c70a87e6360be90df49f4d39c0b2:cyqD3gJNIUyBhcH0Kg3seFPnJw5GaWG9I17CqSDvJcSwozmPoHAJxlxnhEtraY7ldwRKZTQN+gzYSTScc4i7Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: project-threads
+version: "1.0.0"
+description: >-
+  Active-project thread history. This is the broad project execution table:
+  running, failed, cancelled, and completed threads are all present, with the
+  input acting as the active/status/kind/source filter instead of separate
+  active-only views.
+
+widget: table
+source:
+  ref: service:ui/ryeos-ui/threads/list
+  params:
+    project: current
+    project_path: ""
+    limit: 200
+    sort: watch
+  collection: threads
+projections:
+  columns:
+    - label: thread
+      field: thread_id
+    - label: kind
+      field: kind
+    - label: item
+      field: item_ref
+    - label: project
+      field: project.name
+    - label: status
+      field: status
+    - label: source
+      field: requested_by
+    - label: follow
+      field: follow.role
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resume_queued: neutral
+          resumed: good
+    - label: created
+      field: created_at
+  expand:
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      accepted: accent
+      failed: danger
+      killed: danger
+      timed_out: danger
+      cancelled: warn
+      completed: good
+    default: neutral
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: watch-child
+    label: Watch child
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.follow.child_thread_id}"
+        chain_root: "{record.follow.child_chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
+  - id: cancel
+    label: Cancel
+    invoke:
+      plane: rye
+      ref: service:commands/submit
+      args:
+        thread_id: "{record.thread_id}"
+        command_type: cancel
+      notice: "Cancelled {result.thread_id}."
+input:
+  id: filter
+  feeds:
+    fields:
+      - { param: active, label: active }
+      - { param: status, label: status }
+      - { param: kind, label: kind }
+      - { param: requested_by, label: source }
+    debounce_ms: 120
+refresh:
+  on_hint: [thread, activity]

@@ -297,10 +297,26 @@ pub struct ExecutionConfig {
     pub backoff_base_ms: u64,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// Runtime-side backstop for a single model turn's generated output. This
+    /// is independent of provider `max_tokens` request fields, which are
+    /// template/provider dependent and may be absent or ignored. `0` disables
+    /// the backstop.
+    #[serde(default = "default_max_output_tokens_per_turn")]
+    pub max_output_tokens_per_turn: u64,
     #[serde(default)]
     pub tool_preload: bool,
     #[serde(default)]
     pub retry_on_timeout: bool,
+    /// Retry a stream that dies MID-READ (chunk timeout, reset, dropped
+    /// connection) under the same `retries` budget. The request is idempotent
+    /// (same message array); deltas persisted before the cut stay in the braid
+    /// as the record of the abandoned partial, delimited by the
+    /// `provider_retry` event. On by default — a dropped stream is the same
+    /// transient transport class as a pre-stream connect failure, and without
+    /// this every long generation is one hiccup away from a dead thread. Set
+    /// `false` to fail a directive on the first mid-stream cut.
+    #[serde(default = "default_retry_mid_stream")]
+    pub retry_mid_stream: bool,
 }
 
 fn default_retries() -> u32 {
@@ -319,6 +335,14 @@ fn default_timeout() -> u64 {
     300
 }
 
+fn default_max_output_tokens_per_turn() -> u64 {
+    32_768
+}
+
+fn default_retry_mid_stream() -> bool {
+    true
+}
+
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
@@ -328,8 +352,10 @@ impl Default for ExecutionConfig {
             never_retry: vec![],
             backoff_base_ms: default_backoff_base_ms(),
             timeout_seconds: default_timeout(),
+            max_output_tokens_per_turn: default_max_output_tokens_per_turn(),
             tool_preload: false,
             retry_on_timeout: false,
+            retry_mid_stream: default_retry_mid_stream(),
         }
     }
 }
@@ -525,7 +551,10 @@ mod tests {
         // message rather than injecting an empty stimulus.
         let blank: DirectiveHeader = serde_yaml::from_str("return_nudge: \"  \"").unwrap();
         assert!(blank.return_nudge.enabled());
-        assert!(blank.return_nudge.message(&outs).contains("directive_return"));
+        assert!(blank
+            .return_nudge
+            .message(&outs)
+            .contains("directive_return"));
     }
 
     // A config that omits the retry knobs must inherit the same sane values
@@ -546,6 +575,15 @@ mod tests {
             cfg.backoff_base_ms, 1000,
             "omitted backoff defaults to 1s, not a 0ms hot loop"
         );
+        assert!(
+            cfg.retry_mid_stream,
+            "omitted retry_mid_stream defaults ON — a dropped stream is transient"
+        );
+        assert_eq!(
+            cfg.max_output_tokens_per_turn,
+            default_max_output_tokens_per_turn(),
+            "omitted per-turn output cap defaults to the runtime backstop, not 0"
+        );
     }
 
     #[test]
@@ -555,6 +593,11 @@ mod tests {
         assert_eq!(parsed.retries, default.retries);
         assert_eq!(parsed.retry_status_codes, default.retry_status_codes);
         assert_eq!(parsed.backoff_base_ms, default.backoff_base_ms);
+        assert_eq!(
+            parsed.max_output_tokens_per_turn,
+            default.max_output_tokens_per_turn
+        );
+        assert_eq!(parsed.retry_mid_stream, default.retry_mid_stream);
         assert_eq!(parsed.retries, 2);
     }
 }

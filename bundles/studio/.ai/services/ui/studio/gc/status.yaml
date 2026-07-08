@@ -1,7 +1,0 @@
-# ryeos:signed:2026-06-11T22:51:46Z:77917599de6a2253c1d0c8ca5f1f09b8ede1443cef57087bb272614d30e2049b:5nCa74JVEeEVgbNW1y8m4wj5FAcvfd9ARcG8D2XWTfbEzN2V+yrTm9fjTYZQbdO33pV/rinuo4uDclKl5QdmBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-name: studio/gc/status
-version: "1.0.0"
-description: Read-only GC state — running status, current phase, and recent GC event history from the JSONL log.
-endpoint: ui.studio.gc.status
-availability: daemon_only

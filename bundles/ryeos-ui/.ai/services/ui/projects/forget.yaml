@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T08:36:51Z:d68675c682fc797ac97c8ac88dd3e1855a1ff0190a52233044b1811b82bc79bd:mqNfun2ZJpzETvRDwh3VmvP3wT6RUqae4b3Wm94JWjYV3Cbh/rq49KUlLVI9QOOY5P6SD326PqvtcC2r/4WTAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: projects/forget
+version: "1.0.0"
+description: Forget a project registry entry and prune corresponding recent state.
+endpoint: ui.projects.forget
+availability: daemon_only

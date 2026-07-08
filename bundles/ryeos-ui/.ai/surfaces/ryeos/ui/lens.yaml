@@ -1,0 +1,109 @@
+# ryeos:signed:2026-07-07T04:10:29Z:9693f198e32f01db4b6e521fee82410d2b06da1761fe16bc63a7f252d37aa338:bls5svqwZPzqlS9g4YNXcZPbJq+8/IGd0IC4Kx5liWFrqam/TwgJTKm/qetjFQVkhaJ4ya9L4b2k3/aq8eu/Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: ryeos-ui-lens
+version: "1.0.0"
+description: >-
+  The cell-grid single-lens operator surface. One center lens fills the
+  screen at a time; breadth comes from swapping the lens (Ctrl+K view overlay),
+  never from arranging panes. The foot input routes at the directive, so the
+  timeline lens reads as a live cognition feed you talk into. This is the
+  TUI's own composition over the shared model — not the web's tiled RyeOS UI.
+
+# Single lens: the center holds exactly one tile and opening a view REPLACES
+# it rather than splitting. `compute_layout` renders the one tile full-bleed.
+tiling:
+  mode: single_lens
+  master: { side: left, arrange: vertical, ratio: 1.0, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+# Land on a chrome-less splash text view over the prism backdrop until the
+# operator picks a lens (Ctrl+K) or speaks into the foot input. Every lens in
+# the library — the live activity table, a thread's braid, the item space — is
+# one view-overlay stroke away; breadth is swapping the lens, never arranging panes.
+tiles:
+  - "view:ryeos/backdrop/splash"
+
+# Only the foot input and a thin top status strip — no edge panes.
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
+
+style:
+  border: thin
+
+backdrop: view:ryeos/backdrop/prism-shards
+
+# The full lens set — swap the single center lens to reach any of these.
+library:
+  - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
+  - view:ryeos/projects/list
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/items/space
+  - view:ryeos/node/events
+  - view:ryeos/node/remotes
+  - view:ryeos/node/bundles
+  - view:ryeos/node/gc
+  - view:ryeos/graph/topology
+  - view:ryeos/commands/grammar
+
+overlays:
+  views:
+    title: Views
+    widget: table
+    columns: [View, Description]
+    source: { ref: "runtime:views/launchable" }
+    hint: "type to filter views · enter to open"
+  commands:
+    title: Commands
+    widget: palette
+    source: { ref: "runtime:commands/available" }
+    hint: "type to filter commands · enter to run"
+  help:
+    title: Help
+    widget: table
+    columns: [Topic, Open]
+    source: { ref: "runtime:help" }
+    hint: "type to filter help · esc to close"
+  shortcuts:
+    title: Shortcuts
+    widget: table
+    columns: [Keys, Action]
+    source: { ref: "runtime:shortcuts" }
+    hint: "type to filter shortcuts · esc to close"
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+      # Opt into project scoping: the client fills this empty slot with the
+      # seat's project (threads/input requires project_path). Services that
+      # don't declare it never receive it.
+      project_path: ""
+
+ambient:
+  show_background: true
+  opacity: 0.35
+
+affordances:
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.files
+    label: Files
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View
+  - id: view.graph
+    label: Graph
+    category: View

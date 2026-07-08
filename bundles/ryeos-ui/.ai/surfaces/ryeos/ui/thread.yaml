@@ -1,0 +1,56 @@
+# ryeos:signed:2026-07-07T04:10:29Z:011e543f65514b67ec193f9730dc9cbcccb9ff7619db8dbcd9185fcbd8842f8f:x9vjWZgRUT91+w1L8LL8b270nWmXBnq3xgleY0miQPVtWx6nh34FRJHKbRGiVaC8kmnydjvF9TTALqOCKdXDBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: ryeos-ui-thread
+version: "1.0.0"
+description: Directive thread — watch and drive a single execution stream
+
+# One center tile: the directive thread event stream. It starts empty
+# (its source is the route head thread `@facet:input.route.thread`, which
+# is None until the first submit), then fills as the execution streams.
+# The bottom input targets the same directive route, so submitting here
+# launches a thread and the timeline above shows it live.
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 1.0, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - "view:ryeos/thread/transcript"
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
+
+library:
+  - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/node/events
+  - view:ryeos/projects/list
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+      project_path: ""
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View

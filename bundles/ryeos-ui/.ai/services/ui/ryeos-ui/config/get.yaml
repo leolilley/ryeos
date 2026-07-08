@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T12:24:55Z:5fa332a57c2d670c5e2df5b6c68051f902585633d388510378d5cc1316abd290:83uh1my2jCHcL7YL3bHBB8ggaDSMeDGmVmsNkVwKPbzArIneaOEIZbszXY2rIusbTmHgvYu9wUFedzx3CHaLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/config/get
+version: "1.0.0"
+description: Read durable local RyeOS UI user preferences.
+endpoint: ui.ryeos.config.get
+availability: daemon_only

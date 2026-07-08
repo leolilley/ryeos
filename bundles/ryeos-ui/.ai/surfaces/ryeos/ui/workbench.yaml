@@ -1,0 +1,59 @@
+# ryeos:signed:2026-07-07T04:10:29Z:89fc342f8772d0c149c91af8d2f5dae0a11ddb6b5b02167a75e3cc8c8403f3f0:Tcvx87ul0npNf6WU+soqXZ5nBcJEoEb7MPLF/QTRjQBljnEhQzwQIulsqEvnVdmHrLjLzlBuXRh7NUd/qQb+Cg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: ryeos-ui-workbench
+version: "1.0.0"
+description: Working seat - home pane beside a content-bound thread list
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.65, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - "view:ryeos/graph/topology"
+  - "view:ryeos/threads/history"
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  right: { content: "view:ryeos/item/inspector", open: false, size: 40 }
+
+style:
+  border: thin
+
+library:
+  - view:ryeos/graph/topology
+  - view:ryeos/atlas
+  - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
+  - view:ryeos/projects/list
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/items/space
+  - view:ryeos/node/events
+  - view:ryeos/node/remotes
+  - view:ryeos/node/bundles
+  - view:ryeos/node/gc
+  - view:ryeos/commands/grammar
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+      project_path: ""
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.graph
+    label: Graph
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View

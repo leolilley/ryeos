@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-06T12:32:28Z:84dccd078c9a204d87ce7802e519983ce9cce7b5c3dba74f14ff44ba1e004b4b:a5CASuGKa0y5A2U5vEJepABydfAtZxsrPOwGpNsThG8YZq/p3g6AMSTpibNomuQInhPcQKmgulCP+BPCBKOpBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/item/inspect
+path: /ui/api/ryeos-ui/item/inspect
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 15000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/item/inspect"

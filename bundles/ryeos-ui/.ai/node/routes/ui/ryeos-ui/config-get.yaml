@@ -1,0 +1,13 @@
+# ryeos:signed:2026-07-06T12:32:28Z:23da09880cc9cdbd2022b2ac1e97a334d0c6f6fda246f8d2c69bf99502ce681a:QlKRugKECsZ6+sy6z6HQywkgj73yfDVZ+zCI9JHIwg109esB1JshRxR9APo1LnW1buBe7MWHmqPB8clTg3gUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/config/get
+path: /ui/api/ryeos-ui/config/get
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/config/get"

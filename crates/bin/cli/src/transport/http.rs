@@ -39,9 +39,12 @@ pub fn signed_client() -> Result<reqwest::Client, CliTransportError> {
 /// 2xx body to parsed JSON.
 async fn read_json(resp: reqwest::Response) -> Result<Value, CliDispatchError> {
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| CliTransportError::BodyDecode {
-        detail: format!("read body: {e}"),
-    })?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| CliTransportError::BodyDecode {
+            detail: format!("read body: {e}"),
+        })?;
     if !status.is_success() {
         return Err(CliTransportError::HttpError {
             status: status.as_u16(),
@@ -198,9 +201,13 @@ async fn read_sse_stream(
     }
 
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| CliTransportError::BodyDecode {
-        detail: format!("stream frame: {e}"),
-    })? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| CliTransportError::BodyDecode {
+            detail: format!("stream frame: {e}"),
+        })?
+    {
         buf.extend_from_slice(&chunk);
         // Drain every complete event (terminated by a blank line, LF or CRLF)
         // from the front of the buffer, leaving any partial tail for the next

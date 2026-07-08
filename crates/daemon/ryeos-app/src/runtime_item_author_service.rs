@@ -600,7 +600,9 @@ fn read_incumbent_state(
         let Some(after_prefix) = trimmed.strip_prefix(prefix).map(str::trim_start) else {
             continue;
         };
-        let Some(after_marker) = after_prefix.strip_prefix(PROVENANCE_MARKER).map(str::trim_start)
+        let Some(after_marker) = after_prefix
+            .strip_prefix(PROVENANCE_MARKER)
+            .map(str::trim_start)
         else {
             continue;
         };
@@ -711,7 +713,11 @@ mod tests {
     #[test]
     fn malformed_provenance_resolves_to_none_not_error() {
         let dir = tempfile::tempdir().unwrap();
-        let target = write_file(dir.path(), "bad.yaml", "value: 1\n\n# ryeos:authored: {not json\n");
+        let target = write_file(
+            dir.path(),
+            "bad.yaml",
+            "value: 1\n\n# ryeos:authored: {not json\n",
+        );
         assert!(matches!(
             read_incumbent_state(&target, "#", None).unwrap(),
             IncumbentState::Present {
@@ -738,7 +744,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("conflict"), "{err}");
-        assert!(err.contains("expected-d") && err.contains("actual-d"), "{err}");
+        assert!(
+            err.contains("expected-d") && err.contains("actual-d"),
+            "{err}"
+        );
         assert!(err.contains("T-incumbent"), "{err}");
     }
 
@@ -749,7 +758,10 @@ mod tests {
         let err = enforce_expected_digest(&target, "d1", "#", None)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("conflict") && err.contains("no incumbent"), "{err}");
+        assert!(
+            err.contains("conflict") && err.contains("no incumbent"),
+            "{err}"
+        );
     }
 
     #[test]

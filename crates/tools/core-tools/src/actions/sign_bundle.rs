@@ -93,7 +93,7 @@ pub fn sign_bundle_items(
     registry_roots: &[PathBuf],
     signing_key: &lillux::crypto::SigningKey,
 ) -> Result<SignBundleReport> {
-    sign_bundle_items_with_trust(source, registry_roots, signing_key, None, false)
+    sign_bundle_items_with_trust(source, registry_roots, signing_key, None)
 }
 
 /// Sign every signable item in the bundle at `source` using `signing_key`,
@@ -103,17 +103,11 @@ pub fn sign_bundle_items(
 /// kind schemas and parser descriptors come from already-installed bundles
 /// signed by the platform publisher, while source items are signed by the
 /// current user key.
-/// `allow_uncovered_item_dirs` opts out of the loud "every item directory is
-/// covered by a registered kind" check. Leave it `false` for normal publishes;
-/// set it `true` only for a deliberately partial intermediate publish (e.g.
-/// signing core before the bundle that defines its `knowledge` kind exists),
-/// which the caller then completes with a later republish carrying that kind.
 pub fn sign_bundle_items_with_trust(
     source: &Path,
     registry_roots: &[PathBuf],
     signing_key: &lillux::crypto::SigningKey,
     base_trust_store: Option<&TrustStore>,
-    allow_uncovered_item_dirs: bool,
 ) -> Result<SignBundleReport> {
     let verifying_key = signing_key.verifying_key();
     let fingerprint = ryeos_engine::trust::compute_fingerprint(&verifying_key);
@@ -258,10 +252,8 @@ pub fn sign_bundle_items_with_trust(
 
     // Loud pipeline: a populated item directory with no registered kind would
     // otherwise be skipped above with only a TRACE line. Fail before returning
-    // an incomplete report, unless the caller opted into a partial publish.
-    if !allow_uncovered_item_dirs {
-        check_all_item_dirs_covered(&ai_dir, &kinds)?;
-    }
+    // an incomplete report.
+    check_all_item_dirs_covered(&ai_dir, &kinds)?;
 
     report.validated.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));
     report.signed.sort_by(|a, b| a.item_ref.cmp(&b.item_ref));

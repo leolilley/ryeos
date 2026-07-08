@@ -141,7 +141,7 @@ Consider the advanced projection when one or more of these becomes concrete:
 
 - consumers need cross-run querying/export by `definition_hash` or
   `definition_ref`;
-- Studio needs runtime trace projection rather than static `.ai` topology;
+- RyeOS UI needs runtime trace projection rather than static `.ai` topology;
 - replay, resume, or audit workflows require an attestable closure from signed
   capability to consequence;
 - admission/trust policy needs to reason over capability, invocation, and

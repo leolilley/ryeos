@@ -115,7 +115,10 @@ mod tests {
     #[test]
     fn str_round_trip() {
         for intent in [LiveInputIntent::Steer, LiveInputIntent::Interrupt] {
-            assert_eq!(LiveInputIntent::from_str_lossy(intent.as_str()), Some(intent));
+            assert_eq!(
+                LiveInputIntent::from_str_lossy(intent.as_str()),
+                Some(intent)
+            );
         }
         assert_eq!(LiveInputIntent::from_str_lossy("nope"), None);
     }

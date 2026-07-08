@@ -5,8 +5,8 @@
 //! full-width selection) one indent level deeper.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{StudioRowVm, StudioSectionVm};
 use ryeos_client_base::text_surface::TextSurface;
+use ryeos_client_base::ui::view_model::{RyeOsRowVm, RyeOsSectionVm};
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
@@ -16,7 +16,7 @@ use super::super::theme::{style_fg, style_muted, style_selected, tone_glyph, ton
 /// stays clear of content.
 const ROW_INDENT: usize = 2;
 
-pub fn draw_sections(surface: &mut TextSurface, rect: Rect, sections: &[StudioSectionVm]) {
+pub fn draw_sections(surface: &mut TextSurface, rect: Rect, sections: &[RyeOsSectionVm]) {
     let width = rect.w as usize;
     let height = rect.h as usize;
     if width == 0 || height == 0 {
@@ -64,7 +64,7 @@ pub fn draw_sections(surface: &mut TextSurface, rect: Rect, sections: &[StudioSe
 }
 
 /// One indented row, matching the rows widget's layout offset by `ROW_INDENT`.
-fn draw_row(surface: &mut TextSurface, left: usize, y: usize, width: usize, row: &StudioRowVm) {
+fn draw_row(surface: &mut TextSurface, left: usize, y: usize, width: usize, row: &RyeOsRowVm) {
     let style = if row.selected {
         style_selected()
     } else {
@@ -72,7 +72,11 @@ fn draw_row(surface: &mut TextSurface, left: usize, y: usize, width: usize, row:
     };
     fill_line(surface, left, y, width, style);
 
-    let glyph_style = if row.selected { style } else { tone_style(row.tone) };
+    let glyph_style = if row.selected {
+        style
+    } else {
+        tone_style(row.tone)
+    };
     let glyph_x = left + ROW_INDENT;
     surface.draw_text(glyph_x, y, tone_glyph(row.tone), glyph_style);
 
@@ -102,23 +106,27 @@ fn draw_row(surface: &mut TextSurface, left: usize, y: usize, width: usize, row:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::view_model::StudioTone;
+    use ryeos_client_base::ui::view_model::RyeOsTone;
 
-    fn row(primary: &str, meta: Option<&str>) -> StudioRowVm {
-        StudioRowVm {
+    fn row(primary: &str, meta: Option<&str>) -> RyeOsRowVm {
+        RyeOsRowVm {
             id: primary.to_string(),
             primary: primary.to_string(),
             secondary: None,
             meta: meta.map(str::to_string),
             kind: None,
             action: None,
-            tone: StudioTone::Neutral,
+            tone: RyeOsTone::Neutral,
             selected: false,
+            expandable: false,
+            expanded: false,
+            detail: Vec::new(),
+            changed_at_ms: None,
         }
     }
 
-    fn section(title: &str, collapsed: bool, rows: Vec<StudioRowVm>) -> StudioSectionVm {
-        StudioSectionVm {
+    fn section(title: &str, collapsed: bool, rows: Vec<RyeOsRowVm>) -> RyeOsSectionVm {
+        RyeOsSectionVm {
             title: title.to_string(),
             count: rows.len(),
             collapsed,
@@ -172,7 +180,11 @@ mod tests {
         draw_sections(
             &mut s,
             rect,
-            &[section("Threads", true, vec![row("T-ab", None), row("T-cd", None)])],
+            &[section(
+                "Threads",
+                true,
+                vec![row("T-ab", None), row("T-cd", None)],
+            )],
         );
         let header = row_text(&s, 40, 0);
         assert!(header.starts_with('▸'), "collapsed glyph leads: {header:?}");
@@ -210,13 +222,13 @@ mod tests {
             rect,
             &[
                 section("Threads", false, vec![row("T-ab", None)]),
-                section("Bundles", false, vec![row("studio", None)]),
+                section("Bundles", false, vec![row("ryeos", None)]),
             ],
         );
         assert!(row_text(&s, 40, 0).contains("Threads"));
         assert!(row_text(&s, 40, 1).contains("T-ab"));
         assert!(row_text(&s, 40, 2).contains("Bundles"));
-        assert!(row_text(&s, 40, 3).contains("studio"));
+        assert!(row_text(&s, 40, 3).contains("ryeos"));
     }
 
     #[test]

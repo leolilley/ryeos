@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T08:36:51Z:afa86664a4d55ca9ce9b3c71df4601640b136a671386916860278ca64cc72b84:3Gk67qXV9mda6fNi1rwtkFQFJKzr2ulpWOscdlPPRC1Rl41/jnrWEwRLqQYf6PbfaGbHVjNjncnedJqN1v/vCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: projects/add
+version: "1.0.0"
+description: Add or update a canonical local project root in the project registry.
+endpoint: projects.add
+availability: daemon_only

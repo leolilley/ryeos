@@ -1,0 +1,17 @@
+# ryeos:signed:2026-07-06T12:24:56Z:19fa49106a53f6464ead43c6616cb0bb896c2b9d8f153a747083c37189930c9d:FOnUIS3W4sKrc8KrXKxIG7O8V4kiTMa8Nfyc+MsLK53piKNIMW9nkiZxl9FH6MqLqlt/SicPp72JHFjBHoS7CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: node-bundles
+version: "1.0.0"
+description: Installed bundles on this node
+
+widget: table
+source:
+  ref: service:bundle/list
+  params: {}
+  collection: bundles
+projections:
+  columns:
+    - label: bundle
+      field: name
+    - label: path
+      field: path

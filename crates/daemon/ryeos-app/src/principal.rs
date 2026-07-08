@@ -1,4 +1,4 @@
-//! Principal path and YAML helpers for Studio state.
+//! Principal path and YAML helpers for RyeOS UI state.
 //!
 //! This module is the local-install seam for future principal/tenant-aware
 //! resolution. Callers should use logical `config/*` and `state/*` paths here
@@ -51,12 +51,12 @@ impl PrincipalPaths {
         self.config("projects.yaml")
     }
 
-    pub fn studio_config(&self) -> PathBuf {
-        self.config("studio.yaml")
+    pub fn ryeos_config(&self) -> PathBuf {
+        self.config("ryeos-ui.yaml")
     }
 
-    pub fn studio_recent(&self) -> PathBuf {
-        self.state("studio/recent.yaml")
+    pub fn ryeos_recent(&self) -> PathBuf {
+        self.state("ryeos-ui/recent.yaml")
     }
 }
 
@@ -298,8 +298,8 @@ mod tests {
             PathBuf::from("/tmp/user/.ai/config/projects.yaml")
         );
         assert_eq!(
-            paths.studio_recent(),
-            PathBuf::from("/tmp/user/.ai/state/studio/recent.yaml")
+            paths.ryeos_recent(),
+            PathBuf::from("/tmp/user/.ai/state/ryeos-ui/recent.yaml")
         );
     }
 
@@ -361,7 +361,7 @@ mod tests {
             root: tmp.path().to_path_buf(),
         };
         let store = PrincipalStore::resolve_with(&resolver, "fp:test").unwrap();
-        let path = store.paths().studio_config();
+        let path = store.paths().ryeos_config();
 
         let missing: Demo = store.load_yaml(&path).unwrap();
         assert_eq!(missing, Demo::default());
@@ -402,12 +402,12 @@ mod tests {
             .path()
             .join(".ai")
             .join("state")
-            .join("studio")
+            .join("ryeos-ui")
             .join("recent.yaml");
 
         write_yaml_atomic(&path, &Demo { value: "ok".into() }).unwrap();
 
-        for dir in [".ai", ".ai/state", ".ai/state/studio"] {
+        for dir in [".ai", ".ai/state", ".ai/state/ryeos-ui"] {
             let mode = std::fs::metadata(tmp.path().join(dir))
                 .unwrap()
                 .permissions()
@@ -429,7 +429,7 @@ mod tests {
             .join("space")
             .join(".ai")
             .join("config")
-            .join("studio.yaml");
+            .join("ryeos-ui.yaml");
 
         write_yaml_atomic(&path, &Demo { value: "ok".into() }).unwrap();
 

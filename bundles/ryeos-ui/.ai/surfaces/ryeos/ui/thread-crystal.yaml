@@ -1,0 +1,52 @@
+# ryeos:signed:2026-07-07T04:10:29Z:0f9ec2df231e287b239821e24f614b1121b5ddd9d735b826e17e458e168f78b1:ERJ5bh/gc5ZtbCcrUhnlI3fS73UENBoEzyns9HFay9+x+C2sU4nTq3uG9vi8YzKYPAWGtlilh7ZF0K1IETVoAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: ryeos-ui-thread-crystal
+version: "1.0.0"
+description: Focused thread transcript over the live prism backdrop
+
+tiling:
+  mode: single_lens
+  master: { side: left, arrange: vertical, ratio: 1.0, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+tiles:
+  - "view:ryeos/thread/transcript"
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: false, size: 3 }
+
+style:
+  border: hidden
+
+backdrop: view:ryeos/backdrop/prism-shards
+
+library:
+  - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
+  - view:ryeos/node/events
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+      project_path: ""
+
+ambient:
+  show_background: true
+  opacity: 0.35
+
+affordances:
+  - id: view.transcript
+    label: Transcript
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.events
+    label: Events
+    category: View

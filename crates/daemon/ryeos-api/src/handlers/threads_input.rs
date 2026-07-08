@@ -28,7 +28,7 @@ use crate::registry::ServiceDescriptor;
 use ryeos_app::live_input_queue::EnqueueOutcome;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_state::objects::{LiveInputIntent, LiveInput, ThreadStatus};
+use ryeos_state::objects::{LiveInput, LiveInputIntent, ThreadStatus};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,8 +201,7 @@ pub async fn handle(
                 // the runtime next polls), then — for an interrupt — nudge the
                 // runtime to cut its current cognition.
                 FollowUpDecision::Live => {
-                    let input =
-                        LiveInput::new(req.input.clone(), req.intent);
+                    let input = LiveInput::new(req.input.clone(), req.intent);
                     let pending = match state.live_input.enqueue(&detail.thread_id, input) {
                         EnqueueOutcome::Accepted { pending } => pending,
                         EnqueueOutcome::Full { pending } => {
@@ -244,9 +243,7 @@ pub async fn handle(
                     // cooperative steer (it still folds at the next boundary).
                     if req.intent.is_interrupt() {
                         let outcome = match detail.runtime.pgid {
-                            Some(pgid) => {
-                                ryeos_app::process::interrupt_process_group(pgid)
-                            }
+                            Some(pgid) => ryeos_app::process::interrupt_process_group(pgid),
                             None => ryeos_app::process::SignalResult::MissingPgid,
                         };
                         if outcome != ryeos_app::process::SignalResult::Delivered {
@@ -380,7 +377,7 @@ pub async fn handle(
         original_snapshot_hash: None,
         // Operator follow-up launches against the live project tree.
         original_pushed_head_ref: None,
-            state_root: None,
+        state_root: None,
         current_site_id: previous.current_site_id.clone(),
         origin_site_id: previous.origin_site_id.clone(),
         requested_by: EffectivePrincipal::Local(Principal {
@@ -431,7 +428,6 @@ pub async fn handle(
             }
         });
     };
-
 
     use ryeos_app::thread_lifecycle::OperatorContinuation;
     match outcome {

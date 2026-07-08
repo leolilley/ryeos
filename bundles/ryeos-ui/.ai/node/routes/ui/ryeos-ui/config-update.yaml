@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-06T12:32:28Z:c52cd9ab993b3145a7c10fd09b15de01c47fa3505eefa3030bbd8e1e8c654809:QV4uLlp1Te04BFm+g6yGzDt339s2tQ7dR3pterJ/CW7JRQuU9xh9mKIY52YdHA/Tz04t9/tO+Wj+QiIYhiJxAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/config/update
+path: /ui/api/ryeos-ui/config/update
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/config/update"

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 fn test_context() -> LaunchContext {
     LaunchContext {
-        surface_ref: "surface:ryeos/studio/base".into(),
+        surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         read_only: false,
         granted_caps: vec!["ui.read".into()],
@@ -20,7 +20,7 @@ fn test_context() -> LaunchContext {
 
 fn read_only_context() -> LaunchContext {
     LaunchContext {
-        surface_ref: "surface:ryeos/studio/base".into(),
+        surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         read_only: true,
         granted_caps: vec!["ui.read".into()],

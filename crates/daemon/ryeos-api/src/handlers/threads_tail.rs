@@ -104,10 +104,9 @@ fn resolve_stream_path(
     placeholder: &str,
     value: &str,
 ) -> Result<String, HandlerError> {
-    let route = routes
-        .iter()
-        .find(|r| r.id == route_id)
-        .ok_or_else(|| HandlerError::Internal(format!("stream route '{route_id}' is not registered")))?;
+    let route = routes.iter().find(|r| r.id == route_id).ok_or_else(|| {
+        HandlerError::Internal(format!("stream route '{route_id}' is not registered"))
+    })?;
     validate_stream_route_contract(route_id, route, expected_source, placeholder)?;
     let path = fill_path(&route.path, placeholder, value)?;
     // Belt-and-suspenders: the contract guarantees exactly one placeholder and
@@ -130,7 +129,8 @@ fn validate_stream_route_contract(
     expected_source: &str,
     placeholder: &str,
 ) -> Result<(), HandlerError> {
-    let bad = |detail: String| HandlerError::Internal(format!("stream route '{route_id}' {detail}"));
+    let bad =
+        |detail: String| HandlerError::Internal(format!("stream route '{route_id}' {detail}"));
     if !route.methods.iter().any(|m| m.eq_ignore_ascii_case("GET")) {
         return Err(bad("does not serve GET".to_string()));
     }
@@ -259,17 +259,33 @@ mod tests {
 
     /// Resolve via the thread-events contract (the non-braid path).
     fn resolve_thread(routes: &[RawRouteSpec], id: &str) -> Result<String, HandlerError> {
-        resolve_stream_path(routes, THREAD_EVENTS_ROUTE_ID, "thread_events", "thread_id", id)
+        resolve_stream_path(
+            routes,
+            THREAD_EVENTS_ROUTE_ID,
+            "thread_events",
+            "thread_id",
+            id,
+        )
     }
 
     #[test]
     fn fills_placeholder() {
         assert_eq!(
-            fill_path("/threads/{thread_id}/events/stream", "thread_id", "T-abc123").unwrap(),
+            fill_path(
+                "/threads/{thread_id}/events/stream",
+                "thread_id",
+                "T-abc123"
+            )
+            .unwrap(),
             "/threads/T-abc123/events/stream"
         );
         assert_eq!(
-            fill_path("/chains/{chain_root_id}/events/stream", "chain_root_id", "T-root").unwrap(),
+            fill_path(
+                "/chains/{chain_root_id}/events/stream",
+                "chain_root_id",
+                "T-root"
+            )
+            .unwrap(),
             "/chains/T-root/events/stream"
         );
     }

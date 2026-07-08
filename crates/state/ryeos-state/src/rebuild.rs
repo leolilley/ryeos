@@ -13,6 +13,11 @@ use serde_json::Value;
 use crate::projection::{project_event, project_thread_snapshot, ProjectionDb};
 use crate::{ThreadEvent, ThreadSnapshot};
 
+#[cfg(not(test))]
+const REBUILD_TX_CHAIN_BATCH: usize = 200;
+#[cfg(test)]
+const REBUILD_TX_CHAIN_BATCH: usize = 2;
+
 /// Report from a full projection rebuild.
 #[derive(Debug, Clone, Default)]
 pub struct RebuildReport {
@@ -30,6 +35,42 @@ pub struct CatchUpReport {
     pub events_projected: usize,
 }
 
+/// Time-based progress reporter for the rebuild/catch-up loops. These run
+/// synchronously on the daemon boot path and can grind for minutes on a big
+/// store; without a heartbeat the boot is indistinguishable from a hang from
+/// the outside (the control socket does not exist yet).
+struct RebuildProgress {
+    started: std::time::Instant,
+    next_note: std::time::Instant,
+}
+
+const REBUILD_PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
+
+impl RebuildProgress {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            started: now,
+            next_note: now + REBUILD_PROGRESS_EVERY,
+        }
+    }
+
+    fn note(&mut self, stage: &str, chains: usize, threads: usize, events: usize) {
+        if std::time::Instant::now() < self.next_note {
+            return;
+        }
+        tracing::info!(
+            stage,
+            chains,
+            threads,
+            events,
+            elapsed_s = self.started.elapsed().as_secs(),
+            "projection {stage} in progress"
+        );
+        self.next_note = std::time::Instant::now() + REBUILD_PROGRESS_EVERY;
+    }
+}
+
 /// Full rebuild: delete and recreate projection from CAS.
 ///
 /// Walks every signed chain head and projects all thread snapshots
@@ -41,6 +82,7 @@ pub fn rebuild_projection(
     refs_root: &Path,
 ) -> Result<RebuildReport> {
     let mut report = RebuildReport::default();
+    let mut progress = RebuildProgress::new();
 
     // Clear existing projection tables (schema will be re-created)
     let conn = projection.connection();
@@ -58,18 +100,14 @@ pub fn rebuild_projection(
     )
     .context("failed to clear projection tables")?;
 
-    // Enumerate chain head refs
-    let chains_dir = refs_root.join("generic/chains");
-    if !chains_dir.is_dir() {
+    let entries = chain_ref_entries(refs_root)?;
+    if entries.is_empty() {
         return Ok(report);
     }
 
-    for entry in std::fs::read_dir(&chains_dir).context("failed to read chains refs directory")? {
-        let entry = entry.context("failed to read chain ref entry")?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
+    let mut batch = ProjectionBatch::new(projection, "rebuild");
 
+    for entry in entries {
         let chain_root_id = entry.file_name().to_string_lossy().to_string();
         let head_path = entry.path().join("head");
         if !head_path.exists() {
@@ -88,29 +126,30 @@ pub fn rebuild_projection(
             continue;
         }
 
+        batch.ensure_started()?;
+
         // Walk chain history (newest to oldest via prev_chain_state_hash)
         let chain_report = rebuild_chain(projection, cas_root, &chain_root_id, chain_state_hash)?;
 
         // Update projection_meta to point to the head
         // Read the head chain_state to get updated_at
-        let head_path_buf = lillux::shard_path(cas_root, "objects", chain_state_hash, ".json");
-        if let Ok(cs_json) = std::fs::read_to_string(&head_path_buf) {
-            if let Ok(cs_value) = serde_json::from_str::<Value>(&cs_json) {
-                if let Some(updated_at) = cs_value.get("updated_at").and_then(|v| v.as_str()) {
-                    let meta = crate::projection::ProjectionMeta {
-                        chain_root_id: chain_root_id.clone(),
-                        indexed_chain_state_hash: chain_state_hash.to_string(),
-                        updated_at: updated_at.to_string(),
-                    };
-                    projection.update_projection_meta(&meta)?;
-                }
-            }
+        if let Some(meta) = head_projection_meta(cas_root, &chain_root_id, chain_state_hash) {
+            projection.update_projection_meta(&meta)?;
         }
 
         report.chains_rebuilt += 1;
         report.threads_restored += chain_report.threads;
         report.events_projected += chain_report.events;
+        batch.note_chain()?;
+        progress.note(
+            "rebuild",
+            report.chains_rebuilt,
+            report.threads_restored,
+            report.events_projected,
+        );
     }
+
+    batch.commit_partial()?;
 
     Ok(report)
 }
@@ -124,18 +163,16 @@ pub fn catch_up_projection(
     refs_root: &Path,
 ) -> Result<CatchUpReport> {
     let mut report = CatchUpReport::default();
+    let mut progress = RebuildProgress::new();
 
-    let chains_dir = refs_root.join("generic/chains");
-    if !chains_dir.is_dir() {
+    let entries = chain_ref_entries(refs_root)?;
+    if entries.is_empty() {
         return Ok(report);
     }
 
-    for entry in std::fs::read_dir(&chains_dir).context("failed to read chains refs directory")? {
-        let entry = entry.context("failed to read chain ref entry")?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
+    let mut batch = ProjectionBatch::new(projection, "catch-up");
 
+    for entry in entries {
         let chain_root_id = entry.file_name().to_string_lossy().to_string();
         let head_path = entry.path().join("head");
         if !head_path.exists() {
@@ -172,6 +209,8 @@ pub fn catch_up_projection(
             continue;
         }
 
+        batch.ensure_started()?;
+
         // Projection is behind. Rebuild from indexed point (or full if no meta).
         let chain_report = if let Some(meta) = current_meta {
             // Incremental: walk from indexed state to head
@@ -188,26 +227,112 @@ pub fn catch_up_projection(
         };
 
         // Update projection_meta
-        let head_path_buf = lillux::shard_path(cas_root, "objects", head_hash, ".json");
-        if let Ok(cs_json) = std::fs::read_to_string(&head_path_buf) {
-            if let Ok(cs_value) = serde_json::from_str::<Value>(&cs_json) {
-                if let Some(updated_at) = cs_value.get("updated_at").and_then(|v| v.as_str()) {
-                    let new_meta = crate::projection::ProjectionMeta {
-                        chain_root_id: chain_root_id.clone(),
-                        indexed_chain_state_hash: head_hash.to_string(),
-                        updated_at: updated_at.to_string(),
-                    };
-                    projection.update_projection_meta(&new_meta)?;
-                }
-            }
+        if let Some(new_meta) = head_projection_meta(cas_root, &chain_root_id, head_hash) {
+            projection.update_projection_meta(&new_meta)?;
         }
 
         report.chains_updated += 1;
         report.threads_restored += chain_report.threads;
         report.events_projected += chain_report.events;
+        batch.note_chain()?;
+        progress.note(
+            "catch-up",
+            report.chains_updated,
+            report.threads_restored,
+            report.events_projected,
+        );
     }
 
+    batch.commit_partial()?;
+
     Ok(report)
+}
+
+fn chain_ref_entries(refs_root: &Path) -> Result<Vec<std::fs::DirEntry>> {
+    let chains_dir = refs_root.join("generic/chains");
+    if !chains_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&chains_dir).context("failed to read chains refs directory")? {
+        let entry = entry.context("failed to read chain ref entry")?;
+        if entry.file_type()?.is_dir() {
+            entries.push(entry);
+        }
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn head_projection_meta(
+    cas_root: &Path,
+    chain_root_id: &str,
+    chain_state_hash: &str,
+) -> Option<crate::projection::ProjectionMeta> {
+    let head_path_buf = lillux::shard_path(cas_root, "objects", chain_state_hash, ".json");
+    let cs_json = std::fs::read_to_string(&head_path_buf).ok()?;
+    let cs_value = serde_json::from_str::<Value>(&cs_json).ok()?;
+    let updated_at = cs_value.get("updated_at").and_then(|v| v.as_str())?;
+    Some(crate::projection::ProjectionMeta {
+        chain_root_id: chain_root_id.to_string(),
+        indexed_chain_state_hash: chain_state_hash.to_string(),
+        updated_at: updated_at.to_string(),
+    })
+}
+
+struct ProjectionBatch<'a> {
+    projection: &'a ProjectionDb,
+    stage: &'static str,
+    tx: Option<rusqlite::Transaction<'a>>,
+    chains: usize,
+}
+
+impl<'a> ProjectionBatch<'a> {
+    fn new(projection: &'a ProjectionDb, stage: &'static str) -> Self {
+        Self {
+            projection,
+            stage,
+            tx: None,
+            chains: 0,
+        }
+    }
+
+    fn ensure_started(&mut self) -> Result<()> {
+        if self.tx.is_none() {
+            // Projection rebuild/catch-up code reachable under this batch must
+            // not start its own transaction; rusqlite/SQLite will reject nested
+            // BEGINs on this connection. Keep sync-job immediate transactions
+            // out of this path.
+            self.tx = Some(
+                self.projection
+                    .connection()
+                    .unchecked_transaction()
+                    .with_context(|| {
+                        format!("failed to begin projection {} transaction", self.stage)
+                    })?,
+            );
+        }
+        Ok(())
+    }
+
+    fn note_chain(&mut self) -> Result<()> {
+        self.chains += 1;
+        if self.chains >= REBUILD_TX_CHAIN_BATCH {
+            self.commit_partial()?;
+        }
+        Ok(())
+    }
+
+    fn commit_partial(&mut self) -> Result<()> {
+        if let Some(tx) = self.tx.take() {
+            tx.commit().with_context(|| {
+                format!("failed to commit projection {} transaction", self.stage)
+            })?;
+            self.chains = 0;
+        }
+        Ok(())
+    }
 }
 
 /// Internal report for a single chain rebuild.
@@ -984,6 +1109,130 @@ mod tests {
         );
     }
 
+    #[test]
+    fn catch_up_projection_batches_more_than_batch_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let refs_root = tmp.path().join("refs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&refs_root).unwrap();
+
+        for chain_id in ["T-a", "T-b", "T-c"] {
+            let snap_hash = make_hash(&format!("batch-snap-{chain_id}"));
+            let cs_hash = make_hash(&format!("batch-cs-{chain_id}"));
+            let snap = make_snapshot_json(chain_id, chain_id, "created");
+            let cs = make_chain_state(
+                chain_id,
+                None,
+                vec![(chain_id, &snap_hash, None, 0, "created")],
+                None,
+                0,
+            );
+
+            write_object(&cas_root, &snap_hash, &snap);
+            write_object(&cas_root, &cs_hash, &cs);
+            write_signed_head(&refs_root, chain_id, &cs_hash);
+        }
+
+        let proj_path = tmp.path().join("projection.db");
+        let proj = ProjectionDb::open(&proj_path).unwrap();
+
+        let report = catch_up_projection(&proj, &cas_root, &refs_root).unwrap();
+        assert_eq!(report.chains_checked, 3);
+        assert_eq!(report.chains_updated, 3);
+        assert_eq!(report.threads_restored, 3);
+
+        let conn = proj.connection();
+        let thread_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(thread_count, 3);
+        let meta_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(meta_count, 3);
+    }
+
+    #[test]
+    fn catch_up_projection_error_rolls_back_only_current_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        let refs_root = tmp.path().join("refs");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::create_dir_all(&refs_root).unwrap();
+
+        for chain_id in ["T-a", "T-b"] {
+            let snap_hash = make_hash(&format!("rollback-snap-{chain_id}"));
+            let cs_hash = make_hash(&format!("rollback-cs-{chain_id}"));
+            let snap = make_snapshot_json(chain_id, chain_id, "created");
+            let cs = make_chain_state(
+                chain_id,
+                None,
+                vec![(chain_id, &snap_hash, None, 0, "created")],
+                None,
+                0,
+            );
+
+            write_object(&cas_root, &snap_hash, &snap);
+            write_object(&cas_root, &cs_hash, &cs);
+            write_signed_head(&refs_root, chain_id, &cs_hash);
+        }
+
+        let bad_snap_hash = make_hash("rollback-snap-T-c");
+        let bad_event_hash = make_hash("rollback-event-T-c");
+        let bad_cs_hash = make_hash("rollback-cs-T-c");
+        let bad_snap = make_snapshot_json("T-c", "T-c", "created");
+        let bad_event = make_event_json(
+            "T-c",
+            "T-c",
+            1,
+            1,
+            Some("not-a-valid-hash"),
+            "thread_started",
+        );
+        let bad_cs = make_chain_state(
+            "T-c",
+            None,
+            vec![("T-c", &bad_snap_hash, Some(&bad_event_hash), 1, "created")],
+            Some(&bad_event_hash),
+            1,
+        );
+        write_object(&cas_root, &bad_snap_hash, &bad_snap);
+        write_object(&cas_root, &bad_event_hash, &bad_event);
+        write_object(&cas_root, &bad_cs_hash, &bad_cs);
+        write_signed_head(&refs_root, "T-c", &bad_cs_hash);
+
+        let proj_path = tmp.path().join("projection.db");
+        let proj = ProjectionDb::open(&proj_path).unwrap();
+
+        let err = catch_up_projection(&proj, &cas_root, &refs_root).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid prev_chain_event_hash"),
+            "unexpected error: {err:#}"
+        );
+
+        let conn = proj.connection();
+        let committed_meta_count: usize = conn
+            .query_row("SELECT COUNT(*) FROM projection_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(committed_meta_count, 2, "first committed batch remains");
+        let rolled_back_meta_count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM projection_meta WHERE chain_root_id = 'T-c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rolled_back_meta_count, 0, "failed batch meta rolls back");
+        let rolled_back_thread_count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM threads WHERE thread_id = 'T-c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rolled_back_thread_count, 0, "failed batch rows roll back");
+    }
 
     #[test]
     fn rebuild_projection_empty_no_panic() {

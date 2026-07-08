@@ -5,8 +5,8 @@
 //!
 //! Section directories support recursive subfolders. For example:
 //!
-//!   .ai/node/routes/ui/studio/dimension-get.yaml
-//!   .ai/node/routes/ui/studio/items/list.yaml
+//!   .ai/node/routes/ui/ryeos-ui/dimension-get.yaml
+//!   .ai/node/routes/ui/ryeos-ui/items/list.yaml
 //!   .ai/node/commands/web.yaml
 //!
 //! The section invariant requires the file to live under
@@ -806,8 +806,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let routes_dir = dir.path().join("routes");
         let ui_dir = routes_dir.join("ui");
-        let studio_dir = ui_dir.join("studio");
-        fs::create_dir_all(&studio_dir).unwrap();
+        let ryeos_dir = ui_dir.join("ryeos-ui");
+        fs::create_dir_all(&ryeos_dir).unwrap();
 
         // Flat file
         fs::write(routes_dir.join("health.yaml"), "id: health").unwrap();
@@ -815,8 +815,8 @@ mod tests {
         fs::write(ui_dir.join("index.yaml"), "id: ui.index").unwrap();
         // Nested two levels
         fs::write(
-            studio_dir.join("dimension-get.yaml"),
-            "id: ui.studio.dimension-get",
+            ryeos_dir.join("dimension-get.yaml"),
+            "id: ui.ryeos.dimension-get",
         )
         .unwrap();
         // Non-yaml file (should be skipped)
@@ -830,7 +830,7 @@ mod tests {
             .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
             .collect();
 
-        // Sorted: .hidden.yaml, health.yaml, then ui/index.yaml, ui/studio/dimension-get.yaml
+        // Sorted: .hidden.yaml, health.yaml, then ui/index.yaml, ui/ryeos-ui/dimension-get.yaml
         assert_eq!(names.len(), 4, "expected 4 yaml files, got: {:?}", names);
         assert!(names.contains(&".hidden.yaml".to_string()));
         assert!(names.contains(&"health.yaml".to_string()));
@@ -839,7 +839,7 @@ mod tests {
 
         // Verify deterministic order: depth-first, sorted at each level
         // Level 1: .hidden.yaml, health.yaml, ui/
-        //   Level 2: ui/index.yaml, ui/studio/dimension-get.yaml
+        //   Level 2: ui/index.yaml, ui/ryeos-ui/dimension-get.yaml
         assert_eq!(names[0], ".hidden.yaml");
         assert_eq!(names[1], "health.yaml");
         assert_eq!(names[2], "index.yaml");
@@ -925,16 +925,16 @@ mod tests {
         let routes_dir = dir.path().join("routes");
         let api_dir = routes_dir.join("api");
         let ui_dir = routes_dir.join("ui");
-        let studio_dir = ui_dir.join("studio");
-        fs::create_dir_all(&studio_dir).unwrap();
+        let ryeos_dir = ui_dir.join("ryeos-ui");
+        fs::create_dir_all(&ryeos_dir).unwrap();
         fs::create_dir_all(&api_dir).unwrap();
 
         // api/a.yaml (alphabetically before ui/)
         fs::write(api_dir.join("a.yaml"), "").unwrap();
-        // ui/aaa.yaml (alphabetically before ui/studio/)
+        // ui/aaa.yaml (alphabetically before ui/ryeos-ui/)
         fs::write(ui_dir.join("aaa.yaml"), "").unwrap();
-        // ui/studio/c.yaml (deeper under ui/)
-        fs::write(studio_dir.join("c.yaml"), "").unwrap();
+        // ui/ryeos-ui/c.yaml (deeper under ui/)
+        fs::write(ryeos_dir.join("c.yaml"), "").unwrap();
 
         let files = scan_yaml_files_recursive(&routes_dir).unwrap();
         let relative: Vec<String> = files
@@ -948,14 +948,14 @@ mod tests {
             .collect();
 
         // api/ sorts before ui/
-        // Within ui/: aaa.yaml sorts before Studio/ (a < c)
-        // So order is: api/a.yaml, ui/aaa.yaml, ui/studio/c.yaml
+        // Within ui/: aaa.yaml sorts before RyeOS UI/ (a < c)
+        // So order is: api/a.yaml, ui/aaa.yaml, ui/ryeos-ui/c.yaml
         assert_eq!(
             relative,
             vec![
                 "api/a.yaml".to_string(),
                 "ui/aaa.yaml".to_string(),
-                "ui/studio/c.yaml".to_string(),
+                "ui/ryeos-ui/c.yaml".to_string(),
             ]
         );
     }
@@ -966,11 +966,11 @@ mod tests {
     fn section_invariant_nested_file_under_correct_section() {
         let dir = tempfile::tempdir().unwrap();
         let routes_dir = dir.path().join("routes");
-        let studio_dir = routes_dir.join("ui").join("studio");
-        fs::create_dir_all(&studio_dir).unwrap();
+        let ryeos_dir = routes_dir.join("ui").join("ryeos-ui");
+        fs::create_dir_all(&ryeos_dir).unwrap();
 
-        let file = studio_dir.join("dimension-get.yaml");
-        fs::write(&file, "id: ui.studio.dimension-get").unwrap();
+        let file = ryeos_dir.join("dimension-get.yaml");
+        fs::write(&file, "id: ui.ryeos.dimension-get").unwrap();
 
         let body: Value = serde_yaml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
 
@@ -978,7 +978,7 @@ mod tests {
         assert!(file.starts_with(&routes_dir));
         assert_eq!(
             body.get("id").and_then(|v| v.as_str()),
-            Some("ui.studio.dimension-get")
+            Some("ui.ryeos.dimension-get")
         );
     }
 
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn load_full_loads_real_studio_bundle_nested_routes() {
+    fn load_full_loads_real_ryeos_ui_bundle_nested_routes() {
         let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .find(|p| p.join("bundles").is_dir())
@@ -1011,12 +1011,12 @@ mod tests {
         let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
 
         let system = temp_system_with_command_registration_policy(&workspace);
-        let studio = temp_bundle_with_node_section(&workspace.join("bundles/studio"), "routes");
+        let ryeos_ui = temp_bundle_with_node_section(&workspace.join("bundles/ryeos-ui"), "routes");
         let bundles = vec![BundleRecord {
-            name: "studio".into(),
-            path: studio.path().to_path_buf(),
+            name: "ryeos-ui".into(),
+            path: ryeos_ui.path().to_path_buf(),
             command_registration_caps: Vec::new(),
-            source_file: workspace.join("bundles/core/.ai/node/bundles/studio.yaml"),
+            source_file: workspace.join("bundles/core/.ai/node/bundles/ryeos-ui.yaml"),
         }];
 
         let loader = BootstrapLoader {
@@ -1025,23 +1025,23 @@ mod tests {
         };
         let snapshot = loader
             .load_full(&SectionTable::new(), &bundles)
-            .expect("load full node config with Studio bundle");
+            .expect("load full node config with RyeOS UI bundle");
 
-        let studio_dimension_route = snapshot
+        let ryeos_dimension_route = snapshot
             .routes
             .iter()
-            .find(|route| route.path == "/ui/api/studio/dimension")
-            .expect("Studio dimension route should load from nested route directory");
+            .find(|route| route.path == "/ui/api/ryeos-ui/dimension")
+            .expect("RyeOS UI dimension route should load from nested route directory");
         assert!(
-            studio_dimension_route
+            ryeos_dimension_route
                 .source_file
-                .ends_with(".ai/node/routes/ui/studio/dimension-get.yaml"),
+                .ends_with(".ai/node/routes/ui/ryeos-ui/dimension-get.yaml"),
             "route source should preserve nested path, got {}",
-            studio_dimension_route.source_file.display()
+            ryeos_dimension_route.source_file.display()
         );
         assert!(
             snapshot.routes.iter().any(|route| route.path == "/ui"),
-            "moved Studio bundle should still provide base UI route"
+            "moved RyeOS UI bundle should still provide base UI route"
         );
         assert!(
             snapshot

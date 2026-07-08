@@ -1,5 +1,5 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -169,6 +169,9 @@ pub mod follow_display_state {
     /// A suspended parent awaiting its followed child chain
     /// ([`follow_role::SUSPENDED_PARENT`]).
     pub const SUSPENDED: &str = "suspended";
+    /// A resume successor has been created and is waiting for the followed
+    /// child chain to finish before it can consume the result.
+    pub const RESUME_QUEUED: &str = "resume_queued";
     /// A resume successor consuming (or having consumed) the child's result
     /// ([`follow_role::RESUME_SUCCESSOR`]).
     pub const RESUMED: &str = "resumed";
@@ -232,7 +235,11 @@ impl FollowFact {
     fn resume_successor_live(w: &crate::runtime_db::FollowWaiter) -> Self {
         Self {
             role: follow_role::RESUME_SUCCESSOR,
-            display_state: follow_display_state::RESUMED,
+            display_state: if w.child_terminal_status.is_some() {
+                follow_display_state::RESUMED
+            } else {
+                follow_display_state::RESUME_QUEUED
+            },
             phase: None,
             follow_node: Some(w.follow_node.clone()),
             child_thread_id: w.child_thread_id.clone(),
@@ -275,6 +282,8 @@ pub struct ThreadView {
     pub execution: ExecutionFacts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow: Option<FollowFact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectSummary>,
     #[serde(skip_serializing_if = "is_zero_usize")]
     pub pending: usize,
 }
@@ -289,6 +298,8 @@ pub struct ThreadListView {
     pub execution: ExecutionFacts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub follow: Option<FollowFact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectSummary>,
     #[serde(skip_serializing_if = "is_zero_usize")]
     pub pending: usize,
     /// Operator-stamped `(key, value)` facets (cohort/fleet tags via
@@ -311,6 +322,14 @@ pub struct CurrentNode {
     pub step: u32,
 }
 
+/// Project context attached to a thread from its launch metadata. This is
+/// display/scoping metadata for the RyeOS UI, not an authorization boundary.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectSummary {
+    pub path: String,
+    pub name: String,
+}
+
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_usize(n: &usize) -> bool {
     *n == 0
@@ -318,6 +337,46 @@ fn is_zero_usize(n: &usize) -> bool {
 
 fn is_empty_str_map(m: &std::collections::BTreeMap<String, String>) -> bool {
     m.is_empty()
+}
+
+fn project_summary(path: &PathBuf) -> ProjectSummary {
+    ProjectSummary {
+        path: path.display().to_string(),
+        name: path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| path.to_str().unwrap_or("project"))
+            .to_string(),
+    }
+}
+
+fn list_item_from_detail(thread: ThreadDetail) -> ThreadListItem {
+    ThreadListItem {
+        thread_id: thread.thread_id,
+        chain_root_id: thread.chain_root_id,
+        kind: thread.kind,
+        status: thread.status,
+        item_ref: thread.item_ref,
+        launch_mode: thread.launch_mode,
+        current_site_id: thread.current_site_id,
+        origin_site_id: thread.origin_site_id,
+        upstream_thread_id: thread.upstream_thread_id,
+        successor_thread_id: thread.successor_thread_id,
+        requested_by: thread.requested_by,
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
+    }
+}
+
+fn sort_thread_list_items(items: &mut [ThreadListItem], sort: ryeos_state::queries::ThreadSort) {
+    match sort {
+        ryeos_state::queries::ThreadSort::Default => {
+            items.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        }
+        ryeos_state::queries::ThreadSort::Newest | ryeos_state::queries::ThreadSort::Watch => {
+            items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -500,10 +559,7 @@ impl ThreadLifecycleService {
     /// Wire the shared operator live-input queue. Called once after
     /// construction with the same `Arc` held by `AppState`, so finalization can
     /// close a thread's entry. Mirrors `set_scheduler_db`.
-    pub fn set_live_input_queue(
-        &self,
-        queue: Arc<crate::live_input_queue::LiveInputQueue>,
-    ) {
+    pub fn set_live_input_queue(&self, queue: Arc<crate::live_input_queue::LiveInputQueue>) {
         *self.live_input.write().unwrap() = Some(queue);
     }
 
@@ -1067,36 +1123,67 @@ impl ThreadLifecycleService {
         if terminal_status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
             return;
         }
+        match self
+            .state_store
+            .get_follow_waiter_by_child_chain(chain_root_id)
+        {
+            // No waiter awaits this chain — nothing to record (the common,
+            // non-follow case). No noise.
+            Ok(None) => return,
+            Ok(Some(_)) => {}
+            Err(e) => {
+                tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    error = %e,
+                    "failed to look up follow waiter for terminal recording",
+                );
+                return;
+            }
+        }
+        // Only the followed child itself — or a continuation successor of it —
+        // settles the follow. The child's chain also carries AUXILIARY runs
+        // (launch-time knowledge composition, nested dispatches); the first of
+        // those completes in milliseconds, and recording it would resume the
+        // parent with the auxiliary's envelope while the child is still
+        // launching.
+        match self.chain_continuation_lineage_contains(chain_root_id, thread_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!(
+                    thread_id,
+                    chain_root_id,
+                    "terminal thread in a followed chain is not in the followed child's \
+                     continuation lineage (auxiliary run); waiter untouched",
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    error = %e,
+                    "follow lineage check failed; leaving waiter untouched",
+                );
+                return;
+            }
+        }
         // Prefer the canonical envelope carried through finalization (preserves
         // outputs/warnings/raw cost). When none is present, this is a cancel /
-        // reconcile / pre-run finalize or an old runtime — only a REAL follow
-        // waiter needs a stored result, and it must be a visible in-band FAILURE
-        // (not a silently-empty success) so the parent resumes into on_error.
+        // reconcile / pre-run finalize or an old runtime — the stored result
+        // must be a visible in-band FAILURE (not a silently-empty success) so
+        // the parent resumes into on_error.
         let envelope = match managed_envelope {
             Some(env) => env,
-            None => match self.state_store.get_follow_waiter_by_child_chain(chain_root_id) {
-                Ok(Some(_)) => {
-                    tracing::warn!(
-                        thread_id,
-                        chain_root_id,
-                        "follow child finalized without a canonical envelope; storing a \
-                         DEGRADED FAILURE envelope (outputs/warnings unavailable)",
-                    );
-                    degraded_follow_envelope(terminal_status, result, error, final_cost)
-                }
-                // No waiter awaits this chain — nothing to record (the common,
-                // non-follow case). No noise.
-                Ok(None) => return,
-                Err(e) => {
-                    tracing::warn!(
-                        thread_id,
-                        chain_root_id,
-                        error = %e,
-                        "failed to look up follow waiter for terminal recording",
-                    );
-                    return;
-                }
-            },
+            None => {
+                tracing::warn!(
+                    thread_id,
+                    chain_root_id,
+                    "follow child finalized without a canonical envelope; storing a \
+                     DEGRADED FAILURE envelope (outputs/warnings unavailable)",
+                );
+                degraded_follow_envelope(terminal_status, result, error, final_cost)
+            }
         };
         if let Err(e) = self.state_store.mark_follow_child_terminal(
             chain_root_id,
@@ -1111,6 +1198,31 @@ impl ThreadLifecycleService {
                 "failed to record follow child terminal result",
             );
         }
+    }
+
+    /// Whether `thread_id` lies on the chain's continuation lineage: the chain
+    /// root, then `successor_thread_id` links from each `continued` handoff.
+    /// A chain also carries auxiliary threads (launch-time knowledge
+    /// composition, nested dispatches) — in the chain, but NOT the lineage.
+    fn chain_continuation_lineage_contains(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let mut cursor = chain_root_id.to_string();
+        for _ in 0..1024 {
+            if cursor == thread_id {
+                return Ok(true);
+            }
+            match self.get_thread(&cursor)? {
+                Some(t) => match t.successor_thread_id {
+                    Some(next) => cursor = next,
+                    None => return Ok(false),
+                },
+                None => return Ok(false),
+            }
+        }
+        Ok(false)
     }
 
     /// Recover a `waiting` follow waiter whose child chain already reached a
@@ -1133,18 +1245,35 @@ impl ThreadLifecycleService {
             Some(w) if w.phase == crate::runtime_db::follow_phase::WAITING => w,
             _ => return Ok(None),
         };
-        let chain = match self.get_chain(child_chain_root_id)? {
-            Some(c) => c,
-            None => return Ok(None),
-        };
-        // The chain tail the parent awaits: a NON-continued terminal thread
-        // (`continued` links are intermediate handoffs of the child's own chain).
-        let terminal = chain.threads.iter().map(|v| &v.thread).find(|t| {
-            t.status != ryeos_state::objects::ThreadStatus::Continued.as_str()
-                && ryeos_state::objects::ThreadStatus::from_str_lossy(&t.status)
-                    .is_some_and(|s| s.is_terminal())
-        });
-        let terminal = match terminal {
+        // The chain tail the parent awaits: walk the continuation lineage from
+        // the chain root (the followed child) via successor links to its tip.
+        // The chain also carries AUXILIARY threads (launch-time knowledge
+        // composition, nested dispatches) whose terminals must never satisfy
+        // the recovery — only the child's own lineage settles the follow.
+        let mut cursor = child_chain_root_id.to_string();
+        let mut tip = None;
+        for _ in 0..1024 {
+            let Some(t) = self.get_thread(&cursor)? else {
+                break;
+            };
+            if t.status == ryeos_state::objects::ThreadStatus::Continued.as_str() {
+                match t.successor_thread_id {
+                    Some(next) => {
+                        cursor = next;
+                        continue;
+                    }
+                    // A handoff in flight (no successor recorded yet) — not an end.
+                    None => break,
+                }
+            }
+            if ryeos_state::objects::ThreadStatus::from_str_lossy(&t.status)
+                .is_some_and(|s| s.is_terminal())
+            {
+                tip = Some(t);
+            }
+            break;
+        }
+        let terminal = match tip {
             Some(t) => t,
             // Chain not yet terminal — reconcile's native resume / the finalize kick
             // still own it; nothing to recover here.
@@ -1308,7 +1437,10 @@ impl ThreadLifecycleService {
         upstream_thread_id: Option<&str>,
     ) -> Result<Option<FollowFact>> {
         if status == "continued" {
-            if let Some(w) = self.state_store.get_follow_waiter_by_parent_thread(thread_id)? {
+            if let Some(w) = self
+                .state_store
+                .get_follow_waiter_by_parent_thread(thread_id)?
+            {
                 return Ok(Some(FollowFact::suspended_parent(&w)));
             }
         }
@@ -1338,13 +1470,25 @@ impl ThreadLifecycleService {
             &thread.status,
             thread.upstream_thread_id.as_deref(),
         )?;
+        let project = self.project_summary_for(&thread.thread_id);
         let pending = self.pending_input(&thread.thread_id);
         Ok(ThreadView {
             thread,
             execution,
             follow,
+            project,
             pending,
         })
+    }
+
+    fn project_summary_for(&self, thread_id: &str) -> Option<ProjectSummary> {
+        let metadata = self.state_store.get_launch_metadata(thread_id).ok()??;
+        let ctx = metadata.resume_context.as_ref()?;
+        let path = match &ctx.project_context {
+            ProjectContext::LocalPath { path } => path,
+            _ => return None,
+        };
+        Some(project_summary(path))
     }
 
     /// Decorate a page of list rows. Batches the follow lineage: ONE
@@ -1382,6 +1526,7 @@ impl ThreadLifecycleService {
                         .get(item.thread_id.as_str())
                         .map(|w| FollowFact::resume_successor_live(w))
                 });
+                let project = self.project_summary_for(&item.thread_id);
                 let pending = self.pending_input(&item.thread_id);
                 // Cohort/fleet tags for client columns. Best-effort per row (fine
                 // at fleet scale); a facet-read hiccup just yields no tags, never
@@ -1401,12 +1546,76 @@ impl ThreadLifecycleService {
                     item,
                     execution,
                     follow,
+                    project,
                     pending,
                     facets,
                     current_node,
                 }
             })
             .collect())
+    }
+
+    fn active_follow_parent_items(
+        &self,
+        filter: &ryeos_state::queries::ThreadListFilter,
+    ) -> Result<Vec<ThreadListItem>> {
+        let mut items = Vec::new();
+        for waiter in self.state_store.list_follow_waiters()? {
+            let Some(thread) = self.state_store.get_thread(&waiter.parent_thread_id)? else {
+                continue;
+            };
+            if thread.status != "continued" {
+                continue;
+            }
+            let item = list_item_from_detail(thread);
+            if self.thread_list_item_matches_filter(&item, filter) {
+                items.push(item);
+            }
+        }
+        Ok(items)
+    }
+
+    fn thread_list_item_matches_filter(
+        &self,
+        item: &ThreadListItem,
+        filter: &ryeos_state::queries::ThreadListFilter,
+    ) -> bool {
+        if let Some(principal) = &filter.principal {
+            if item.requested_by.as_deref() != Some(principal.as_str()) {
+                return false;
+            }
+        }
+        if let Some(status) = &filter.status {
+            if !item.status.contains(status) {
+                return false;
+            }
+        }
+        if let Some(kind) = &filter.kind {
+            if !item.kind.contains(kind) {
+                return false;
+            }
+        }
+        if let Some(requested_by) = &filter.requested_by {
+            if !item
+                .requested_by
+                .as_deref()
+                .is_some_and(|value| value.contains(requested_by))
+            {
+                return false;
+            }
+        }
+        if let Some((key, value)) = &filter.facet {
+            let has_facet = self
+                .state_store
+                .get_facets(&item.thread_id)
+                .unwrap_or_default()
+                .into_iter()
+                .any(|(k, v)| k == *key && v == *value);
+            if !has_facet {
+                return false;
+            }
+        }
+        true
     }
 
     /// `get_thread` for client-facing callers: the projection plus its
@@ -1583,7 +1792,10 @@ impl ThreadLifecycleService {
         limit: usize,
         filter_principal: Option<&str>,
     ) -> Result<Vec<ThreadListView>> {
-        self.decorate_list_items(self.state_store.list_threads_filtered(limit, filter_principal)?)
+        self.decorate_list_items(
+            self.state_store
+                .list_threads_filtered(limit, filter_principal)?,
+        )
     }
 
     /// As [`Self::list_thread_views_filtered`] but with an explicit sort — the
@@ -1595,10 +1807,11 @@ impl ThreadLifecycleService {
         filter_principal: Option<&str>,
         sort: ryeos_state::queries::ThreadSort,
     ) -> Result<Vec<ThreadListView>> {
-        self.decorate_list_items(
-            self.state_store
-                .list_threads_sorted(limit, filter_principal, sort)?,
-        )
+        self.decorate_list_items(self.state_store.list_threads_sorted(
+            limit,
+            filter_principal,
+            sort,
+        )?)
     }
 
     /// As [`Self::list_thread_views_sorted`] but with the full optional filter
@@ -1609,7 +1822,21 @@ impl ThreadLifecycleService {
         filter: &ryeos_state::queries::ThreadListFilter,
         sort: ryeos_state::queries::ThreadSort,
     ) -> Result<Vec<ThreadListView>> {
-        self.decorate_list_items(self.state_store.list_threads_query(limit, filter, sort)?)
+        let mut items = self.state_store.list_threads_query(limit, filter, sort)?;
+        if filter.active_only {
+            let mut seen = items
+                .iter()
+                .map(|item| item.thread_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            for item in self.active_follow_parent_items(filter)? {
+                if seen.insert(item.thread_id.clone()) {
+                    items.push(item);
+                }
+            }
+            sort_thread_list_items(&mut items, sort);
+            items.truncate(limit);
+        }
+        self.decorate_list_items(items)
     }
 
     /// `threads.list` service envelope: the decorated rows plus a cursor.
@@ -2369,10 +2596,8 @@ mod tests {
 
     #[test]
     fn follow_fact_suspended_parent_wire_shape() {
-        let f = FollowFact::suspended_parent(&waiter(
-            crate::runtime_db::follow_phase::WAITING,
-            None,
-        ));
+        let f =
+            FollowFact::suspended_parent(&waiter(crate::runtime_db::follow_phase::WAITING, None));
         let v = serde_json::to_value(&f).unwrap();
         assert_eq!(v["role"], json!("suspended_parent"));
         assert_eq!(v["display_state"], json!("suspended"));
@@ -2396,7 +2621,10 @@ mod tests {
         assert_eq!(v["role"], json!("resume_successor"));
         assert_eq!(v["display_state"], json!("resumed"));
         // `phase` is a suspended_parent-only field.
-        assert!(v.get("phase").is_none(), "resume_successor carries no phase");
+        assert!(
+            v.get("phase").is_none(),
+            "resume_successor carries no phase"
+        );
         assert_eq!(v["child_terminal_status"], json!("completed"));
         assert_eq!(v["child_chain_root_id"], json!("chain-child"));
     }
@@ -2440,6 +2668,7 @@ mod tests {
                 supports_operator_followup: true,
             },
             follow: None,
+            project: None,
             pending: 0,
             facets: std::collections::BTreeMap::new(),
             current_node: None,
@@ -2451,10 +2680,7 @@ mod tests {
         assert_eq!(v["execution"]["supports_continuation"], json!(true));
 
         // A staged input surfaces the count.
-        let steered = ThreadListView {
-            pending: 2,
-            ..view
-        };
+        let steered = ThreadListView { pending: 2, ..view };
         let v2 = serde_json::to_value(&steered).unwrap();
         assert_eq!(v2["pending"], json!(2));
     }

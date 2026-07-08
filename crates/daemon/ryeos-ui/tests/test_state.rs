@@ -88,7 +88,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     )
 }
 
-/// Build an AppState backed by the live workspace core + standard + Studio bundles.
+/// Build an AppState backed by the live workspace core + standard + RyeOS UI bundles.
 /// Suitable for happy-path topology/session tests that need real kind schemas,
 /// parsers, handlers, runtimes, and bundled items.
 #[allow(dead_code)]
@@ -175,7 +175,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
     let core_bundle = workspace.join("bundles/core");
     let std_bundle = workspace.join("bundles/standard");
-    let studio_bundle = workspace.join("bundles/studio");
+    let ryeos_bundle = workspace.join("bundles/ryeos-ui");
 
     let kinds = KindRegistry::load_base(
         &[
@@ -186,7 +186,7 @@ fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
     )
     .expect("load kind registry");
 
-    let bundle_roots = vec![core_bundle, std_bundle, studio_bundle];
+    let bundle_roots = vec![core_bundle, std_bundle, ryeos_bundle];
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
             .expect("load parser tools");

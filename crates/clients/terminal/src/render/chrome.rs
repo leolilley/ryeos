@@ -3,17 +3,17 @@
 //! truth (provenance, focus) — it is load-bearing, not decoration.
 
 use ryeos_client_base::layout::Rect;
-use ryeos_client_base::studio::view_model::{
-    StudioDockPlaneVm, StudioDockTileVm, StudioInputVm, StudioViewModel, StudioViewVm,
-};
 use ryeos_client_base::text_surface::{Border, Color, Style, TextSurface};
+use ryeos_client_base::ui::view_model::{
+    RyeOsDockPlaneVm, RyeOsDockTileVm, RyeOsInputVm, RyeOsViewModel, RyeOsViewVm,
+};
 
 use super::input::draw_input_tile;
 use super::primitives::{fill_line, fill_rect};
 use super::text::{display_width, letterspace, truncate};
-use super::theme::{border_for, style_muted, tone_style, ACCENT, BG, FG, MUTED};
+use super::theme::{border_for, mix_toward, style_muted, tone_style, ACCENT, BG, FG, MUTED, WARN};
 
-pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+pub fn draw_top_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     // Breadcrumb: when a drill is open, prefix the return trail (root-first)
     // onto the current level so the operator sees the execution path they
     // stepped down and that Backspace walks back up. The current level reads its
@@ -31,32 +31,53 @@ pub fn draw_top_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
     };
     let text = format!(
         " {}  {}  {} ",
-        vm.presentation.chrome.version_label,
-        crumb,
-        vm.presentation.chrome.top_bar.layout_symbol
+        vm.presentation.chrome.version_label, crumb, vm.presentation.chrome.top_bar.layout_symbol
     );
     draw_bar(surface, 0, &text, ACCENT);
 }
 
-pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
+pub fn draw_status_bar(surface: &mut TextSurface, vm: &RyeOsViewModel) {
     let y = surface.height.saturating_sub(1);
-    fill_line(surface, 0, y, surface.width, Style::new().fg(MUTED).bg(BG));
+    let energy = vm.presentation.chrome.status_bar.energy.clamp(0.0, 1.0);
+    let mut bg = mix_toward(BG, ACCENT, 0.12 * energy);
+    if vm.presentation.chrome.status_bar.attention.is_some() {
+        bg = mix_toward(bg, WARN, 0.18);
+    }
+    let base = Style::new().fg(MUTED).bg(bg);
+    fill_line(surface, 0, y, surface.width, base);
     let mut x = 1usize;
+    let heartbeat = if energy > 0.05 {
+        ["⋄", "◇", "◈", "◆"][(vm.generation as usize / 2) % 4]
+    } else {
+        "⋄"
+    };
+    surface.draw_text(
+        x,
+        y,
+        heartbeat,
+        Style::new().fg(mix_toward(MUTED, ACCENT, energy)).bg(bg),
+    );
+    x += 2;
     for segment in &vm.presentation.chrome.status_bar.segments {
         if x >= surface.width {
             return;
         }
         if let Some(label) = &segment.label {
             let label = format!("{}: ", letterspace(label));
-            surface.draw_text(x, y, &truncate(&label, surface.width - x), style_muted());
+            surface.draw_text(
+                x,
+                y,
+                &truncate(&label, surface.width - x),
+                style_muted().bg(bg),
+            );
             x = x.saturating_add(display_width(&label));
         }
         let value = truncate(&segment.value, surface.width.saturating_sub(x));
-        surface.draw_text(x, y, &value, tone_style(segment.tone));
+        surface.draw_text(x, y, &value, tone_style(segment.tone).bg(bg));
         x = x.saturating_add(display_width(&value) + 2);
     }
     if x + 3 < surface.width {
-        surface.draw_text(x, y, "·", style_muted());
+        surface.draw_text(x, y, "·", style_muted().bg(bg));
         x += 2;
         surface.draw_text(
             x,
@@ -65,7 +86,7 @@ pub fn draw_status_bar(surface: &mut TextSurface, vm: &StudioViewModel) {
                 &vm.presentation.chrome.status_bar.key_hint,
                 surface.width - x,
             ),
-            style_muted(),
+            style_muted().bg(bg),
         );
     }
 }
@@ -80,12 +101,12 @@ fn draw_bar(surface: &mut TextSurface, y: usize, text: &str, fg: Color) {
     );
 }
 
-pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -> Rect {
+pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &RyeOsViewModel) -> Rect {
     let border = border_for(&vm.presentation.chrome.border);
     let project_path = vm.session.project_path.as_deref();
     let (dock_rects, center) = carve_docks(body, &vm.workspace.docks);
     for (dock, rect) in dock_rects {
-        draw_dock_tile(surface, rect, dock, project_path, border);
+        draw_dock_tile(surface, rect, dock, project_path, border, vm.now_ms);
     }
     center
 }
@@ -99,8 +120,8 @@ pub fn draw_docks(surface: &mut TextSurface, body: Rect, vm: &StudioViewModel) -
 /// policy verbatim.
 fn carve_docks<'a>(
     body: Rect,
-    docks: &'a StudioDockPlaneVm,
-) -> (Vec<(&'a StudioDockTileVm, Rect)>, Rect) {
+    docks: &'a RyeOsDockPlaneVm,
+) -> (Vec<(&'a RyeOsDockTileVm, Rect)>, Rect) {
     let mut center = body;
     let mut out = Vec::new();
 
@@ -146,9 +167,10 @@ fn carve_docks<'a>(
 fn draw_dock_tile(
     surface: &mut TextSurface,
     rect: Rect,
-    dock: &StudioDockTileVm,
+    dock: &RyeOsDockTileVm,
     project_path: Option<&str>,
     border: Option<Border>,
+    now_ms: u64,
 ) {
     // An input dock renders minimally on the page background — no PANEL
     // fill, no title, no shadow. Just the bordered buffer + cursor.
@@ -192,7 +214,7 @@ fn draw_dock_tile(
         rect.w.saturating_sub(2),
         rect.h.saturating_sub(2),
     );
-    super::draw_view(surface, inner, &dock.view);
+    super::draw_view(surface, inner, &dock.view, now_ms);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,9 +225,11 @@ pub fn draw_tile(
     focused: bool,
     title: &str,
     _action_count: usize,
-    view: &StudioViewVm,
-    input: Option<&StudioInputVm>,
+    view: &RyeOsViewVm,
+    input: Option<&RyeOsInputVm>,
     border: Option<Border>,
+    now_ms: u64,
+    preserve_background: bool,
 ) {
     let w = rect.w as usize;
     let h = rect.h as usize;
@@ -223,9 +247,11 @@ pub fn draw_tile(
     } else {
         Style::new().fg(MUTED).bg(BG)
     };
-    fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    if !preserve_background {
+        fill_rect(surface, rect, Style::new().fg(FG).bg(BG));
+    }
     if w < 2 || h < 2 {
-        super::draw_view(surface, rect, view);
+        super::draw_view(surface, rect, view, now_ms);
         return;
     }
     if let Some(border) = border {
@@ -239,7 +265,12 @@ pub fn draw_tile(
         } else {
             style_muted()
         };
-        surface.draw_text(x + 2, y, &truncate(&label, w.saturating_sub(4)), title_style);
+        surface.draw_text(
+            x + 2,
+            y,
+            &truncate(&label, w.saturating_sub(4)),
+            title_style,
+        );
     }
     // Provenance (left) + affordance hints (right) in the bottom border.
     if w > 6 {
@@ -274,9 +305,9 @@ pub fn draw_tile(
             let filter_rect = Rect::new(inner.x, inner.y, inner.w, 1);
             super::input::draw_filter_line(surface, filter_rect, input, focused);
             let view_rect = Rect::new(inner.x, inner.y + 1, inner.w, inner.h - 1);
-            super::draw_view(surface, view_rect, view);
+            super::draw_view(surface, view_rect, view, now_ms);
         } else {
-            super::draw_view(surface, inner, view);
+            super::draw_view(surface, inner, view, now_ms);
         }
         return;
     }
@@ -286,22 +317,22 @@ pub fn draw_tile(
         draw_input_tile(surface, inner, input, None, None);
         return;
     }
-    super::draw_view(surface, inner, view);
+    super::draw_view(surface, inner, view, now_ms);
 }
 
-fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
+fn view_chrome(view: &RyeOsViewVm) -> Option<(&str, &[String])> {
     match view {
-        StudioViewVm::Rows {
+        RyeOsViewVm::Rows {
             provenance,
             affordance_hints,
             ..
         }
-        | StudioViewVm::Timeline {
+        | RyeOsViewVm::Timeline {
             provenance,
             affordance_hints,
             ..
         }
-        | StudioViewVm::Table {
+        | RyeOsViewVm::Table {
             provenance,
             affordance_hints,
             ..
@@ -315,14 +346,14 @@ fn view_chrome(view: &StudioViewVm) -> Option<(&str, &[String])> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_client_base::studio::model::StudioDockEdge;
+    use ryeos_client_base::ui::model::RyeOsDockEdge;
 
-    fn dock(edge: StudioDockEdge, size: u16) -> StudioDockTileVm {
-        StudioDockTileVm {
+    fn dock(edge: RyeOsDockEdge, size: u16) -> RyeOsDockTileVm {
+        RyeOsDockTileVm {
             edge,
             title: "t".into(),
             size,
-            view: StudioViewVm::Placeholder {
+            view: RyeOsViewVm::Placeholder {
                 title: "t".into(),
                 message: "m".into(),
             },
@@ -332,8 +363,8 @@ mod tests {
 
     #[test]
     fn carve_docks_bottom_leaves_center_above_and_preserves_bounds() {
-        let docks = StudioDockPlaneVm {
-            bottom: Some(dock(StudioDockEdge::Bottom, 7)),
+        let docks = RyeOsDockPlaneVm {
+            bottom: Some(dock(RyeOsDockEdge::Bottom, 7)),
             ..Default::default()
         };
         let body = Rect::new(0, 0, 100, 30);
@@ -354,9 +385,9 @@ mod tests {
 
     #[test]
     fn carve_docks_left_and_right_keep_center_in_bounds() {
-        let docks = StudioDockPlaneVm {
-            left: Some(dock(StudioDockEdge::Left, 20)),
-            right: Some(dock(StudioDockEdge::Right, 20)),
+        let docks = RyeOsDockPlaneVm {
+            left: Some(dock(RyeOsDockEdge::Left, 20)),
+            right: Some(dock(RyeOsDockEdge::Right, 20)),
             ..Default::default()
         };
         let body = Rect::new(0, 0, 100, 30);
@@ -373,24 +404,30 @@ mod tests {
 
     #[test]
     fn live_filter_tile_composes_filter_line_above_the_widget() {
-        use ryeos_client_base::studio::view_model::{StudioTableRowVm, StudioTone};
-        let view = StudioViewVm::Table {
+        use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
+        let view = RyeOsViewVm::Table {
             title: "threads".into(),
             columns: vec!["thread".into()],
+            total_rows: 1,
             provenance: None,
             affordance_hints: vec![],
-            rows: vec![StudioTableRowVm {
+            rows: vec![RyeOsTableRowVm {
                 id: "T-ab".into(),
                 cells: vec!["T-ab".into()],
                 cell_tones: Vec::new(),
-                tone: StudioTone::Neutral,
+                tone: RyeOsTone::Neutral,
                 action: None,
                 selected: false,
+                expandable: false,
+                expanded: false,
+                detail: Vec::new(),
+                changed_at_ms: None,
                 raw: serde_json::Value::Null,
             }],
         };
-        let input = StudioInputVm {
+        let input = RyeOsInputVm {
             cursor: 3,
+            focused: false,
             route_label: String::new(),
             placeholder: "filter…".into(),
             hint: String::new(),
@@ -410,6 +447,8 @@ mod tests {
             &view,
             Some(&input),
             Some(Border::Sharp),
+            0,
+            false,
         );
         let row = |y: usize| (0..40).map(|x| surface.get(x, y).rune).collect::<String>();
         // Filter strip on the first interior row (inside the top border).
@@ -423,8 +462,8 @@ mod tests {
     #[test]
     fn carve_docks_tiny_body_drops_docks_that_would_starve_center() {
         // A left dock can't take so much that the center drops below 8 wide.
-        let docks = StudioDockPlaneVm {
-            left: Some(dock(StudioDockEdge::Left, 50)),
+        let docks = RyeOsDockPlaneVm {
+            left: Some(dock(RyeOsDockEdge::Left, 50)),
             ..Default::default()
         };
         let body = Rect::new(0, 0, 10, 6);

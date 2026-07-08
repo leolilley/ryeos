@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T08:36:51Z:52a2c1b08e2bc9093afe2481cd95bba89a5f078ef6ef294aa6c30df0c2781f9b:5oj34VLAcNI6D1uxfIKr7FDpCqgmgIeB+Ra/KVjHnkiz1iSqaDe5NUyz32gIBwdISD1KdQCdcjTSMMdorHDFBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: projects/open
+version: "1.0.0"
+description: Open a registered project root and bind it to the current UI session.
+endpoint: ui.projects.open
+availability: daemon_only

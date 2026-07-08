@@ -1,0 +1,29 @@
+# ryeos:signed:2026-07-06T12:24:56Z:aeaa96f8997ab2a8cd5d9b2055f752b87daa6d7024f533dcdc75a420319072cc:bNzG08TS3UhQ71whUb7SsnfiZiAPoXA/0/cgEy0nuuqu866ntlcFke0JzHrQkNWTG4VdOKrPwHjgLwHoNgH3AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: item-inspector
+version: "1.0.0"
+description: Key-value inspection of the selection — an item (provenance first), or an inspected summary (an error terminal's full event)
+
+widget: key_value
+# An inspect action can write an inline `selection.summary` ({title, detail})
+# — e.g. Enter on a failed feed line stages the full structured error. When
+# present it renders directly (no round trip); otherwise the view falls back to
+# the item-inspect fetch below against `selection.item`.
+facet: selection.summary
+source:
+  ref: service:ui/ryeos-ui/item/inspect
+  params:
+    canonical_ref: "@facet:selection.item"
+    include_raw: false
+    include_effective: true
+    project_path: ""
+projections:
+  detail:
+    - canonical_ref
+    - kind
+    - signer
+    - version
+    - description
+    - title
+    - detail
+refresh:
+  on_facet: selection

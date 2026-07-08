@@ -1,0 +1,87 @@
+# ryeos:signed:2026-07-07T04:10:29Z:986c7beb66fd40c06256414f303895b926ed0f1ea31056df7a151d9daf530ecd:cNjQiyuZbohuFTUkKf9ELydhArJobeVMhv7cBr3JbQjc5vgQAmaJbLO3T0zUfnc0bBYa0+exzHY5mY15v0fIDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: ryeos-ui-cockpit
+version: "1.0.0"
+description: >-
+  Project cockpit for driving RyeOS: the left pane is the current project's live
+  execution field, the right pane is the selected execution/project object, and
+  the foot input injects cognition into the current project or routed thread.
+  Unlike the single-lens TUI, the activity list remains visible while the
+  operator watches or chats with a directive thread.
+
+tiling:
+  mode: master_stack
+  master: { side: left, arrange: vertical, ratio: 0.36, count: 1 }
+  stack: { arrange: vertical }
+  insert: end
+
+# Left: current-project live execution. Right: the route's cognition stream.
+# Enter on a live row updates input.route and focuses this existing timeline,
+# so the cockpit keeps the execution table visible while the selected thread
+# becomes the conversational/detail surface.
+tiles:
+  - "view:ryeos/threads/history"
+  - "view:ryeos/thread/transcript"
+
+slots:
+  bottom: { content: "view:ryeos/input", open: true, size: 7 }
+  top:    { content: "view:ryeos/node/status", open: true, size: 3 }
+
+style:
+  border: thin
+
+backdrop: view:ryeos/backdrop/prism-shards
+
+library:
+  - view:ryeos/threads/history
+  - view:ryeos/node/threads/history
+  - view:ryeos/projects/list
+  - view:ryeos/project/files
+  - view:ryeos/project/items
+  - view:ryeos/project/schedules
+  - view:ryeos/items/space
+  - view:ryeos/node/events
+  - view:ryeos/node/remotes
+  - view:ryeos/node/bundles
+  - view:ryeos/node/gc
+  - view:ryeos/graph/topology
+  - view:ryeos/commands/grammar
+
+input:
+  route:
+    invoke:
+      type: service
+      ref: service:threads/input
+    params:
+      directive: directive:ryeos/ops/base
+      # The terminal fills this with the cockpit's current project. Launching
+      # cognition from the cockpit therefore creates project-scoped execution
+      # that immediately appears in the left activity pane.
+      project_path: ""
+
+ambient:
+  show_background: true
+  opacity: 1.0
+
+affordances:
+  - id: view.activity
+    label: Activity
+    category: View
+  - id: view.projects
+    label: Projects
+    category: View
+  - id: view.files
+    label: Project files
+    category: View
+  - id: view.threads
+    label: Threads
+    category: View
+  - id: view.items
+    label: Items
+    category: View
+  - id: view.item_inspector
+    label: Inspector
+    category: View
+  - id: view.graph
+    label: Graph
+    category: View

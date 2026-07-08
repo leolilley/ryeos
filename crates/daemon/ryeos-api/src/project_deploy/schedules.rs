@@ -1088,7 +1088,10 @@ mod tests {
         assert!(matches!(he, HandlerError::Conflict(_)), "got: {he:?}");
 
         let msg = format!("{err}");
-        assert!(msg.contains("snap-track-feed"), "must name the schedule: {msg}");
+        assert!(
+            msg.contains("snap-track-feed"),
+            "must name the schedule: {msg}"
+        );
         assert!(
             msg.contains("different principal") && msg.contains("deregister"),
             "must be actionable: {msg}"
@@ -1105,9 +1108,8 @@ mod tests {
         // Defence in depth: an unverified caller never even learns of the
         // conflict — it gets the existence-hiding NotFound, as on direct access.
         let caller = HandlerContext::anonymous();
-        let err =
-            require_project_reconcile_schedule_owner(&caller, "snap-track-feed", "fp:owner")
-                .expect_err("unverified caller must fail closed");
+        let err = require_project_reconcile_schedule_owner(&caller, "snap-track-feed", "fp:owner")
+            .expect_err("unverified caller must fail closed");
         let he = extract_handler_error(&err).expect("typed HandlerError in chain");
         assert!(matches!(he, HandlerError::NotFound), "got: {he:?}");
     }

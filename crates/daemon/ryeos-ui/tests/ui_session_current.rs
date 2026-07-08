@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 fn test_context() -> LaunchContext {
     LaunchContext {
-        surface_ref: "surface:ryeos/studio/base".into(),
+        surface_ref: "surface:ryeos/ui/base".into(),
         project_path: Some("/tmp/project".into()),
         read_only: false,
         granted_caps: vec!["ui.read".into()],
@@ -43,7 +43,7 @@ async fn session_current_returns_session_fields() {
     .expect("should succeed");
 
     assert_eq!(result["session_id"], session_id);
-    assert_eq!(result["surface_ref"], "surface:ryeos/studio/base");
+    assert_eq!(result["surface_ref"], "surface:ryeos/ui/base");
     assert_eq!(result["project_path"], "/tmp/project");
     assert!(!result["read_only"].as_bool().unwrap());
     assert!(result["events_url"].as_str().unwrap().contains(&session_id));
@@ -122,7 +122,7 @@ async fn session_current_returns_durable_user_principal_when_present() {
     let (_tmp, state) = build_test_state();
     let user_principal_id = format!("fp:{}", "cd".repeat(32));
     let ctx = LaunchContext {
-        surface_ref: "surface:ryeos/studio/base".into(),
+        surface_ref: "surface:ryeos/ui/base".into(),
         project_path: None,
         read_only: false,
         granted_caps: vec!["ui.read".into()],

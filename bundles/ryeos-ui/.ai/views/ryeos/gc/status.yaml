@@ -1,0 +1,10 @@
+# ryeos:signed:2026-07-06T12:24:56Z:7cc00f5e956d7b31a39ef6dfeba8deb008777b1b1251546b1ffe760bfe2553e4:q/BLvHBL96srnqJMiwE1REBqrprmuf6iTVSbz3bSfuSrf5FnzhxoFqJeABlZDsRa3IcVbPtITWXWzF+ruZ3CCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: gc-status
+version: "1.0.0"
+description: Garbage collection state
+
+widget: key_value
+source:
+  ref: service:ui/ryeos-ui/gc/status
+  params:
+    project_path: ""

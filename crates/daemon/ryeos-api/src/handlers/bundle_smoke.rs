@@ -91,12 +91,10 @@ pub async fn handle(
     // tree being authored, which may deliberately differ from any installed
     // (signed) manifest for the same bundle.
     let manifest_path = ai_dir.join("manifest.source.yaml");
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        HandlerError::BadRequest(format!("read {}: {e}", manifest_path.display()))
-    })?;
-    let manifest: BundleManifestSource = serde_yaml::from_str(&raw).map_err(|e| {
-        HandlerError::BadRequest(format!("parse {}: {e}", manifest_path.display()))
-    })?;
+    let raw = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| HandlerError::BadRequest(format!("read {}: {e}", manifest_path.display())))?;
+    let manifest: BundleManifestSource = serde_yaml::from_str(&raw)
+        .map_err(|e| HandlerError::BadRequest(format!("parse {}: {e}", manifest_path.display())))?;
     validate_smoke_decls(&manifest.smoke)
         .map_err(|e| HandlerError::BadRequest(format!("invalid smoke declaration: {e}")))?;
 
@@ -120,22 +118,23 @@ pub async fn handle(
         .collect();
     let operator_config_root =
         ryeos_engine::roots::RuntimeRoot::new(state.config.app_root.clone()).config();
-    let preflight_warnings = match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
-        &source,
-        &dependency_roots,
-        &operator_config_root,
-    ) {
-        Ok(report) => report
-            .warnings
-            .iter()
-            .map(|w| format!("{w:?}"))
-            .collect::<Vec<_>>(),
-        Err(e) => {
-            return Err(HandlerError::BadRequest(format!(
-                "bundle preflight failed (fix before smoking): {e:#}"
-            )));
-        }
-    };
+    let preflight_warnings =
+        match ryeos_bundle::preflight::preflight_verify_bundle_report_in_context(
+            &source,
+            &dependency_roots,
+            &operator_config_root,
+        ) {
+            Ok(report) => report
+                .warnings
+                .iter()
+                .map(|w| format!("{w:?}"))
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                return Err(HandlerError::BadRequest(format!(
+                    "bundle preflight failed (fix before smoking): {e:#}"
+                )));
+            }
+        };
 
     // Temporary state root, outside the source by construction. Created here
     // so per-entry dispatches inherit an existing directory. The pid +
@@ -149,10 +148,7 @@ pub async fn handle(
         SMOKE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::create_dir_all(&state_root).map_err(|e| {
-        HandlerError::Internal(format!(
-            "create state root {}: {e}",
-            state_root.display()
-        ))
+        HandlerError::Internal(format!("create state root {}: {e}", state_root.display()))
     })?;
 
     let mut outcomes: Vec<EntryOutcome> = Vec::with_capacity(manifest.smoke.len());
@@ -265,7 +261,8 @@ async fn run_entry(
         parent_execution_context: None,
     };
 
-    let dispatch = ryeos_executor::dispatch::dispatch(&decl.item_ref, &dispatch_req, &exec_ctx, state);
+    let dispatch =
+        ryeos_executor::dispatch::dispatch(&decl.item_ref, &dispatch_req, &exec_ctx, state);
     let result = match decl.timeout_secs {
         Some(secs) => {
             match tokio::time::timeout(std::time::Duration::from_secs(secs), dispatch).await {
@@ -313,9 +310,7 @@ async fn run_entry(
                         .get("result")
                         .filter(|r| !r.is_null())
                         .map(|r| r.to_string())
-                        .unwrap_or_else(|| {
-                            format!("thread finished with status '{status}'")
-                        }),
+                        .unwrap_or_else(|| format!("thread finished with status '{status}'")),
                 );
             }
         }

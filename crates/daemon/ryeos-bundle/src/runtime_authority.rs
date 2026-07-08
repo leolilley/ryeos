@@ -939,7 +939,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(empty_ns.validate().unwrap_err().contains("empty `namespace`"));
+        assert!(empty_ns
+            .validate()
+            .unwrap_err()
+            .contains("empty `namespace`"));
     }
 
     #[test]
@@ -981,10 +984,9 @@ mod tests {
 
     #[test]
     fn concrete_request_is_backed_by_manifest_wildcard() {
-        let manifest: BTreeSet<String> =
-            ["ryeos.author.knowledge.runtime-authored/*".to_string()]
-                .into_iter()
-                .collect();
+        let manifest: BTreeSet<String> = ["ryeos.author.knowledge.runtime-authored/*".to_string()]
+            .into_iter()
+            .collect();
         assert!(manifest_backs_requested_cap(
             &manifest,
             "ryeos.author.knowledge.runtime-authored/foo"
@@ -1005,10 +1007,9 @@ mod tests {
             "ryeos.author.knowledge.runtime-authored/foo*"
         ));
         // An identical wildcard request IS backed.
-        let manifest: BTreeSet<String> =
-            ["ryeos.author.knowledge.runtime-authored/*".to_string()]
-                .into_iter()
-                .collect();
+        let manifest: BTreeSet<String> = ["ryeos.author.knowledge.runtime-authored/*".to_string()]
+            .into_iter()
+            .collect();
         assert!(manifest_backs_requested_cap(
             &manifest,
             "ryeos.author.knowledge.runtime-authored/*"

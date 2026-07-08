@@ -159,8 +159,7 @@ async fn handle_execute(
     // belong to the daemon's suspend/fanout machinery, so fail closed with
     // the fix: `follow: true` (await via durable suspend) or `detach: true`
     // (lineage-linked fire-and-forget).
-    if let Ok(child_ref) =
-        ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
+    if let Ok(child_ref) = ryeos_engine::canonical_ref::CanonicalRef::parse(&params.action.item_id)
     {
         let is_thread_run_kind = state
             .engine
@@ -329,7 +328,10 @@ mod tests {
 
         let ctx = parent_execution_context_from_capability(&cap);
         assert_eq!(ctx.parent_thread_id, "T-parent");
-        assert_eq!(ctx.hard_limits, serde_json::json!({"turns": 6, "tokens": 1000}));
+        assert_eq!(
+            ctx.hard_limits,
+            serde_json::json!({"turns": 6, "tokens": 1000})
+        );
         assert_eq!(ctx.depth, 4);
     }
 

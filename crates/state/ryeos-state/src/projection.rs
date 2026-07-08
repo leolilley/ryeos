@@ -61,6 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_threads_updated_at ON threads(updated_at);
 -- Events: durable thread events
 CREATE TABLE IF NOT EXISTS events (
     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_hash TEXT NOT NULL,
     chain_root_id TEXT NOT NULL,
     chain_seq INTEGER NOT NULL,
     thread_id TEXT NOT NULL,
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS events (
     UNIQUE(chain_root_id, chain_seq)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_hash ON events(event_hash);
 CREATE INDEX IF NOT EXISTS idx_events_chain_root ON events(chain_root_id);
 CREATE INDEX IF NOT EXISTS idx_events_thread_id ON events(thread_id);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
@@ -327,7 +329,15 @@ fn schema_spec_fingerprint(spec: &sqlite_schema::SchemaSpec) -> u64 {
     let mut indexes: Vec<String> = spec
         .indexes
         .iter()
-        .map(|i| format!("I:{}:{}:{}:{}", i.name, i.table, i.columns.join(","), i.unique))
+        .map(|i| {
+            format!(
+                "I:{}:{}:{}:{}",
+                i.name,
+                i.table,
+                i.columns.join(","),
+                i.unique
+            )
+        })
         .collect();
     indexes.sort();
     parts.extend(tables);
@@ -475,6 +485,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                         name: "event_id",
                         col_type: "INTEGER",
                         pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "event_hash",
+                        col_type: "TEXT",
+                        pk: false,
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
@@ -1191,6 +1207,12 @@ fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_events_event_hash",
+                table: "events",
+                columns: &["event_hash"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_events_chain_root",
                 table: "events",
                 columns: &["chain_root_id"],
@@ -1809,7 +1831,8 @@ impl ProjectionDb {
     /// epoch. Callers with CAS/refs access should rebuild the projection when
     /// `reset` is true.
     pub fn open_with_status(path: &Path) -> anyhow::Result<ProjectionOpenResult> {
-        let conn = Connection::open(path).context("failed to open projection database")?;
+        let conn =
+            open_projection_connection(path).context("failed to open projection database")?;
 
         let spec = projection_schema_spec();
 
@@ -1848,7 +1871,8 @@ impl ProjectionDb {
             close_connection(conn)?;
             reset_projection_files(path, stored_epoch, current_epoch)?;
 
-            let conn = Connection::open(path).context("failed to reopen projection database")?;
+            let conn =
+                open_projection_connection(path).context("failed to reopen projection database")?;
             init_current_projection_schema(&conn, &spec, path)?;
             return Ok(ProjectionOpenResult {
                 db: Self { conn },
@@ -2634,6 +2658,13 @@ impl ProjectionDb {
     }
 }
 
+fn open_projection_connection(path: &Path) -> anyhow::Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .context("failed to set projection synchronous=NORMAL")?;
+    Ok(conn)
+}
+
 fn validate_sync_job_id(job_id: &str) -> anyhow::Result<()> {
     validate_non_empty_label("job_id", job_id)?;
     if job_id.len() > 128
@@ -2899,6 +2930,31 @@ pub fn project_thread_snapshot(
     Ok(())
 }
 
+/// Project a newly-created child thread and its initial durable events as one
+/// read-model update.
+///
+/// This is used by relation-bearing child creation, where exposing the child
+/// without the event that defines its relation would be misleading even though
+/// the CAS/head transition is already atomic.
+pub fn project_thread_snapshot_with_events(
+    db: &ProjectionDb,
+    snapshot: &crate::ThreadSnapshot,
+    chain_root_id: &str,
+    events: &[crate::ThreadEvent],
+) -> anyhow::Result<()> {
+    db.immediate_transaction("thread snapshot with events projection", || {
+        project_thread_snapshot(db, snapshot, chain_root_id)?;
+        for event in events {
+            if event.durability.is_projection_indexed() {
+                project_event(db, event).with_context(|| {
+                    format!("projection failed for event chain_seq={}", event.chain_seq)
+                })?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Project all thread snapshots from a chain state into the projection database.
 ///
 /// Also updates the projection metadata to track the indexed chain state hash.
@@ -2947,15 +3003,17 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
 
     let payload =
         serde_json::to_vec(&event.payload).context("failed to serialize event payload")?;
+    let event_hash = lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes());
 
     db.connection()
         .execute(
             "INSERT OR IGNORE INTO events (
-            chain_root_id, chain_seq, thread_id, thread_seq,
+            event_hash, chain_root_id, chain_seq, thread_id, thread_seq,
             event_type, durability, ts, prev_chain_event_hash,
             prev_thread_event_hash, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
+                &event_hash,
                 &event.chain_root_id,
                 event.chain_seq,
                 &event.thread_id,
@@ -3052,12 +3110,7 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
                      VALUES (?, ?, ?, ?)
                      ON CONFLICT(thread_id, key)
                      DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    rusqlite::params![
-                        &event.thread_id,
-                        key,
-                        value.as_bytes(),
-                        &event.ts,
-                    ],
+                    rusqlite::params![&event.thread_id, key, value.as_bytes(), &event.ts,],
                 )
                 .context("failed to project thread facet")?;
         }
@@ -3285,9 +3338,19 @@ mod tests {
         };
 
         // Old terminal job (+ attempt), a recent terminal job, and an active job.
-        insert_job("old", "completed", "2026-01-01T00:00:00Z", Some("2026-01-01T00:00:00Z"));
+        insert_job(
+            "old",
+            "completed",
+            "2026-01-01T00:00:00Z",
+            Some("2026-01-01T00:00:00Z"),
+        );
         insert_attempt("old-a", "old", "2026-01-01T00:00:00Z");
-        insert_job("recent", "failed", "2026-06-30T00:00:00Z", Some("2026-06-30T00:00:00Z"));
+        insert_job(
+            "recent",
+            "failed",
+            "2026-06-30T00:00:00Z",
+            Some("2026-06-30T00:00:00Z"),
+        );
         insert_job("active", "running", "2026-01-01T00:00:00Z", None);
 
         let (jobs, attempts) = db
@@ -3331,6 +3394,12 @@ mod tests {
             stored_projection_schema_epoch(db.connection()).unwrap(),
             projection_schema_epoch()
         );
+
+        let synchronous: i64 = db
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "projection DB must use synchronous=NORMAL");
     }
 
     #[test]
@@ -3381,6 +3450,12 @@ mod tests {
             stored_projection_schema_epoch(opened.db.connection()).unwrap(),
             projection_schema_epoch()
         );
+        let synchronous: i64 = opened
+            .db
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1, "reopened projection DB must use NORMAL");
         assert!(reset_backups(&path).is_empty());
     }
 
@@ -3407,6 +3482,15 @@ mod tests {
             opened.db.connection(),
             "thread_usage_subjects"
         ));
+        let synchronous: i64 = opened
+            .db
+            .connection()
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            synchronous, 1,
+            "post-epoch-reset projection DB must use NORMAL"
+        );
         assert!(!table_exists(opened.db.connection(), "sentinel"));
         assert_eq!(reset_backups(&path).len(), 1);
     }

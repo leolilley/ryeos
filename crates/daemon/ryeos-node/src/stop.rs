@@ -49,6 +49,15 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
         // shutdown call may itself time out, after which the deadline/force
         // path below applies.
         LifecycleStatus::Unresponsive { ref metadata, .. } => metadata.uds_path.clone(),
+        LifecycleStatus::Starting { pid, .. } => {
+            // No control socket exists yet, so there is nothing to send a
+            // graceful shutdown to; the force path can't reconfirm a live
+            // pid either. Booting clears on its own.
+            bail!(
+                "a daemon (pid {pid}) is starting up and has no control socket yet; \
+                 wait for it to finish booting, then stop it"
+            )
+        }
     };
 
     // Send shutdown to the UDS that just proved the daemon is alive,
@@ -81,7 +90,9 @@ pub async fn stop(env: &LocalLifecycleEnv, opts: StopOptions) -> Result<StopRepo
                     already_stopped: false,
                 })
             }
-            LifecycleStatus::Running { .. } | LifecycleStatus::Unresponsive { .. } => {}
+            LifecycleStatus::Running { .. }
+            | LifecycleStatus::Unresponsive { .. }
+            | LifecycleStatus::Starting { .. } => {}
         }
 
         if Instant::now() >= deadline {

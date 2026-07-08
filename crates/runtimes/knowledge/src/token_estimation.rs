@@ -62,7 +62,9 @@ impl ResolvedTokenEstimator {
         })?;
 
         let config: TokenEstimationRuntimeConfig = serde_json::from_value(token_estimation.clone())
-            .map_err(|e| KnowledgeError::TokenEstimation(format!("invalid token_estimation config: {e}")))?;
+            .map_err(|e| {
+                KnowledgeError::TokenEstimation(format!("invalid token_estimation config: {e}"))
+            })?;
         if let Some(category) = config.category.as_deref() {
             if category != EXPECTED_CATEGORY {
                 return Err(KnowledgeError::TokenEstimation(format!(
@@ -165,7 +167,8 @@ mod tests {
                 "policy": {"provider": "heuristic", "chars_per_token": 2.0, "reserve_ratio": 0.0}
             }
         });
-        let estimator = ResolvedTokenEstimator::from_runtime_config(&runtime_config(config)).unwrap();
+        let estimator =
+            ResolvedTokenEstimator::from_runtime_config(&runtime_config(config)).unwrap();
         assert_eq!(estimator.estimate(&"a".repeat(40)), 20);
     }
 

@@ -3,7 +3,7 @@
 # ryeosd-hosted-node — lean hosted remote-node image.
 #
 # This image intentionally bakes only the core bundle plus hosted-node policy.
-# It does not include standard/studio/web, so it can run the decentralized
+# It does not include standard/ryeos-ui/web, so it can run the decentralized
 # remote admission/execution substrate without workflow runtimes or UI bundles.
 
 FROM rust:1.95-slim AS builder

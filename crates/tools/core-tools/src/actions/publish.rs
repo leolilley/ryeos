@@ -37,7 +37,7 @@ pub struct PublishOptions {
     /// Registry/dependency roots supplying kind schemas + parsers for sign-items.
     ///
     /// When publishing `core` itself, pass the same path as `bundle_source`.
-    /// Bundles that depend on kinds from multiple bundles (for example Studio
+    /// Bundles that depend on kinds from multiple bundles (for example RyeOS UI
     /// depends on `surface` from standard and base parsers/handlers from core)
     /// must pass each dependency root so every signable item is discovered and
     /// validated during authoring.
@@ -66,12 +66,6 @@ pub struct PublishOptions {
     /// such a mismatch is fatal, because the daemon hard-fails runtime-cap
     /// minting for it — a published-but-unusable manifest. Default `false`.
     pub allow_namespace_mismatch: bool,
-    /// If `true`, do not fail when a populated `.ai/<dir>` is covered by no
-    /// registered kind. Set this ONLY for a deliberately partial intermediate
-    /// publish (e.g. signing core before the bundle defining its `knowledge`
-    /// kind is available), which a later republish then completes. Default
-    /// `false`: an uncovered item directory hard-fails the publish.
-    pub allow_uncovered_item_dirs: bool,
     /// If `true`, write `<bundle_source>/PUBLISHER_TRUST.toml` summarizing
     /// the author key fingerprint + raw public key bytes for downstream
     /// operators to pin via `ryeos trust pin`. Default `true`.
@@ -162,7 +156,6 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         &opts.registry_roots,
         &opts.signing_key,
         opts.base_trust_store.as_ref(),
-        opts.allow_uncovered_item_dirs,
     )
     .context("sign-items phase failed")?;
     let mut partial = false;
@@ -639,8 +632,7 @@ fn lint_item_namespaces(
     let mut shadow_warnings: Vec<sign_bundle::ItemWarning> = Vec::new();
     let mut notes: Vec<sign_bundle::ItemWarning> = Vec::new();
 
-    let declared: std::collections::BTreeSet<&str> =
-        shadows.iter().map(String::as_str).collect();
+    let declared: std::collections::BTreeSet<&str> = shadows.iter().map(String::as_str).collect();
     let mut matched: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
 
     for outcome in report
@@ -909,8 +901,15 @@ mod tests {
             "undeclared shadows must not escalate: {:?}",
             lint.warnings
         );
-        assert_eq!(lint.shadow_warnings.len(), 2, "got {:?}", lint.shadow_warnings);
-        assert!(lint.shadow_warnings[0].message.contains("undeclared override"));
+        assert_eq!(
+            lint.shadow_warnings.len(),
+            2,
+            "got {:?}",
+            lint.shadow_warnings
+        );
+        assert!(lint.shadow_warnings[0]
+            .message
+            .contains("undeclared override"));
         assert_eq!(lint.notes.len(), 1, "got {:?}", lint.notes);
         assert_eq!(lint.notes[0].item_ref, "knowledge:other/notes");
     }
@@ -935,7 +934,9 @@ mod tests {
             lint.shadow_warnings
         );
         assert_eq!(lint.notes.len(), 2, "got {:?}", lint.notes);
-        assert!(lint.notes[0].message.contains("declared config shadow verified"));
+        assert!(lint.notes[0]
+            .message
+            .contains("declared config shadow verified"));
     }
 
     #[test]
@@ -948,7 +949,12 @@ mod tests {
         ];
         let lint = lint_item_namespaces(&report, "downstream", &shadows);
         assert!(lint.warnings.is_empty());
-        assert_eq!(lint.shadow_warnings.len(), 1, "got {:?}", lint.shadow_warnings);
+        assert_eq!(
+            lint.shadow_warnings.len(),
+            1,
+            "got {:?}",
+            lint.shadow_warnings
+        );
         assert_eq!(
             lint.shadow_warnings[0].item_ref,
             "config:ryeos-runtime/limits"

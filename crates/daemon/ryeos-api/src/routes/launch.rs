@@ -212,10 +212,10 @@ pub(crate) fn spawn_dispatch_launch(
                     "reason": e.to_string(),
                 });
                 let should_finalize = match state_clone.threads.get_thread(&pre_minted_thread_id) {
-                    Ok(Some(detail)) => !ryeos_state::objects::ThreadStatus::from_str_lossy(
-                        &detail.status,
-                    )
-                    .is_some_and(|s| s.is_terminal()),
+                    Ok(Some(detail)) => {
+                        !ryeos_state::objects::ThreadStatus::from_str_lossy(&detail.status)
+                            .is_some_and(|s| s.is_terminal())
+                    }
                     Ok(None) => {
                         let failure_thread_kind = state_clone
                             .engine
@@ -238,8 +238,8 @@ pub(crate) fn spawn_dispatch_launch(
                                 upstream_thread_id: None,
                                 requested_by: Some(principal_id.clone()),
                                 usage_subject: usage_subject_for_failure_row.clone(),
-                                usage_subject_asserted_by: usage_subject_asserted_by_for_failure_row
-                                    .clone(),
+                                usage_subject_asserted_by:
+                                    usage_subject_asserted_by_for_failure_row.clone(),
                             },
                         );
                         state_clone

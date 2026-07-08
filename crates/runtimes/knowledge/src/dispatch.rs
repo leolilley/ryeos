@@ -245,8 +245,7 @@ mod tests {
 
     #[test]
     fn non_object_payload_is_invalid_arg() {
-        let err = dispatch_without_config("query", json!("not an object"))
-            .expect_err("must error");
+        let err = dispatch_without_config("query", json!("not an object")).expect_err("must error");
         assert!(
             matches!(err, KnowledgeError::InvalidArg { .. }),
             "got: {err:?}"

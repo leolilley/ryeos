@@ -1642,9 +1642,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            view.composed.pointer(
-                "/requires/capabilities/manifest/runtime_authority/item_authoring/0/namespace"
-            ).and_then(|v| v.as_str()),
+            view.composed
+                .pointer(
+                    "/requires/capabilities/manifest/runtime_authority/item_authoring/0/namespace"
+                )
+                .and_then(|v| v.as_str()),
             Some("runtime-authored/foo"),
         );
     }
@@ -1675,7 +1677,9 @@ mod tests {
         .unwrap_err();
         assert!(
             err.1.contains("widens parent requirement")
-                && err.1.contains("item_authoring.knowledge.runtime-authored/foo*"),
+                && err
+                    .1
+                    .contains("item_authoring.knowledge.runtime-authored/foo*"),
             "got: {}",
             err.1
         );

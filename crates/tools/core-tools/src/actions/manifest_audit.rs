@@ -219,9 +219,24 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
     );
 
     // ── provides / requires / uses kinds ──
-    diff_kind_list(&old.provides_kinds, &new.provides_kinds, "provides_kinds", &mut findings);
-    diff_kind_list(&old.requires_kinds, &new.requires_kinds, "requires_kinds", &mut findings);
-    diff_kind_list(&old.uses_kinds, &new.uses_kinds, "uses_kinds", &mut findings);
+    diff_kind_list(
+        &old.provides_kinds,
+        &new.provides_kinds,
+        "provides_kinds",
+        &mut findings,
+    );
+    diff_kind_list(
+        &old.requires_kinds,
+        &new.requires_kinds,
+        "requires_kinds",
+        &mut findings,
+    );
+    diff_kind_list(
+        &old.uses_kinds,
+        &new.uses_kinds,
+        "uses_kinds",
+        &mut findings,
+    );
 
     findings
 }
@@ -301,8 +316,8 @@ fn diff_kind_list(old: &[String], new: &[String], family: &str, findings: &mut V
 /// (source manifests derive provides from schemas, unavailable from the file
 /// alone).
 pub fn load_audit_manifest(path: &Path) -> Result<BundleManifest> {
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("read manifest {}", path.display()))?;
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("read manifest {}", path.display()))?;
     let body = lillux::signature::strip_signature_lines(&raw);
 
     if let Ok(manifest) = serde_yaml::from_str::<BundleManifest>(&body) {
@@ -414,10 +429,7 @@ mod tests {
                     },
                     BundleEventDecl {
                         event_kind: "ev_shrink".to_string(),
-                        operations: vec![
-                            BundleEventOperation::Append,
-                            BundleEventOperation::Scan,
-                        ],
+                        operations: vec![BundleEventOperation::Append, BundleEventOperation::Scan],
                     },
                 ],
                 ..Default::default()
@@ -429,10 +441,7 @@ mod tests {
                 bundle_events: vec![
                     BundleEventDecl {
                         event_kind: "ev_grow".to_string(),
-                        operations: vec![
-                            BundleEventOperation::Append,
-                            BundleEventOperation::Scan,
-                        ],
+                        operations: vec![BundleEventOperation::Append, BundleEventOperation::Scan],
                     },
                     BundleEventDecl {
                         event_kind: "ev_shrink".to_string(),
@@ -475,10 +484,7 @@ mod tests {
                 runtime_vault: vec![
                     RuntimeVaultDecl {
                         namespace: "arc/state".to_string(),
-                        operations: vec![
-                            RuntimeVaultOperation::Get,
-                            RuntimeVaultOperation::Put,
-                        ],
+                        operations: vec![RuntimeVaultOperation::Get, RuntimeVaultOperation::Put],
                     },
                     RuntimeVaultDecl {
                         namespace: "arc/cache".to_string(),

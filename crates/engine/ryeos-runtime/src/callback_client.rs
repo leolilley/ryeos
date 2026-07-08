@@ -531,7 +531,10 @@ impl CallbackClient {
         let mut after_chain_seq: Option<i64> = None;
         loop {
             let mut params = serde_json::Map::new();
-            params.insert(scope_key.to_string(), Value::String(scope_value.to_string()));
+            params.insert(
+                scope_key.to_string(),
+                Value::String(scope_value.to_string()),
+            );
             params.insert("limit".to_string(), serde_json::json!(REPLAY_PAGE_LIMIT));
             if let Some(cursor) = after_chain_seq {
                 params.insert("after_chain_seq".to_string(), serde_json::json!(cursor));
@@ -688,6 +691,7 @@ impl CallbackClient {
         truncated: bool,
         truncated_reason: Option<&str>,
         result_size_bytes: u64,
+        duplicate_of: Option<&str>,
     ) -> Result<()> {
         let mut data = serde_json::json!({
             "call_id": call_id,
@@ -696,17 +700,23 @@ impl CallbackClient {
             "result_size_bytes": result_size_bytes,
         });
         if let Some(body_str) = body {
-            match serde_json::from_str::<serde_json::Value>(body_str) {
-                Ok(parsed) => data["result"] = parsed,
-                Err(e) => {
-                    tracing::warn!(
-                        call_id,
-                        tool,
-                        error = %e,
-                        "emit_tool_result received non-JSON body; preserving as result_text"
-                    );
-                    data["result_text"] = serde_json::json!(body_str);
-                    data["result_parse_error"] = serde_json::json!(e.to_string());
+            if let Some(hash) = duplicate_of {
+                data["result_text"] = serde_json::json!(body_str);
+                data["deduplicated"] = serde_json::json!(true);
+                data["duplicate_of"] = serde_json::json!(hash);
+            } else {
+                match serde_json::from_str::<serde_json::Value>(body_str) {
+                    Ok(parsed) => data["result"] = parsed,
+                    Err(e) => {
+                        tracing::warn!(
+                            call_id,
+                            tool,
+                            error = %e,
+                            "emit_tool_result received non-JSON body; preserving as result_text"
+                        );
+                        data["result_text"] = serde_json::json!(body_str);
+                        data["result_parse_error"] = serde_json::json!(e.to_string());
+                    }
                 }
             }
         }
@@ -1028,6 +1038,7 @@ mod tests {
             false,
             None,
             58,
+            None,
         )
         .await
         .unwrap();
@@ -1052,6 +1063,7 @@ mod tests {
             true,
             Some("size_cap_exceeded"),
             524_288,
+            None,
         )
         .await
         .unwrap();
@@ -1076,6 +1088,7 @@ mod tests {
             false,
             None,
             body.len() as u64,
+            None,
         )
         .await
         .unwrap();
@@ -1098,6 +1111,7 @@ mod tests {
             true,
             Some("result_guard"),
             body.len() as u64,
+            None,
         )
         .await
         .unwrap();
@@ -1109,6 +1123,31 @@ mod tests {
         assert_eq!(evt["result_text"], body);
         assert!(evt.get("result").is_none());
         assert!(!evt["result_parse_error"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn emit_tool_result_marks_deduplicated_body_as_text_without_parse_error() {
+        let (cb, recorder) = make_recorder_client();
+        let body = "[duplicate result omitted — hash deadbeefdeadbeef]";
+        cb.emit_tool_result(
+            "call_duplicate",
+            "test/search",
+            Some(body),
+            false,
+            None,
+            2048,
+            Some("deadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .await
+        .unwrap();
+
+        let evt = recorder.last("tool_call_result").unwrap();
+        assert_eq!(evt["call_id"], "call_duplicate");
+        assert_eq!(evt["result_text"], body);
+        assert_eq!(evt["deduplicated"], true);
+        assert_eq!(evt["duplicate_of"], "deadbeefdeadbeefdeadbeefdeadbeef");
+        assert!(evt.get("result").is_none());
+        assert!(evt.get("result_parse_error").is_none());
     }
 
     // ── Existing tests ───────────────────────────────────────────────
@@ -1393,35 +1432,109 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::callback::RuntimeCallbackAPI for PagingReplay {
-        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn finalize_thread(&self, _: &str, _: TerminalCompletion) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> { Ok(Value::Null) }
-        async fn append_event(&self, _: &str, _: &str, _: Value, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> { Ok(json!({})) }
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
         async fn replay_events(&self, params: Value) -> Result<Value, CallbackError> {
             use crate::callback::{ReplayResponse, ReplayedEventRecord};
-            let ev = |t: &str| ReplayedEventRecord { event_type: t.to_string(), payload: json!({}) };
+            let ev = |t: &str| ReplayedEventRecord {
+                event_type: t.to_string(),
+                payload: json!({}),
+            };
             let page = match params.get("after_chain_seq").and_then(|v| v.as_i64()) {
-                None => ReplayResponse { events: vec![ev("a"), ev("b")], next_cursor: Some(2) },
-                Some(2) => ReplayResponse { events: vec![ev("c")], next_cursor: None },
-                _ => ReplayResponse { events: vec![], next_cursor: None },
+                None => ReplayResponse {
+                    events: vec![ev("a"), ev("b")],
+                    next_cursor: Some(2),
+                },
+                Some(2) => ReplayResponse {
+                    events: vec![ev("c")],
+                    next_cursor: None,
+                },
+                _ => ReplayResponse {
+                    events: vec![],
+                    next_cursor: None,
+                },
             };
             Ok(serde_json::to_value(page).unwrap())
         }
-        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
-        async fn bundle_events_read_chain(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({"events": []})) }
-        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
-        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
-        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
-        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> { Ok(r) }
-        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn complete_command(&self, _: &str, _: i64, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> { Ok(json!({})) }
-        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> { Ok(Value::Null) }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
     }
 
     #[tokio::test]
@@ -1434,7 +1547,11 @@ mod tests {
         );
         let resp = client.replay_chain("C-1").await.unwrap();
         let types: Vec<&str> = resp.events.iter().map(|e| e.event_type.as_str()).collect();
-        assert_eq!(types, vec!["a", "b", "c"], "all pages must fold in chain order");
+        assert_eq!(
+            types,
+            vec!["a", "b", "c"],
+            "all pages must fold in chain order"
+        );
         assert!(resp.next_cursor.is_none());
     }
 }

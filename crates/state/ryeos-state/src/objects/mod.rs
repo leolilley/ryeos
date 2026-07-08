@@ -30,7 +30,7 @@ pub use bundle_event::{
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use item_source::ItemSource;
-pub use live_input::{LiveInputIntent, LiveInput};
+pub use live_input::{LiveInput, LiveInputIntent};
 pub use project_snapshot::ProjectSnapshot;
 pub use source_manifest::SourceManifest;
 pub use thread_event::{EventDurability, ThreadEvent};

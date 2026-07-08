@@ -960,10 +960,7 @@ typo_field: oops
             shadows: vec![],
         };
         let err = materialize_manifest(source, &ai_dir, "arc").unwrap_err();
-        assert!(
-            err.to_string().contains("runtime_authority"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("runtime_authority"), "got: {err}");
     }
 
     #[test]
@@ -1067,7 +1064,10 @@ smoke:
     bogus: true
 "#;
         let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "unknown smoke entry field must be rejected");
+        assert!(
+            result.is_err(),
+            "unknown smoke entry field must be rejected"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("bogus"), "error should name the field: {msg}");
     }
@@ -1076,7 +1076,10 @@ smoke:
     fn smoke_rejects_entry_without_ref() {
         let yaml = "name: test\nversion: \"1.0\"\nsmoke:\n  - name: no-ref\n";
         let result: Result<BundleManifestSource, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "smoke entry without `ref:` must be rejected");
+        assert!(
+            result.is_err(),
+            "smoke entry without `ref:` must be rejected"
+        );
     }
 
     #[test]
@@ -1094,11 +1097,9 @@ smoke:
         let err = validate_smoke_decls(&[decl(":missing-kind", None)]).unwrap_err();
         assert!(err.to_string().contains("canonical"), "{err}");
 
-        let err = validate_smoke_decls(&[
-            decl("tool:a/b", Some("dup")),
-            decl("tool:c/d", Some("dup")),
-        ])
-        .unwrap_err();
+        let err =
+            validate_smoke_decls(&[decl("tool:a/b", Some("dup")), decl("tool:c/d", Some("dup"))])
+                .unwrap_err();
         assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
@@ -1174,11 +1175,8 @@ shadows:
         let err = validate_shadow_decls(&[":missing-kind".to_string()]).unwrap_err();
         assert!(err.to_string().contains("canonical"), "{err}");
 
-        let err = validate_shadow_decls(&[
-            "config:a/b".to_string(),
-            "config:a/b".to_string(),
-        ])
-        .unwrap_err();
+        let err = validate_shadow_decls(&["config:a/b".to_string(), "config:a/b".to_string()])
+            .unwrap_err();
         assert!(err.to_string().contains("duplicate"), "{err}");
     }
 

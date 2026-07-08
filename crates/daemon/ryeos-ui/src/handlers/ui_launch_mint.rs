@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn launch_mint_request_defaults_to_read_only() {
         let req: Request = serde_json::from_value(serde_json::json!({
-            "surface_ref": "surface:ryeos/studio/base"
+            "surface_ref": "surface:ryeos/ui/base"
         }))
         .unwrap();
 

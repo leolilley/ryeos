@@ -41,9 +41,9 @@ mid-walk interruption.
   `allowed_actions(graph_run, running, …)` omits `interrupt`, so
   `commands/submit` refuses an `interrupt` command on a graph thread. This is
   the enforcement point — it holds for every caller (TUI, web, CLI, other
-  nodes), not just the studio.
-- **Client:** there is nothing to grey out, because the studio never surfaces a
-  command-style interrupt control. The only "interrupt" in the studio is
+  nodes), not just the ryeos-ui.
+- **Client:** there is nothing to grey out, because the ryeos-ui never surfaces a
+  command-style interrupt control. The only "interrupt" in the ryeos-ui is
   Alt+Enter (`SubmitInputInterrupt`) — a *text-bearing live redirect* through
   `service:threads/input`, not a `commands/submit` control command — and it is
   already gated on `supports_operator_followup`, which a graph declares `false`
@@ -55,16 +55,16 @@ mid-walk interruption.
 To stop a graph, use **cancel** (or **kill** when it has a process). Those stay
 in `allowed_actions` for a running graph.
 
-## 2. One cancel path for the studio (§5c.3)
+## 2. One cancel path for the ryeos-ui (§5c.3)
 
-**Decision: the studio's operator-facing cancel affordance routes through
+**Decision: the ryeos-ui's operator-facing cancel affordance routes through
 `service:commands/submit` with `command_type: cancel`.** That is the single
 audited cancel path.
 
 Three cancel services exist:
 
 - `service:threads/cancel` (core) — the raw cancel; CLI / delegate target.
-- `service:ui/studio/thread/cancel` (studio) — a daemon-only shim that delegates
+- `service:ui/ryeos-ui/thread/cancel` (ryeos-ui) — a daemon-only shim that delegates
   to `threads/cancel` under the verified session principal.
 - `service:commands/submit { command_type: cancel }` (standard) — the command
   channel: per-thread **ownership check** (`ctx.require_owner`) **and a durable
@@ -77,11 +77,11 @@ mechanism.
 
 ### What changed
 
-- `bundles/studio/.ai/views/ryeos/threads/list.yaml` — the row `cancel`
+- `bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml` — the row `cancel`
   affordance now invokes `service:commands/submit` with
   `{ thread_id: "{record.thread_id}", command_type: cancel }` instead of
-  `service:ui/studio/thread/cancel`. It rides the generic Service-invoke path
-  (`AffordanceInvoke::Service` → `StudioEffectKind::Invoke { intent: Service }`),
+  `service:ui/ryeos-ui/thread/cancel`. It rides the generic Service-invoke path
+  (`AffordanceInvoke::Service` → `RyeOsEffectKind::Invoke { intent: Service }`),
   so args reach the daemon as `/execute` parameters and target the row, not the
   route head. The authored `notice:` template resolves against the returned
   `CommandRecord` (which carries `thread_id`). This is the exact shape the
@@ -92,32 +92,32 @@ mechanism.
   affordance targets `commands/submit` with `command_type: cancel`, and that the
   killed service refs appear in no affordance.
 
-The studio launcher steering item "Cancel thread" already routes through
-`commands/submit` (via the typed `StudioEffectKind::SubmitThreadCommand`), so the
+The ryeos-ui launcher steering item "Cancel thread" already routes through
+`commands/submit` (via the typed `RyeOsEffectKind::SubmitThreadCommand`), so the
 operator-facing affordance and the launcher now share the one path.
 
 ### The other routes' remaining use sites
 
 - `service:threads/cancel` stays as the raw core cancel (CLI `thread cancel`,
-  and the delegate target of the studio shim). Not a studio affordance.
-- `service:ui/studio/thread/cancel` still backs the Esc / head-interrupt path:
-  `StudioUiEvent::InterruptHead` → `StudioAction::CancelThread` →
-  `StudioEffectKind::CancelThread` → the terminal executor's
-  `/ui/api/studio/thread/cancel` mapping. This is a client-internal typed effect,
+  and the delegate target of the ryeos-ui shim). Not a ryeos-ui affordance.
+- `service:ui/ryeos-ui/thread/cancel` still backs the Esc / head-interrupt path:
+  `RyeOsUiEvent::InterruptHead` → `RyeOsAction::CancelThread` →
+  `RyeOsEffectKind::CancelThread` → the terminal executor's
+  `/ui/api/ryeos-ui/thread/cancel` mapping. This is a client-internal typed effect,
   not the operator affordance, and semantically it too is a head cancel.
 
 ### Follow-up (needs files outside this branch's ownership)
 
 Collapsing the Esc path onto `commands/submit` as well — so
-`service:ui/studio/thread/cancel` and the `CancelThread` /
+`service:ui/ryeos-ui/thread/cancel` and the `CancelThread` /
 `ThreadCancelled` effect family can be deleted outright — is a clean negative
 diff, but it touches files this branch does not own: `reducer/mod.rs`
 (`InterruptHead` should dispatch `SubmitThreadCommand { Cancel }`; drop the
-`CancelThread` action handler), `event.rs` (`StudioAction::CancelThread`),
-`effect.rs` (`StudioEffectKind::CancelThread` + `StudioEffectResultKind::ThreadCancelled`),
+`CancelThread` action handler), `event.rs` (`RyeOsAction::CancelThread`),
+`effect.rs` (`RyeOsEffectKind::CancelThread` + `RyeOsEffectResultKind::ThreadCancelled`),
 `reducer/effect_results.rs` (the `ThreadCancelled` arms — this branch owns this
 file, but the removal is only valid as part of the cross-file switch),
-`clients/terminal/src/app/effects.rs` and `clients/web/pkg/studio_effects.js`
+`clients/terminal/src/app/effects.rs` and `clients/web/pkg/ryeos_effects.js`
 (the executor mappings), plus the `CancelThread` tests in `mod.rs` /
 `effect_results.rs`. Booked for a follow-up that owns the effect family.
 
@@ -126,6 +126,6 @@ file, but the removal is only valid as part of the cross-file switch),
 Both YAML edits invalidate signatures and ride the single Wave 3 republish:
 
 - `bundles/standard/.ai/node/engine/kinds/graph/graph.kind-schema.yaml`
-- `bundles/studio/.ai/views/ryeos/threads/list.yaml`
+- `bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml`
 
 This decision record is a repo doc; it needs no signing or republish.

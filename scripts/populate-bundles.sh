@@ -13,7 +13,7 @@
 #   ./scripts/populate-bundles.sh --key <pem-path> --owner <label> [--bundle-set full|central-host|standard|hosted-node|hosted-workflow]
 #
 # Bundle sets:
-#   full            core + standard + web + browser + studio + hosted-node (default)
+#   full            core + standard + web + browser + ryeos-ui + hosted-node (default)
 #   central-host    core + standard + web — standard node plus the rye/web/search
 #                   tool; the app-hosting image (e.g. tv-tracker) that also serves
 #                   its own central-auth realm
@@ -180,8 +180,9 @@ CORE="$ROOT/bundles/core"
 STD="$ROOT/bundles/standard"
 WEB="$ROOT/bundles/web"
 BROWSER="$ROOT/bundles/browser"
-STUDIO="$ROOT/bundles/studio"
+RYEOS_UI="$ROOT/bundles/ryeos-ui"
 HOSTED_NODE="$ROOT/bundles/hosted-node"
+TVTA="$ROOT/bundles/tv-tracker-authoring"
 SOURCE_ROOT_AI="$ROOT/bundles/.ai"
 INIT_SEED="$SOURCE_ROOT_AI/node/init"
 PUBLISHER_PUBKEY_RAW_B64="$(publisher_pubkey_raw_b64)"
@@ -210,7 +211,7 @@ CORE_BIN="$CORE/.ai/bin/$TRIPLE"
 STD_BIN="$STD/.ai/bin/$TRIPLE"
 WEB_BIN="$WEB/.ai/bin/$TRIPLE"
 BROWSER_BIN="$BROWSER/.ai/bin/$TRIPLE"
-STUDIO_BIN="$STUDIO/.ai/bin/$TRIPLE"
+RYEOS_UI_BIN="$RYEOS_UI/.ai/bin/$TRIPLE"
 HOSTED_NODE_BIN="$HOSTED_NODE/.ai/bin/$TRIPLE"
 
 # Bin dirs for exactly the bin-managed bundles this set builds.
@@ -344,11 +345,11 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
 fi
 
 if [[ "$BUNDLE_SET" == "full" ]]; then
-  echo "[populate-bundles] installing studio bundle binaries → $STUDIO_BIN"
+  echo "[populate-bundles] installing ryeos-ui bundle binaries → $RYEOS_UI_BIN"
   install -m 0755 \
     "$TARGET/release/ryeos-tui" \
     "$TARGET/release/web" \
-    "$STUDIO_BIN/"
+    "$RYEOS_UI_BIN/"
 
   echo "[populate-bundles] installing browser bundle binaries → $BROWSER_BIN"
   install -m 0755 \
@@ -375,15 +376,8 @@ cp "$KEY" "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 chmod 0600 "$SIGN_APP_ROOT/.ai/config/keys/signing/private_key.pem"
 
 echo "[populate-bundles] publishing core bundle…"
-# Core ships `knowledge/` documentation items whose kind is defined by standard,
-# which is not yet signed at this point. This first pass is a deliberately
-# partial publish: `--allow-uncovered-kind-dirs` acknowledges the uncovered
-# `knowledge/` directory so the publish does not hard-fail. The republish below
-# (with the standard registry root) signs those items and runs WITHOUT the flag,
-# so any genuinely uncovered directory there is caught loudly.
 RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
   --registry-root "$CORE" \
-  --allow-uncovered-kind-dirs \
   --owner "$OWNER" >/dev/null
 
 # central-auth ships in the source tree and is discovered/parsed at init, so its
@@ -402,16 +396,6 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" || "$BUNDLE_SET
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STD" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
-
-  echo "[populate-bundles] republishing core bundle with standard extension kinds…"
-  # Core owns foundational runtime items but also ships documentation items whose
-  # `knowledge` kind is provided by standard. Once standard has been signed, run
-  # core through the authoring path again with both roots so those extension-kind
-  # items are signed by the publisher key instead of being silently skipped.
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$CORE" \
-    --registry-root "$CORE" \
-    --registry-root "$STD" \
-    --owner "$OWNER" >/dev/null
 fi
 
 if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
@@ -421,14 +405,24 @@ if [[ "$BUNDLE_SET" == "full" || "$BUNDLE_SET" == "central-host" ]]; then
     --owner "$OWNER" >/dev/null
 fi
 
+if [[ "$BUNDLE_SET" == "central-host" ]]; then
+  # tv-tracker-authoring — source-only bundle (tool kind from core); ships the
+  # operator context-doc author/read wrappers. No compiled binary of its own.
+  echo "[populate-bundles] publishing tv-tracker-authoring bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$TVTA" \
+    --registry-root "$CORE" \
+    --registry-root "$STD" \
+    --owner "$OWNER" >/dev/null
+fi
+
 if [[ "$BUNDLE_SET" == "full" ]]; then
   echo "[populate-bundles] publishing browser bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$BROWSER" \
     --registry-root "$CORE" \
     --owner "$OWNER" >/dev/null
 
-  echo "[populate-bundles] publishing studio bundle…"
-  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$STUDIO" \
+  echo "[populate-bundles] publishing ryeos-ui bundle…"
+  RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$RYEOS_UI" \
     --registry-root "$CORE" \
     --registry-root "$STD" \
     --owner "$OWNER" >/dev/null

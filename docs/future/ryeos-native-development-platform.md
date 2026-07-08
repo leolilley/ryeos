@@ -45,7 +45,7 @@ GitHub concepts should become projections of richer RyeOS-native objects:
    tools/services with artifact and target-dir handling.
 3. Model check runs as durable thread/check records with logs in CAS.
 4. Add scheduler-managed runner execution for expensive checks.
-5. Add Studio/TUI review surfaces for change records and check results.
+5. Add RyeOS UI/TUI review surfaces for change records and check results.
 6. Only then consider a RyeOS-hosted remote that can mirror to GitHub.
 
 ## Non-goals

@@ -41,6 +41,14 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
                 diagnostics.message
             )
         }
+        LifecycleStatus::Starting { pid, .. } => {
+            // A booting daemon holds the state lock; a second one here
+            // would double-run against the same state.
+            bail!(
+                "a daemon (pid {pid}) is already starting up but not yet serving; \
+                 wait for it to become ready"
+            )
+        }
     }
 
     let _start_lock = loop {
@@ -79,6 +87,11 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
         .spawn()
         .with_context(|| format!("spawn {}", ryeosd.display()))?;
 
+    // A boot that includes projection catch-up (e.g. right after a deploy)
+    // can take minutes before the control socket exists. Say so instead of
+    // sitting silent for the whole readiness wait.
+    let wait_started = Instant::now();
+    let mut next_progress_note = wait_started + Duration::from_secs(5);
     loop {
         let status = crate::status::status(env).await?;
         if is_running(&status) {
@@ -86,6 +99,23 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
                 status,
                 already_running: false,
             });
+        }
+
+        if Instant::now() >= next_progress_note {
+            match &status {
+                LifecycleStatus::Starting { pid, .. } => eprintln!(
+                    "ryeosd (pid {pid}) is booting — still initializing after {}s \
+                     (projection catch-up after a deploy can take minutes); log: {}",
+                    wait_started.elapsed().as_secs(),
+                    stderr_log_path.display()
+                ),
+                _ => eprintln!(
+                    "waiting for the daemon to become ready ({}s); log: {}",
+                    wait_started.elapsed().as_secs(),
+                    stderr_log_path.display()
+                ),
+            }
+            next_progress_note = Instant::now() + Duration::from_secs(15);
         }
 
         if let Some(exit) = child.try_wait().context("poll spawned ryeosd")? {

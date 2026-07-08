@@ -4,7 +4,7 @@
 #
 # Bakes core + standard only: project sync/CAS/remote APIs from core plus
 # scheduler, graph/directive/knowledge kind schemas, services, and runtimes
-# from standard. Hosted-node policy, studio, and web can be installed later
+# from standard. Hosted-node policy, ryeos-ui, and web can be installed later
 # when needed.
 
 FROM rust:1.95-slim AS builder

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T12:24:56Z:bed13eec7c14ed24611698c758eadd18541fc9a186a9ab7bb858955e465d09dd:AuMpvfml2KIvIbXsoB1asYucoGKaOwEBKxVnJ2D6bxjtyJY0oVkZPBswo9ML1VftKwc8JxXv/7eCQvZDEUydBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/projects/add
+version: "1.0.0"
+description: Add or update a canonical local project root in the per-principal RyeOS UI registry.
+endpoint: ui.ryeos.projects.add
+availability: daemon_only

@@ -22,6 +22,9 @@ pub use runtime_db::{CommandRecord, NewCommandRecord, RuntimeInfo};
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
     pub event_id: i64,
+    /// CAS hash of the signed thread event object for durable records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_hash: Option<String>,
     pub chain_root_id: String,
     pub chain_seq: i64,
     pub thread_id: String,
@@ -284,12 +287,26 @@ fn persisted_from_append(
     result: &ryeos_state::chain::AppendResult,
     events: &[NewEventRecord],
 ) -> Vec<PersistedEventRecord> {
-    result
-        .events
+    persisted_from_stored_events(&result.events, events)
+}
+
+fn persisted_from_add_thread_with_events(
+    result: &ryeos_state::chain::AddThreadWithEventsResult,
+    events: &[NewEventRecord],
+) -> Vec<PersistedEventRecord> {
+    persisted_from_stored_events(&result.events, events)
+}
+
+fn persisted_from_stored_events(
+    stored_events: &[ryeos_state::objects::ThreadEvent],
+    events: &[NewEventRecord],
+) -> Vec<PersistedEventRecord> {
+    stored_events
         .iter()
         .zip(events.iter())
         .map(|(stored, input)| PersistedEventRecord {
             event_id: stored.chain_seq as i64,
+            event_hash: Some(thread_event_hash(stored)),
             chain_root_id: stored.chain_root_id.clone(),
             chain_seq: stored.chain_seq as i64,
             thread_id: stored.thread_id.clone(),
@@ -297,11 +314,15 @@ fn persisted_from_append(
             event_type: input.event_type.clone(),
             storage_class: input.storage_class.clone(),
             ts: stored.ts.clone(),
-            prev_chain_event_hash: None,
-            prev_thread_event_hash: None,
+            prev_chain_event_hash: stored.prev_chain_event_hash.clone(),
+            prev_thread_event_hash: stored.prev_thread_event_hash.clone(),
             payload: input.payload.clone(),
         })
         .collect()
+}
+
+fn thread_event_hash(event: &ryeos_state::objects::ThreadEvent) -> String {
+    lillux::sha256_hex(lillux::canonical_json(&event.to_value()).as_bytes())
 }
 
 fn ephemeral_record(
@@ -311,6 +332,7 @@ fn ephemeral_record(
 ) -> PersistedEventRecord {
     PersistedEventRecord {
         event_id: 0,
+        event_hash: None,
         chain_root_id: chain_root_id.to_string(),
         chain_seq: 0,
         thread_id: thread_id.to_string(),
@@ -505,6 +527,67 @@ impl StateStore {
         )?;
 
         Ok(persisted_from_append(&result, &[create_event]))
+    }
+
+    #[tracing::instrument(
+        name = "state:create_trace_branch",
+        skip(self, thread, branch_payload),
+        fields(
+            thread_id = %thread.thread_id,
+            chain_root_id = %thread.chain_root_id,
+            item_ref = %thread.item_ref,
+        )
+    )]
+    pub fn create_trace_branch(
+        &self,
+        thread: &NewThreadRecord,
+        branch_payload: Value,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+
+        if thread.thread_id == thread.chain_root_id {
+            bail!("trace branch child must not be a chain root thread");
+        }
+        if thread.upstream_thread_id.is_some() {
+            bail!("trace branch child must not use upstream_thread_id");
+        }
+        if g.state_db.get_thread(&thread.thread_id)?.is_some() {
+            bail!("thread already exists: {}", thread.thread_id);
+        }
+
+        let create_event = NewEventRecord {
+            event_type: ryeos_state::event_types::THREAD_CREATED.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: json!({
+                "kind": &thread.kind,
+                "item_ref": &thread.item_ref,
+                "executor_ref": &thread.executor_ref,
+                "launch_mode": &thread.launch_mode,
+                "trace_branch": true,
+            }),
+        };
+        let branch_event = NewEventRecord {
+            event_type: ryeos_state::event_types::EDGE_RECORDED.to_string(),
+            storage_class: "indexed".to_string(),
+            payload: branch_payload,
+        };
+        let events_to_append = vec![create_event, branch_event];
+        let te = convert_events(&events_to_append, &thread.chain_root_id, &thread.thread_id);
+        let result = g.state_db.add_thread_with_events(
+            &thread.chain_root_id,
+            build_snapshot(thread),
+            te,
+            g.signer.as_ref(),
+        )?;
+
+        g.runtime_db
+            .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
+
+        Ok(persisted_from_add_thread_with_events(
+            &result,
+            &events_to_append,
+        ))
     }
 
     #[tracing::instrument(
@@ -795,7 +878,8 @@ impl StateStore {
         // write permit + lock held here serialize `create_continuation`, so this
         // check-then-create is atomic — a double-submit or race cannot mint
         // sibling successors (which would make `successor_thread_id` ambiguous).
-        if let Some(existing) = queries::continuation_successor(g.state_db.projection(), source_thread_id)?
+        if let Some(existing) =
+            queries::continuation_successor(g.state_db.projection(), source_thread_id)?
         {
             bail!("thread {source_thread_id} already continued as {existing}");
         }
@@ -1595,10 +1679,7 @@ impl StateStore {
     /// Chain-wide execution usage totals (tokens, cost, turns, thread count)
     /// for a `chain_root_id` — the deep-watch summary of an execution and its
     /// continuations.
-    pub fn chain_usage_totals(
-        &self,
-        chain_root_id: &str,
-    ) -> Result<queries::ThreadUsageTotals> {
+    pub fn chain_usage_totals(&self, chain_root_id: &str) -> Result<queries::ThreadUsageTotals> {
         let g = self.lock()?;
         queries::sum_thread_usage_latest_by_chain(g.state_db.projection(), chain_root_id)
     }
@@ -1635,10 +1716,7 @@ impl StateStore {
     /// thread's continuation successor so the client can identify chain heads
     /// (a head has no successor). Shared by the filtered and unfiltered list
     /// paths.
-    fn rows_to_list_items(
-        g: &Inner,
-        rows: Vec<queries::ThreadRow>,
-    ) -> Result<Vec<ThreadListItem>> {
+    fn rows_to_list_items(g: &Inner, rows: Vec<queries::ThreadRow>) -> Result<Vec<ThreadListItem>> {
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             let successor_thread_id = if is_terminal_status(&row.status) {
@@ -1895,7 +1973,8 @@ impl StateStore {
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
-        g.runtime_db.release_thread_launch_claim(thread_id, claim_id)
+        g.runtime_db
+            .release_thread_launch_claim(thread_id, claim_id)
     }
 
     /// Read the current launch claim, if any — distinguishes an unlaunched
@@ -2118,6 +2197,7 @@ impl StateStore {
                 })?;
                 Ok(PersistedEventRecord {
                     event_id: row.event_id,
+                    event_hash: Some(row.event_hash),
                     chain_root_id: row.chain_root_id,
                     chain_seq: row.chain_seq,
                     thread_id: row.thread_id,
@@ -2155,6 +2235,7 @@ impl StateStore {
                 })?;
                 Ok(PersistedEventRecord {
                     event_id: row.event_id,
+                    event_hash: Some(row.event_hash),
                     chain_root_id: row.chain_root_id,
                     chain_seq: row.chain_seq,
                     thread_id: row.thread_id,
@@ -2188,6 +2269,7 @@ impl StateStore {
                 })?;
                 Ok(PersistedEventRecord {
                     event_id: row.event_id,
+                    event_hash: Some(row.event_hash),
                     chain_root_id: row.chain_root_id,
                     chain_seq: row.chain_seq,
                     thread_id: row.thread_id,
@@ -2342,7 +2424,8 @@ impl StateStore {
         terminal_status: &str,
     ) -> Result<Vec<CommandRecord>> {
         let g = self.lock()?;
-        g.runtime_db.settle_open_commands(thread_id, terminal_status)
+        g.runtime_db
+            .settle_open_commands(thread_id, terminal_status)
     }
 
     /// Record that `parent_thread_id` spawned `child_thread_id` (operational
@@ -2403,5 +2486,155 @@ fn terminal_event_type(status: &str) -> Result<&'static str> {
         "timed_out" => Ok("thread_timed_out"),
         "continued" => Ok("thread_continued"),
         other => bail!("invalid terminal event status: {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    struct LocalTestSigner;
+
+    impl Signer for LocalTestSigner {
+        fn sign(&self, _data: &[u8]) -> Vec<u8> {
+            vec![1; 64]
+        }
+
+        fn fingerprint(&self) -> &str {
+            "fp:test"
+        }
+    }
+
+    fn test_store() -> StateStore {
+        let tmp = tempdir().expect("tempdir").keep();
+        StateStore::new(
+            tmp.join("state"),
+            tmp.join("runtime.sqlite3"),
+            Arc::new(LocalTestSigner),
+            WriteBarrier::new(),
+        )
+        .expect("state store")
+    }
+
+    fn thread_record(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
+        NewThreadRecord {
+            thread_id: thread_id.to_string(),
+            chain_root_id: chain_root_id.to_string(),
+            kind: "directive".to_string(),
+            item_ref: "directive:test".to_string(),
+            executor_ref: "native:test".to_string(),
+            launch_mode: "inline".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("fp:test".to_string()),
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+        }
+    }
+
+    #[test]
+    fn trace_branch_does_not_project_ordinary_upstream_edge() {
+        let store = test_store();
+        store
+            .create_thread(&thread_record("T-root", "T-root"))
+            .expect("root thread");
+
+        let branch = thread_record("T-branch", "T-root");
+        let persisted = store
+            .create_trace_branch(
+                &branch,
+                json!({
+                    "relation": "trace_branch",
+                    "child_thread_id": "T-branch",
+                    "parent_event_ref": {"chain_root_id": "T-root"},
+                    "state_anchor_ref": {"chain_root_id": "T-root"}
+                }),
+            )
+            .expect("trace branch");
+
+        let child = store
+            .get_thread("T-branch")
+            .expect("get branch")
+            .expect("branch thread");
+        assert_eq!(child.upstream_thread_id, None);
+        assert!(store.list_chain_edges("T-root").expect("edges").is_empty());
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(
+            persisted[1].event_type,
+            ryeos_state::event_types::EDGE_RECORDED
+        );
+        assert_eq!(persisted[1].payload["relation"], json!("trace_branch"));
+    }
+
+    #[test]
+    fn trace_branch_duplicate_explicit_child_id_does_not_append_events() {
+        let store = test_store();
+        store
+            .create_thread(&thread_record("T-root", "T-root"))
+            .expect("root thread");
+
+        let branch = thread_record("T-branch", "T-root");
+        store
+            .create_trace_branch(
+                &branch,
+                json!({
+                    "relation": "trace_branch",
+                    "child_thread_id": "T-branch",
+                    "parent_event_ref": {"chain_root_id": "T-root"},
+                    "state_anchor_ref": {"chain_root_id": "T-root"}
+                }),
+            )
+            .expect("trace branch");
+
+        let head_after_first = {
+            let g = store.lock().expect("lock");
+            g.state_db
+                .read_generic_head_ref("chains", "T-root")
+                .expect("read chain head")
+                .expect("chain head")
+                .target_hash
+        };
+
+        let err = store
+            .create_trace_branch(
+                &branch,
+                json!({
+                    "relation": "trace_branch",
+                    "child_thread_id": "T-branch",
+                    "parent_event_ref": {"chain_root_id": "T-root"},
+                    "state_anchor_ref": {"chain_root_id": "T-root"}
+                }),
+            )
+            .expect_err("duplicate child id should fail");
+
+        assert!(
+            err.to_string().contains("already exists"),
+            "unexpected error: {err:#}"
+        );
+
+        let head_after_duplicate = {
+            let g = store.lock().expect("lock");
+            g.state_db
+                .read_generic_head_ref("chains", "T-root")
+                .expect("read chain head")
+                .expect("chain head")
+                .target_hash
+        };
+        assert_eq!(head_after_duplicate, head_after_first);
+
+        let events = store
+            .replay_events("T-root", Some("T-branch"), None, 10)
+            .expect("branch replay");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].event_type,
+            ryeos_state::event_types::THREAD_CREATED
+        );
+        assert_eq!(
+            events[1].event_type,
+            ryeos_state::event_types::EDGE_RECORDED
+        );
     }
 }

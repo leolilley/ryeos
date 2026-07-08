@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T12:24:56Z:2aca97583501a939131dbd1a53b269c8b544c4992f435cf2ef3806a4b6332da7:TbaUHDAOIpNnPm46136cIWpbR+nkcblUBMK8weIA8dsrupkPxisqYcuLlazRJlgFKxzupdo520gPuE3fmL/TCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/remotes/list
+version: "1.0.0"
+description: List configured remotes for the active RyeOS UI project session.
+endpoint: ui.ryeos.remotes.list
+availability: daemon_only

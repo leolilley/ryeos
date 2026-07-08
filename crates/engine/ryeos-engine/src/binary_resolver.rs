@@ -963,7 +963,9 @@ mod tests {
         write_signed_bundle_manifest(&source, "authoring", &[], &["tool"], &[], &key);
         write_signed_bundle_manifest(&target, "core", &["tool"], &[], &[], &key);
         let roots = roots_for(&[&source, &target]);
-        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        let wrapper = source
+            .join(crate::AI_DIR)
+            .join("tools/authoring/author-item.yaml");
         std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
         std::fs::write(&wrapper, "version: 0.1.0\n").unwrap();
 
@@ -991,7 +993,9 @@ mod tests {
         write_signed_bundle_manifest(&source, "authoring", &[], &["knowledge"], &[], &key);
         write_signed_bundle_manifest(&target, "core", &["tool"], &[], &[], &key);
         let roots = roots_for(&[&source, &target]);
-        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        let wrapper = source
+            .join(crate::AI_DIR)
+            .join("tools/authoring/author-item.yaml");
 
         let err = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
@@ -1018,7 +1022,9 @@ mod tests {
         let (fp, key) = write_resolver_fixture(&source, "local");
         write_signed_bundle_manifest(&source, "authoring", &["tool"], &[], &[], &key);
         let roots = roots_for(&[&source]);
-        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        let wrapper = source
+            .join(crate::AI_DIR)
+            .join("tools/authoring/author-item.yaml");
 
         let err = resolve_runtime_binary_command_ref(
             "bin:ryeos/core/ryeos-core-tools",
@@ -1048,7 +1054,9 @@ mod tests {
         write_signed_bundle_manifest(&target_a, "core", &["tool"], &[], &[], &key);
         write_signed_bundle_manifest(&target_b, "core", &["tool"], &[], &[], &key);
         let roots = roots_for(&[&source, &target_a, &target_b]);
-        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        let wrapper = source
+            .join(crate::AI_DIR)
+            .join("tools/authoring/author-item.yaml");
 
         let err = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
@@ -1104,7 +1112,9 @@ mod tests {
         let rogue = SigningKey::from_bytes(&[7u8; 32]);
         write_signed_bundle_manifest(&target, "core", &["tool"], &[], &[], &rogue);
         let roots = roots_for(&[&source, &target]);
-        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        let wrapper = source
+            .join(crate::AI_DIR)
+            .join("tools/authoring/author-item.yaml");
 
         let err = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",
@@ -1148,9 +1158,18 @@ mod tests {
             &key,
             "runtime_authority:\n  item_authoring:\n    - kind: knowledge\n      namespace: runtime-authored/*\n",
         );
-        write_full_signed_manifest(&target, "core", &["tool"], &[], &key, "runtime_authority: {}\n");
+        write_full_signed_manifest(
+            &target,
+            "core",
+            &["tool"],
+            &[],
+            &key,
+            "runtime_authority: {}\n",
+        );
         let roots = roots_for(&[&source, &target]);
-        let wrapper = source.join(crate::AI_DIR).join("tools/authoring/author-item.yaml");
+        let wrapper = source
+            .join(crate::AI_DIR)
+            .join("tools/authoring/author-item.yaml");
 
         let resolved = resolve_runtime_binary_command_ref(
             "bin:core/ryeos-core-tools",

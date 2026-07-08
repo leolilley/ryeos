@@ -620,8 +620,14 @@ mod tests {
     #[test]
     fn signal_missing_pgid_is_not_delivered() {
         // pgid 0 must NOT map to kill(-0, …) (the daemon's own group).
-        assert_eq!(signal_process_group(0, libc::SIGUSR1), SignalResult::MissingPgid);
-        assert_eq!(signal_process_group(-5, libc::SIGUSR1), SignalResult::MissingPgid);
+        assert_eq!(
+            signal_process_group(0, libc::SIGUSR1),
+            SignalResult::MissingPgid
+        );
+        assert_eq!(
+            signal_process_group(-5, libc::SIGUSR1),
+            SignalResult::MissingPgid
+        );
     }
 
     #[test]

@@ -367,7 +367,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         let bundles = tmp.path().join("bundles");
-        let target = bundles.join("studio");
+        let target = bundles.join("ryeos-ui");
         fs::create_dir_all(src.join("new")).unwrap();
         fs::create_dir_all(target.join("old")).unwrap();
         fs::write(src.join("new/file.txt"), b"new").unwrap();
@@ -377,8 +377,8 @@ mod tests {
 
         assert_eq!(fs::read(target.join("new/file.txt")).unwrap(), b"new");
         assert!(!target.join("old/file.txt").exists());
-        assert!(!bundles.join(".studio.staging").exists());
-        assert!(!bundles.join(".studio.backup.prev").exists());
+        assert!(!bundles.join(".ryeos-ui.staging").exists());
+        assert!(!bundles.join(".ryeos-ui.backup.prev").exists());
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         let bundles = tmp.path().join("bundles");
-        let target = bundles.join("studio");
+        let target = bundles.join("ryeos-ui");
         fs::create_dir_all(src.join(".ai/node/commands")).unwrap();
         fs::create_dir_all(target.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
         fs::create_dir_all(target.join(".ai/objects/blobs")).unwrap();
@@ -421,7 +421,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("src");
         let bundles = tmp.path().join("bundles");
-        let target = bundles.join("studio");
+        let target = bundles.join("ryeos-ui");
         fs::create_dir_all(src.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
         fs::create_dir_all(target.join(".ai/bin/x86_64-unknown-linux-gnu")).unwrap();
         fs::write(src.join(".ai/bin/x86_64-unknown-linux-gnu/web"), b"new").unwrap();

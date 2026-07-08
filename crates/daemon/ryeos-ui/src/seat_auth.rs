@@ -1,6 +1,6 @@
-//! Seat caller authentication for studio services.
+//! Seat caller authentication for ryeos-ui services.
 //!
-//! Studio sources serve two caller lanes with one gate:
+//! RyeOS UI sources serve two caller lanes with one gate:
 //! - **browser sessions** (cookie → `session:<id>` fingerprint), and
 //! - **verified operators** (signed requests through the one daemon
 //!   invocation path — `/execute` → service dispatch).
@@ -46,8 +46,8 @@ pub fn require_seat_caller(
     state: &AppState,
 ) -> Result<SeatCaller, HandlerError> {
     if let Some(session_id) = ctx.fingerprint.strip_prefix("session:") {
-        let ui = get_ui_state(state)
-            .ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
+        let ui =
+            get_ui_state(state).ok_or_else(|| HandlerError::Internal("UiState not set".into()))?;
         return ui
             .browser_sessions
             .get_session(session_id)

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-06T12:32:28Z:381605ba161c921545bb6cfbdfb49f6d535b21f7ab2df20f0f306da665d08256:hO2YfddX2p22VyFK9SDGFP0HbjT3pS/x8M4D8frg2jpim3uL/30tuKgV8E7ve/AkRDABdK+fEoUijccBlpHeCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/projects/add
+path: /ui/api/ryeos-ui/projects/add
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/projects/add"

@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-06T12:32:28Z:790c1dc34b2261ec544cbc661a9083f5fa8c60c7017ca3f4346458fbbc32e685:SmGOuJxWZ3lwKxjRHr3wGoPCCX/4Oee4hP67TNslxM9yLFVrc8Z6y34h5P7TKqYFxTd6Xje9MODTpPu0CBAuAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/files/list
+path: /ui/api/ryeos-ui/files/list
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/files/list"

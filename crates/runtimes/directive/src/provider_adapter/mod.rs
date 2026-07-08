@@ -5,5 +5,5 @@ pub mod tools;
 
 pub use streaming::call_provider_streaming;
 pub use streaming::ProviderStreamError;
-pub use streaming::StreamingCallInput;
 pub use streaming::StreamOutcome;
+pub use streaming::StreamingCallInput;

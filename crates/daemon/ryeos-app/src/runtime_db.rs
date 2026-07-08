@@ -362,31 +362,131 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::TableSpec {
                 name: "follow_waiter",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "follow_key", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "parent_thread_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "parent_chain_root_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "parent_successor_thread_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "follow_node", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "graph_run_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "step_count", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "frontier_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "child_chain_root_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "child_terminal_thread_id", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "child_terminal_status", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "terminal_envelope", col_type: "TEXT", pk: false, not_null: false },
-                    sqlite_schema::ColumnSpec { name: "phase", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "updated_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "follow_key",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "parent_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "parent_chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "parent_successor_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "follow_node",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "graph_run_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "step_count",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frontier_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_terminal_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_terminal_status",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "terminal_envelope",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
                 name: "thread_child_link",
                 columns: &[
-                    sqlite_schema::ColumnSpec { name: "child_thread_id", col_type: "TEXT", pk: true, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "parent_thread_id", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "relation", col_type: "TEXT", pk: false, not_null: true },
-                    sqlite_schema::ColumnSpec { name: "created_at_ms", col_type: "INTEGER", pk: false, not_null: true },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "parent_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "relation",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
                 ],
             },
             sqlite_schema::TableSpec {
@@ -749,9 +849,7 @@ impl RuntimeDb {
     /// any surviving claim is stale and would otherwise block a reconcile relaunch
     /// of a `created` successor until the lease expired. Returns the count removed.
     pub fn clear_all_launch_claims(&self) -> Result<usize> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM thread_launch_claim", [])?)
+        Ok(self.conn.execute("DELETE FROM thread_launch_claim", [])?)
     }
 
     /// Read the current launch claim for a thread, if any. The reconciler uses
@@ -1057,11 +1155,12 @@ impl RuntimeDb {
         child_chain_root_id: &str,
     ) -> Result<()> {
         let w = self.require_follow_waiter(follow_key)?;
-        match (w.child_thread_id.as_deref(), w.child_chain_root_id.as_deref()) {
+        match (
+            w.child_thread_id.as_deref(),
+            w.child_chain_root_id.as_deref(),
+        ) {
             (None, None) => {}
-            (Some(t), Some(c)) if t == child_thread_id && c == child_chain_root_id => {
-                return Ok(())
-            }
+            (Some(t), Some(c)) if t == child_thread_id && c == child_chain_root_id => return Ok(()),
             _ => bail!(
                 "follow waiter {follow_key} already has a different child; refusing to overwrite"
             ),
@@ -1099,7 +1198,11 @@ impl RuntimeDb {
             "UPDATE follow_waiter
                 SET parent_successor_thread_id = ?2, updated_at_ms = ?3
               WHERE follow_key = ?1",
-            params![follow_key, successor_thread_id, lillux::time::timestamp_millis()],
+            params![
+                follow_key,
+                successor_thread_id,
+                lillux::time::timestamp_millis()
+            ],
         )?;
         Ok(())
     }
@@ -1113,7 +1216,10 @@ impl RuntimeDb {
             return Ok(());
         }
         if w.phase != follow_phase::RESERVED {
-            bail!("follow waiter {follow_key} cannot transition {} -> waiting", w.phase);
+            bail!(
+                "follow waiter {follow_key} cannot transition {} -> waiting",
+                w.phase
+            );
         }
         if w.child_chain_root_id.is_none() || w.parent_successor_thread_id.is_none() {
             bail!(
@@ -1131,12 +1237,13 @@ impl RuntimeDb {
             return Ok(());
         }
         if w.phase != follow_phase::READY {
-            bail!("follow waiter {follow_key} cannot transition {} -> resuming", w.phase);
+            bail!(
+                "follow waiter {follow_key} cannot transition {} -> resuming",
+                w.phase
+            );
         }
         if w.terminal_envelope.is_none() || w.parent_successor_thread_id.is_none() {
-            bail!(
-                "follow waiter {follow_key} cannot resume without terminal envelope + successor"
-            );
+            bail!("follow waiter {follow_key} cannot resume without terminal envelope + successor");
         }
         self.set_follow_phase_unchecked(follow_key, follow_phase::RESUMING)
     }
@@ -1297,15 +1404,18 @@ impl RuntimeDb {
             "SELECT {FOLLOW_WAITER_COLUMNS} FROM follow_waiter ORDER BY created_at_ms ASC"
         ))?;
         let rows = stmt.query_map([], read_follow_waiter_row)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Delete a follow waiter — only once the parent successor is independently
     /// recoverable (checkpoint copied with the result + launch claimed, or the
     /// successor reached terminal).
     pub fn clear_follow_waiter(&self, follow_key: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM follow_waiter WHERE follow_key = ?1", params![follow_key])?;
+        self.conn.execute(
+            "DELETE FROM follow_waiter WHERE follow_key = ?1",
+            params![follow_key],
+        )?;
         Ok(())
     }
 
@@ -1687,7 +1797,10 @@ mod tests {
             "pending"
         );
         // Idempotent: nothing open remains to settle.
-        assert!(db.settle_open_commands("t1", "cancelled").unwrap().is_empty());
+        assert!(db
+            .settle_open_commands("t1", "cancelled")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1763,26 +1876,35 @@ mod tests {
     fn launch_window_admits_to_width_then_queues_fifo() {
         let (_tmp, db) = fresh_db();
         db.launch_window_insert("c1", "P:gr:fan", 2, 1).unwrap();
-        assert_eq!(db.launch_window_admit("P:gr:fan", None, 1).unwrap(), vec!["c1"]);
+        assert_eq!(
+            db.launch_window_admit("P:gr:fan", None, 1).unwrap(),
+            vec!["c1"]
+        );
         db.launch_window_insert("c2", "P:gr:fan", 2, 2).unwrap();
-        assert_eq!(db.launch_window_admit("P:gr:fan", None, 2).unwrap(), vec!["c2"]);
+        assert_eq!(
+            db.launch_window_admit("P:gr:fan", None, 2).unwrap(),
+            vec!["c2"]
+        );
         // Width 2 reached — the third member queues.
         db.launch_window_insert("c3", "P:gr:fan", 2, 3).unwrap();
-        assert!(db.launch_window_admit("P:gr:fan", None, 3).unwrap().is_empty());
+        assert!(db
+            .launch_window_admit("P:gr:fan", None, 3)
+            .unwrap()
+            .is_empty());
         assert!(db.launch_window_is_queued("c3").unwrap());
         assert!(db.launch_window_is_member("c3").unwrap());
         assert!(!db.launch_window_is_queued("c1").unwrap());
 
         // A hard terminal releases the slot and admits the oldest queued.
-        assert_eq!(
-            db.launch_window_release("c1", None, 4).unwrap(),
-            vec!["c3"]
-        );
+        assert_eq!(db.launch_window_release("c1", None, 4).unwrap(), vec!["c3"]);
         assert!(!db.launch_window_is_member("c1").unwrap());
         assert!(!db.launch_window_is_queued("c3").unwrap());
 
         // Releasing a non-member is a no-op.
-        assert!(db.launch_window_release("nope", None, 5).unwrap().is_empty());
+        assert!(db
+            .launch_window_release("nope", None, 5)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -1791,13 +1913,28 @@ mod tests {
         db.launch_window_insert("a1", "P:one", 5, 1).unwrap();
         db.launch_window_insert("b1", "Q:two", 5, 2).unwrap();
         // Global ceiling of 1: only the first window admits.
-        assert_eq!(db.launch_window_admit("P:one", Some(1), 3).unwrap(), vec!["a1"]);
-        assert!(db.launch_window_admit("Q:two", Some(1), 4).unwrap().is_empty());
+        assert_eq!(
+            db.launch_window_admit("P:one", Some(1), 3).unwrap(),
+            vec!["a1"]
+        );
+        assert!(db
+            .launch_window_admit("Q:two", Some(1), 4)
+            .unwrap()
+            .is_empty());
         // The release under the same ceiling hands the slot across windows
         // only via that window's own admit — the sweep drives other keys.
-        assert_eq!(db.launch_window_release("a1", Some(1), 5).unwrap(), Vec::<String>::new());
-        assert_eq!(db.launch_window_admit("Q:two", Some(1), 6).unwrap(), vec!["b1"]);
-        assert_eq!(db.launch_window_keys_with_queue().unwrap(), Vec::<String>::new());
+        assert_eq!(
+            db.launch_window_release("a1", Some(1), 5).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            db.launch_window_admit("Q:two", Some(1), 6).unwrap(),
+            vec!["b1"]
+        );
+        assert_eq!(
+            db.launch_window_keys_with_queue().unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -2060,7 +2197,8 @@ mod tests {
     fn follow_waiter_full_lifecycle() {
         let (_tmp, db) = fresh_db();
         db.reserve_follow(&seed_follow("fk1")).unwrap();
-        db.set_follow_child("fk1", "child-1", "chain-child").unwrap();
+        db.set_follow_child("fk1", "child-1", "chain-child")
+            .unwrap();
         db.set_follow_parent_successor("fk1", "succ-1").unwrap();
         db.mark_follow_waiting("fk1").unwrap();
 
@@ -2097,7 +2235,8 @@ mod tests {
     fn lookup_by_parent_and_successor_thread() {
         let (_tmp, db) = fresh_db();
         db.reserve_follow(&seed_follow("fk1")).unwrap();
-        db.set_follow_child("fk1", "child-1", "chain-child").unwrap();
+        db.set_follow_child("fk1", "child-1", "chain-child")
+            .unwrap();
         db.set_follow_parent_successor("fk1", "succ-1").unwrap();
         db.mark_follow_waiting("fk1").unwrap();
 
@@ -2117,14 +2256,23 @@ mod tests {
         assert_eq!(by_succ.follow_key, "fk1");
 
         // Unrelated ids miss.
-        assert!(db.get_follow_waiter_by_parent_thread("nope").unwrap().is_none());
+        assert!(db
+            .get_follow_waiter_by_parent_thread("nope")
+            .unwrap()
+            .is_none());
         assert!(db.get_follow_waiter_by_successor("nope").unwrap().is_none());
 
         // Cleared waiter is invisible to both accessors (terminal history moves
         // to the projection's continuation edge).
         db.clear_follow_waiter("fk1").unwrap();
-        assert!(db.get_follow_waiter_by_parent_thread("parent-1").unwrap().is_none());
-        assert!(db.get_follow_waiter_by_successor("succ-1").unwrap().is_none());
+        assert!(db
+            .get_follow_waiter_by_parent_thread("parent-1")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .get_follow_waiter_by_successor("succ-1")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2141,10 +2289,12 @@ mod tests {
         let (_tmp, db) = fresh_db();
         db.reserve_follow(&seed_follow("fk1")).unwrap();
         db.reserve_follow(&seed_follow("fk2")).unwrap();
-        db.set_follow_child("fk1", "child-1", "shared-chain").unwrap();
+        db.set_follow_child("fk1", "child-1", "shared-chain")
+            .unwrap();
         // A second follow cannot claim the same child chain root (UNIQUE).
         assert!(
-            db.set_follow_child("fk2", "child-2", "shared-chain").is_err(),
+            db.set_follow_child("fk2", "child-2", "shared-chain")
+                .is_err(),
             "duplicate child_chain_root_id must violate UNIQUE"
         );
     }
@@ -2203,14 +2353,27 @@ mod tests {
         db.mark_follow_waiting("fk1").unwrap();
         // Cannot resume from waiting (must be ready first).
         assert!(db.mark_follow_resuming("fk1").is_err());
-        db.mark_follow_child_terminal("chain-1", "c-tail", "completed", &serde_json::json!({"ok": true}))
-            .unwrap();
+        db.mark_follow_child_terminal(
+            "chain-1",
+            "c-tail",
+            "completed",
+            &serde_json::json!({"ok": true}),
+        )
+        .unwrap();
         db.mark_follow_resuming("fk1").unwrap();
         // A late/duplicate terminal hook must NOT downgrade resuming → ready.
         let matched = db
-            .mark_follow_child_terminal("chain-1", "c-tail", "completed", &serde_json::json!({"ok": true}))
+            .mark_follow_child_terminal(
+                "chain-1",
+                "c-tail",
+                "completed",
+                &serde_json::json!({"ok": true}),
+            )
             .unwrap();
-        assert!(!matched, "resuming row must not be downgraded by a late terminal");
+        assert!(
+            !matched,
+            "resuming row must not be downgraded by a late terminal"
+        );
         assert_eq!(
             db.get_follow_waiter_by_key("fk1").unwrap().unwrap().phase,
             follow_phase::RESUMING

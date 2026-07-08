@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T12:24:56Z:22467ca3a8f5d5af0cefc23e5761869d0c5a03610bca52d6c5a290b972e7a626:w5+G3vselA/utKvvYegh4ICfyCmKUxO3ix5y6bhAegiUv4/qLpKOuxP2j6Nk4SwBsHDXuSAzC+adO5QSA1diDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/remotes/probe
+version: "1.0.0"
+description: Probe a configured remote for the active RyeOS UI project session.
+endpoint: ui.ryeos.remotes.probe
+availability: daemon_only

@@ -32,6 +32,15 @@ pub enum LifecycleStatus {
         metadata: DaemonMetadata,
         diagnostics: StaleDiagnostics,
     },
+    /// The daemon process is alive (per its boot marker) but its control
+    /// socket is not up yet — boot is in progress. Projection catch-up after
+    /// a deploy can hold this window open for minutes. Clears on its own;
+    /// starting a second daemon would double-run against the same state.
+    Starting {
+        pid: u32,
+        started_at: String,
+        app_root: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,7 +167,29 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
         return Ok(LifecycleStatus::Running { metadata });
     }
 
-    // No UDS responded.
+    // No UDS responded. Before classifying from (possibly stale) daemon.json,
+    // consult the boot marker: the daemon records it at process start, well
+    // before its control socket exists (projection catch-up after a deploy
+    // holds that window open for minutes). A live marker pid with a missing/
+    // refused socket is a daemon mid-boot — reporting it "stopped" would
+    // prescribe `ryeos start` at a live daemon. A probe that TIMED OUT is
+    // excluded: a socket that accepted means the daemon is past boot, and
+    // Unresponsive below carries the right remediation.
+    if !probe_timed_out {
+        let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
+        if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at }) =
+            crate::lifecycle_marker::read(&state_dir)
+        {
+            if crate::lifecycle_marker::process_alive_as_ryeosd(pid) {
+                return Ok(LifecycleStatus::Starting {
+                    pid,
+                    started_at,
+                    app_root: config.app_root.clone(),
+                });
+            }
+        }
+    }
+
     match metadata_hint {
         Some(metadata) if probe_timed_out => {
             let probed: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
@@ -255,6 +286,106 @@ mod tests {
 
         let status = status(&env).await.unwrap();
         assert!(matches!(status, LifecycleStatus::Stale { .. }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_boot_marker_without_control_socket_is_starting_not_stopped() {
+        // A daemon writes its boot marker at process start, minutes before
+        // the control socket exists on a heavy boot (projection catch-up).
+        // Misclassifying that window as Stopped prescribes `ryeos start` at
+        // a live daemon.
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Stand in for the booting daemon with a process whose comm really
+        // is "ryeosd" (the classifier verifies the name, not just liveness):
+        // a copy of /bin/sh idling under that name.
+        let fake_ryeosd = tmp.path().join("ryeosd");
+        std::fs::copy("/bin/sh", &fake_ryeosd).unwrap();
+        // Two commands, so the shell cannot exec-optimize into `sleep`
+        // (which would change the comm out from under the test).
+        let mut daemon = std::process::Command::new(&fake_ryeosd)
+            .args(["-c", "sleep 30; exit 0"])
+            .spawn()
+            .unwrap();
+        std::fs::write(
+            state_dir.join("lifecycle.json"),
+            format!(
+                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
+                daemon.id()
+            ),
+        )
+        .unwrap();
+
+        let status = status(&env).await;
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        let LifecycleStatus::Starting { pid, .. } = status.unwrap() else {
+            panic!("live boot marker without socket should be Starting");
+        };
+        assert_eq!(pid, daemon.id());
+    }
+
+    // The recycled-pid discrimination needs /proc to inspect the comm.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn boot_marker_pid_recycled_by_another_process_is_not_starting() {
+        // A crash leaves a `running` marker; if the OS recycles that pid onto
+        // an unrelated process, classifying it as a live daemon would block
+        // `ryeos start` indefinitely. This test's own pid is alive but is not
+        // a ryeosd.
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("lifecycle.json"),
+            format!(
+                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        let status = status(&env).await.unwrap();
+        assert!(
+            matches!(status, LifecycleStatus::Stopped { .. }),
+            "recycled marker pid should not classify as Starting, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn boot_marker_with_dead_pid_is_stopped() {
+        // A crashed daemon leaves a `running` marker behind; a dead marker
+        // pid must NOT read as Starting — `ryeos start` is the right
+        // remediation there.
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(tmp.path());
+        let config = env.config();
+        mark_initialized(&config.app_root);
+        let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("lifecycle.json"),
+            format!(
+                r#"{{"state":"running","pid":{},"started_at":"2026-01-01T00:00:00Z"}}"#,
+                u32::MAX - 1
+            ),
+        )
+        .unwrap();
+
+        let status = status(&env).await.unwrap();
+        assert!(
+            matches!(status, LifecycleStatus::Stopped { .. }),
+            "dead marker pid should be Stopped, got: {status:?}"
+        );
     }
 
     #[tokio::test]

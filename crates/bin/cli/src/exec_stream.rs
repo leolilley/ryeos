@@ -153,10 +153,7 @@ fn payload_summary(payload: &Value) -> String {
             // One level of descent: flatten a nested object's own scalars dotted.
             Value::Object(sub) => {
                 for (subkey, subval) in sub {
-                    if matches!(
-                        subval,
-                        Value::String(_) | Value::Number(_) | Value::Bool(_)
-                    ) {
+                    if matches!(subval, Value::String(_) | Value::Number(_) | Value::Bool(_)) {
                         push_field(&mut parts, &mut width, &format!("{key}.{subkey}"), subval);
                         if width >= SUMMARY_WIDTH_CAP {
                             break;
@@ -277,7 +274,10 @@ mod tests {
         assert!(s.contains("call_id=gr-eb7d9e3da2bc:30:aim"));
         assert!(s.contains("step=30"));
         assert!(s.contains("ok=true"));
-        assert!(s.contains("cost.tokens=812"), "one level of nesting, dotted");
+        assert!(
+            s.contains("cost.tokens=812"),
+            "one level of nesting, dotted"
+        );
         assert!(!s.contains("items="), "arrays are skipped");
         // The long hash is present but truncated with an ellipsis.
         assert!(s.contains("definition_hash=1154"));

@@ -1,5 +1,5 @@
 //! The terminal seat runtime: one event loop folding terminal input,
-//! braid tails, session hints, and ticks into the shared `StudioCore`.
+//! braid tails, session hints, and ticks into the shared `RyeOsCore`.
 //!
 //! This module is the loop and nothing else. Effect execution lives in
 //! `effects`, seat-thread lifecycle in `seat`, live-signal subscriptions
@@ -12,10 +12,10 @@ mod seat;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
-use ryeos_client_base::studio::{BrowserSession, BrowserViewport, StudioCore, StudioEvent};
 use ryeos_client_base::surface::LoadedSurface;
+use ryeos_client_base::ui::{BrowserSession, BrowserViewport, RyeOsCore, RyeOsEvent};
 
-use crate::render::StudioTerminalRenderer;
+use crate::render::RyeOsTerminalRenderer;
 use crate::terminal::TerminalGuard;
 use crate::transport::daemon::DaemonClient;
 
@@ -44,18 +44,18 @@ pub async fn run(
     let mut term = TerminalGuard::init()?;
     let (width, height) = term.size();
     let mut stdout = std::io::stdout();
-    let mut renderer = StudioTerminalRenderer::new();
-    let mut core = StudioCore::default();
+    let mut renderer = RyeOsTerminalRenderer::new();
+    let mut core = RyeOsCore::default();
     let mut dirty = true;
 
     // Degraded live timeline: tail the route's head thread over SSE.
     // The braid is the truth; this is it arriving now. Retargets abort
     // the old tail and open a new one.
     let (tail_tx, mut tail_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
-    let mut tail_thread: Option<String> = None;
+    let mut tail_chain: Option<String> = None;
     let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    let start_effects = core.dispatch(StudioEvent::Start {
+    let start_effects = core.dispatch(RyeOsEvent::Start {
         session: session_for(project_path, read_only, &loaded_surface),
         viewport: viewport(width, height),
         now_ms: now_ms(),
@@ -69,7 +69,7 @@ pub async fn run(
     // notices. Otherwise they print to stderr BEFORE the alternate screen is
     // entered, so they scroll off above the render where they can't be read.
     for message in diagnostics {
-        core.notice(message, ryeos_client_base::studio::view_model::StudioTone::Warn);
+        core.notice(message, ryeos_client_base::ui::view_model::RyeOsTone::Warn);
     }
 
     // First frame before any daemon round trip: chrome, docks, and the
@@ -106,16 +106,16 @@ pub async fn run(
     // Session hints: transient "look" signals; bound views declaring
     // `refresh.on_hint` refetch their sources. This replaces polling —
     // content decides its own liveness.
-    let (hint_tx, mut hint_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (hint_tx, mut hint_rx) = tokio::sync::mpsc::unbounded_channel::<hints::HintMessage>();
     hints::spawn_hint_listener(client.clone(), hint_tx.clone());
 
     let mut events = EventStream::new();
     // Adaptive frame clock: the backdrop's breathe/sweep animation reads
-    // fluid at ~8fps, so the tick quickens while the center is empty (the
+    // fluid at ~14fps, so the tick quickens while the center is empty (the
     // diff renderer repaints only the handful of changed cells). With
     // tiles up nothing animates per-tick, so 4fps keeps the debounce and
     // seat sync cadence without burning cycles.
-    const TICK_BACKDROP_MS: u64 = 120;
+    const TICK_BACKDROP_MS: u64 = 72;
     const TICK_TILES_MS: u64 = 250;
     let mut tick_ms = TICK_TILES_MS;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
@@ -130,7 +130,7 @@ pub async fn run(
             dirty = false;
         }
 
-        let want_tick_ms = if core.workspace.center_is_empty() {
+        let want_tick_ms = if core.wants_fast_ticks() {
             TICK_BACKDROP_MS
         } else {
             TICK_TILES_MS
@@ -140,21 +140,26 @@ pub async fn run(
             tick = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
         }
 
-        // Reconcile the SSE tail with the route facet.
-        let desired = core.seat.fold().input_route().thread;
-        if desired != tail_thread {
+        // Reconcile the SSE tail with the route facet. The timeline source is
+        // scoped by `input.route.chain_root`, so tail the same braid live; keep
+        // the moving route head separately as the live-buffer owner.
+        let route = core.seat.fold().input_route();
+        let desired_chain = route.chain_root.clone().or_else(|| route.thread.clone());
+        let desired_thread = route.thread.clone().or_else(|| desired_chain.clone());
+        if desired_chain != tail_chain {
             if let Some(task) = tail_task.take() {
                 task.abort();
             }
-            tail_thread = desired.clone();
-            if let Some(thread_id) = desired {
+            tail_chain = desired_chain.clone();
+            if let Some(chain_root_id) = desired_chain {
                 tail_task = Some(hints::spawn_thread_tail(
                     client.clone(),
-                    thread_id,
+                    chain_root_id,
                     tail_tx.clone(),
                 ));
             }
         }
+        let tail_thread = desired_thread;
 
         tokio::select! {
             maybe_event = events.next() => {
@@ -181,7 +186,7 @@ pub async fn run(
                     }
                     Event::Resize(w, h) => {
                         let _ = term.update_size();
-                        let effects = core.dispatch(StudioEvent::Resize { viewport: viewport(w, h) });
+                        let effects = core.dispatch(RyeOsEvent::Resize { viewport: viewport(w, h) });
                         dispatch_effects(&mut core, &client, effects).await;
                         dirty = true;
                     }
@@ -195,7 +200,7 @@ pub async fn run(
                 if let Some(thread_id) = tail_thread.clone() {
                     let payload = serde_json::from_str::<serde_json::Value>(&data)
                         .unwrap_or(serde_json::Value::Null);
-                    let effects = core.dispatch(StudioEvent::ThreadTail {
+                    let effects = core.dispatch(RyeOsEvent::ThreadTail {
                         thread_id,
                         event_type,
                         payload,
@@ -204,8 +209,8 @@ pub async fn run(
                     dirty = true;
                 }
             }
-            Some(kind) = hint_rx.recv() => {
-                let effects = core.effects_for_hint(&kind);
+            Some((kind, payload)) = hint_rx.recv() => {
+                let effects = core.note_hint(&kind, &payload);
                 if !effects.is_empty() {
                     dispatch_effects(&mut core, &client, effects).await;
                     dirty = true;
@@ -245,7 +250,7 @@ pub async fn run(
                     let effects = core.refresh_focused_feeds();
                     dispatch_effects(&mut core, &client, effects).await;
                 }
-                let effects = core.dispatch(StudioEvent::Tick { now_ms: now_ms() });
+                let effects = core.dispatch(RyeOsEvent::Tick { now_ms: now_ms() });
                 dispatch_effects(&mut core, &client, effects).await;
                 sync_seat_braid(&client, &core, &seat_thread, &mut seat_synced).await;
                 dirty = true;

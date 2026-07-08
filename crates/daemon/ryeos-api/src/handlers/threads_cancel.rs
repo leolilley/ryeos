@@ -136,21 +136,18 @@ pub async fn handle(
     // blocked on an inline child would leave that child running — and authoring —
     // past the parent's cancel. Graceful, honouring each child's declared mode. A
     // walk failure is logged, not raised: the primary is already settled.
-    let cascade = match cascade_descendants(
-        &state.state_store,
-        &req.thread_id,
-        CascadeMode::Graceful,
-    ) {
-        Ok(report) => report,
-        Err(e) => {
-            tracing::warn!(
-                thread_id = %req.thread_id,
-                error = %e,
-                "descendant cascade failed during cancel"
-            );
-            Vec::new()
-        }
-    };
+    let cascade =
+        match cascade_descendants(&state.state_store, &req.thread_id, CascadeMode::Graceful) {
+            Ok(report) => report,
+            Err(e) => {
+                tracing::warn!(
+                    thread_id = %req.thread_id,
+                    error = %e,
+                    "descendant cascade failed during cancel"
+                );
+                Vec::new()
+            }
+        };
 
     // If the cancelled thread was a followed child's chain terminal, its finalize
     // just flipped the awaiting waiter to `ready` (a degraded failure envelope) —

@@ -55,7 +55,7 @@ This future direction assumes RyeOS already has the local/hosted seams needed to
 - principal-aware hosted user-space exists;
 - hosted-node exists outside `standard` as the bundle for always-on hosted RyeOS behavior;
 - central-auth exists as app-local realm auth, not RyeOS identity;
-- local Studio/Cockpit project registration and launch flows exist as current substrate.
+- local RyeOS UI/Cockpit project registration and launch flows exist as current substrate.
 
 Those pieces are not the future described here. They are the footing.
 

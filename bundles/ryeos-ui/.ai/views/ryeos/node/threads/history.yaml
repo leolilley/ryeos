@@ -1,0 +1,95 @@
+# ryeos:signed:2026-07-08T01:26:03Z:f1b49b313f54d00292c8c514b03f590e0fe6e98acd8b3ba18ed4edeb0ce5e2f6:Ze3Adbc3i0z7MWbBC66qIK1MMYs7PuNCRFvGmOCynLzWfQQ5XtqOjLPc+uADQ00tCy88U0sv5g14gDbIG0elCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: node-threads-history
+version: "1.0.0"
+description: >-
+  Node-wide thread history across project contexts. The input acts as the
+  active/status/kind/source filter instead of a separate active-only view.
+
+widget: table
+source:
+  ref: service:ui/ryeos-ui/threads/list
+  params:
+    limit: 200
+    sort: watch
+  collection: threads
+projections:
+  columns:
+    - label: thread
+      field: thread_id
+    - label: kind
+      field: kind
+    - label: item
+      field: item_ref
+    - label: project
+      field: project.name
+    - label: status
+      field: status
+    - label: source
+      field: requested_by
+    - label: follow
+      field: follow.role
+      tone:
+        field: follow.display_state
+        map:
+          suspended: warn
+          resume_queued: neutral
+          resumed: good
+    - label: created
+      field: created_at
+  expand:
+    fields: [thread_id, chain_root_id, project.name, project.path, item_ref, current_node.node, follow.role, follow.display_state, follow.follow_node, follow.child_thread_id, follow.child_chain_root_id, follow.parent_successor_thread_id, error]
+  tone:
+    field: status
+    map:
+      running: accent
+      created: accent
+      accepted: accent
+      failed: danger
+      killed: danger
+      timed_out: danger
+      cancelled: warn
+      completed: good
+    default: neutral
+selection:
+  activate: watch
+affordances:
+  - id: watch
+    label: Watch
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.thread_id}"
+        chain_root: "{record.chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: watch-child
+    label: Watch child
+    invoke:
+      plane: ui
+      facet: input.route
+      merge:
+        thread: "{record.follow.child_thread_id}"
+        chain_root: "{record.follow.child_chain_root_id}"
+      open_view: view:ryeos/thread/transcript
+      drill: true
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        thread: "{record.thread_id}"
+      open_view: view:ryeos/threads/detail
+input:
+  id: filter
+  feeds:
+    fields:
+      - { param: active, label: active }
+      - { param: status, label: status }
+      - { param: kind, label: kind }
+      - { param: requested_by, label: source }
+    debounce_ms: 120
+refresh:
+  on_hint: [thread, activity]

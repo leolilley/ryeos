@@ -75,9 +75,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // Parent callback token → the PARENT's effective caps (bound the child under
     // `FollowChildHybrid`) + provenance. Validated against the parent thread +
     // project path exactly like `runtime.dispatch_action`.
-    let cap = state
-        .callback_tokens
-        .validate(&params.callback_token, &parent_thread_id, &project_path)?;
+    let cap =
+        state
+            .callback_tokens
+            .validate(&params.callback_token, &parent_thread_id, &project_path)?;
 
     // Per-request identity proof → the server-side acting principal. The request
     // body carries no principal field (`deny_unknown_fields`) so it cannot spoof
@@ -124,7 +125,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // parent that could never dispatch the child never suspends behind it.
     let child_execute_cap = canonical_cap(&child_ref.kind, &child_ref.bare_id, "execute");
     let policy = AuthorizationPolicy::require_all(&[&child_execute_cap]);
-    if state.authorizer.authorize(&cap.effective_caps, &policy).is_err() {
+    if state
+        .authorizer
+        .authorize(&cap.effective_caps, &policy)
+        .is_err()
+    {
         bail!(
             "follow admission denied: parent lacks execute authority '{child_execute_cap}' over \
              child '{}'",

@@ -546,7 +546,10 @@ mod tests {
         }));
         let result = compose(&payload, &runtime_config).unwrap();
         assert_eq!(result.composition.token_estimator.provider, "heuristic");
-        assert_eq!(result.composition.token_estimator.chars_per_token, Some(2.0));
+        assert_eq!(
+            result.composition.token_estimator.chars_per_token,
+            Some(2.0)
+        );
     }
 
     #[test]
@@ -634,6 +637,9 @@ mod tests {
         let result = compose_positions(&payload, &runtime_config).unwrap();
         let before = result.rendered.get("before").unwrap();
         assert_eq!(before.composition.token_estimator.provider, "heuristic");
-        assert_eq!(before.composition.token_estimator.chars_per_token, Some(2.0));
+        assert_eq!(
+            before.composition.token_estimator.chars_per_token,
+            Some(2.0)
+        );
     }
 }

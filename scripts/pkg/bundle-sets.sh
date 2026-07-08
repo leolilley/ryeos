@@ -15,8 +15,8 @@
 
 ryeos_bundle_set_names() {
   case "$1" in
-    full)            printf '%s\n' core central-auth standard web browser studio hosted-node ;;
-    central-host)    printf '%s\n' core central-auth standard web ;;
+    full)            printf '%s\n' core central-auth standard web browser ryeos-ui hosted-node ;;
+    central-host)    printf '%s\n' core central-auth standard web tv-tracker-authoring ;;
     standard)        printf '%s\n' core central-auth standard ;;
     hosted-node)     printf '%s\n' core central-auth hosted-node ;;
     hosted-workflow) printf '%s\n' core central-auth standard hosted-node ;;
@@ -29,7 +29,9 @@ ryeos_bundle_set_names() {
 ryeos_bundle_set_bin_managed_names() {
   local name
   ryeos_bundle_set_names "$1" | while IFS= read -r name; do
-    [[ "$name" == "central-auth" ]] && continue
+    # central-auth (Python source) and tv-tracker-authoring (reuses bin:core/
+    # ryeos-core-tools) own no compiled binaries — exclude from bin staging.
+    [[ "$name" == "central-auth" || "$name" == "tv-tracker-authoring" ]] && continue
     printf '%s\n' "$name"
   done
 }

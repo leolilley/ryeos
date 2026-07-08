@@ -204,7 +204,9 @@ mod integration_tests {
         seed_continuable(&store, "P", "graph");
 
         // The ordered spawn sequence, as the handler drives it.
-        store.reserve_follow(&follow_seed("P/gr-1/node-a/0")).unwrap();
+        store
+            .reserve_follow(&follow_seed("P/gr-1/node-a/0"))
+            .unwrap();
         // Child is a FRESH ROOT: its own chain root, no upstream braid.
         store
             .create_thread(&make_thread("C", "C", "graph", "test/graph", None))
@@ -751,7 +753,10 @@ mod integration_tests {
 
         // No successor was minted; the source keeps its terminal result.
         assert!(
-            store.get_thread("T-mc-done-2").expect("get_thread").is_none(),
+            store
+                .get_thread("T-mc-done-2")
+                .expect("get_thread")
+                .is_none(),
             "a refused machine continuation must not persist a successor"
         );
         let source = store
@@ -795,7 +800,10 @@ mod integration_tests {
             "a failed handoff must leave the source running, not continued"
         );
         assert!(
-            store.get_thread("T-mc-run-2").expect("get_thread").is_none(),
+            store
+                .get_thread("T-mc-run-2")
+                .expect("get_thread")
+                .is_none(),
             "no successor should exist after a refused handoff"
         );
     }
@@ -851,7 +859,10 @@ mod integration_tests {
         // The fingerprint is persisted on the edge (not re-derived), so dedup
         // works even before/without any runtime-emitted input.
         assert_eq!(
-            store.get_continuation_fingerprint("T-fp-1").unwrap().as_deref(),
+            store
+                .get_continuation_fingerprint("T-fp-1")
+                .unwrap()
+                .as_deref(),
             Some("sha256:fp-A")
         );
 
@@ -869,7 +880,9 @@ mod integration_tests {
             )
             .expect("duplicate create_or_get");
         match outcome {
-            ContinuationOutcome::Existing { successor_thread_id } => {
+            ContinuationOutcome::Existing {
+                successor_thread_id,
+            } => {
                 assert_eq!(successor_thread_id, "T-fp-2")
             }
             other => panic!("expected Existing, got {other:?}"),
@@ -892,7 +905,9 @@ mod integration_tests {
             )
             .expect("conflicting create_or_get");
         match outcome {
-            ContinuationOutcome::Conflict { successor_thread_id } => {
+            ContinuationOutcome::Conflict {
+                successor_thread_id,
+            } => {
                 assert_eq!(successor_thread_id, "T-fp-2")
             }
             other => panic!("expected Conflict, got {other:?}"),
@@ -906,7 +921,9 @@ mod integration_tests {
     #[test]
     fn machine_continuation_chain_depth_cap() {
         use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
-        use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
+        use ryeos_engine::contracts::{
+            EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+        };
         let (_tmpdir, store) = setup_state_store();
         let max = ryeos_app::thread_lifecycle::MAX_CONTINUATION_CHAIN_DEPTH;
 
@@ -935,7 +952,9 @@ mod integration_tests {
         // A machine continuation requires the source be RUNNING with a captured
         // ResumeContext, so make each successor continuable before extending.
         let make_continuable = |id: &str| {
-            store.mark_thread_running(id, None).expect("mark_thread_running");
+            store
+                .mark_thread_running(id, None)
+                .expect("mark_thread_running");
             store
                 .seed_launch_metadata(
                     id,
@@ -992,7 +1011,10 @@ mod integration_tests {
             .get_thread("D-follow")
             .unwrap()
             .expect("follow successor persisted");
-        assert_eq!(fs.status, "created", "follow successor is created, not running");
+        assert_eq!(
+            fs.status, "created",
+            "follow successor is created, not running"
+        );
         assert_eq!(fs.upstream_thread_id.as_deref(), Some(source.as_str()));
         assert_eq!(
             store.get_thread(&source).unwrap().unwrap().status,
@@ -1032,7 +1054,9 @@ mod integration_tests {
             runtime_ref: None,
         };
         let make_continuable = |id: &str| {
-            store.mark_thread_running(id, None).expect("mark_thread_running");
+            store
+                .mark_thread_running(id, None)
+                .expect("mark_thread_running");
             store
                 .seed_launch_metadata(
                     id,
@@ -1078,7 +1102,13 @@ mod integration_tests {
 
         // Follow-resume successor invariants.
         store
-            .create_thread(&make_thread("F-root", "F-root", "directive", "test/item", None))
+            .create_thread(&make_thread(
+                "F-root",
+                "F-root",
+                "directive",
+                "test/item",
+                None,
+            ))
             .expect("create root");
         make_continuable("F-root");
         store
@@ -1089,7 +1119,10 @@ mod integration_tests {
             )
             .expect("follow-resume");
 
-        let fs = store.get_thread("F-succ").unwrap().expect("successor persisted");
+        let fs = store
+            .get_thread("F-succ")
+            .unwrap()
+            .expect("successor persisted");
         assert_eq!(fs.status, "created", "successor is created, not running");
         assert_eq!(fs.upstream_thread_id.as_deref(), Some("F-root"));
         assert_eq!(
@@ -1099,8 +1132,14 @@ mod integration_tests {
         );
         let (reason, fp) = edge("F-root");
         assert_eq!(reason.as_deref(), Some("graph_follow_resume"));
-        assert!(fp.is_none(), "follow-resume edge has no request fingerprint");
-        assert!(store.get_continuation_fingerprint("F-root").unwrap().is_none());
+        assert!(
+            fp.is_none(),
+            "follow-resume edge has no request fingerprint"
+        );
+        assert!(store
+            .get_continuation_fingerprint("F-root")
+            .unwrap()
+            .is_none());
         assert!(
             store
                 .get_launch_metadata("F-succ")
@@ -1114,11 +1153,15 @@ mod integration_tests {
         // target — another created row naming the same upstream does not match —
         // and a machine edge is never matched.
         assert!(
-            store.is_follow_resume_successor("F-root", "F-succ").unwrap(),
+            store
+                .is_follow_resume_successor("F-root", "F-succ")
+                .unwrap(),
             "the follow edge F-root -> F-succ must read as a follow-resume successor"
         );
         assert!(
-            !store.is_follow_resume_successor("F-root", "F-other").unwrap(),
+            !store
+                .is_follow_resume_successor("F-root", "F-other")
+                .unwrap(),
             "a different successor naming the same upstream must NOT match"
         );
         assert!(
@@ -1159,7 +1202,9 @@ mod integration_tests {
         store
             .create_thread(&make_thread("R-nr", "R-nr", "directive", "test/item", None))
             .expect("create");
-        store.mark_thread_running("R-nr", None).expect("mark running");
+        store
+            .mark_thread_running("R-nr", None)
+            .expect("mark running");
         assert!(
             store
                 .create_machine_continuation(
@@ -1180,14 +1225,26 @@ mod integration_tests {
         // Successor preconditions are checked BEFORE any runtime-db write, so a
         // rejection leaves no orphan row and the source untouched.
         store
-            .create_thread(&make_thread("G-root", "G-root", "directive", "test/item", None))
+            .create_thread(&make_thread(
+                "G-root",
+                "G-root",
+                "directive",
+                "test/item",
+                None,
+            ))
             .expect("create");
         make_continuable("G-root");
         // A successor in a FOREIGN chain is rejected.
         assert!(
             store
                 .create_follow_resume_successor(
-                    &make_thread("G-bad-chain", "OTHER", "directive", "test/item", Some("G-root")),
+                    &make_thread(
+                        "G-bad-chain",
+                        "OTHER",
+                        "directive",
+                        "test/item",
+                        Some("G-root")
+                    ),
                     "G-root",
                     "G-root",
                 )
@@ -1203,7 +1260,13 @@ mod integration_tests {
         assert!(
             store
                 .create_follow_resume_successor(
-                    &make_thread("G-bad-up", "G-root", "directive", "test/item", Some("ELSEWHERE")),
+                    &make_thread(
+                        "G-bad-up",
+                        "G-root",
+                        "directive",
+                        "test/item",
+                        Some("ELSEWHERE")
+                    ),
                     "G-root",
                     "G-root",
                 )

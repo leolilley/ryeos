@@ -4,7 +4,6 @@ use once_cell::sync::OnceCell;
 pub mod bootstrap;
 pub mod config;
 pub mod engine_init;
-pub mod lifecycle_marker;
 pub mod reconcile;
 pub mod scheduler_impl;
 pub mod uds;

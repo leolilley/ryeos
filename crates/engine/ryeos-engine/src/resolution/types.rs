@@ -643,7 +643,10 @@ mod tests {
         assert_eq!(digest.ancestors[0].raw_content_digest, "basedigest");
         assert_eq!(digest.ancestors[0].trust_class, TrustClass::Unsigned);
         assert_eq!(digest.effective_trust_class, TrustClass::Unsigned);
-        assert_eq!(digest.policy_facts["effective_caps"], serde_json::json!(["a"]));
+        assert_eq!(
+            digest.policy_facts["effective_caps"],
+            serde_json::json!(["a"])
+        );
 
         // Round-trips through the braid-event payload wire form, and carries no
         // `raw_content` (slim: digests only).

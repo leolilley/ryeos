@@ -104,7 +104,11 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             // answers must surface as an error, not park the connection (and
             // everything queued behind it) forever.
             self.rpc
-                .request_with_timeout("runtime.dispatch_action", params, Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT))
+                .request_with_timeout(
+                    "runtime.dispatch_action",
+                    params,
+                    Some(crate::daemon_rpc::DEFAULT_RPC_TIMEOUT),
+                )
                 .await
                 .map_err(Self::map_rpc_error)
         }

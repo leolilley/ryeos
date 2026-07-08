@@ -235,6 +235,7 @@ mod tests {
     fn event(thread_seq: i64, event_type: &str, payload: Value) -> PersistedEventRecord {
         PersistedEventRecord {
             event_id: thread_seq,
+            event_hash: None,
             chain_root_id: "T-test".to_string(),
             chain_seq: thread_seq,
             thread_id: "T-test".to_string(),

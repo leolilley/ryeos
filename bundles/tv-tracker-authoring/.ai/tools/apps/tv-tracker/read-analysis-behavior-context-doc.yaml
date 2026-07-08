@@ -1,0 +1,29 @@
+version: "0.1.0"
+category: "apps/tv-tracker"
+name: "read-analysis-behavior-context-doc"
+executor_id: "@subprocess"
+description: "Read the raw signed source of the tv-tracker AnalysisBehavior context doc (resolve + verify + read the on-disk file). Read-only — no authoring authority. Returns fetch report incl. raw content + signature_status."
+
+config:
+  command: "bin:core/ryeos-core-tools"
+  args:
+    - "fetch"
+    - "--stdin-json"
+  input_data: "{params_json}"
+  timeout_secs: 20
+
+config_schema:
+  type: object
+  properties:
+    item_ref:
+      type: string
+      enum: ["knowledge:apps/tv-tracker/AnalysisBehavior"]
+    with_content:
+      type: boolean
+      default: true
+    verify:
+      type: boolean
+      default: true
+    project_path:
+      type: string
+  required: [item_ref]

@@ -1,0 +1,19 @@
+name: tv-tracker-authoring
+version: "0.1.0"
+description: "Operator authoring wrappers for tv-tracker context/prompt knowledge docs"
+requires_kinds:
+  - tool
+uses_kinds: []
+# Upper bound is EXACTLY the three editable context docs — no wildcard. Each
+# wrapper tool below requests exactly one of these, so the daemon mints only that
+# single ryeos.author.knowledge.<doc> cap into that wrapper's per-thread callback
+# token. A route bug or bad item_ref cannot author any other item, because the
+# minted authority — not the caller's intent — is what the daemon enforces.
+runtime_authority:
+  item_authoring:
+    - kind: knowledge
+      namespace: apps/tv-tracker/Identity
+    - kind: knowledge
+      namespace: apps/tv-tracker/AnalysisBehavior
+    - kind: knowledge
+      namespace: apps/tv-tracker/ChatInstructions

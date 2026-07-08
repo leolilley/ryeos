@@ -44,14 +44,14 @@ fn load_dev_signing_key() -> SigningKey {
 }
 
 fn create_declarative_bundle(root: &Path) -> PathBuf {
-    let bundle = root.join("studio");
+    let bundle = root.join("ryeos-ui");
     let ai_dir = bundle.join(ryeos_engine::AI_DIR);
     std::fs::create_dir_all(&ai_dir).unwrap();
     std::fs::write(
         ai_dir.join("manifest.source.yaml"),
-        r#"name: studio
+        r#"name: ryeos-ui
 version: "0.1.0"
-description: "Declarative studio bundle test fixture"
+description: "Declarative ryeos-ui bundle test fixture"
 requires_kinds: []
 "#,
     )
@@ -128,7 +128,6 @@ fn run_publish_once_with_trust(
         name: None,
         skip_unsignable: false,
         allow_namespace_mismatch: false,
-        allow_uncovered_item_dirs: false,
         emit_trust_doc: false,
     };
     ryeos_core_tools::actions::publish::run_publish(&opts)
@@ -203,7 +202,6 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
             name: None,
             skip_unsignable: false,
             allow_namespace_mismatch: false,
-            allow_uncovered_item_dirs: false,
             emit_trust_doc: false,
         },
     )
@@ -288,17 +286,18 @@ fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
     // not author node runtime state.
     let scheduled = std::fs::read_to_string(ai.join("node/schedules/nightly.yaml")).unwrap();
     assert!(
-        lillux::signature::parse_signature_line(scheduled.lines().next().unwrap_or_default(), "#", None)
-            .is_none(),
+        lillux::signature::parse_signature_line(
+            scheduled.lines().next().unwrap_or_default(),
+            "#",
+            None
+        )
+        .is_none(),
         "node runtime state must not be signed by publish"
     );
 }
 
 /// A populated item directory whose kind is not in the loaded registry roots
-/// must hard-fail the publish instead of silently skipping those items. The
-/// `knowledge` kind lives in standard, so a bundle with `.ai/knowledge/` items
-/// published against the core registry alone is exactly this case. Opting into
-/// `allow_uncovered_item_dirs` lets a deliberately partial publish proceed.
+/// must hard-fail the publish instead of silently skipping those items.
 #[test]
 fn publish_hard_fails_on_uncovered_item_dir() {
     if !core_bundle().join(ryeos_engine::AI_DIR).is_dir() {
@@ -312,12 +311,12 @@ fn publish_hard_fails_on_uncovered_item_dir() {
 
     let kdir = bundle
         .join(ryeos_engine::AI_DIR)
-        .join("knowledge")
+        .join("unknown_kind")
         .join("app");
     std::fs::create_dir_all(&kdir).unwrap();
     std::fs::write(kdir.join("notes.md"), "# notes\n").unwrap();
 
-    let base_opts = |allow_uncovered: bool| ryeos_core_tools::actions::publish::PublishOptions {
+    let opts = ryeos_core_tools::actions::publish::PublishOptions {
         bundle_source: bundle.to_path_buf(),
         registry_roots: vec![registry.to_path_buf()],
         signing_key: key.clone(),
@@ -326,21 +325,16 @@ fn publish_hard_fails_on_uncovered_item_dir() {
         name: None,
         skip_unsignable: false,
         allow_namespace_mismatch: false,
-        allow_uncovered_item_dirs: allow_uncovered,
         emit_trust_doc: false,
     };
 
-    let err = ryeos_core_tools::actions::publish::run_publish(&base_opts(false))
-        .expect_err("uncovered knowledge/ dir must hard-fail the publish");
+    let err = ryeos_core_tools::actions::publish::run_publish(&opts)
+        .expect_err("uncovered item dir must hard-fail the publish");
     let err = format!("{err:#}");
     assert!(
-        err.contains("knowledge/") && err.contains("no registered kind"),
+        err.contains("unknown_kind/") && err.contains("no registered kind"),
         "unexpected error: {err}"
     );
-
-    // Opting out proceeds — the knowledge items are skipped, no error.
-    ryeos_core_tools::actions::publish::run_publish(&base_opts(true))
-        .expect("allow_uncovered_item_dirs should let a partial publish proceed");
 }
 
 #[test]

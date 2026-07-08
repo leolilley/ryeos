@@ -366,7 +366,10 @@ mod tests {
         let harness = make_harness(HardLimits::default(), vec![]);
         harness.interrupted_flag().store(true, Ordering::Relaxed);
         assert!(harness.is_interrupted());
-        assert!(harness.check_limits().is_ok(), "interrupt must not stop the loop");
+        assert!(
+            harness.check_limits().is_ok(),
+            "interrupt must not stop the loop"
+        );
     }
 
     #[test]

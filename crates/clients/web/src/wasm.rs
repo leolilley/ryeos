@@ -1,17 +1,17 @@
 //! WASM bridge for RyeOS browser clients.
 //!
-//! Studio is the only product model: Rust owns state, reducer, effects,
+//! RyeOS is the only product model: Rust owns state, reducer, effects,
 //! semantic view model, and scene model; browser JavaScript owns adapters
 //! for fetch/EventSource/DOM/Three.js and returns events/effect results.
 
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use ryeos_client_base::studio::{
-    studio_key_command, BrowserSession as StudioBrowserSession, BrowserViewport, StudioCore,
-    StudioEffectResult, StudioEnvelope, StudioEvent, StudioKeyCommand, StudioKeyEvent,
+use ryeos_client_base::ui::{
+    ryeos_key_command, BrowserSession as RyeOsBrowserSession, BrowserViewport, RyeOsCore,
+    RyeOsEffectResult, RyeOsEnvelope, RyeOsEvent, RyeOsKeyCommand, RyeOsKeyEvent,
 };
-use ryeos_client_base::studio::{SeatEvent, SeatEventKind};
+use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 
 use std::cell::RefCell;
 
@@ -20,12 +20,12 @@ use std::cell::RefCell;
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static STUDIO: RefCell<Option<StudioCore>> = const { RefCell::new(None) };
+    static RYEOS_UI: RefCell<Option<RyeOsCore>> = const { RefCell::new(None) };
 }
 
-fn studio_envelope(
-    core: &StudioCore,
-    effects: Vec<ryeos_client_base::studio::StudioEffect>,
+fn ryeos_envelope(
+    core: &RyeOsCore,
+    effects: Vec<ryeos_client_base::ui::RyeOsEffect>,
 ) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&core.envelope(effects))
         .map_err(|e| JsValue::from_str(&format!("serialize RyeOS envelope: {e}")))
@@ -37,22 +37,22 @@ fn studio_envelope(
 
 /// Start RyeOS, returning the semantic view/scene models and initial effects.
 #[wasm_bindgen]
-pub fn studio_start(
+pub fn ryeos_start(
     session_json: JsValue,
     viewport_json: JsValue,
     now_ms: u64,
 ) -> Result<JsValue, JsValue> {
-    let session: StudioBrowserSession = serde_wasm_bindgen::from_value(session_json)
+    let session: RyeOsBrowserSession = serde_wasm_bindgen::from_value(session_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS browser session: {e}")))?;
     let viewport: BrowserViewport = serde_wasm_bindgen::from_value(viewport_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS viewport: {e}")))?;
 
-    let mut core = StudioCore::new(session, viewport, now_ms);
+    let mut core = RyeOsCore::new(session, viewport, now_ms);
     core.bump_generation();
     let effects = core.initial_effects();
-    let response = studio_envelope(&core, effects)?;
+    let response = ryeos_envelope(&core, effects)?;
 
-    STUDIO.with(|state| {
+    RYEOS_UI.with(|state| {
         *state.borrow_mut() = Some(core);
     });
 
@@ -61,33 +61,33 @@ pub fn studio_start(
 
 /// Dispatch a browser-neutral RyeOS event into the Rust reducer.
 #[wasm_bindgen]
-pub fn studio_dispatch(event_json: JsValue) -> Result<JsValue, JsValue> {
-    let event: StudioEvent = serde_wasm_bindgen::from_value(event_json)
+pub fn ryeos_dispatch(event_json: JsValue) -> Result<JsValue, JsValue> {
+    let event: RyeOsEvent = serde_wasm_bindgen::from_value(event_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS event: {e}")))?;
 
-    STUDIO.with(|state| {
+    RYEOS_UI.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
         let effects = core.dispatch(event);
-        studio_envelope(core, effects)
+        ryeos_envelope(core, effects)
     })
 }
 
 /// Apply a browser/daemon effect result to RyeOS.
 #[wasm_bindgen]
-pub fn studio_apply_effect_result(result_json: JsValue) -> Result<JsValue, JsValue> {
-    let result: StudioEffectResult = serde_wasm_bindgen::from_value(result_json)
+pub fn ryeos_apply_effect_result(result_json: JsValue) -> Result<JsValue, JsValue> {
+    let result: RyeOsEffectResult = serde_wasm_bindgen::from_value(result_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS effect result: {e}")))?;
 
-    STUDIO.with(|state| {
+    RYEOS_UI.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        let effects = core.dispatch(StudioEvent::EffectResult { result });
-        studio_envelope(core, effects)
+        let effects = core.dispatch(RyeOsEvent::EffectResult { result });
+        ryeos_envelope(core, effects)
     })
 }
 
@@ -95,40 +95,40 @@ pub fn studio_apply_effect_result(result_json: JsValue) -> Result<JsValue, JsVal
 /// key (so the browser suppresses its native default) plus the updated
 /// envelope to commit.
 #[derive(Serialize)]
-struct StudioKeyOutcome {
+struct RyeOsKeyOutcome {
     handled: bool,
-    envelope: StudioEnvelope,
+    envelope: RyeOsEnvelope,
 }
 
-/// Route a browser key press through the SHARED studio keymap.
+/// Route a browser key press through the SHARED ryeos keymap.
 ///
-/// JavaScript translates a DOM `KeyboardEvent` into a neutral `StudioKeyEvent`
+/// JavaScript translates a DOM `KeyboardEvent` into a neutral `RyeOsKeyEvent`
 /// (`{ key, modifiers }`) and calls this. The binding table lives in
-/// `ryeos_client_base::studio::studio_key_command` — the exact function the
+/// `ryeos_client_base::ui::ryeos_key_command` — the exact function the
 /// terminal uses — so the two renderers never diverge on what a key does. The
 /// focus-context capabilities are resolved by the shared `key_context()`.
 /// Genuinely-web key handling (native text-input editing, launcher search,
 /// pointer, focus capture) stays in JavaScript and never reaches here.
 #[wasm_bindgen]
-pub fn studio_key(event_json: JsValue) -> Result<JsValue, JsValue> {
-    let event: StudioKeyEvent = serde_wasm_bindgen::from_value(event_json)
+pub fn ryeos_key(event_json: JsValue) -> Result<JsValue, JsValue> {
+    let event: RyeOsKeyEvent = serde_wasm_bindgen::from_value(event_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS key event: {e}")))?;
 
-    STUDIO.with(|state| {
+    RYEOS_UI.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
             .ok_or_else(|| JsValue::from_str("RyeOS has not been started"))?;
-        let command = studio_key_command(event, core.key_context());
+        let command = ryeos_key_command(event, core.key_context());
         // Quit is a terminal affordance (Ctrl+C); the browser has nothing to
         // quit and leaves the key native. Ignore is an unbound key — also
         // native, so browser chords (Ctrl+R, F5, copy) still work.
-        let handled = !matches!(command, StudioKeyCommand::Quit | StudioKeyCommand::Ignore);
-        // Interpretation is shared: `StudioCore::apply_key_command` owns the
+        let handled = !matches!(command, RyeOsKeyCommand::Quit | RyeOsKeyCommand::Ignore);
+        // Interpretation is shared: `RyeOsCore::apply_key_command` owns the
         // row-cursor walk, focus fallback, and launcher edits for BOTH
         // renderers.
         let effects = core.apply_key_command(command);
-        let outcome = StudioKeyOutcome {
+        let outcome = RyeOsKeyOutcome {
             handled,
             envelope: core.envelope(effects),
         };
@@ -139,8 +139,8 @@ pub fn studio_key(event_json: JsValue) -> Result<JsValue, JsValue> {
 
 /// Return the current RyeOS view model without mutating state.
 #[wasm_bindgen]
-pub fn studio_view_model() -> Result<JsValue, JsValue> {
-    STUDIO.with(|state| {
+pub fn ryeos_view_model() -> Result<JsValue, JsValue> {
+    RYEOS_UI.with(|state| {
         let state = state.borrow();
         let core = state
             .as_ref()
@@ -152,8 +152,8 @@ pub fn studio_view_model() -> Result<JsValue, JsValue> {
 
 /// Return the current RyeOS scene model without mutating state.
 #[wasm_bindgen]
-pub fn studio_scene_model() -> Result<JsValue, JsValue> {
-    STUDIO.with(|state| {
+pub fn ryeos_scene_model() -> Result<JsValue, JsValue> {
+    RYEOS_UI.with(|state| {
         let state = state.borrow();
         let core = state
             .as_ref()
@@ -165,8 +165,8 @@ pub fn studio_scene_model() -> Result<JsValue, JsValue> {
 
 /// Return the local seat event log so JS can mirror it into the seat braid.
 #[wasm_bindgen]
-pub fn studio_seat_events() -> Result<JsValue, JsValue> {
-    STUDIO.with(|state| {
+pub fn ryeos_seat_events() -> Result<JsValue, JsValue> {
+    RYEOS_UI.with(|state| {
         let state = state.borrow();
         let core = state
             .as_ref()
@@ -176,12 +176,12 @@ pub fn studio_seat_events() -> Result<JsValue, JsValue> {
     })
 }
 
-/// Replay durable seat braid events into the in-memory Studio engine.
+/// Replay durable seat braid events into the in-memory RyeOs engine.
 #[wasm_bindgen]
-pub fn studio_replay_seat_events(events_json: JsValue) -> Result<JsValue, JsValue> {
+pub fn ryeos_replay_seat_events(events_json: JsValue) -> Result<JsValue, JsValue> {
     let events: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(events_json)
         .map_err(|e| JsValue::from_str(&format!("invalid RyeOS seat replay: {e}")))?;
-    STUDIO.with(|state| {
+    RYEOS_UI.with(|state| {
         let mut state = state.borrow_mut();
         let core = state
             .as_mut()
@@ -191,7 +191,7 @@ pub fn studio_replay_seat_events(events_json: JsValue) -> Result<JsValue, JsValu
                 core.seat.append_replayed(seat_event);
             }
         }
-        studio_envelope(core, Vec::new())
+        ryeos_envelope(core, Vec::new())
     })
 }
 

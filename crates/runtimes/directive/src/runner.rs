@@ -211,8 +211,10 @@ struct CostBreakdown {
 /// retry budget (`execution.retries`) is spent.
 ///
 /// Only a [`ProviderStreamError`](crate::provider_adapter::ProviderStreamError)
-/// is retryable — the adapter classifies these as pre-stream failures, so a
-/// retry cannot duplicate a persisted cognition_out. `never_retry` (status
+/// is retryable — the adapter classifies exactly the transient transport/
+/// provider classes (pre-stream send/status/timeout, and a stream that dies
+/// mid-read). Everything else — invalid model, auth, context overflow, a
+/// persistence-first append failure — stays fail-fast. `never_retry` (status
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
 /// (`base * 2^attempt`).
@@ -237,6 +239,11 @@ fn retry_backoff(
         // shared `execution.retries` budget so a burst-fanout connect blip backs
         // off and re-attempts instead of surfacing as a fatal generic error.
         Some(ProviderStreamError::Send { .. }) => true,
+        // The stream died mid-read (chunk timeout/reset). The request is
+        // idempotent; deltas persisted before the cut stay in the braid as the
+        // abandoned-partial record, delimited by the `provider_retry` event the
+        // caller appends before re-issuing.
+        Some(ProviderStreamError::MidStream { .. }) => execution.retry_mid_stream,
         None => false,
     };
     if !retryable {
@@ -257,10 +264,15 @@ fn normalize_hook_dispatch_result(
     let is_native_runtime_envelope = obj.contains_key("success")
         && obj.contains_key("status")
         && obj.contains_key("result")
-        && (obj.contains_key("outputs") || obj.contains_key("warnings") || obj.contains_key("cost"));
+        && (obj.contains_key("outputs")
+            || obj.contains_key("warnings")
+            || obj.contains_key("cost"));
     if is_native_runtime_envelope {
         let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        let status = obj.get("status").and_then(Value::as_str).unwrap_or("unknown");
+        let status = obj
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         if !success || status != "completed" {
             let message = obj
                 .get("error")
@@ -454,7 +466,10 @@ impl Runner {
                 reasoning_content: None,
             });
         }
-        tracing::info!(folded = inputs.len(), "folded operator inputs as cognition_in");
+        tracing::info!(
+            folded = inputs.len(),
+            "folded operator inputs as cognition_in"
+        );
         Ok(true)
     }
 
@@ -572,17 +587,18 @@ impl Runner {
                             visible_tools_owned.push(build_directive_return_tool(outputs));
                         }
                     }
-                    // §1 retry loop. A retryable provider failure (a configured
-                    // HTTP status or a send timeout) is re-attempted with
-                    // exponential backoff. Both classes are classified at the
-                    // source as occurring STRICTLY BEFORE any SSE byte — the HTTP
-                    // status check and the send timeout both precede stream
-                    // consumption — so a retry can never duplicate an
-                    // already-persisted cognition_out. This is the explicit
-                    // persistence-first decision: retry ONLY errors before first
-                    // content; any failure surfacing after the stream opens is
-                    // not a `ProviderStreamError`, so `retry_backoff` returns
-                    // `None` and it routes to `State::Errored` unchanged.
+                    // §1 retry loop. A retryable provider failure — a configured
+                    // HTTP status, a send timeout/transport error, or a stream
+                    // that died mid-read — is re-attempted with exponential
+                    // backoff. The request is idempotent (same message array).
+                    // Pre-stream classes cannot duplicate a persisted
+                    // cognition_out; the mid-stream class leaves the already-
+                    // persisted deltas in the braid as the honest record of the
+                    // abandoned partial, delimited by the `provider_retry`
+                    // event appended below before the re-issue. Anything not
+                    // classified as a `ProviderStreamError` (invalid bytes, a
+                    // persistence-first append failure) routes to
+                    // `State::Errored` unchanged.
                     //
                     // Budget is re-checked before every attempt so a retry never
                     // pushes spend past the wall. `record_turn`/`emit_turn_start`
@@ -634,6 +650,19 @@ impl Runner {
                                             } => Some(*connect),
                                             _ => None,
                                         });
+                                    // A mid-stream cut abandons already-persisted
+                                    // partial output; carry how much so the braid
+                                    // quantifies what precedes this retry marker.
+                                    let mid_stream_persisted_out_events = e
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
+                                        )
+                                        .and_then(|pe| match pe {
+                                            crate::provider_adapter::ProviderStreamError::MidStream {
+                                                persisted_out_events,
+                                                ..
+                                            } => Some(*persisted_out_events),
+                                            _ => None,
+                                        });
                                     tracing::warn!(
                                         turn,
                                         attempt,
@@ -666,6 +695,8 @@ impl Runner {
                                                     "max_retries": self.execution.retries,
                                                     "backoff_ms": delay.as_millis() as u64,
                                                     "send_connect_phase": send_connect_phase,
+                                                    "mid_stream_persisted_out_events":
+                                                        mid_stream_persisted_out_events,
                                                     "error": format!("{e:#}"),
                                                 }),
                                             )
@@ -1097,6 +1128,7 @@ impl Runner {
                         content: String,
                         raw_size: u64,
                         result_guard_truncated: bool,
+                        duplicate_of: Option<String>,
                         truncated_reason_override: Option<&'static str>,
                     }
 
@@ -1154,6 +1186,7 @@ impl Runner {
                                     raw_size: body_str.len() as u64,
                                     content: body_str,
                                     result_guard_truncated: false,
+                                    duplicate_of: None,
                                     truncated_reason_override: Some("error_envelope"),
                                 }
                             } else {
@@ -1194,31 +1227,31 @@ impl Runner {
                                                 Vec::new()
                                             });
                                         let raw_size = raw_bytes.len() as u64;
-                                        let processed_bytes =
-                                            self.result_guard.process_bytes(&raw_bytes);
-                                        let result_guard_truncated =
-                                            processed_bytes.len() != raw_bytes.len();
+                                        let guarded = self.result_guard.process_bytes(&raw_bytes);
                                         let content =
-                                            String::from_utf8_lossy(&processed_bytes).to_string();
+                                            String::from_utf8_lossy(&guarded.bytes).to_string();
                                         ToolResult {
                                             tool: tool_name.clone(),
                                             content,
                                             raw_size,
-                                            result_guard_truncated,
+                                            result_guard_truncated: guarded.truncated,
+                                            duplicate_of: guarded.duplicate_of,
                                             truncated_reason_override: None,
                                         }
                                     }
                                     Err(e) => {
-                                        let body_str =
-                                            serde_json::to_string(&json!({"error": format!("{e:#}")}))
-                                                .unwrap_or_else(|_| {
-                                                    "{\"error\":\"dispatch failed\"}".to_string()
-                                                });
+                                        let body_str = serde_json::to_string(
+                                            &json!({"error": format!("{e:#}")}),
+                                        )
+                                        .unwrap_or_else(|_| {
+                                            "{\"error\":\"dispatch failed\"}".to_string()
+                                        });
                                         ToolResult {
                                             tool: tool_name.clone(),
                                             raw_size: body_str.len() as u64,
                                             content: body_str,
                                             result_guard_truncated: false,
+                                            duplicate_of: None,
                                             truncated_reason_override: Some("error_envelope"),
                                         }
                                     }
@@ -1233,6 +1266,7 @@ impl Runner {
                                 raw_size: body_str.len() as u64,
                                 content: body_str,
                                 result_guard_truncated: false,
+                                duplicate_of: None,
                                 truncated_reason_override: Some("error_envelope"),
                             }
                         }
@@ -1270,6 +1304,7 @@ impl Runner {
                             truncated,
                             truncated_reason,
                             tool_result.raw_size,
+                            tool_result.duplicate_of.as_deref(),
                         )
                         .await
                     {
@@ -1359,6 +1394,7 @@ impl Runner {
                                         false,
                                         None,
                                         outputs_size,
+                                        None,
                                     )
                                     .await
                                 {
@@ -1422,6 +1458,7 @@ impl Runner {
                             false,
                             Some("error_envelope"),
                             failure_size,
+                            None,
                         )
                         .await
                     {
@@ -2126,7 +2163,10 @@ mod tests {
         assert_eq!(context["event"]["usage"]["input_tokens"], 10);
         assert_eq!(context["event"]["usage"]["output_tokens"], 5);
         assert_eq!(context["event"]["budget_remaining"]["spend_usd"], 0.75);
-        assert_eq!(context["event"]["budget_remaining"]["spend_unlimited"], false);
+        assert_eq!(
+            context["event"]["budget_remaining"]["spend_unlimited"],
+            false
+        );
         assert_eq!(context["event"]["declared_outputs"], json!([]));
     }
 
@@ -2440,8 +2480,14 @@ mod tests {
         use std::time::Duration;
         let cfg = retry_cfg();
         let e = status_err(429);
-        assert_eq!(retry_backoff(&e, 0, &cfg), Some(Duration::from_millis(1000)));
-        assert_eq!(retry_backoff(&e, 1, &cfg), Some(Duration::from_millis(2000)));
+        assert_eq!(
+            retry_backoff(&e, 0, &cfg),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            retry_backoff(&e, 1, &cfg),
+            Some(Duration::from_millis(2000))
+        );
         // Retry budget spent once attempt reaches `retries`.
         assert_eq!(retry_backoff(&e, 2, &cfg), None);
     }
@@ -2506,14 +2552,40 @@ mod tests {
     }
 
     #[test]
-    fn retry_backoff_never_retries_post_stream_errors() {
-        // The persistence-first decision, guarded: any failure that is NOT a
-        // classified pre-stream `ProviderStreamError` (i.e. anything that could
-        // have occurred after cognition_out began persisting) is never retried,
-        // so a retry can never duplicate streamed content.
+    fn retry_backoff_never_retries_unclassified_errors() {
+        // Only errors the adapter classified as transient (a typed
+        // `ProviderStreamError`) are retryable. Anything unclassified — invalid
+        // bytes, a persistence-first append failure, parse defects — fails the
+        // turn immediately.
         let cfg = retry_cfg();
-        let e = anyhow::anyhow!("SSE parse failure mid-stream");
+        let e = anyhow::anyhow!("non-utf8 SSE chunk: invalid byte sequence");
         assert_eq!(retry_backoff(&e, 0, &cfg), None);
+    }
+
+    #[test]
+    fn retry_backoff_mid_stream_gated_by_retry_mid_stream() {
+        use std::time::Duration;
+        // A stream cut mid-read (chunk timeout/reset) is transient: retried by
+        // default under the shared budget, and disabled by the knob.
+        let mid_stream = || {
+            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream {
+                persisted_out_events: 42,
+                detail: "stream chunk error: operation timed out".into(),
+            })
+        };
+        let mut cfg = retry_cfg();
+        assert_eq!(
+            retry_backoff(&mid_stream(), 0, &cfg),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            retry_backoff(&mid_stream(), 1, &cfg),
+            Some(Duration::from_millis(2000))
+        );
+        // Still bounded by the retry budget.
+        assert_eq!(retry_backoff(&mid_stream(), 2, &cfg), None);
+        cfg.retry_mid_stream = false;
+        assert_eq!(retry_backoff(&mid_stream(), 0, &cfg), None);
     }
 
     #[test]

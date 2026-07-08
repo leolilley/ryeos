@@ -1,0 +1,26 @@
+# ryeos:signed:2026-07-06T12:24:56Z:fa334e60b7801664562dddbb3362230c16c8b59664319c175b0258bd8e42d8bd:FZipAzhXrdLdQ/rVemOxNPhJFEZqmVohiExqiIPN1fH6eXLlZc0xQlIJWnI2VDpP7vxyDuNzWj1j6jGbIuXAAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: input
+version: "1.0.0"
+description: The ryeos-ui chat box - an input buffer that dispatches through the engine route-fold
+
+widget: text
+input:
+  id: line
+  placeholder: Ask or run a command
+  completion:
+    ref: service:commands/list
+    collection: commands
+  # Inline @-mentions of substrate refs (the ryeos twist on file @-mentions):
+  # type `@` to reference a thread; the hint shows its directive, Tab inserts
+  # the thread handle. One source for now (threads); extensible to items/files.
+  mentions:
+    ref: service:threads/list
+    collection: threads
+    reference: thread_id
+    label: item_ref
+  submit: route
+  # Semantic capability only (no physical keys): the central keymap maps
+  # Tab/Shift+Tab to cycling the route target over [new conversation] +
+  # open chains. Tab still completes slash-commands when one can be accepted.
+  target:
+    cycle: route_chains

@@ -168,9 +168,9 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             ));
         }
         if node.parallel {
-            result
-                .errors
-                .push(format!("node '{name}' cannot be both 'follow' and 'parallel'"));
+            result.errors.push(format!(
+                "node '{name}' cannot be both 'follow' and 'parallel'"
+            ));
         }
         if node.is_cacheable() {
             result.errors.push(format!(
@@ -201,9 +201,9 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             ));
         }
         if node.follow {
-            result
-                .errors
-                .push(format!("node '{name}' cannot be both 'detach' and 'follow'"));
+            result.errors.push(format!(
+                "node '{name}' cannot be both 'detach' and 'follow'"
+            ));
         }
         if node.is_cacheable() {
             result.errors.push(format!(
@@ -255,9 +255,9 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             ));
         }
         if retry.backoff_ms == 0 {
-            result
-                .errors
-                .push(format!("node '{name}' retry.backoff_ms must be greater than 0"));
+            result.errors.push(format!(
+                "node '{name}' retry.backoff_ms must be greater than 0"
+            ));
         }
         if let Some(cap) = retry.max_backoff_ms {
             if cap < retry.backoff_ms {
@@ -292,11 +292,7 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
 /// branch must read `result.K`. Warn (not error): `state.K` is valid syntax
 /// and reading a *different* node's assigned `K` is legitimate — only the
 /// same-node assign∩condition intersection is the footgun.
-fn check_conditional_reads_own_assign(
-    name: &str,
-    node: &GraphNode,
-    result: &mut ValidationResult,
-) {
+fn check_conditional_reads_own_assign(name: &str, node: &GraphNode, result: &mut ValidationResult) {
     let assigned: HashSet<&str> = match node.assign.as_ref() {
         Some(Value::Object(map)) => map.keys().map(String::as_str).collect(),
         _ => return,
@@ -643,7 +639,11 @@ config:
       node_type: return
 "#;
         let result = validate_graph(&make_graph(yaml));
-        assert!(result.errors.is_empty(), "typed hook must validate: {:?}", result.errors);
+        assert!(
+            result.errors.is_empty(),
+            "typed hook must validate: {:?}",
+            result.errors
+        );
         assert!(
             !result.warnings.iter().any(|w| w.contains("never fire")),
             "a graph_completed hook must not warn: {:?}",

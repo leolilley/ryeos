@@ -1,0 +1,49 @@
+# ryeos:signed:2026-07-06T12:24:56Z:df57651618cd08f0327638bd399acfa0aee3d0df556f2febb5947a98b2b6b6ac:A2yzsuHQnRKJYVfuW9Lx7b3fX2hKMyDETGrCyfg7hlyCJjgxlzmmq9UzrO6peRkh9ImYOHwwP5mhBX1TVuOmBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:unsigned
+name: project-items
+version: "1.0.0"
+description: Signed content visible from the active project
+
+widget: table
+source:
+  ref: service:ui/ryeos-ui/items/list
+  params:
+    limit: 500
+    project_path: ""
+  collection: items
+projections:
+  columns:
+    - label: item
+      field: canonical_ref
+    - label: kind
+      field: item_kind
+    - label: space
+      field: space
+    - label: trust
+      field: trust.class
+  tone:
+    field: trust.class
+    map:
+      trusted: good
+      untrusted: danger
+      unsigned: warn
+      unknown: neutral
+    default: neutral
+selection:
+  activate: inspect
+affordances:
+  - id: inspect
+    label: Inspect
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+  - id: explain
+    label: Explain
+    invoke:
+      plane: ui
+      facet: selection
+      value:
+        item: "{record.canonical_ref}"
+      open_view: view:ryeos/item/explain

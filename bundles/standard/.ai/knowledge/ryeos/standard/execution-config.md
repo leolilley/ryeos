@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:944293ab7601be20449cc152de35b66c369041a81c11e17770d8b66966616e32:lizLZcqIH6m8QLU6907n6qMejyNQYoWq527MqAPRddAoUBfhWB1Z9JoHAyDZm0KqX13vM0VSL+1R+t5z1248CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-06T12:24:50Z:1aca6b518a35d273d11bd67c70e12f647259a006a38632bd7e4a4ea86c7d698f:TYzwvi0IrVXZRtjoERzoIeQPxnVKjCh7xzKrP79utKGXKSDgAjnt3VTcDeT3tJu2rdsWtD4Z49bE61/ds5yYAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -24,6 +24,7 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `never_retry`        | 401, 403, 404 | HTTP codes that never retry    |
 | `backoff_base_ms`    | 1000     | Exponential backoff base (ms)         |
 | `timeout_seconds`    | 300      | Overall request timeout               |
+| `max_output_tokens_per_turn` | 32768 | Runtime-side cap for one model turn's generated output; `0` disables |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
 | `retry_on_timeout`   | true     | Whether timeouts trigger retries      |
 
@@ -37,6 +38,10 @@ When an API call fails with a retryable status code (429, 500, 502, 503):
 Auth errors (401, 403) and not-found (404) are never retried.
 
 Timeouts are retried by default (`retry_on_timeout: true`).
+
+Per-turn output caps are enforced by the directive runtime while streaming, so
+they still apply if a provider omits or ignores a wire-level `max_tokens` field.
+Cap failures are terminal for the turn rather than retryable provider errors.
 
 ## Config Resolution Chain
 

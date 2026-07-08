@@ -259,8 +259,8 @@ impl DaemonClient {
     /// threads (tools, composes). The conversation feed is the route
     /// ratchet concatenating per-turn tails. The braid is the truth;
     /// this stream is it arriving now.
-    pub async fn open_thread_events(&self, thread_id: &str) -> Result<SseStream, ClientError> {
-        let path = format!("/chains/{thread_id}/events/stream");
+    pub async fn open_thread_events(&self, chain_root_id: &str) -> Result<SseStream, ClientError> {
+        let path = format!("/chains/{chain_root_id}/events/stream");
         self.open_sse(&path).await
     }
 

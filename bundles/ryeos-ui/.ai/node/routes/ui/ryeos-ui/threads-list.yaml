@@ -1,0 +1,13 @@
+# ryeos:signed:2026-07-06T12:32:28Z:28d75c2be2b06a24c0d11b665daa5e95b0ffa9f5dc2d900fa797aea88cbfd339:WQqXEdeRWLCU0WZzMJXsUDFH7wzF78vtjfyrOF4V0ApX+ytLNSTJMMQ8shlokzLuFFgDxJmMy6ZFCzDr/y7UDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/threads/list
+path: /ui/api/ryeos-ui/threads/list
+methods:
+  - GET
+auth: browser_session
+limits:
+  body_bytes_max: 0
+  timeout_ms: 10000
+  concurrent_max: 64
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/threads/list"

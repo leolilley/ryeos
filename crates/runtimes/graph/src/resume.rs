@@ -190,8 +190,12 @@ pub fn from_checkpoint_value(value: &Value) -> Result<ResumeState> {
         graph_run_id,
         accounting: value.get("accounting").cloned(),
         suppressed_errors: value.get("suppressed_errors").cloned(),
-        pending_follow: value.get(crate::walker::follow_keys::PENDING_FOLLOW).cloned(),
-        follow_result: value.get(crate::walker::follow_keys::FOLLOW_RESULT).cloned(),
+        pending_follow: value
+            .get(crate::walker::follow_keys::PENDING_FOLLOW)
+            .cloned(),
+        follow_result: value
+            .get(crate::walker::follow_keys::FOLLOW_RESULT)
+            .cloned(),
         retry_attempt: value
             .get("retry_attempt")
             .and_then(|v| v.as_u64())
@@ -285,7 +289,11 @@ mod tests {
         async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
-        async fn request_continuation(&self, _: &str, _: Option<&str>) -> Result<Value, CallbackError> {
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
         async fn append_event(

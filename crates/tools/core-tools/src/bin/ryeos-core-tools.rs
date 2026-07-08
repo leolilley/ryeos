@@ -87,14 +87,6 @@ enum Cmd {
         #[arg(long)]
         allow_namespace_mismatch: bool,
 
-        /// Publish even when a populated `.ai/<dir>` is covered by no registered
-        /// kind. Use ONLY for a deliberately partial intermediate publish (e.g.
-        /// signing core before the bundle defining its `knowledge` kind exists),
-        /// which a later republish completes. Default: fail loudly so items are
-        /// never silently skipped.
-        #[arg(long = "allow-uncovered-kind-dirs")]
-        allow_uncovered_item_dirs: bool,
-
         /// Suppress emitting `<bundle_source>/PUBLISHER_TRUST.toml`.
         #[arg(long)]
         no_trust_doc: bool,
@@ -564,7 +556,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             name,
             skip_unsignable,
             allow_namespace_mismatch,
-            allow_uncovered_item_dirs,
             no_trust_doc,
         } => run_build(
             bundle_source,
@@ -573,7 +564,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             name,
             skip_unsignable,
             allow_namespace_mismatch,
-            allow_uncovered_item_dirs,
             no_trust_doc,
             cli.stdin_json,
         ),
@@ -917,12 +907,11 @@ fn run_build(
     name: Option<String>,
     skip_unsignable: bool,
     allow_namespace_mismatch: bool,
-    allow_uncovered_item_dirs: bool,
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_engine::roots;
     use ryeos_core_tools::actions::publish::{run_publish, PublishOptions};
+    use ryeos_engine::roots;
 
     let (
         bundle_source,
@@ -931,7 +920,6 @@ fn run_build(
         name,
         skip_unsignable,
         allow_namespace_mismatch,
-        allow_uncovered_item_dirs,
         no_trust_doc,
     ) = if stdin_json {
         if bundle_source.is_some() {
@@ -946,7 +934,6 @@ fn run_build(
             params.name,
             params.skip_unsignable,
             params.allow_namespace_mismatch,
-            params.allow_uncovered_item_dirs,
             params.no_trust_doc,
         )
     } else {
@@ -959,7 +946,6 @@ fn run_build(
             name,
             skip_unsignable,
             allow_namespace_mismatch,
-            allow_uncovered_item_dirs,
             no_trust_doc,
         )
     };
@@ -1001,7 +987,6 @@ fn run_build(
         name,
         skip_unsignable,
         allow_namespace_mismatch,
-        allow_uncovered_item_dirs,
         emit_trust_doc: !no_trust_doc,
     })?;
 
@@ -1231,6 +1216,7 @@ fn resolve_publish_owner(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BundlePublishParams {
     source: PathBuf,
     #[serde(default)]
@@ -1245,8 +1231,6 @@ struct BundlePublishParams {
     skip_unsignable: bool,
     #[serde(default)]
     allow_namespace_mismatch: bool,
-    #[serde(default)]
-    allow_uncovered_item_dirs: bool,
     #[serde(default)]
     no_trust_doc: bool,
 }
@@ -1465,8 +1449,11 @@ fn run_bundle_sign(
         .context("load trust store for registry roots")?;
 
     if source_path.join(ryeos_engine::AI_DIR).join("bin").is_dir() {
-        ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(&source_path, &signing_key)
-            .context("rebuild source bundle binary manifest")?;
+        ryeos_core_tools::actions::build_bundle::rebuild_bundle_manifest(
+            &source_path,
+            &signing_key,
+        )
+        .context("rebuild source bundle binary manifest")?;
     }
 
     let report = ryeos_core_tools::actions::sign_bundle::sign_bundle_items_with_trust(
@@ -1474,7 +1461,6 @@ fn run_bundle_sign(
         &dependency_roots,
         &signing_key,
         Some(&trust_store),
-        false,
     )
     .context("bundle sign failed")?;
 
@@ -1876,20 +1862,20 @@ fn run_vault(cmd: VaultCmd) -> anyhow::Result<()> {
                 buf
             };
 
-            let report =
-                ryeos_core_tools::actions::vault::run_put(&ryeos_core_tools::actions::vault::PutOptions {
+            let report = ryeos_core_tools::actions::vault::run_put(
+                &ryeos_core_tools::actions::vault::PutOptions {
                     app_root: ssd,
                     entries: vec![(name, value)],
-                })?;
+                },
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
         VaultCmd::List { app_root } => {
             let ssd = resolve_app_root(app_root)?;
-            let report =
-                ryeos_core_tools::actions::vault::run_list(&ryeos_core_tools::actions::vault::ListOptions {
-                    app_root: ssd,
-                })?;
+            let report = ryeos_core_tools::actions::vault::run_list(
+                &ryeos_core_tools::actions::vault::ListOptions { app_root: ssd },
+            )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -1924,7 +1910,9 @@ fn run_authorize_client(
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
-    use ryeos_core_tools::actions::authorize::{run_authorize_client as run, AuthorizeClientParams};
+    use ryeos_core_tools::actions::authorize::{
+        run_authorize_client as run, AuthorizeClientParams,
+    };
 
     let params = if stdin_json {
         let val = read_stdin_json()?;
@@ -2018,7 +2006,9 @@ fn run_admission_token(
     ttl_secs: u64,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::authorize::{run_mint_admission_token, MintAdmissionTokenParams};
+    use ryeos_core_tools::actions::authorize::{
+        run_mint_admission_token, MintAdmissionTokenParams,
+    };
 
     let (app_root, scopes, label, ttl_secs) = if stdin_json {
         let val = read_stdin_json()?;

@@ -1,0 +1,14 @@
+# ryeos:signed:2026-07-08T04:27:35Z:6598ebb47bf6e5725fc78d89d68215b257d1df1b582d68793a55b25358a0f570:HeJVrJxygbz8nIqwgU4DfLscfzBEf7oSTg/av5kD0s1A7cqNcnQKLH/3AlnlXbKs770fzzd4qOGRI2yyC7U1Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+category: "trace"
+name: "inspect"
+kind: service
+version: "1.0.0"
+endpoint: trace.inspect
+availability: both
+required_caps: []
+schema:
+  thread_id: string?
+  chain_root_id: string?
+  after_chain_seq: integer?
+  limit: integer?
+description: "Inspect a thread or chain as normalized durable trace events with verifiable event refs."

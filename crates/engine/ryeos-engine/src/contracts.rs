@@ -2752,7 +2752,7 @@ mod kind_contract_regressions {
         // Child surface with extends pointing to parent.
         // Validation only checks the composed value, not extends resolution.
         let value = serde_json::json!({
-            "extends": "surface:ryeos/studio/base",
+            "extends": "surface:ryeos/ui/base",
             "layout": { "root": "main" },
             "affordances": [
                 { "id": "view.graph", "label": "Graph", "category": "Graph" }
@@ -3180,9 +3180,9 @@ impl NativeResumeSpec {
     pub fn parse_declaration(value: &Value) -> Result<Self, String> {
         match value {
             Value::Bool(true) => Ok(Self::default()),
-            Value::Bool(false) => {
-                Err("`native_resume: false` is not supported — omit the block to disable".to_string())
-            }
+            Value::Bool(false) => Err(
+                "`native_resume: false` is not supported — omit the block to disable".to_string(),
+            ),
             other => {
                 #[derive(Deserialize)]
                 #[serde(deny_unknown_fields)]

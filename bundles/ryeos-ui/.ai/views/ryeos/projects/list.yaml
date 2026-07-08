@@ -1,0 +1,52 @@
+# ryeos:signed:2026-07-08T01:26:03Z:4fad1c0060e0bf55f5e8a0ede274acacfcc68e96cb3465376f5cba6bc1b6ea0e:D7xKtld4K3jLUsPfJLt8BvmSEGmHfO2cWgwvGlT86M+QuWfMhMNWCCsMyz72mK3UkFx6JpTZb4h7TY4r/MG0CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+name: projects-list
+version: "1.0.0"
+description: >-
+  Registered project contexts for this operator. The current TUI project is
+  marked in-row; Enter opens a project so current-project lenses and foot-input
+  launches retarget to that root.
+
+widget: table
+source:
+  ref: service:projects/list
+  params:
+    project_path: ""
+  collection: projects
+projections:
+  columns:
+    - label: current
+      field: current
+      tone:
+        field: current
+        map:
+          "true": accent
+    - label: saved
+      field: registered
+    - label: name
+      field: name
+    - label: root
+      field: root
+    - label: exists
+      field: exists
+    - label: added
+      field: added_at
+  expand:
+    fields: [local_id, name, root, current, registered, exists, tags, added_at]
+  tone:
+    field: current
+    map:
+      "true": accent
+    default: neutral
+selection:
+  activate: open-project
+affordances:
+  - id: open-project
+    label: Open project
+    invoke:
+      plane: rye
+      ref: service:projects/open
+      args:
+        local_id: "{record.local_id}"
+      notice: "Opened {result.project.name}."
+refresh:
+  on_hint: [project]

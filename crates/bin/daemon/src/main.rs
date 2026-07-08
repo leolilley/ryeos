@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::serve;
@@ -16,9 +17,10 @@ use ryeos_app::thread_lifecycle::ThreadLifecycleService;
 use ryeos_app::{command_service, event_store_service, thread_lifecycle};
 use ryeos_app::{kind_profiles, process, state, state_lock, state_store};
 use ryeos_executor::executor as service_executor;
+use ryeos_node::lifecycle_marker;
 use ryeosd::config::{self, Cli, Config};
 use ryeosd::scheduler::db::SchedulerDb;
-use ryeosd::{bootstrap, lifecycle_marker, reconcile, scheduler, uds};
+use ryeosd::{bootstrap, reconcile, scheduler, uds};
 
 mod maintenance_schedule;
 
@@ -444,37 +446,66 @@ async fn main() -> Result<()> {
     };
     let webhook_dedupe = Arc::new(ryeos_api::routes::webhook_dedupe::WebhookDedupeStore::new());
 
-    // Session hints: thread lifecycle events fan out to every live UI
-    // session as transient `thread.hint` notices (never persisted —
-    // hints say "look", the braid says what happened).
+    // Session hints: lifecycle events fan out immediately; mid-run braid
+    // activity coalesces into lossy `activity` hints. Hints are never
+    // persisted — they say "look", the braid says what happened.
     {
         let hub = app_state.event_streams.clone();
         let ui = ui_state_for_hints.clone();
         tokio::spawn(async move {
             let mut rx = hub.subscribe_all();
+            let mut activity_tick = tokio::time::interval(Duration::from_millis(750));
+            activity_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut pending_activity: HashMap<String, u64> = HashMap::new();
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if !ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
-                            &event.event_type,
-                        ) {
+                tokio::select! {
+                    recv = rx.recv() => {
+                        match recv {
+                            Ok(event) => {
+                                if ryeos_api::routes::invokers::stream_helpers::is_lifecycle_hint(
+                                    &event.event_type,
+                                ) {
+                                    let payload = serde_json::json!({
+                                        "kind": "thread",
+                                        "thread_id": event.thread_id,
+                                        "chain_root_id": event.chain_root_id,
+                                        "event_type": event.event_type,
+                                    });
+                                    for session_id in ui.browser_sessions.session_ids() {
+                                        ui.session_bus.publish(
+                                            &session_id,
+                                            "thread.hint",
+                                            payload.clone(),
+                                        );
+                                    }
+                                } else if !event.event_type.starts_with("seat.") {
+                                    *pending_activity.entry(event.thread_id).or_insert(0) += 1;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    _ = activity_tick.tick() => {
+                        if pending_activity.is_empty() {
                             continue;
                         }
+                        let thread_ids = pending_activity.keys().cloned().collect::<Vec<_>>();
+                        let event_count = pending_activity.values().sum::<u64>();
+                        pending_activity.clear();
+                        let payload = serde_json::json!({
+                            "kind": "activity",
+                            "thread_ids": thread_ids,
+                            "event_count": event_count,
+                        });
                         for session_id in ui.browser_sessions.session_ids() {
                             ui.session_bus.publish(
                                 &session_id,
                                 "thread.hint",
-                                serde_json::json!({
-                                    "kind": "thread",
-                                    "thread_id": event.thread_id,
-                                    "chain_root_id": event.chain_root_id,
-                                    "event_type": event.event_type,
-                                }),
+                                payload.clone(),
                             );
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
@@ -485,6 +516,18 @@ async fn main() -> Result<()> {
     // making its first daemon callback before the UDS / HTTP server is
     // bound would fail. We collect intents here and dispatch them
     // below, after the listeners are accepting connections.
+    // Node-scoped execution limits ride the SAME signed, layered config
+    // family as every other execution limit: `config/execution/execution.yaml`,
+    // `node:` section. Bundle layers carry defaults; the node's own tree
+    // (`<app_root>/.ai/config/...`) is the top overlay — the operator's
+    // surface, which no project layer can touch (per-launch policy reads use
+    // the project as overlay instead and never read `node:`).
+    let node_fanout = load_node_max_live_fanout(&app_state, &config.app_root);
+    ryeos_executor::execution::launch::arm_global_live_fanout_limit(node_fanout);
+    if let Some(n) = node_fanout {
+        tracing::info!(max_live_fanout = n, "node execution limits armed");
+    }
+
     let resume_intents = reconcile::reconcile(&app_state).await?;
     // Follow reconcile actions collected here, dispatched post-listener too: a
     // resumed parent's (or relaunched child's) first callback must not precede a
@@ -625,12 +668,11 @@ async fn main() -> Result<()> {
             // build one. A tool-subprocess native_resume (no `runtime_ref`) keeps
             // that path.
             if intent.resume_context.runtime_ref.is_some() {
-                if let Err(err) =
-                    ryeos_executor::execution::launch::launch_existing_native_resume(
-                        st,
-                        &intent.thread_id,
-                    )
-                    .await
+                if let Err(err) = ryeos_executor::execution::launch::launch_existing_native_resume(
+                    st,
+                    &intent.thread_id,
+                )
+                .await
                 {
                     tracing::error!(
                         thread_id = %intent.thread_id,
@@ -787,23 +829,74 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Read `node.max_live_fanout` from the layered signed execution config,
+/// bundle defaults first and the node's own `.ai` tree last (last layer
+/// wins, matching execution-policy layering). A layer that fails signature
+/// verification is skipped loudly rather than trusted.
+fn load_node_max_live_fanout(state: &AppState, app_root: &std::path::Path) -> Option<u32> {
+    let engine = &state.engine;
+    let roots = engine.resolution_roots(Some(app_root.to_path_buf()));
+    let parsers = match engine.effective_parser_dispatcher(Some(app_root)) {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(error = %err, "node execution limits: parser dispatcher unavailable");
+            return None;
+        }
+    };
+    let ctx = ryeos_engine::config_loading::ConfigLoadContext {
+        roots: &roots,
+        parsers: &parsers,
+        kinds: &engine.kinds,
+        trust_store: &engine.trust_store,
+    };
+    let mut limit: Option<u32> = None;
+    for root in &roots.ordered {
+        let candidate = root
+            .ai_root
+            .join("config")
+            .join("execution")
+            .join("execution.yaml");
+        if !candidate.exists() {
+            continue;
+        }
+        match ryeos_engine::config_loading::load_and_verify_config_file(&candidate, &ctx) {
+            Ok(value) => {
+                if let Some(n) = value
+                    .get("node")
+                    .and_then(|n| n.get("max_live_fanout"))
+                    .and_then(|v| v.as_u64())
+                {
+                    limit = Some(n as u32);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    path = %candidate.display(),
+                    error = %err,
+                    "node execution limits: config layer failed verification — ignoring"
+                );
+            }
+        }
+    }
+    limit.filter(|n| *n > 0)
+}
+
 /// Drive follow reconcile actions as detached tasks. Shared by the boot
 /// pass and the periodic recovery sweep; every launch is claim-guarded, so
 /// concurrent drives are benign skips.
-fn dispatch_follow_actions(
-    state: &AppState,
-    actions: Vec<reconcile::FollowReconcileAction>,
-) {
+fn dispatch_follow_actions(state: &AppState, actions: Vec<reconcile::FollowReconcileAction>) {
     for action in actions {
         let st = state.clone();
         tokio::spawn(async move {
             use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
             let (label, outcome) = match action {
                 reconcile::FollowReconcileAction::Resume { follow_key } => {
-                    let outcome = ryeos_executor::execution::launch::launch_follow_resume_successor(
-                        st, &follow_key,
-                    )
-                    .await;
+                    let outcome =
+                        ryeos_executor::execution::launch::launch_follow_resume_successor(
+                            st,
+                            &follow_key,
+                        )
+                        .await;
                     (format!("parent-resume {follow_key}"), outcome)
                 }
                 reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
@@ -830,7 +923,10 @@ fn drain_running_threads(state: &AppState) {
     // it marks running, so there is a brief `created` + live-pgid window. The
     // kill loop below only acts on rows with `Some(pgid)`, so unlaunched
     // `created` rows (no pgid) are untouched.
-    let threads = match state.state_store.list_threads_by_status(&["created", "running"]) {
+    let threads = match state
+        .state_store
+        .list_threads_by_status(&["created", "running"])
+    {
         Ok(threads) => threads,
         Err(err) => {
             tracing::warn!(error = %err, "failed to list running threads during shutdown");

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-06T12:24:56Z:d5475c652d96076fdbc130c7f277fd008bef68898722b2dac35776f363f28939:iX2D0LFMLFtkxc7yqEUqalejwuqNDHN33JniagH5VrSpnhbc6zBPPi+mCtnQCOm+vd4Dy9vFRRXeMCd5cO0+CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+name: ryeos-ui/projects/open
+version: "1.0.0"
+description: Open a registered local RyeOS UI project by local id and bind it to the current browser session.
+endpoint: ui.ryeos.projects.open
+availability: daemon_only

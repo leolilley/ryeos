@@ -353,7 +353,7 @@ intentionally bypasses the package manager/AUR flow while installing the same
 runtime layout:
 
 - binaries to `/usr/bin`;
-- bundle sources to `/usr/share/ryeos/{core,standard,studio,web,hosted-node}`;
+- bundle sources to `/usr/share/ryeos/{core,standard,ryeos-ui,web,hosted-node}`;
 - initialized bundles under `~/.local/share/ryeos/.ai/bundles/...` after
   `ryeos init`.
 

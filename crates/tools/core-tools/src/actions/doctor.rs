@@ -97,10 +97,9 @@ fn check_manifest(source: &Path) -> CheckResult {
             );
         }
     };
-    let source_manifest = match serde_yaml::from_str::<
-        ryeos_bundle::manifest::BundleManifestSource,
-    >(&raw)
-    {
+    let source_manifest = match serde_yaml::from_str::<ryeos_bundle::manifest::BundleManifestSource>(
+        &raw,
+    ) {
         Ok(src) => src,
         Err(e) => {
             let msg = e.to_string();
@@ -421,7 +420,10 @@ mod tests {
         assert_eq!(r.status, FAIL);
         let err = r.detail["error"].as_str().unwrap();
         assert!(err.contains("malformed"), "unexpected: {err}");
-        assert!(err.contains("bogus_field"), "raw serde error preserved: {err}");
+        assert!(
+            err.contains("bogus_field"),
+            "raw serde error preserved: {err}"
+        );
         assert!(r.detail.get("remedy").is_none());
     }
 

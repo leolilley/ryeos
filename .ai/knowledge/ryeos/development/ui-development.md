@@ -3,14 +3,14 @@
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
-description: "How to iterate on RyeOS Studio browser UI assets without republishing bundles for every JS/CSS edit"
+description: "How to iterate on RyeOS UI browser UI assets without republishing bundles for every JS/CSS edit"
 entry_type: reference
 version: "1.0.0"
 ```
 
 # Browser UI Development Workflow
 
-Use this when working on the RyeOS Studio browser UI. The goal is to avoid the
+Use this when working on the RyeOS UI browser UI. The goal is to avoid the
 slow bundle/reinstall loop for ordinary JavaScript and CSS changes.
 
 ## Where the browser UI lives
@@ -19,12 +19,12 @@ slow bundle/reinstall loop for ordinary JavaScript and CSS changes.
 |---|---|
 | Static HTML shell | `crates/clients/web/pkg/index.html` |
 | Boot script | `crates/clients/web/pkg/bootstrap.js` |
-| Studio JS shell | `crates/clients/web/pkg/studio_shell.js` |
-| DOM renderer | `crates/clients/web/pkg/studio_dom_adapter.js` |
-| Browser effects | `crates/clients/web/pkg/studio_effects.js` |
-| Ambient animation | `crates/clients/web/pkg/studio_ambient_scene.js` |
+| RyeOS UI JS shell | `crates/clients/web/pkg/ryeos_shell.js` |
+| DOM renderer | `crates/clients/web/pkg/ryeos_dom_adapter.js` |
+| Browser effects | `crates/clients/web/pkg/ryeos_effects.js` |
+| Ambient animation | `crates/clients/web/pkg/ryeos_ambient_scene.js` |
 | CSS | `crates/clients/web/pkg/web-shell.css` |
-| Rust/WASM Studio model | `crates/clients/base/src/studio/` and `crates/clients/web/src/wasm.rs` |
+| Rust/WASM RyeOS UI model | `crates/clients/base/src/ui/` and `crates/clients/web/src/wasm.rs` |
 | Static asset provider | `crates/daemon/ryeos-ui/src/assets.rs` |
 
 ## Fast JS/CSS loop without touching the daemon
@@ -128,7 +128,7 @@ already-running daemon.
 | Change | Required action |
 |---|---|
 | `crates/clients/web/pkg/*.js` or `*.css` only | run `scripts/dev-ui-assets.sh --background`, then refresh browser at port 7411 |
-| `crates/clients/base/src/studio/*` | rebuild WASM / update `crates/clients/web/pkg/ryeos_web*.{js,wasm}` through the project’s WASM build path |
+| `crates/clients/base/src/ui/*` | rebuild WASM / update `crates/clients/web/pkg/ryeos_web*.{js,wasm}` through the project’s WASM build path |
 | `crates/daemon/ryeos-ui/src/assets.rs` or route/static-mode code | rebuild/restart daemon |
 | Bundle YAML or bundle-owned binaries | `scripts/populate-bundles.sh` or `scripts/gate.sh --no-tests` |
 | Full packaged install repair | `scripts/pkg/install-local-direct.sh` |
@@ -138,8 +138,8 @@ already-running daemon.
 For browser asset edits, prefer cheap checks:
 
 ```bash
-node --check crates/clients/web/pkg/studio_ambient_scene.js
-node --check crates/clients/web/pkg/studio_dom_adapter.js
+node --check crates/clients/web/pkg/ryeos_ambient_scene.js
+node --check crates/clients/web/pkg/ryeos_dom_adapter.js
 ```
 
 Avoid broad `cargo test`, `cargo build --release`, or local reinstall loops
@@ -148,8 +148,8 @@ daemon behavior.
 
 ## Ambient scene state hooks
 
-The Studio scene model is the bridge between RyeOS state and the animation.
-`crates/clients/base/src/studio/scene_model.rs` emits semantic objects such as:
+The RyeOS UI scene model is the bridge between RyeOS state and the animation.
+`crates/clients/base/src/ui/scene_model.rs` emits semantic objects such as:
 
 - `local_node`
 - `remote_node`
@@ -160,21 +160,21 @@ The Studio scene model is the bridge between RyeOS state and the animation.
 - `schedule_pulse`
 - `service_beacon`
 
-`crates/clients/web/pkg/studio_ambient_scene.js` consumes those objects and can
+`crates/clients/web/pkg/ryeos_ambient_scene.js` consumes those objects and can
 map counts/tone/state into visual scale, color, opacity, pulse rate, stream
 count, orbit count, etc.
 
 Future UI work should keep this separation:
 
 ```text
-Rust StudioCore data
+Rust RyeOS UICore data
   -> scene_model.rs emits semantic scene objects
-  -> studio_ambient_scene.js maps objects to visuals
+  -> ryeos_ambient_scene.js maps objects to visuals
   -> browser refresh shows JS/CSS changes immediately in dev asset mode
 ```
 
 Do not hardcode daemon fetches inside the animation if the data already belongs
-in the Studio model. Prefer adding semantic fields/objects to the scene model
+in the RyeOS UI model. Prefer adding semantic fields/objects to the scene model
 and keeping the animation as a renderer of that state.
 
 ## Common mistakes
@@ -187,4 +187,4 @@ and keeping the animation as a renderer of that state.
 - Expecting `RYEOS_UI_ASSET_DIR` to affect Rust/WASM model changes; it only
   serves already-built files from `pkg/`.
 - Adding direct daemon API fetches to the Three.js animation instead of using
-  the Studio scene model.
+  the RyeOS UI scene model.

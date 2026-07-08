@@ -1410,35 +1410,56 @@ impl Walker {
         // like a live dispatch, so the resumed node runs the identical success/
         // failure path (receipt, cost, assign land normally in commit_step).
         let mut cache_hit = false;
-        let outcome: Result<dispatch::ActionOutcome, String> = if let Some(envelope) =
-            resumed_follow_envelope
-        {
-            Ok(dispatch::classify_envelope(envelope))
-        } else if node.is_cacheable() {
-            let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
-            if let Some(cached) = cache.lookup(&cache_key) {
-                cache_hit = true;
-                // A cache hit replays the stored result and must NOT re-bill cost —
-                // `bare` carries no cost. A stale/tampered entry still carrying a
-                // top-level continuation_id is rejected loudly, exactly like a live
-                // inline-continuation dispatch (F10 — inline continuation is retired;
-                // use a `follow: true` node). New dispatches never cache such a value.
-                if cached
-                    .get("continuation_id")
-                    .and_then(|v| v.as_str())
-                    .is_some()
-                {
-                    Ok(dispatch::ActionOutcome::Failure(dispatch::ActionFailure {
-                        diagnostic: format!(
-                            "cached result for node `{current}` carries a continuation_id; \
+        let outcome: Result<dispatch::ActionOutcome, String> =
+            if let Some(envelope) = resumed_follow_envelope {
+                Ok(dispatch::classify_envelope(envelope))
+            } else if node.is_cacheable() {
+                let cache_key = compute_cache_key(&self.graph.graph_id, current, &stripped_action);
+                if let Some(cached) = cache.lookup(&cache_key) {
+                    cache_hit = true;
+                    // A cache hit replays the stored result and must NOT re-bill cost —
+                    // `bare` carries no cost. A stale/tampered entry still carrying a
+                    // top-level continuation_id is rejected loudly, exactly like a live
+                    // inline-continuation dispatch (F10 — inline continuation is retired;
+                    // use a `follow: true` node). New dispatches never cache such a value.
+                    if cached
+                        .get("continuation_id")
+                        .and_then(|v| v.as_str())
+                        .is_some()
+                    {
+                        Ok(dispatch::ActionOutcome::Failure(dispatch::ActionFailure {
+                            diagnostic: format!(
+                                "cached result for node `{current}` carries a continuation_id; \
                              inline continuation is retired — use a `follow: true` node"
-                        ),
-                        cost: None,
-                    }))
+                            ),
+                            cost: None,
+                        }))
+                    } else {
+                        Ok(dispatch::ActionOutcome::Success(
+                            dispatch::ActionSuccess::bare(cached),
+                        ))
+                    }
                 } else {
-                    Ok(dispatch::ActionOutcome::Success(
-                        dispatch::ActionSuccess::bare(cached),
-                    ))
+                    match dispatch::dispatch_action(
+                        &self.client,
+                        &stripped_action,
+                        &self.thread_id,
+                        &self.project_path,
+                        Some(exec_ctx),
+                    )
+                    .await
+                    {
+                        Ok(dispatch::ActionOutcome::Success(success)) => {
+                            // Only successful dispatches are cached — never a
+                            // failure, which would otherwise replay a stale
+                            // error (or `null`) on the next run. The cache
+                            // stores only the result value; cost is per-run.
+                            cache.store(&cache_key, &success.result);
+                            Ok(dispatch::ActionOutcome::Success(success))
+                        }
+                        Ok(failure) => Ok(failure),
+                        Err(e) => Err(format!("{e:#}")),
+                    }
                 }
             } else {
                 match dispatch::dispatch_action(
@@ -1450,32 +1471,10 @@ impl Walker {
                 )
                 .await
                 {
-                    Ok(dispatch::ActionOutcome::Success(success)) => {
-                        // Only successful dispatches are cached — never a
-                        // failure, which would otherwise replay a stale
-                        // error (or `null`) on the next run. The cache
-                        // stores only the result value; cost is per-run.
-                        cache.store(&cache_key, &success.result);
-                        Ok(dispatch::ActionOutcome::Success(success))
-                    }
-                    Ok(failure) => Ok(failure),
+                    Ok(o) => Ok(o),
                     Err(e) => Err(format!("{e:#}")),
                 }
-            }
-        } else {
-            match dispatch::dispatch_action(
-                &self.client,
-                &stripped_action,
-                &self.thread_id,
-                &self.project_path,
-                Some(exec_ctx),
-            )
-            .await
-            {
-                Ok(o) => Ok(o),
-                Err(e) => Err(format!("{e:#}")),
-            }
-        };
+            };
 
         let elapsed = start.elapsed().as_millis() as u64;
 
@@ -1697,7 +1696,14 @@ impl Walker {
                 // child behind it.
                 match self
                     .client
-                    .spawn_follow_child(graph_run_id, current, step as i64, item_id, params.clone(), None)
+                    .spawn_follow_child(
+                        graph_run_id,
+                        current,
+                        step as i64,
+                        item_id,
+                        params.clone(),
+                        None,
+                    )
                     .await
                 {
                     Ok(_) => {
@@ -2140,7 +2146,14 @@ impl Walker {
                     .await;
                 self.fire_graph_hooks(
                     "graph_step_completed",
-                    self.step_hook_context(graph_run_id, current, step, "error", Some(error), state),
+                    self.step_hook_context(
+                        graph_run_id,
+                        current,
+                        step,
+                        "error",
+                        Some(error),
+                        state,
+                    ),
                 )
                 .await;
 
@@ -2273,7 +2286,14 @@ impl Walker {
                     .await;
                 self.fire_graph_hooks(
                     "graph_step_completed",
-                    self.step_hook_context(graph_run_id, current, step, "error", Some(error), state),
+                    self.step_hook_context(
+                        graph_run_id,
+                        current,
+                        step,
+                        "error",
+                        Some(error),
+                        state,
+                    ),
                 )
                 .await;
 
@@ -5288,8 +5308,11 @@ config:
         // A re-attempt emits exactly one graph_node_retry milestone carrying the
         // attempt number, the total, and the backoff — indexed (braid-visible).
         let graph = make_graph(RETRY_YAML);
-        let (w, rec) =
-            make_recording_walker(graph, vec![subprocess_failure(), subprocess_success()], None);
+        let (w, rec) = make_recording_walker(
+            graph,
+            vec![subprocess_failure(), subprocess_success()],
+            None,
+        );
         let result = w.execute(json!({}), Some("gr-retry".to_string())).await;
         assert!(result.success, "retry should recover: {result:?}");
 
@@ -5487,7 +5510,10 @@ config:
         let (w1, rec1) = make_recording_walker(make_graph(FOLLOW_YAML), vec![], None);
         let r1 = w1.execute(json!({}), Some("gr-original".to_string())).await;
         assert_eq!(r1.status, "continued");
-        assert_eq!(rec1.recorded_follow_requests()[0].graph_run_id, "gr-original");
+        assert_eq!(
+            rec1.recorded_follow_requests()[0].graph_run_id,
+            "gr-original"
+        );
 
         // Resume with a DIFFERENT outer run id, but resume_state carrying the
         // original (as main.rs injects it). The re-entry MUST re-drive with the
@@ -5521,8 +5547,12 @@ config:
             follow_should_fail: true,
             ..RecordingMockClient::new(vec![])
         });
-        let client =
-            CallbackClient::from_inner(inner.clone(), "thread-test", "/tmp/test-project", "tat-test");
+        let client = CallbackClient::from_inner(
+            inner.clone(),
+            "thread-test",
+            "/tmp/test-project",
+            "tat-test",
+        );
         let w = Walker::new(
             make_graph(FOLLOW_YAML),
             "/tmp/test-project".to_string(),
@@ -5657,7 +5687,10 @@ config:
             "warnings": []
         });
         let result = w
-            .execute(follow_resume_params(Some(envelope)), Some("gr-resume".to_string()))
+            .execute(
+                follow_resume_params(Some(envelope)),
+                Some("gr-resume".to_string()),
+            )
             .await;
 
         assert!(result.success);
@@ -5687,7 +5720,10 @@ config:
             "warnings": []
         });
         let result = w
-            .execute(follow_resume_params(Some(envelope)), Some("gr-resume".to_string()))
+            .execute(
+                follow_resume_params(Some(envelope)),
+                Some("gr-resume".to_string()),
+            )
             .await;
 
         // on_error: recover redirects to the recover return node → the run
@@ -5697,11 +5733,24 @@ config:
         assert!(rec.recorded_follow_requests().is_empty());
         // The follow node's step recorded an ERROR completion, and the failed
         // child's cost was still accounted.
-        let step_completed_error = rec.recorded_events().into_iter().any(|(_, et, payload, _)| {
-            et == "graph_step_completed" && payload.get("status").and_then(|s| s.as_str()) == Some("error")
-        });
-        assert!(step_completed_error, "expected an error graph_step_completed");
-        assert_eq!(result.cost.expect("failed child cost preserved").input_tokens, 80);
+        let step_completed_error = rec
+            .recorded_events()
+            .into_iter()
+            .any(|(_, et, payload, _)| {
+                et == "graph_step_completed"
+                    && payload.get("status").and_then(|s| s.as_str()) == Some("error")
+            });
+        assert!(
+            step_completed_error,
+            "expected an error graph_step_completed"
+        );
+        assert_eq!(
+            result
+                .cost
+                .expect("failed child cost preserved")
+                .input_tokens,
+            80
+        );
     }
 
     #[tokio::test]
@@ -5735,7 +5784,10 @@ config:
         let (w, rec) = make_recording_walker(make_graph(FOLLOW_ENV_YAML), vec![], None);
         let envelope = json!({ "result": {"ok": true} });
         let result = w
-            .execute(follow_resume_params(Some(envelope)), Some("gr-resume".to_string()))
+            .execute(
+                follow_resume_params(Some(envelope)),
+                Some("gr-resume".to_string()),
+            )
             .await;
 
         assert!(result.success);
@@ -5787,10 +5839,20 @@ config:
             }
         });
         let r2 = w2.execute(resume1, Some("gr-seq".to_string())).await;
-        assert_eq!(r2.status, "continued", "must suspend again at the second follow node");
+        assert_eq!(
+            r2.status, "continued",
+            "must suspend again at the second follow node"
+        );
         let req2 = rec2.recorded_follow_requests();
-        assert_eq!(req2.len(), 1, "resuming fetch1 issues exactly one new handoff (fetch2)");
-        assert_eq!(req2[0].follow_node, "fetch2", "the second suspend is at fetch2");
+        assert_eq!(
+            req2.len(),
+            1,
+            "resuming fetch1 issues exactly one new handoff (fetch2)"
+        );
+        assert_eq!(
+            req2[0].follow_node, "fetch2",
+            "the second suspend is at fetch2"
+        );
         let fetch2_step = req2[0].step_count;
 
         // Pass 3: resume fetch2 with its child result → the graph completes.
@@ -5806,7 +5868,10 @@ config:
             }
         });
         let r3 = w3.execute(resume2, Some("gr-seq".to_string())).await;
-        assert_eq!(r3.status, "completed", "after both follow nodes resume, the graph completes");
+        assert_eq!(
+            r3.status, "completed",
+            "after both follow nodes resume, the graph completes"
+        );
         assert!(r3.success);
     }
 

@@ -9,7 +9,7 @@ Completed work from the June 2026 planning scratch files includes:
 - data-driven command registration policy;
 - thin accepted/background `ryeos execute --async` launch;
 - project `.ai` deployable surface sync and project schedule reconciliation;
-- Studio Dimension v0 and Studio remotes services;
+- RyeOS UI Dimension v0 and RyeOS UI remotes services;
 - bundle event chains, bundle projection helpers, and bundle outbox helpers;
 - local direct install layout updates.
 

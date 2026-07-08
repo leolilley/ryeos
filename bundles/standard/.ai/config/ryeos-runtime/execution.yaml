@@ -1,9 +1,10 @@
-# ryeos:signed:2026-06-11T21:03:05Z:e68af8ad2765ff1bf364e0729f1d35ebff87207de29d8363254e03bca9a576d6:tkBi0UX5i4Zap2ZjxjSG/O26QL/dn+3RtS3NkbFHYTbicVVDX1JAnkw+OE5qkWWuLrYcYU2MyDCEGhebLF1lDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-06T12:24:50Z:c16829a50c361412224a876f095ba353ec816e37897750ef21aea737bce2f441:tQDo52BpMhYolrUuBd1OCs8a1RT6zSLD5AO1Z2G7FkTiuERbe1TrPGshpoc29P3dwZukSBTIPZauI97/dwfqDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime"
 retries: 2
 retry_status_codes: [429, 500, 502, 503]
 never_retry: ["401", "403", "404"]
 backoff_base_ms: 1000
 timeout_seconds: 300
+max_output_tokens_per_turn: 32768
 tool_preload: false
 retry_on_timeout: true

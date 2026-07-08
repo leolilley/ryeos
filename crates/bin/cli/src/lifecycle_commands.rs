@@ -231,7 +231,11 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
             false
         }
         Err(e) => {
-            checks.push(check("init", FAIL, serde_json::json!({ "error": format!("{e:#}") })));
+            checks.push(check(
+                "init",
+                FAIL,
+                serde_json::json!({ "error": format!("{e:#}") }),
+            ));
             false
         }
     };
@@ -268,7 +272,11 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
             }
         }
         Ok(LifecycleStatus::Stopped { .. }) => {
-            checks.push(check("daemon", OK, serde_json::json!({ "state": "stopped" })));
+            checks.push(check(
+                "daemon",
+                OK,
+                serde_json::json!({ "state": "stopped" }),
+            ));
         }
         Ok(LifecycleStatus::Stale {
             metadata,
@@ -301,12 +309,34 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 }),
             ));
         }
+        Ok(LifecycleStatus::Starting {
+            pid, started_at, ..
+        }) => {
+            checks.push(check(
+                "daemon",
+                WARN,
+                serde_json::json!({
+                    "state": "starting",
+                    "pid": pid,
+                    "started_at": started_at,
+                    "note": "boot in progress (e.g. projection catch-up) — control socket not up yet; wait for readiness",
+                }),
+            ));
+        }
         Ok(LifecycleStatus::NotInitialized { .. }) => {
             // Covered by the init check; don't double-report.
-            checks.push(check("daemon", NA, serde_json::json!({ "state": "not initialized" })));
+            checks.push(check(
+                "daemon",
+                NA,
+                serde_json::json!({ "state": "not initialized" }),
+            ));
         }
         Err(e) => {
-            checks.push(check("daemon", FAIL, serde_json::json!({ "error": format!("{e:#}") })));
+            checks.push(check(
+                "daemon",
+                FAIL,
+                serde_json::json!({ "error": format!("{e:#}") }),
+            ));
         }
     }
 
@@ -321,7 +351,9 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
             serde_json::json!({ "note": "not initialized" }),
         ));
     } else {
-        let probe = config.app_root.join(format!(".doctor-probe-{}", std::process::id()));
+        let probe = config
+            .app_root
+            .join(format!(".doctor-probe-{}", std::process::id()));
         match std::fs::write(&probe, b"probe").and_then(|()| std::fs::remove_file(&probe)) {
             Ok(()) => checks.push(check(
                 "storage",
@@ -377,15 +409,21 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
         match std::net::TcpListener::bind(config.bind) {
             Ok(l) => {
                 drop(l);
-                detail.insert("tcp".into(), serde_json::json!({ "bind": config.bind.to_string(), "status": "bindable" }));
+                detail.insert(
+                    "tcp".into(),
+                    serde_json::json!({ "bind": config.bind.to_string(), "status": "bindable" }),
+                );
             }
             Err(e) => {
                 status = FAIL;
-                detail.insert("tcp".into(), serde_json::json!({
-                    "bind": config.bind.to_string(),
-                    "error": format!("{e}"),
-                    "note": "another process holds the port",
-                }));
+                detail.insert(
+                    "tcp".into(),
+                    serde_json::json!({
+                        "bind": config.bind.to_string(),
+                        "error": format!("{e}"),
+                        "note": "another process holds the port",
+                    }),
+                );
             }
         }
         match std::os::unix::net::UnixListener::bind(&config.uds_path) {
@@ -393,7 +431,10 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
                 drop(l);
                 // Binding created the socket file; remove the probe artifact.
                 let _ = std::fs::remove_file(&config.uds_path);
-                detail.insert("uds".into(), serde_json::json!({ "path": config.uds_path, "status": "bindable" }));
+                detail.insert(
+                    "uds".into(),
+                    serde_json::json!({ "path": config.uds_path, "status": "bindable" }),
+                );
             }
             Err(e) => {
                 status = FAIL;
@@ -412,18 +453,15 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
     if initialized {
         match crate::node_descriptors::load_verified_snapshot(&config.app_root) {
             Ok(snapshot) => {
-                let roots: Vec<PathBuf> =
-                    snapshot.bundles.iter().map(|b| b.path.clone()).collect();
+                let roots: Vec<PathBuf> = snapshot.bundles.iter().map(|b| b.path.clone()).collect();
                 checks.push(check(
                     "node_config",
                     OK,
                     serde_json::json!({ "bundles": roots.len() }),
                 ));
                 if !args.no_bundles {
-                    let operator_config_root = ryeos_engine::roots::RuntimeRoot::new(
-                        config.app_root.clone(),
-                    )
-                    .config();
+                    let operator_config_root =
+                        ryeos_engine::roots::RuntimeRoot::new(config.app_root.clone()).config();
                     for record in &snapshot.bundles {
                         // Static checks only (no offline engine): the doctor
                         // must stay fast and dependency-free; import dry-runs
@@ -462,7 +500,11 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
             }
         }
     } else {
-        checks.push(check("node_config", NA, serde_json::json!({ "note": "not initialized" })));
+        checks.push(check(
+            "node_config",
+            NA,
+            serde_json::json!({ "note": "not initialized" }),
+        ));
     }
 
     let ok = checks.iter().all(|c| c.status != FAIL);
@@ -501,7 +543,11 @@ async fn run_node_doctor_command(argv: &[String]) -> Result<()> {
 
 /// Build a check row in core-tools doctor vocabulary (its constructor is
 /// module-private; the fields are the contract).
-fn check(name: &str, status: &str, detail: serde_json::Value) -> ryeos_core_tools::actions::doctor::CheckResult {
+fn check(
+    name: &str,
+    status: &str,
+    detail: serde_json::Value,
+) -> ryeos_core_tools::actions::doctor::CheckResult {
     ryeos_core_tools::actions::doctor::CheckResult {
         name: name.to_string(),
         status: status.to_string(),
@@ -682,12 +728,24 @@ fn print_lifecycle_status(status: &LifecycleStatus) {
         LifecycleStatus::Stale { diagnostics, .. } => {
             println!("stale daemon metadata — {}", diagnostics.message);
         }
-        LifecycleStatus::Unresponsive { metadata, diagnostics } => {
+        LifecycleStatus::Unresponsive {
+            metadata,
+            diagnostics,
+        } => {
             println!("running but not answering — {}", diagnostics.message);
             if let Some(pid) = metadata.pid {
                 println!("pid: {pid}");
             }
             println!("likely busy; retry shortly (do not start a second daemon)");
+        }
+        LifecycleStatus::Starting {
+            pid, started_at, ..
+        } => {
+            println!("starting — daemon (pid {pid}) is booting, control socket not up yet");
+            println!("since: {started_at}");
+            println!(
+                "boot can take minutes after a deploy (projection catch-up); wait for readiness"
+            );
         }
     }
 }

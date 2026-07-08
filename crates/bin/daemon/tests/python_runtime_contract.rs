@@ -11,7 +11,7 @@
 //! These are engine-level e2e tests (resolve → verify → build_plan →
 //! execute_plan), mirroring `hello_world_python.rs`; each launches a real
 //! `python3`. The full contract is documented in
-//! `bundles/core/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
+//! `bundles/standard/.ai/knowledge/ryeos/core/runtimes/python-runtime-contract.md`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -198,16 +198,13 @@ pub async fn run(
         ryeos_runtime::method_wire::MethodCallResult,
         LaunchAugmentationError,
     > = async {
-        let runtime_config =
-            crate::dispatch::method_runtime_config_snapshot(
-                target_kind,
-                runtime_config,
-                &engine_roots,
-                state,
-            )
-                .map_err(|e| {
-                    LaunchAugmentationError::RuntimeRegistry(format!("runtime config: {e}"))
-                })?;
+        let runtime_config = crate::dispatch::method_runtime_config_snapshot(
+            target_kind,
+            runtime_config,
+            &engine_roots,
+            state,
+        )
+        .map_err(|e| LaunchAugmentationError::RuntimeRegistry(format!("runtime config: {e}")))?;
 
         let envelope = ryeos_runtime::method_wire::MethodCallEnvelope {
             schema_version: 1,
@@ -491,16 +488,19 @@ fn extract_rendered_positions(
     validate_rendered_positions_exact(rendered, expected_positions)?;
 
     for position in expected_positions.keys() {
-        let data = rendered.get(position).ok_or_else(|| {
-            LaunchAugmentationError::ProjectionInvariant {
-                reason: format!("child output missing rendered position `{position}`"),
-            }
-        })?;
+        let data =
+            rendered
+                .get(position)
+                .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
+                    reason: format!("child output missing rendered position `{position}`"),
+                })?;
         let content = data
             .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
-                reason: format!("child output rendered position `{position}` missing string `content`"),
+                reason: format!(
+                    "child output rendered position `{position}` missing string `content`"
+                ),
             })?
             .to_string();
         result.insert(position.clone(), content);
@@ -519,14 +519,17 @@ fn extract_rendered_meta(
     validate_rendered_positions_exact(rendered, expected_positions)?;
 
     for position in expected_positions.keys() {
-        let data = rendered.get(position).ok_or_else(|| {
-            LaunchAugmentationError::ProjectionInvariant {
-                reason: format!("child output missing rendered position `{position}`"),
-            }
-        })?;
+        let data =
+            rendered
+                .get(position)
+                .ok_or_else(|| LaunchAugmentationError::ProjectionInvariant {
+                    reason: format!("child output missing rendered position `{position}`"),
+                })?;
         let composition = data.get("composition").ok_or_else(|| {
             LaunchAugmentationError::ProjectionInvariant {
-                reason: format!("child output rendered position `{position}` missing `composition`"),
+                reason: format!(
+                    "child output rendered position `{position}` missing `composition`"
+                ),
             }
         })?;
         result.insert(position.clone(), composition.clone());

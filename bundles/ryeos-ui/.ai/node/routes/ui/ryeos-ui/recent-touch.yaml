@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-06T12:32:28Z:af51a2dc5a10e7ceabd180bb198b1d550247c4a1b2a4379e1a4b67b3240cac22:ZcOckuhSYXbsSQIHtql8rrwe7AkbSt6WrpN78tHVKJeZhUuXHHAY74GjBENEA1V7nv47GSD+5Qrt+n57fxQrBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: ui/api/ryeos-ui/recent/touch
+path: /ui/api/ryeos-ui/recent/touch
+methods:
+  - POST
+auth: browser_session
+request:
+  body: json
+limits:
+  body_bytes_max: 4096
+  timeout_ms: 5000
+  concurrent_max: 16
+response:
+  mode: json
+  source: "service:ui/ryeos-ui/recent/touch"

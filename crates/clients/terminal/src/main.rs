@@ -53,6 +53,7 @@ fn main() {
         .unwrap_or_else(|_| ".".into());
     let mut surface_file: Option<String> = None;
     let mut surface_name: Option<String> = None;
+    let mut views_root: Option<String> = None;
     let mut read_only = false;
 
     let mut i = 1;
@@ -86,6 +87,15 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--views-root" => {
+                i += 1;
+                if i < args.len() {
+                    views_root = Some(args[i].clone());
+                } else {
+                    eprintln!("--views-root requires a directory argument");
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: ryeos-tui [OPTIONS] [PROJECT_PATH]");
                 eprintln!();
@@ -93,6 +103,9 @@ fn main() {
                 eprintln!("  --surface <REF>         Open a surface by canonical ref");
                 eprintln!(
                     "  --surface-file <PATH>   Load surface spec from a local file (untrusted preview)"
+                );
+                eprintln!(
+                    "  --views-root <DIR>      Resolve view: refs from local YAML under DIR first (with --surface-file)"
                 );
                 eprintln!("  --project <PATH>        Project root for daemon-backed resolution");
                 eprintln!("  --read-only             Read-only seat");
@@ -193,21 +206,41 @@ fn main() {
                 }
             }
         } else {
-            // `--surface-file`: the SURFACE is an untrusted local file, but its
-            // views still come from the trusted daemon — resolve and embed them
-            // so a layout previews with real content (no populate/install just
-            // to look at it). Without a daemon, the layout still renders; its
-            // panes show the missing-binding placeholder.
+            // `--surface-file`: the SURFACE is an untrusted local file. Its
+            // views come from `--views-root` first (read straight off disk —
+            // the content-iteration path: edit a view in the repo, relaunch,
+            // see it, no republish), then from the trusted daemon for
+            // whatever the root doesn't carry. Without a daemon, the layout
+            // still renders; unresolved panes show the missing-binding
+            // placeholder.
             let mut loaded = ryeos_client_base::surface::load_surface(&surface_opts);
+            let spec_value = serde_json::to_value(loaded.spec()).unwrap_or(serde_json::Value::Null);
+            let mut view_refs: Vec<String> = Vec::new();
+            collect_view_refs(&spec_value, &mut view_refs);
+            view_refs.sort();
+            view_refs.dedup();
+            let mut views = serde_json::Map::new();
+            if let Some(root) = &views_root {
+                // `view:<path>` → `<root>/<path>.yaml`. The signed header
+                // line is a YAML comment, so files parse as-is. Misses fall
+                // through to daemon resolution below.
+                view_refs.retain(|view_ref| {
+                    let rel = view_ref.strip_prefix("view:").unwrap_or(view_ref);
+                    let path = std::path::Path::new(root).join(format!("{rel}.yaml"));
+                    match std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|text| serde_yaml::from_str::<serde_json::Value>(&text).ok())
+                    {
+                        Some(value) => {
+                            views.insert(view_ref.clone(), value);
+                            false
+                        }
+                        None => true,
+                    }
+                });
+            }
             match transport::daemon::DaemonClient::try_connect().await {
                 Ok(client) => {
-                    let spec_value =
-                        serde_json::to_value(loaded.spec()).unwrap_or(serde_json::Value::Null);
-                    let mut view_refs: Vec<String> = Vec::new();
-                    collect_view_refs(&spec_value, &mut view_refs);
-                    view_refs.sort();
-                    view_refs.dedup();
-                    let mut views = serde_json::Map::new();
                     for view_ref in view_refs {
                         match client
                             .resolve_effective_item(&view_ref, "view", Some(&project_path))
@@ -218,20 +251,18 @@ fn main() {
                                     binding.get("composed_value").cloned().unwrap_or(binding);
                                 views.insert(view_ref, composed);
                             }
-                            Err(e) => {
-                                diagnostics.push(format!("view {view_ref} unavailable: {e}"))
-                            }
+                            Err(e) => diagnostics.push(format!("view {view_ref} unavailable: {e}")),
                         }
                     }
-                    loaded.set_views(serde_json::Value::Object(views));
                     daemon_client = Some(client);
                 }
                 Err(_) => {
                     eprintln!(
-                        "warn: no daemon — local preview shows layout only (views unresolved)"
+                        "warn: no daemon — local preview renders only views the views-root carries"
                     );
                 }
             }
+            loaded.set_views(serde_json::Value::Object(views));
             loaded
         };
 

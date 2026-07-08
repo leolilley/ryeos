@@ -32,7 +32,7 @@ COPY bundles/.ai         /opt/ryeos/.ai
 COPY bundles/core        /opt/ryeos/core
 COPY bundles/standard    /opt/ryeos/standard
 COPY bundles/web         /opt/ryeos/web
-COPY bundles/studio     /opt/ryeos/studio
+COPY bundles/ryeos-ui     /opt/ryeos/ryeos-ui
 COPY bundles/hosted-node /opt/ryeos/hosted-node
 
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
