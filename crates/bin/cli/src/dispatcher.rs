@@ -78,6 +78,13 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
         return Ok(());
     }
 
+    // Non-TTY `ryeos help` keeps the plain top-level help path. TTY stdout
+    // is intercepted above and rendered through the compact TTY help screen.
+    if cli.rest == ["help"] {
+        crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
+        return Ok(());
+    }
+
     // `ryeos help --all` / `ryeos commands` → exhaustive command reference.
     if cli.rest == ["help", "--all"] || cli.rest == ["commands"] {
         crate::help::print_help(std::io::stdout(), &app_root, &snapshot)?;
