@@ -152,6 +152,7 @@ pub enum SceneCutoutAmountVm {
     #[default]
     Static,
     Break,
+    BreakSpin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -751,6 +752,7 @@ fn read_cutouts(v: Option<&serde_json::Value>) -> Vec<SceneCutoutVm> {
                     scale: read_scale(item.get("scale")),
                     amount: match item.get("amount").and_then(serde_json::Value::as_str) {
                         Some("break") => SceneCutoutAmountVm::Break,
+                        Some("break_spin") => SceneCutoutAmountVm::BreakSpin,
                         _ => SceneCutoutAmountVm::Static,
                     },
                 })
