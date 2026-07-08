@@ -428,6 +428,7 @@ if [[ "$BUNDLE_SET" == "central-host" ]]; then
   echo "[populate-bundles] publishing tv-tracker-authoring bundle…"
   RYEOS_APP_ROOT="$SIGN_APP_ROOT" "$TARGET/release/ryeos-core-tools" build "$TVTA" \
     --registry-root "$CORE" \
+    --registry-root "$STD" \
     --owner "$OWNER" >/dev/null
 fi
 
