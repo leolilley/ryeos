@@ -10,8 +10,11 @@ use anyhow::{Context, Result as AnyhowResult};
 use ryeos_app::principal::{PrincipalPaths, PrincipalResolver, PrincipalStore};
 use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::exec_stream::StreamOutcome;
 use crate::error::{CliError, CliTransportError};
+use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
 const TTY_HOME_VERSION: u32 = 1;
@@ -757,6 +760,357 @@ enum RenderMode {
     Live,
 }
 
+pub fn render_command_loading(command: &str, route: &str) -> io::Result<usize> {
+    let lines = command_frame_lines(CommandFrame {
+        title: "RYE OS COMMAND",
+        phase: "loading",
+        command,
+        status: "contacting daemon",
+        detail: Some(route),
+        payload: &[],
+    });
+    render_command_frame(&lines, 0)
+}
+
+pub fn render_command_result(
+    command: &str,
+    payload: &Value,
+    previous_lines: usize,
+) -> io::Result<usize> {
+    let result = payload.get("result").unwrap_or(payload);
+    let mut rows = Vec::new();
+    if let Some(execution) = payload.get("execution") {
+        if let Some(source) = execution.get("source_root").and_then(Value::as_str) {
+            rows.push(("source_root".to_string(), source.to_string()));
+        }
+        if let Some(state) = execution.get("state_root").and_then(Value::as_str) {
+            rows.push(("state_root".to_string(), state.to_string()));
+        }
+    }
+    if let Some(outcome) = result.get("outcome_code").and_then(Value::as_str) {
+        rows.push(("outcome".to_string(), outcome.to_string()));
+    }
+    if let Some(error) = result.get("error").filter(|value| !value.is_null()) {
+        rows.push(("error".to_string(), value_summary(error)));
+    }
+    if let Some(artifacts) = result.get("artifacts").and_then(Value::as_array) {
+        rows.push(("artifacts".to_string(), artifacts.len().to_string()));
+    }
+
+    let display_value = result.get("result").unwrap_or(result);
+    append_value_rows("result", display_value, &mut rows);
+    if rows.is_empty() {
+        rows.push(("result".to_string(), value_summary(display_value)));
+    }
+
+    let status = if result_indicates_failure(result) {
+        "error"
+    } else {
+        "complete"
+    };
+    let row_refs = rows
+        .iter()
+        .map(|(label, value)| (label.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let lines = command_frame_lines(CommandFrame {
+        title: "RYE OS COMMAND",
+        phase: "live",
+        command,
+        status,
+        detail: None,
+        payload: &row_refs,
+    });
+    render_command_frame(&lines, previous_lines)
+}
+
+pub struct TtyStreamPresenter {
+    command: String,
+    previous_lines: usize,
+    thread_id: Option<String>,
+    status: String,
+    events: Vec<(String, String)>,
+}
+
+impl TtyStreamPresenter {
+    pub fn new(command: impl Into<String>) -> io::Result<Self> {
+        Self::with_previous(command, 0)
+    }
+
+    pub fn with_previous(command: impl Into<String>, previous_lines: usize) -> io::Result<Self> {
+        let mut presenter = Self {
+            command: command.into(),
+            previous_lines,
+            thread_id: None,
+            status: "opening stream".to_string(),
+            events: Vec::new(),
+        };
+        presenter.render()?;
+        Ok(presenter)
+    }
+
+    pub fn render_event(&mut self, ev: &SseEvent) -> io::Result<StreamOutcome> {
+        let data: Value = serde_json::from_str(&ev.data).unwrap_or(Value::Null);
+        let inner = data.get("payload").unwrap_or(&data);
+        match ev.event.as_str() {
+            "stream_started" => {
+                self.status = "streaming".to_string();
+                self.thread_id = data
+                    .get("thread_id")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                self.push_event("stream_started", self.thread_id.as_deref().unwrap_or(""));
+                self.render()?;
+                Ok(StreamOutcome::Continue)
+            }
+            "stream_error" => {
+                let code = data
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("stream_error");
+                let msg = data.get("error").and_then(Value::as_str).unwrap_or("");
+                let detail = format!("{code}: {msg}");
+                self.status = "error".to_string();
+                self.push_event("stream_error", &detail);
+                self.render()?;
+                Ok(StreamOutcome::Failed(detail))
+            }
+            event if stream_success_terminal(event) => {
+                self.status = "complete".to_string();
+                self.push_event(event, &value_summary(inner));
+                self.render()?;
+                Ok(StreamOutcome::Done)
+            }
+            event if stream_failure_terminal(event) => {
+                let detail = stream_failure_reason(inner, event);
+                self.status = "error".to_string();
+                self.push_event(event, &detail);
+                self.render()?;
+                Ok(StreamOutcome::Failed(detail))
+            }
+            event => {
+                let detail = stream_event_detail(inner);
+                self.push_event(event, &detail);
+                self.render()?;
+                Ok(StreamOutcome::Continue)
+            }
+        }
+    }
+
+    fn push_event(&mut self, event: &str, detail: &str) {
+        self.events.push((event.to_string(), detail.to_string()));
+        if self.events.len() > 10 {
+            let excess = self.events.len() - 10;
+            self.events.drain(0..excess);
+        }
+    }
+
+    fn render(&mut self) -> io::Result<()> {
+        let mut owned = Vec::new();
+        if let Some(thread_id) = &self.thread_id {
+            owned.push(("thread".to_string(), thread_id.clone()));
+        }
+        for (event, detail) in &self.events {
+            owned.push((event.clone(), detail.clone()));
+        }
+        let refs = owned
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let lines = command_frame_lines(CommandFrame {
+            title: "RYE OS STREAM",
+            phase: "live",
+            command: &self.command,
+            status: &self.status,
+            detail: None,
+            payload: &refs,
+        });
+        self.previous_lines = render_command_frame(&lines, self.previous_lines)?;
+        Ok(())
+    }
+}
+
+struct CommandFrame<'a> {
+    title: &'static str,
+    phase: &'static str,
+    command: &'a str,
+    status: &'a str,
+    detail: Option<&'a str>,
+    payload: &'a [(&'a str, &'a str)],
+}
+
+fn command_frame_lines(frame: CommandFrame<'_>) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(frame.title.to_string());
+    lines.push(format!("{:<9} {}", "phase", frame.phase));
+    lines.push(format!("{:<9} {}", "command", empty_dash(frame.command)));
+    lines.push(format!("{:<9} {}", "status", frame.status));
+    if let Some(detail) = frame.detail {
+        lines.push(format!("{:<9} {}", "detail", detail));
+    }
+    if !frame.payload.is_empty() {
+        lines.push(String::new());
+        for (label, value) in frame.payload.iter().take(16) {
+            lines.push(format!("{:<13} {}", label, value));
+        }
+    }
+    lines.push(String::new());
+    lines
+}
+
+fn render_command_frame(lines: &[String], previous_lines: usize) -> io::Result<usize> {
+    let width = terminal_width();
+    let lines = lines
+        .iter()
+        .map(|line| clamp_line(line, width))
+        .collect::<Vec<_>>();
+    write_frame(&mut io::stdout(), &lines, previous_lines)?;
+    Ok(lines.len())
+}
+
+fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String)>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map.iter().take(12) {
+                rows.push((format!("{prefix}.{key}"), value_summary(value)));
+            }
+        }
+        Value::Array(values) => {
+            rows.push((prefix.to_string(), format!("{} item(s)", values.len())));
+            for (idx, value) in values.iter().take(8).enumerate() {
+                rows.push((format!("{prefix}[{idx}]"), value_summary(value)));
+            }
+        }
+        _ => rows.push((prefix.to_string(), value_summary(value))),
+    }
+}
+
+fn value_summary(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        Value::Array(values) => format!("{} item(s)", values.len()),
+        Value::Object(map) => {
+            let mut fields = map
+                .iter()
+                .filter_map(|(key, value)| {
+                    scalar_summary(value).map(|value| format!("{key}={value}"))
+                })
+                .take(4)
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                fields.push(format!("{} field(s)", map.len()));
+            }
+            fields.join(" · ")
+        }
+    }
+}
+
+fn result_indicates_failure(result: &Value) -> bool {
+    if result.get("error").is_some_and(|error| !error.is_null()) {
+        return true;
+    }
+    if result.get("success").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    if result.get("ok").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    if result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .is_some_and(|code| code != 0)
+    {
+        return true;
+    }
+    if result
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(failure_status_label)
+    {
+        return true;
+    }
+    if matches!(
+        result.get("outcome_code").and_then(Value::as_str),
+        Some(code) if failure_status_label(code) || code.starts_with("exit:")
+    ) {
+        return true;
+    }
+    result
+        .get("result")
+        .is_some_and(result_indicates_failure)
+}
+
+fn failure_status_label(label: &str) -> bool {
+    matches!(
+        label,
+        "failure"
+            | "failed"
+            | "error"
+            | "cancelled"
+            | "canceled"
+            | "timeout"
+            | "timed_out"
+            | "nonzero"
+            | "not_ok"
+    )
+}
+
+fn scalar_summary(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some("null".to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.trim().is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
+fn stream_success_terminal(event: &str) -> bool {
+    matches!(event, "thread_completed" | "thread_continued")
+}
+
+fn stream_failure_terminal(event: &str) -> bool {
+    matches!(
+        event,
+        "thread_failed" | "thread_cancelled" | "thread_killed" | "thread_timed_out"
+    )
+}
+
+fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
+    if let Some(error) = payload.get("error").and_then(Value::as_str) {
+        return error.to_string();
+    }
+    if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
+        return value_summary(error);
+    }
+    payload
+        .get("outcome_code")
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn stream_event_detail(payload: &Value) -> String {
+    for key in ["delta", "text", "content", "message", "output"] {
+        if let Some(text) = payload.get(key).and_then(Value::as_str) {
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    value_summary(payload)
+}
+
 fn render(home: &TtyHomeFile, mode: RenderMode, previous_lines: usize) -> io::Result<usize> {
     let width = terminal_width();
     let lines = render_lines(home, mode)
@@ -817,10 +1171,7 @@ fn render_lines(home: &TtyHomeFile, mode: RenderMode) -> Vec<String> {
     ));
     lines.push(String::new());
     for action in &home.sections.actions {
-        lines.push(format!(
-            "  {:<8} {:<18} {}",
-            action.label, action.command, action.description
-        ));
+        lines.push(format!("  {:<24} {}", action.command, action.description));
     }
     lines.push(String::new());
     lines
@@ -888,5 +1239,26 @@ fn detail_suffix(detail: Option<&str>) -> String {
 fn debug_warn(debug: bool, message: String) {
     if debug {
         eprintln!("ryeos tty: {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_failure_detection_checks_nested_shapes() {
+        assert!(result_indicates_failure(&serde_json::json!({
+            "result": { "success": false, "error": "boom" }
+        })));
+        assert!(result_indicates_failure(&serde_json::json!({
+            "result": { "exit_code": 2 }
+        })));
+        assert!(result_indicates_failure(&serde_json::json!({
+            "result": { "outcome_code": "exit:1" }
+        })));
+        assert!(!result_indicates_failure(&serde_json::json!({
+            "result": { "success": true, "outcome_code": "success" }
+        })));
     }
 }

@@ -10,6 +10,7 @@ mod help;
 mod lifecycle_commands;
 mod node_descriptors;
 mod offline_dispatch;
+mod presenter;
 mod project_resolve;
 #[cfg(test)]
 mod test_env;
